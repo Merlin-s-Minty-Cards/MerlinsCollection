@@ -1,7 +1,11 @@
+import NextAuth from 'next-auth'
 import type { NextAuthConfig } from 'next-auth'
 
-// Cognito provider and callbacks added via TDD
-export const authOptions = {
+// Next.js 15 note: cookies(), headers(), params, searchParams are now async.
+// When adding Cognito providers, await these where needed.
+export const config: NextAuthConfig = {
   providers: [],
   callbacks: {},
-} satisfies NextAuthConfig
+}
+
+export const { handlers, auth, signIn, signOut } = NextAuth(config)
