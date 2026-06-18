@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npm test 2>&1; exit 0"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(npm*)",
+      "Bash(npx vitest*)",
+      "Bash(python -m pytest*)",
+      "Bash(pip install*)",
+      "Bash(pip install -e*)",
+      "Bash(uvicorn*)"
+    ]
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "merlins-collection",
+  "private": true,
+  "workspaces": ["frontend", "mcp-server"],
+  "scripts": {
+    "test": "npm run test --workspaces --if-present && python -m pytest backend/tests -q --tb=short",
+    "test:frontend": "npm run test --workspace=frontend",
+    "test:mcp": "npm run test --workspace=mcp-server",
+    "test:backend": "python -m pytest backend/tests -q --tb=short"
+  }
+}
