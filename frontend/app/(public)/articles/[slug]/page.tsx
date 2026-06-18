@@ -1,11 +1,13 @@
 import type { Metadata } from 'next'
 
-type Props = { params: { slug: string } }
+type Props = { params: Promise<{ slug: string }> }
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
-  return { title: params.slug }
+  const { slug } = await params
+  return { title: slug }
 }
 
-export default function ArticlePage({ params }: Props) {
+export default async function ArticlePage({ params }: Props) {
+  const { slug } = await params
   return null
 }
