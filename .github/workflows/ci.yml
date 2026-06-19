@@ -16,8 +16,7 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-      - run: npm install
-        working-directory: frontend
+      - run: npm ci
       - run: npm test
         working-directory: frontend
       - run: npm run build
@@ -32,9 +31,7 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: mcp-server/package.json
-      - run: npm install
-        working-directory: mcp-server
+      - run: npm ci
       - run: npm test
         working-directory: mcp-server
 
@@ -61,8 +58,7 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-      - run: npm install
-        working-directory: frontend
+      - run: npm ci
       - run: npm run lint
         working-directory: frontend
       - uses: actions/setup-python@v5
