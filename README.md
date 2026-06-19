@@ -81,4 +81,4 @@ See `frontend/.env.example` and `backend/.env.example` for required variables.
 
 ## Contributing
 
-All PRs require review from @EthanHarter934. See CLAUDE.md for TDD guidelines and branch protection requirements.
+All PRs require review. See CLAUDE.md for TDD guidelines and branch protection requirements.
