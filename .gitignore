@@ -49,3 +49,6 @@ Thumbs.db
 
 # Sanity
 .sanity/
+
+# Superpowers brainstorming companion (mockups, server state)
+.superpowers/

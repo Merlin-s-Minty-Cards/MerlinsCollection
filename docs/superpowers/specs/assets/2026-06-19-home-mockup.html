@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Merlin's Minty Cards — Responsive Home mockup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --forest:#1f6e32; --deep:#103b1c; --mid:#2d8f44; --mint:#a9e0b3; --mint-soft:#d4f0d9;
+    --cream:#f5f0e8; --cream-2:#efe7d8; --paper:#fffdf8; --ink:#241f1b; --muted:#6f6457; --line:#e6ddcc;
+    --serif:'Fraunces',Georgia,serif; --sans:'Inter',system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0; font-family:var(--sans); color:var(--ink); background:var(--cream); line-height:1.6;}
+  .wrap{max-width:1140px; margin:0 auto; padding:0 28px;}
+  h1,h2,h3{font-family:var(--serif); font-weight:600; line-height:1.1; color:var(--deep); margin:0;}
+  a{color:inherit; text-decoration:none;}
+  .eyebrow{font-size:13px; font-weight:700; letter-spacing:.16em; text-transform:uppercase; color:var(--forest);}
+  .btn{display:inline-block; padding:13px 24px; border-radius:999px; font-weight:600; font-size:15px; cursor:pointer; transition:transform .15s, box-shadow .15s; text-align:center;}
+  .btn:active{transform:translateY(1px);}
+  .btn-primary{background:var(--forest); color:#fff; box-shadow:0 8px 20px rgba(31,110,50,.25);}
+  .btn-ghost{border:1.5px solid var(--forest); color:var(--forest);}
+  .ph{display:flex; align-items:center; justify-content:center; text-align:center; color:#fff; font-size:12px; font-weight:600; padding:10px;}
+
+  /* NAV */
+  header{position:sticky; top:0; z-index:40; background:rgba(245,240,232,.9); backdrop-filter:blur(10px); border-bottom:1px solid var(--line);}
+  .nav{display:flex; align-items:center; gap:16px; height:66px; position:relative;}
+  .brand{display:flex; align-items:center; gap:10px; font-family:var(--serif); font-weight:600; font-size:19px; color:var(--deep); white-space:nowrap;}
+  .brand .mark{flex:0 0 auto; width:32px; height:32px; border-radius:50%; background:var(--forest); color:#fff; font-family:var(--serif); font-weight:700; display:flex; align-items:center; justify-content:center; font-size:16px;}
+  .links{display:flex; gap:22px; margin-left:10px; font-weight:500; font-size:15px; color:#4a4339;}
+  .links a:hover{color:var(--forest);}
+  .spacer{flex:1;}
+  .nav-inv{padding:10px 20px; font-size:14px;}
+  .hamburger{display:none; background:none; border:1.5px solid var(--line); border-radius:10px; width:42px; height:42px; font-size:18px; color:var(--deep); cursor:pointer;}
+
+  /* HERO */
+  .hero{padding:60px 0 52px;}
+  .hero-grid{display:grid; grid-template-columns:1.1fr .9fr; gap:48px; align-items:center;}
+  .hero h1{font-size:clamp(34px,6.4vw,54px); letter-spacing:-.01em; margin:14px 0 18px;}
+  .hero p.lead{font-size:clamp(16px,2.4vw,19px); color:var(--muted); max-width:42ch; margin:0 0 26px;}
+  .hero .cta{display:flex; gap:14px; flex-wrap:wrap;}
+
+  /* FLIP CARD */
+  .hero-card{display:flex; flex-direction:column; align-items:center;}
+  .stage{perspective:1500px; width:min(262px,72vw); height:calc(min(262px,72vw)*1.4); cursor:pointer;}
+  .flip{position:relative; width:100%; height:100%; transform-style:preserve-3d; transition:transform .8s cubic-bezier(.2,.8,.2,1);}
+  .flip.flipped{transform:rotateY(180deg);}
+  /* hover-flip ONLY on devices that genuinely hover (desktop) */
+  @media (hover:hover) and (pointer:fine){ .stage:hover .flip{transform:rotateY(180deg);} }
+  .face{position:absolute; inset:0; backface-visibility:hidden; border-radius:16px; box-shadow:0 22px 44px rgba(16,59,28,.30); overflow:hidden;}
+  .front{background:linear-gradient(150deg,#2d8f44,#103b1c); color:#fff; display:flex; flex-direction:column;}
+  .front .top{display:flex; justify-content:space-between; padding:14px 16px; font-weight:700;}
+  .front .art{flex:1; margin:0 16px; border-radius:9px; background:rgba(255,255,255,.13); border:2px solid rgba(255,255,255,.34); display:flex; align-items:center; justify-content:center; text-align:center; font-size:12px; color:#eaf6ec; padding:12px;}
+  .front .foot{padding:12px 16px 16px; font-size:11px; color:#cfe6d4;}
+  .back{transform:rotateY(180deg); background:linear-gradient(160deg,#3457b0,#1d2f6b); display:flex; align-items:center; justify-content:center;}
+  .ball{width:38%; aspect-ratio:1; border-radius:50%; background:#fff; position:relative; overflow:hidden; box-shadow:0 0 0 12px rgba(255,255,255,.16);}
+  .ball .t{position:absolute; top:0; left:0; right:0; height:50%; background:#6f8fe0;}
+  .ball .b{position:absolute; top:calc(50% - 6px); left:0; right:0; height:12px; background:#1d2f6b;}
+  .ball .c{position:absolute; top:50%; left:50%; width:26%; aspect-ratio:1; border-radius:50%; background:#fff; border:6px solid #1d2f6b; transform:translate(-50%,-50%);}
+  .back .word{position:absolute; bottom:22px; color:#f6c945; font-weight:800; font-style:italic; font-size:18px; text-shadow:1px 1px 0 #1d2f6b;}
+  .back .tag{position:absolute; top:16px; color:rgba(255,255,255,.6); font-size:10px; letter-spacing:.12em; text-transform:uppercase;}
+  .fliphint{text-align:center; font-size:12px; color:var(--muted); margin-top:14px;}
+  .fliphint .desktop{display:inline;} .fliphint .mobile{display:none;}
+
+  /* TRUST */
+  .trust{background:var(--deep); color:#eaf6ec;}
+  .trust .row{display:grid; grid-template-columns:repeat(4,1fr); gap:22px; padding:26px 16px;}
+  .trust .item{display:flex; gap:12px; align-items:flex-start; justify-content:center;}
+  .trust .item > div{flex:0 1 170px;}
+  .trust .ic{display:flex; align-items:center; justify-content:center; flex:0 0 auto;}
+  .trust .ic svg{width:24px; height:24px; fill:none; stroke:#a9e0b3; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round;}
+  .trust h4{margin:0; font-family:var(--sans); font-size:15px; font-weight:700; color:#fff;}
+  .trust small{color:#aecbb4; font-size:13px;}
+
+  section.block{padding:clamp(44px,7vw,74px) 0;}
+  .section-head{max-width:60ch; margin-bottom:32px;}
+  .section-head h2{font-size:clamp(26px,4.6vw,36px); margin-bottom:10px;}
+  .section-head p{color:var(--muted); font-size:clamp(15px,2.2vw,17px); margin:0;}
+  .alt{background:var(--paper);}
+
+  .story{display:grid; grid-template-columns:.95fr 1.05fr; gap:48px; align-items:center;}
+  .story .photo{height:clamp(220px,42vw,340px); border-radius:18px; background:linear-gradient(135deg,#c9b79a,#8a7657); box-shadow:0 18px 38px rgba(74,67,51,.22);}
+  .story h2{font-size:clamp(26px,4.4vw,34px); margin-bottom:14px;}
+  .story p{color:#4a4339; margin:0 0 14px;}
+
+  .three{display:grid; grid-template-columns:repeat(3,1fr); gap:20px;}
+  .tcard{background:var(--cream); border:1px solid var(--line); border-radius:16px; padding:26px; transition:transform .15s, box-shadow .15s;}
+  .tcard:hover{transform:translateY(-3px); box-shadow:0 14px 30px rgba(16,59,28,.10);}
+  .tcard .badge{display:inline-block; font-size:12px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--forest); background:var(--mint-soft); padding:5px 12px; border-radius:999px; margin-bottom:14px;}
+  .tcard h3{font-size:21px; margin-bottom:8px;}
+  .tcard p{color:var(--muted); font-size:15px; margin:0;}
+
+  .finds{display:grid; grid-template-columns:repeat(5,1fr); gap:16px;}
+  .finds .card{aspect-ratio:5/7; border-radius:12px; background:linear-gradient(150deg,#72c882,#175427); box-shadow:0 10px 22px rgba(16,59,28,.16);}
+
+  .show{display:flex; gap:20px; align-items:center; background:var(--cream); border:1px solid var(--line); border-radius:16px; padding:20px 24px;}
+  .show .date{flex:0 0 auto; width:74px; height:74px; border-radius:14px; background:var(--forest); color:#fff; display:flex; flex-direction:column; align-items:center; justify-content:center;}
+  .show .date b{font-size:23px; line-height:1; font-family:var(--serif);}
+  .show .date span{font-size:12px; text-transform:uppercase; letter-spacing:.08em;}
+
+  .learn{display:grid; grid-template-columns:1fr 1fr; gap:20px;}
+  .lcard{border-radius:18px; padding:32px; color:#fff; min-height:170px; display:flex; flex-direction:column; justify-content:flex-end; box-shadow:0 14px 30px rgba(16,59,28,.16);}
+  .lcard.a{background:linear-gradient(140deg,#2d8f44,#103b1c);} .lcard.b{background:linear-gradient(140deg,#3a6b46,#1c3a26);}
+  .lcard h3{color:#fff; font-size:23px; margin-bottom:6px;} .lcard p{margin:0; color:#dceede; font-size:15px;}
+
+  .cta-band{background:var(--mint-soft); border-radius:24px; padding:clamp(34px,5vw,54px); text-align:center;}
+  .cta-band h2{font-size:clamp(26px,4.4vw,34px); margin-bottom:10px;}
+  .cta-band p{color:#3f5a45; max-width:50ch; margin:0 auto 22px;}
+
+  footer{background:var(--deep); color:#bcd6c4; padding:54px 0 30px;}
+  footer .cols{display:grid; grid-template-columns:2fr 1fr 1fr 1fr; gap:30px;}
+  footer h5{color:#fff; font-family:var(--sans); font-size:14px; letter-spacing:.06em; text-transform:uppercase; margin:0 0 14px;}
+  footer a{display:block; color:#bcd6c4; font-size:14px; padding:5px 0;}
+  footer a:hover{color:var(--mint);}
+  footer .legal{border-top:1px solid rgba(255,255,255,.12); margin-top:34px; padding-top:18px; font-size:13px; color:#8fae98; display:flex; gap:14px; justify-content:space-between; flex-wrap:wrap;}
+  .note{font-size:11px; color:#9a8f7d; font-style:italic;}
+
+  /* ---------- TABLET ---------- */
+  @media (max-width:900px){
+    .hero-grid{grid-template-columns:1fr; gap:30px;}
+    .hero-card{order:-1;}
+    .story{grid-template-columns:1fr; gap:26px;}
+    .three{grid-template-columns:1fr 1fr;}
+    footer .cols{grid-template-columns:1fr 1fr;}
+  }
+  /* ---------- MOBILE ---------- */
+  @media (max-width:860px){
+    .links{display:none; position:absolute; top:66px; left:0; right:0; flex-direction:column; gap:0; background:var(--cream); border-bottom:1px solid var(--line); padding:8px 0; box-shadow:0 12px 24px rgba(16,59,28,.10);}
+    .links.open{display:flex;}
+    .links a{padding:14px 28px; font-size:17px;}
+    .hamburger{display:block;}
+  }
+  @media (max-width:640px){
+    .wrap{padding:0 20px;}
+    .nav{gap:10px;} .brand{font-size:16px;} .brand .mark{width:30px; height:30px; font-size:15px;}
+    .nav-inv{padding:9px 15px; font-size:13px;} .hamburger{width:40px; height:40px;}
+    .trust .row{grid-template-columns:1fr 1fr; gap:18px 16px;}
+    .three{grid-template-columns:1fr;}
+    .learn{grid-template-columns:1fr;}
+    .hero .cta{flex-direction:column;} .hero .cta .btn{width:100%;}
+    .show{flex-wrap:wrap;} .show .btn{width:100%;}
+    /* card strip becomes a horizontal swipe */
+    .finds{display:flex; overflow-x:auto; gap:14px; padding-bottom:8px; scroll-snap-type:x mandatory; -webkit-overflow-scrolling:touch;}
+    .finds .card{flex:0 0 44%; scroll-snap-align:start;}
+    footer .cols{grid-template-columns:1fr 1fr;}
+    .fliphint .desktop{display:none;} .fliphint .mobile{display:inline;}
+  }
+  @media (max-width:380px){ .trust .row{grid-template-columns:1fr;} footer .cols{grid-template-columns:1fr;} }
+  @media (prefers-reduced-motion: reduce){ .flip{transition:none;} .btn{transition:none;} }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap nav">
+    <div class="brand"><span class="mark">M</span> Merlin's Minty Cards</div>
+    <nav class="links" id="menu">
+      <a>Shows</a><a>About</a><a>Dictionary</a><a>Articles</a>
+    </nav>
+    <span class="spacer"></span>
+    <a class="btn btn-primary nav-inv">Inventory</a>
+    <button class="hamburger" onclick="document.getElementById('menu').classList.toggle('open')" aria-label="Menu">☰</button>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <span class="eyebrow">Buy · Sell · Trade</span>
+      <h1>Pokémon cards,<br>handled with care.</h1>
+      <p class="lead">Merlin's Minty Cards is a collector-run shop built on 25 years in the hobby — fair grading, honest pricing, and a friendly face at every card show.</p>
+      <div class="cta">
+        <a class="btn btn-primary">Read our story</a>
+        <a class="btn btn-ghost">See upcoming shows</a>
+      </div>
+    </div>
+    <div class="hero-card">
+      <div class="stage" onclick="this.querySelector('.flip').classList.toggle('flipped')">
+        <div class="flip">
+          <div class="face front">
+            <div class="top"><span>Lapras</span><span>70 HP</span></div>
+            <div class="art">[ Front: real graded card photo<br>e.g. laprassouthern.webp ]</div>
+            <div class="foot">Placeholder — real card image swaps in</div>
+          </div>
+          <div class="face back">
+            <span class="tag">Card back</span>
+            <div class="ball"><div class="t"></div><div class="b"></div><div class="c"></div></div>
+            <span class="word">Pokémon</span>
+          </div>
+        </div>
+      </div>
+      <div class="fliphint"><span class="desktop">↕ Hover or tap to flip</span><span class="mobile">👆 Tap to flip</span></div>
+    </div>
+  </div>
+</section>
+
+<div class="trust">
+  <div class="wrap row">
+    <div class="item"><span class="ic"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg></span><div><h4>Honest grading</h4><small>Accurate, no surprises — PSA-referenced.</small></div></div>
+    <div class="item"><span class="ic"><svg viewBox="0 0 24 24"><path d="M20.5 11.5l-8-8H4v8.5l8 8z"/><circle cx="7.5" cy="7.5" r="1.4"/></svg></span><div><h4>Fair pricing</h4><small>Priced to the real market.</small></div></div>
+    <div class="item"><span class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c0-3.9 3.1-7 7-7s7 3.1 7 7"/></svg></span><div><h4>Collector-run</h4><small>A real person who loves the hobby.</small></div></div>
+    <div class="item"><span class="ic"><svg viewBox="0 0 24 24"><path d="M12 22s7-7.6 7-13a7 7 0 10-14 0c0 5.4 7 13 7 13z"/><circle cx="12" cy="9" r="2.5"/></svg></span><div><h4>At the shows</h4><small>Meet us in person.</small></div></div>
+  </div>
+</div>
+
+<section class="block">
+  <div class="wrap story">
+    <div class="photo ph">[ Photo: childhood-card-collection.webp ]</div>
+    <div>
+      <span class="eyebrow">Our story</span>
+      <h2>It started with one binder.</h2>
+      <p>What began as a kid laying every card out on the living-room floor turned into a quarter-century of collecting, trading, and helping other people find the cards they've been chasing.</p>
+      <p>Today it's about the same thing it always was: the joy of the find, treated with honesty and care.</p>
+      <a class="btn btn-ghost" style="margin-top:6px">More about Merlin</a>
+    </div>
+  </div>
+</section>
+
+<section class="block alt">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">What we do</span>
+      <h2>Three ways to work with us.</h2>
+      <p>Whether you're starting out, cashing in, or hunting a grail, there's a friendly way in.</p>
+    </div>
+    <div class="three">
+      <div class="tcard"><span class="badge">Buy</span><h3>Find your next card</h3><p>Browse a curated, fairly-priced inventory — beginner singles to graded vintage.</p></div>
+      <div class="tcard"><span class="badge">Sell</span><h3>Cash in your collection</h3><p>An honest valuation. No lowballs, no pressure — just a fair offer.</p></div>
+      <div class="tcard"><span class="badge">Trade</span><h3>Swap toward a grail</h3><p>Bring what you've got and trade up toward the card you actually want.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="block">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">From the case</span>
+      <h2>A peek at the collection.</h2>
+      <p>A few recent finds. Sign in to search the full inventory by set, condition, and price — or just ask in plain English.</p>
+    </div>
+    <div class="finds">
+      <div class="card ph">Card</div><div class="card ph">Card</div><div class="card ph">Card</div><div class="card ph">Card</div><div class="card ph">Card</div>
+    </div>
+    <p class="note" style="margin-top:14px">Placeholders for featured inventory images (CloudFront). Inventory search is login-gated.</p>
+    <div style="margin-top:22px"><a class="btn btn-primary">Explore the inventory →</a></div>
+  </div>
+</section>
+
+<section class="block alt">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">In person</span>
+      <h2>Catch us at a card show.</h2>
+      <p>Half the fun is meeting collectors face to face. Here's where we'll be next.</p>
+    </div>
+    <div class="show">
+      <div class="date"><b>JUL</b><span>12</span></div>
+      <div style="flex:1; min-width:160px"><h3 style="font-size:20px; margin-bottom:4px">Regional Collectors Expo</h3><div style="color:var(--muted); font-size:15px">Community Center · 9am–4pm · Table 14</div></div>
+      <a class="btn btn-ghost">All shows</a>
+    </div>
+  </div>
+</section>
+
+<section class="block">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">New to collecting?</span>
+      <h2>Start with the basics.</h2>
+      <p>No gatekeeping. Plain-English guides and a glossary to get you confident fast.</p>
+    </div>
+    <div class="learn">
+      <a class="lcard a"><h3>Articles &amp; guides</h3><p>Beginner-friendly reads on grading, sets, and smart collecting.</p></a>
+      <a class="lcard b"><h3>Collectors Dictionary</h3><p>Every term — slab, PSA, holo, reverse — explained simply.</p></a>
+    </div>
+  </div>
+</section>
+
+<section class="block alt">
+  <div class="wrap">
+    <div class="cta-band">
+      <span class="eyebrow">Looking for something?</span>
+      <h2>Let's find your card.</h2>
+      <p>Tell us what you're chasing, or come say hi at the next show. We're always happy to talk Pokémon.</p>
+      <a class="btn btn-primary">Get in touch</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="cols">
+      <div>
+        <div class="brand" style="color:#fff; margin-bottom:12px"><span class="mark">M</span> Merlin's Minty Cards</div>
+        <p style="color:#9fbfa8; font-size:14px; max-width:34ch">Buy. Sell. Trade. A collector-run Pokémon card shop built on honesty and 25 years of love for the hobby.</p>
+      </div>
+      <div><h5>Explore</h5><a>Shows</a><a>About</a><a>Articles</a><a>Dictionary</a></div>
+      <div><h5>Collect</h5><a>Inventory</a><a>Sign in</a><a>Sell to us</a></div>
+      <div><h5>Follow</h5><a>Instagram</a><a>Contact</a></div>
+    </div>
+    <div class="legal"><span>© 2026 Merlin's Minty Cards LLC</span><span>Privacy · Terms</span></div>
+  </div>
+</footer>
+
+<script>
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var flip = document.querySelector('.flip');
+  if(flip && !reduce && 'IntersectionObserver' in window){
+    var seen=false;
+    var io = new IntersectionObserver(function(es){
+      es.forEach(function(e){
+        if(e.isIntersecting && !seen){ seen=true;
+          setTimeout(function(){ flip.classList.add('flipped');
+            setTimeout(function(){ flip.classList.remove('flipped'); }, 1000); }, 600);
+        }
+      });
+    }, {threshold:.6});
+    io.observe(flip);
+  }
+</script>
+</body>
+</html>
