@@ -152,3 +152,13 @@ def test_list_inventory_for_card(dynamo_repo):
     rows = dynamo_repo.list_inventory_for_card("swsh1-1")
     assert len(rows) == 2
     assert {r.condition for r in rows} == {Condition.NM, Condition.LP}
+
+
+def test_put_then_get_graded_inventory_item(dynamo_repo):
+    item = GradedInventoryItem(
+        card_id="swsh1-1", quantity=1, listed_price=Decimal("600"),
+        cost_basis=Decimal("300"), acquired_at=_date(2026, 1, 1),
+        company=GradingCompany.PSA, grade=Decimal("10"), cert_number="12345678",
+    )
+    dynamo_repo.put_inventory_item(item)
+    assert dynamo_repo.get_inventory_item(item) == item

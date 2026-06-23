@@ -122,7 +122,7 @@ class InventoryRepository:
         else:
             grade_key = _grade_key(item.grade)
             sk = f"CARD#{item.card_id}#GRADED#{item.company}#{grade_key}#{item.cert_number}"
-            gsi1sk = f"INV#GRADED#{item.company}#{_grade_key(item.grade)}"
+            gsi1sk = f"INV#GRADED#{item.company}#{grade_key}"
         return pk, sk, gsi1sk
 
     def put_inventory_item(self, item):
@@ -198,14 +198,20 @@ class InventoryRepository:
     def get_price_history(self, card_id, *, finish=None, company=None,
                           grade=None, start=None, end=None):
         if company is not None:
-            prefix = f"PRICE#GRADED#{company}#{_grade_key(grade)}#" if grade is not None else f"PRICE#GRADED#{company}#"
+            if grade is not None:
+                prefix = f"PRICE#GRADED#{company}#{_grade_key(grade)}#"
+            else:
+                prefix = f"PRICE#GRADED#{company}#"
         elif finish is not None:
             prefix = f"PRICE#RAW#{finish}#"
         else:
             prefix = "PRICE#RAW#"
         pk = Key("PK").eq(f"CARD#{card_id}")
         if start is not None and end is not None:
-            cond = pk & Key("SK").between(f"{prefix}{start.isoformat()}", f"{prefix}{end.isoformat()}")
+            cond = pk & Key("SK").between(
+                f"{prefix}{start.isoformat()}",
+                f"{prefix}{end.isoformat()}",
+            )
         else:
             cond = pk & Key("SK").begins_with(prefix)
         items = self._query_all(KeyConditionExpression=cond)
