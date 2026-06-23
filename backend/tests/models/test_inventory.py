@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from merlins_collection.models.inventory import (
     Condition,
     GradedInventoryItem,
+    GradingCompany,
     InventoryItemAdapter,
     RawInventoryItem,
 )
@@ -46,6 +47,16 @@ def test_graded_item_parses_via_adapter():
     )
     assert isinstance(item, GradedInventoryItem)
     assert item.grade == Decimal("10")
+    assert item.company is GradingCompany.PSA
+
+
+def test_adapter_rejects_raw_missing_fields():
+    with pytest.raises(ValidationError):
+        InventoryItemAdapter.validate_python(
+            {"kind": "raw", "card_id": "x", "quantity": 1,
+             "listed_price": Decimal("1"), "cost_basis": Decimal("1"),
+             "acquired_at": "2026-01-01"}
+        )
 
 
 def test_raw_item_rejects_graded_fields_missing():

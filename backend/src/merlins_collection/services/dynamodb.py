@@ -206,12 +206,13 @@ class InventoryRepository:
             prefix = f"PRICE#RAW#{finish}#"
         else:
             prefix = "PRICE#RAW#"
+        # Note: for a GRADED range query the `grade` argument is required (otherwise the
+        # prefix spans grades and the between bounds may not behave as expected).
         pk = Key("PK").eq(f"CARD#{card_id}")
-        if start is not None and end is not None:
-            cond = pk & Key("SK").between(
-                f"{prefix}{start.isoformat()}",
-                f"{prefix}{end.isoformat()}",
-            )
+        if start is not None or end is not None:
+            lo = (start or date.min).isoformat()
+            hi = (end or date.max).isoformat()
+            cond = pk & Key("SK").between(f"{prefix}{lo}", f"{prefix}{hi}")
         else:
             cond = pk & Key("SK").begins_with(prefix)
         items = self._query_all(KeyConditionExpression=cond)

@@ -2,10 +2,16 @@ from datetime import date
 from decimal import Decimal
 
 from merlins_collection.models.inventory import (
-    Condition, GradingCompany, GradedInventoryItem, RawInventoryItem,
+    Condition,
+    GradedInventoryItem,
+    GradingCompany,
+    RawInventoryItem,
 )
 from merlins_collection.services.catalog_sync import (
-    refresh_inventory_market_values, run_daily_sync, snapshot_graded_prices, sync_catalog,
+    refresh_inventory_market_values,
+    run_daily_sync,
+    snapshot_graded_prices,
+    sync_catalog,
 )
 
 RAW = {
@@ -49,7 +55,9 @@ def test_refresh_sets_current_market_value_from_catalog(dynamo_repo):
 
 
 def test_snapshot_graded_prices_writes_history_for_owned_slabs(dynamo_repo):
-    dynamo_repo.set_graded_market_value("swsh1-1", GradingCompany.PSA, Decimal("10"), Decimal("500"))
+    dynamo_repo.set_graded_market_value(
+        "swsh1-1", GradingCompany.PSA, Decimal("10"), Decimal("500")
+    )
     dynamo_repo.put_inventory_item(_graded_item())
     summary = snapshot_graded_prices(dynamo_repo, date(2026, 6, 22))
     assert summary == {"graded_points_written": 1}
@@ -87,7 +95,9 @@ def test_sync_catalog_skips_bad_cards(dynamo_repo):
 
 def test_run_daily_sync_includes_graded_snapshot_and_refresh(dynamo_repo):
     # Own a graded slab and set its manual market value.
-    dynamo_repo.set_graded_market_value("swsh1-1", GradingCompany.PSA, Decimal("10"), Decimal("500"))
+    dynamo_repo.set_graded_market_value(
+        "swsh1-1", GradingCompany.PSA, Decimal("10"), Decimal("500")
+    )
     dynamo_repo.put_inventory_item(_graded_item())
 
     summary = run_daily_sync(dynamo_repo, FakeClient([RAW]), date(2026, 6, 22))

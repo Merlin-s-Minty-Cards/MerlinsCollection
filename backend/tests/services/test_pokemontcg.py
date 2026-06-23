@@ -1,7 +1,14 @@
 from datetime import datetime
 from decimal import Decimal
 
-from merlins_collection.services.pokemontcg import to_catalog_card
+import httpx
+import pytest
+
+from merlins_collection.services.pokemontcg import (
+    PokemonTcgClient,
+    PokemonTcgError,
+    to_catalog_card,
+)
 
 SAMPLE = {
     "id": "swsh1-1",
@@ -35,11 +42,6 @@ def test_card_without_tcgplayer_prices_maps_to_empty():
     card = to_catalog_card(raw)
     assert card.prices == {}
     assert card.rarity is None
-
-
-import httpx
-
-from merlins_collection.services.pokemontcg import PokemonTcgClient, PokemonTcgError
 
 
 def _client(handler, **kwargs):
@@ -76,7 +78,5 @@ def test_get_card_404_returns_none():
 
 
 def test_get_card_4xx_raises():
-    import pytest
-
     with pytest.raises(PokemonTcgError):
         _client(lambda r: httpx.Response(400, json={})).get_card("bad")
