@@ -1,7 +1,8 @@
+from datetime import date as _date
 from datetime import datetime
 from decimal import Decimal
 
-from merlins_collection.models.catalog import CatalogCard
+from merlins_collection.models.catalog import CatalogCard, PricePoint
 
 
 def _card(card_id="swsh1-1", set_id="swsh1", market="12.50"):
@@ -58,3 +59,47 @@ def test_catalog_upsert_does_not_clobber_graded_price(dynamo_repo):
     dynamo_repo.set_graded_market_value("swsh1-1", GradingCompany.PSA, Decimal("10"), Decimal("500"))
     dynamo_repo.batch_upsert_catalog_cards([_card()])  # re-sync the same card
     assert dynamo_repo.get_graded_market_value("swsh1-1", GradingCompany.PSA, Decimal("10")) == Decimal("500")
+
+
+def _raw_point(card_id, d, market):
+    return PricePoint(card_id=card_id, date=d, source="pokemontcg.io",
+                      kind="raw", finish="holofoil", market=Decimal(market))
+
+
+def test_price_history_range_for_finish(dynamo_repo):
+    dynamo_repo.append_price_points([
+        _raw_point("c1", _date(2026, 6, 20), "10"),
+        _raw_point("c1", _date(2026, 6, 21), "11"),
+        _raw_point("c1", _date(2026, 6, 22), "12"),
+    ])
+    got = dynamo_repo.get_price_history(
+        "c1", finish="holofoil", start=_date(2026, 6, 21), end=_date(2026, 6, 22)
+    )
+    assert [p.date for p in got] == [_date(2026, 6, 21), _date(2026, 6, 22)]
+    assert got[-1].market == Decimal("12")
+
+
+def test_price_history_all_raw(dynamo_repo):
+    dynamo_repo.append_price_points([_raw_point("c2", _date(2026, 6, 20), "5")])
+    assert len(dynamo_repo.get_price_history("c2", finish="holofoil")) == 1
+
+
+def test_query_pagination_follows_last_evaluated_key(dynamo_repo, monkeypatch):
+    # Drive the LastEvaluatedKey loop deterministically (no need for >1MB of data).
+    item1 = {"card_id": "c9", "date": "2026-06-20", "source": "x",
+             "kind": "raw", "finish": "holofoil", "market": Decimal("1")}
+    item2 = {"card_id": "c9", "date": "2026-06-21", "source": "x",
+             "kind": "raw", "finish": "holofoil", "market": Decimal("2")}
+    calls = []
+
+    def fake_query(**kwargs):
+        calls.append(kwargs)
+        if "ExclusiveStartKey" not in kwargs:
+            return {"Items": [item1], "LastEvaluatedKey": {"PK": "CARD#c9", "SK": "p"}}
+        return {"Items": [item2]}
+
+    monkeypatch.setattr(dynamo_repo._table, "query", fake_query)
+    got = dynamo_repo.get_price_history("c9", finish="holofoil")
+    assert len(got) == 2
+    assert len(calls) == 2
+    assert "ExclusiveStartKey" in calls[1]

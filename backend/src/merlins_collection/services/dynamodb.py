@@ -8,7 +8,7 @@ from enum import Enum
 import boto3
 from boto3.dynamodb.conditions import Key
 
-from merlins_collection.models.catalog import CatalogCard
+from merlins_collection.models.catalog import CatalogCard, PricePoint
 
 INVENTORY_SHARD_COUNT = 10
 
@@ -133,3 +133,33 @@ class InventoryRepository:
             Key={"PK": f"CARD#{card_id}", "SK": f"GRADEDPRICE#{company}#{_grade_key(grade)}"}
         ).get("Item")
         return item["market_value"] if item else None
+
+    # ---- price history ----
+    def _price_point_item(self, p: PricePoint) -> dict:
+        if p.kind == "raw":
+            sk = f"PRICE#RAW#{p.finish}#{p.date.isoformat()}"
+        else:
+            sk = f"PRICE#GRADED#{p.company}#{_grade_key(p.grade)}#{p.date.isoformat()}"
+        body = _serialize(p.model_dump(mode="python"))
+        return {"PK": f"CARD#{p.card_id}", "SK": sk, "entity": "price_point", **body}
+
+    def append_price_points(self, points):
+        with self._table.batch_writer() as batch:
+            for p in points:
+                batch.put_item(Item=self._price_point_item(p))
+
+    def get_price_history(self, card_id, *, finish=None, company=None,
+                          grade=None, start=None, end=None):
+        if company is not None:
+            prefix = f"PRICE#GRADED#{company}#{_grade_key(grade)}#" if grade is not None else f"PRICE#GRADED#{company}#"
+        elif finish is not None:
+            prefix = f"PRICE#RAW#{finish}#"
+        else:
+            prefix = "PRICE#RAW#"
+        pk = Key("PK").eq(f"CARD#{card_id}")
+        if start is not None and end is not None:
+            cond = pk & Key("SK").between(f"{prefix}{start.isoformat()}", f"{prefix}{end.isoformat()}")
+        else:
+            cond = pk & Key("SK").begins_with(prefix)
+        items = self._query_all(KeyConditionExpression=cond)
+        return [PricePoint.model_validate(i) for i in items]
