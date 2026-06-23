@@ -55,7 +55,7 @@ At the start of this work the entire backend is empty placeholders: bare `FastAP
 
 **Table `merlins-cards`** — partition key `PK`, sort key `SK`, one global secondary index **GSI1** (`GSI1PK`, `GSI1SK`).
 
-Graded market value is modeled **per `(card, company, grade)`** (a PSA 10 of a card is worth the same regardless of how many you own), so manual graded values live at the card level alongside raw per-finish prices. Each graded slab is just an ownership record (cost basis, listed price, cert #).
+Graded market value is modeled **per `(card, company, grade)`** (a PSA 10 of a card is worth the same regardless of how many you own), so manual graded values live at the card level as their **own `GRADEDPRICE#<company>#<grade>` items** — deliberately *not* a map inside the card's `META` item, so the daily catalog `put_item` can never overwrite admin-entered graded prices. Each graded slab is just an ownership record (cost basis, listed price, cert #).
 
 **Inventory is sharded** to scale past the single-partition throughput cap and to keep "list all" parallelizable: the partition key is `INV#<bucket>` where `bucket = hash(card_id) % N` and `N = 10` (`INVENTORY_SHARD_COUNT`, fixed at design time — choose with headroom). To read/write/delete a specific item the shard is computed from its `card_id` (always known). "List all inventory" is a bounded **N-way parallel scatter-gather**, each shard query **paginated** on `LastEvaluatedKey`.
 
@@ -63,7 +63,8 @@ Graded market value is modeled **per `(card, company, grade)`** (a PSA 10 of a c
 
 | Entity | PK | SK | GSI1PK | GSI1SK | Key attributes |
 |---|---|---|---|---|---|
-| **Catalog card** | `CARD#<id>` | `META` | `SET#<setId>` | `CARD#<id>` | name, set_id, set_name, number, rarity, types[], images{small,large}, `prices` (finish → {market,low,mid,high}), `graded_prices` (`COMPANY#grade` → market value), last_synced_at |
+| **Catalog card** | `CARD#<id>` | `META` | `SET#<setId>` | `CARD#<id>` | name, set_id, set_name, number, rarity, types[], images{small,large}, `prices` (finish → {market,low,mid,high}), last_synced_at |
+| **Graded price (current)** | `CARD#<id>` | `GRADEDPRICE#<company>#<grade>` | — | — | company, grade, market_value, updated_at, source=`manual` |
 | **Raw price point** | `CARD#<id>` | `PRICE#RAW#<finish>#<date>` | — | — | finish, date, market, low, mid, high, source |
 | **Graded price point** | `CARD#<id>` | `PRICE#GRADED#<company>#<grade>#<date>` | — | — | company, grade, date, market_value, source=`manual` |
 | **Inventory — raw** | `INV#<bucket>` | `CARD#<id>#RAW#<finish>#<condition>` | `CARD#<id>` | `INV#RAW#<finish>#<condition>` | card_id, finish, condition, quantity, listed_price, cost_basis, current_market_value, acquired_at |
@@ -120,8 +121,8 @@ class CatalogCard(BaseModel):
     types: list[str] = []
     images: CardImages
     prices: dict[str, FinishPrice] = {}        # finish -> raw price (PokemonTCG.io)
-    graded_prices: dict[str, Decimal] = {}     # "PSA#10" -> manual market value
     last_synced_at: datetime
+    # (graded current values are separate GRADEDPRICE items, not stored on the card)
 
 class PricePoint(BaseModel):                    # one dated history row
     card_id: str
@@ -180,8 +181,9 @@ A module constant `INVENTORY_SHARD_COUNT = 10` and a helper `_bucket(card_id) ->
 # catalog
 get_catalog_card(card_id) -> CatalogCard | None
 list_cards_by_set(set_id) -> list[CatalogCard]
-batch_upsert_catalog_cards(cards: list[CatalogCard]) -> None
-set_graded_market_value(card_id, company, grade, value) -> None   # admin manual entry
+batch_upsert_catalog_cards(cards: list[CatalogCard]) -> None      # put META only; never touches GRADEDPRICE
+set_graded_market_value(card_id, company, grade, value) -> None   # admin manual entry (separate item)
+get_graded_market_value(card_id, company, grade) -> Decimal | None
 
 # prices (history)
 append_price_points(points: list[PricePoint]) -> None
@@ -194,8 +196,9 @@ get_inventory_item(<key fields>) -> InventoryItem | None
 list_inventory() -> list[InventoryItem]                  # scatter-gather over N shards, paginated
 list_inventory_for_card(card_id) -> list[InventoryItem]  # GSI1 (shard-independent)
 delete_inventory_item(<key fields>) -> None
-refresh_inventory_market_values(price_lookup) -> int     # sync denormalizes current_market_value
 ```
+
+(Denormalizing `current_market_value` onto items is done by `catalog_sync.refresh_inventory_market_values` — it needs catalog price knowledge, so it lives with the sync, not in the pure-persistence repository.)
 
 ---
 
@@ -209,8 +212,8 @@ refresh_inventory_market_values(price_lookup) -> int     # sync denormalizes cur
 **`services/catalog_sync.py`** — orchestration as plain callables taking `(repo, client, today)` so they're testable without a scheduler:
 
 1. **`sync_catalog`** — iterate all cards → `batch_upsert_catalog_cards` (chunked to 25) → append one **raw** `PricePoint` per `(card, finish)` dated `today`.
-2. **`snapshot_graded_prices`** — for each **owned** graded `(card, company, grade)` derived from `list_inventory()` (no full-table scan), read the card's manual `graded_prices` and append a **graded** `PricePoint` for `today`.
-3. **`refresh_inventory_market_values`** — recompute each inventory item's denormalized `current_market_value` from freshly-synced prices (raw → `prices[finish].market`; graded → `graded_prices["COMPANY#grade"]`).
+2. **`snapshot_graded_prices`** — for each **owned** graded `(card, company, grade)` derived from `list_inventory()` (no full-table scan), read the card's `GRADEDPRICE#<company>#<grade>` item via `get_graded_market_value` and append a **graded** `PricePoint` for `today`.
+3. **`refresh_inventory_market_values`** — recompute each inventory item's denormalized `current_market_value` from freshly-synced prices (raw → catalog `prices[finish].market` via `get_catalog_card`; graded → `get_graded_market_value`), writing changed items back with `put_inventory_item`. Catalog/graded lookups are cached per run; reads are bounded by the owned-card set, not the whole catalog.
 4. **`run_daily_sync`** = 1 → 2 → 3; returns a summary (cards synced, price points written, items refreshed, failures) for logging.
 
 **Idempotency & resilience:**
@@ -240,7 +243,7 @@ Tests are written RED-first, one behavior at a time, per the project's outside-i
 | Layer | Boundary | Coverage |
 |---|---|---|
 | Pydantic models | pure | discriminated union raw vs. graded, required fields per kind, `Decimal` coercion |
-| Repository `dynamodb.py` | **`moto`** (`@mock_aws`) | every access pattern: catalog upsert/get, list-by-set (GSI1), inventory put/list, list-for-card (GSI1 `begins_with`), price-history range (`between`/`begins_with`), 25-item batch chunking, `Decimal` round-trip, not-found → `None`; **sharding** (`_bucket` is deterministic; items land in expected shards; `list_inventory()` gathers across all shards); **pagination** (insert > 1 page of items → all are returned, not just the first page) |
+| Repository `dynamodb.py` | **`moto`** (`@mock_aws`) | every access pattern: catalog upsert/get, list-by-set (GSI1), graded current-price set/get, inventory put/list, list-for-card (GSI1 `begins_with`), price-history range (`between`/`begins_with`), 25-item batch chunking, `Decimal` round-trip, not-found → `None`; **catalog upsert does not clobber a previously-set graded price**; **sharding** (`_bucket` is deterministic; items land in expected shards; `list_inventory()` gathers across all shards); **pagination** (insert > 1 page of items → all are returned, not just the first page) |
 | `to_catalog_card` mapper | pure (real sample JSON) | multi-finish card, card with **no** prices, field extraction |
 | PokemonTCG client | `httpx.MockTransport` | pagination, retry/backoff — real `httpx` path, no network |
 | Sync orchestration | `moto` repo + fake client | catalog upserted, raw price points appended, graded snapshot for **owned** slabs, `current_market_value` refreshed, **idempotency (run twice/day → no dupes)**, per-card skip-and-continue |
