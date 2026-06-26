@@ -22,4 +22,18 @@ describe('Button', () => {
     )
     expect(screen.getByRole('link', { name: 'Go' }).className).toMatch(/hover:bg-forest/)
   })
+
+  it('renders a button element when no href is given', () => {
+    render(<Button>Submit</Button>)
+    expect(screen.getByRole('button', { name: 'Submit' })).toBeInTheDocument()
+  })
+
+  it('exposes the ghost variant via data-variant', () => {
+    render(
+      <Button href="/x" variant="ghost">
+        Ghost
+      </Button>,
+    )
+    expect(screen.getByRole('link', { name: 'Ghost' })).toHaveAttribute('data-variant', 'ghost')
+  })
 })
