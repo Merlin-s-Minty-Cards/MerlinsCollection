@@ -38,4 +38,10 @@ describe('mid Home sections', () => {
     const { container } = render(<TrustStrip />)
     expect(container.querySelectorAll('.reveal').length).toBeGreaterThanOrEqual(4)
   })
+
+  it('BuySellTrade staggers the three cards and gives each a hover lift', () => {
+    const { container } = render(<BuySellTrade />)
+    expect(container.querySelectorAll('.reveal').length).toBeGreaterThanOrEqual(3)
+    expect(container.querySelectorAll('.hover-lift').length).toBeGreaterThanOrEqual(3)
+  })
 })
