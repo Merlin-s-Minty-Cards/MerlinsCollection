@@ -33,4 +33,9 @@ describe('mid Home sections', () => {
     expect(screen.getByText('Cash in your collection')).toBeInTheDocument()
     expect(screen.getByText('Tired of your old cards?')).toBeInTheDocument()
   })
+
+  it('TrustStrip staggers its four items into view', () => {
+    const { container } = render(<TrustStrip />)
+    expect(container.querySelectorAll('.reveal').length).toBeGreaterThanOrEqual(4)
+  })
 })
