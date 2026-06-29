@@ -4,16 +4,27 @@ export type UnderpricedCard = {
   id: string;
   name: string;
   set: string;
+  /** The card's current listed value per unit. */
   listedPrice: number;
+  /** The external market reference price per unit. */
   marketPrice: number;
+  /** Unrounded percentage the listed price sits below market: (market - listed) / market x 100. */
   discountPercent: number;
 };
 
 export type FlagUnderpricedResult = {
   flaggedCards: UnderpricedCard[];
+  /** Echoes the threshold the caller passed in, for traceability. */
   thresholdPercent: number;
 };
 
+/**
+ * Flags cards listed below `thresholdPercent` of their market price — e.g. a
+ * threshold of 80 flags anything listed under 80% of market. The comparison is a
+ * strict less-than, so a card listed at exactly the threshold is not flagged.
+ * Cards without a positive market reference are skipped (they have no meaningful
+ * discount and would otherwise divide by zero).
+ */
 export async function flagUnderpricedCards(
   repo: InventoryRepository,
   thresholdPercent: number,

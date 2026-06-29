@@ -7,9 +7,15 @@ export type { PricePoint } from "../repository.js";
 export type PriceHistoryResult = {
   cardId: string;
   cardName: string;
+  /** Price points ordered oldest-to-newest. */
   history: PricePoint[];
 };
 
+/**
+ * Returns a card's price history sorted chronologically (oldest first). Price
+ * points sharing the same date keep their original repository order (the sort is
+ * stable). Throws an `Error` if no card has the given id.
+ */
 export async function getCardPriceHistory(
   repo: InventoryRepository,
   cardId: string,
