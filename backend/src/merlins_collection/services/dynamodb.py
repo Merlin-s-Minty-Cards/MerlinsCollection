@@ -275,6 +275,7 @@ class InventoryRepository:
             lo = (start or date.min).isoformat()
             hi = (end or date.max).isoformat()
             cond = pk & Key("SK").between(f"{prefix}{lo}", f"{prefix}{hi}")
+        else:
             cond = pk & Key("SK").begins_with(prefix)
         items = self._query_all(KeyConditionExpression=cond)
         return [PricePoint.model_validate(i) for i in items]
