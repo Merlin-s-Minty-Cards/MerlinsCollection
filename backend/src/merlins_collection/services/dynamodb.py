@@ -270,10 +270,11 @@ class InventoryRepository:
             prefix = "PRICE#RAW#"
         pk = Key("PK").eq(f"CARD#{card_id}")
         if start is not None or end is not None:
+            if company is not None and grade is None:
+                raise ValueError("graded range queries require 'grade'")
             lo = (start or date.min).isoformat()
             hi = (end or date.max).isoformat()
             cond = pk & Key("SK").between(f"{prefix}{lo}", f"{prefix}{hi}")
-        else:
             cond = pk & Key("SK").begins_with(prefix)
         items = self._query_all(KeyConditionExpression=cond)
         return [PricePoint.model_validate(i) for i in items]
