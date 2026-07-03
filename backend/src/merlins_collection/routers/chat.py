@@ -33,7 +33,7 @@ def chat(
     content filtering → 422, any other Bedrock error → 502.
     """
     try:
-        reply = service.chat(request.message)
+        reply = service.chat(request.message, request.history)
     except BedrockThrottledError as exc:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,

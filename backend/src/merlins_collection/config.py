@@ -24,6 +24,15 @@ class Settings(BaseSettings):
     bedrock_model_id: str = "anthropic.claude-3-5-sonnet-20241022-v2:0"
     mcp_server_path: str = "../mcp-server/dist/index.js"
     pokemontcg_api_key: str = ""
+    # Comma-separated browser origins allowed to call the API (CORS).
+    cors_origins: str = "http://localhost:3000"
+    # Dev-only: inject a fake user instead of verifying Cognito JWTs.
+    # NEVER set in production.
+    auth_disabled: bool = False
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
 
 settings = Settings()

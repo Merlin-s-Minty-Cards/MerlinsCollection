@@ -55,6 +55,28 @@ def test_batch_upsert_handles_more_than_25(dynamo_repo):
     assert len(dynamo_repo.list_cards_by_set("setBig")) == 30
 
 
+def test_batch_get_catalog_cards_returns_found_and_skips_missing(dynamo_repo):
+    dynamo_repo.batch_upsert_catalog_cards([_card("a-1"), _card("a-2")])
+
+    got = dynamo_repo.batch_get_catalog_cards({"a-1", "a-2", "a-missing"})
+
+    assert set(got) == {"a-1", "a-2"}
+    assert got["a-1"].name == "Celebi V"
+
+
+def test_batch_get_catalog_cards_handles_more_than_100_keys(dynamo_repo):
+    """DynamoDB caps BatchGetItem at 100 keys — the repo must chunk."""
+    dynamo_repo.batch_upsert_catalog_cards([_card(f"bulk-{i}", "setBulk") for i in range(120)])
+
+    got = dynamo_repo.batch_get_catalog_cards([f"bulk-{i}" for i in range(120)])
+
+    assert len(got) == 120
+
+
+def test_batch_get_catalog_cards_empty_input_returns_empty(dynamo_repo):
+    assert dynamo_repo.batch_get_catalog_cards([]) == {}
+
+
 def test_graded_price_set_and_get(dynamo_repo):
     dynamo_repo.set_graded_market_value(
         "swsh1-1", GradingCompany.PSA, Decimal("10"), Decimal("500")

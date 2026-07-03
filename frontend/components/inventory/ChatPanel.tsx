@@ -2,13 +2,46 @@
 
 import { useState } from 'react'
 import { Send } from 'lucide-react'
-import CardGrid from './CardGrid'
-import { sendChat, type ChatMessage, type PokemonCard } from '@/lib/inventory'
+import { ApiError } from '@/lib/api'
+import { sendChat, type ChatMessage } from '@/lib/inventory'
 
 type Bubble = {
   role: 'user' | 'assistant' | 'error'
   content: string
-  cards?: PokemonCard[]
+}
+
+const GENERIC_ERROR = 'Something went wrong. Try asking again.'
+
+// The backend caps history at 20 turns (10 exchanges) — send only the newest.
+const MAX_HISTORY_TURNS = 20
+
+/**
+ * Build the history the backend will replay into Bedrock. Converse demands
+ * strict user/assistant alternation starting with a user turn, so only
+ * completed exchanges survive: a user bubble immediately answered by a
+ * non-empty assistant bubble. Failed or empty turns are dropped, and the
+ * result is capped to the newest MAX_HISTORY_TURNS (an even slice of an even
+ * list, so alternation is preserved).
+ */
+function buildHistory(messages: Bubble[]): ChatMessage[] {
+  const turns: ChatMessage[] = []
+  for (let i = 0; i < messages.length - 1; i++) {
+    const question = messages[i]
+    const answer = messages[i + 1]
+    if (
+      question.role === 'user' &&
+      answer.role === 'assistant' &&
+      question.content !== '' &&
+      answer.content !== ''
+    ) {
+      turns.push(
+        { role: 'user', content: question.content },
+        { role: 'assistant', content: answer.content },
+      )
+      i++ // consume the pair
+    }
+  }
+  return turns.slice(-MAX_HISTORY_TURNS)
 }
 
 export default function ChatPanel() {
@@ -21,24 +54,20 @@ export default function ChatPanel() {
     const text = input.trim()
     if (!text || sending) return
 
-    const history: ChatMessage[] = messages
-      .filter((m): m is Bubble & { role: 'user' | 'assistant' } => m.role !== 'error')
-      .map((m) => ({ role: m.role, content: m.content }))
+    // Prior turns travel with the request — the backend replays them into the
+    // Bedrock conversation so follow-up questions keep their context.
+    const history = buildHistory(messages)
 
     setMessages((prev) => [...prev, { role: 'user', content: text }])
     setInput('')
     setSending(true)
     try {
       const res = await sendChat(text, history)
-      setMessages((prev) => [
-        ...prev,
-        { role: 'assistant', content: res.reply, cards: res.cards },
-      ])
-    } catch {
-      setMessages((prev) => [
-        ...prev,
-        { role: 'error', content: 'Something went wrong. Try asking again.' },
-      ])
+      setMessages((prev) => [...prev, { role: 'assistant', content: res.reply }])
+    } catch (err) {
+      // The backend sends actionable detail for 429/503/422 — show it.
+      const detail = err instanceof ApiError && err.detail ? err.detail : GENERIC_ERROR
+      setMessages((prev) => [...prev, { role: 'error', content: detail }])
     } finally {
       setSending(false)
     }
@@ -110,17 +139,14 @@ function ChatBubble({ bubble }: { bubble: Bubble }) {
   }
   const isError = bubble.role === 'error'
   return (
-    <div className="space-y-3">
-      <p
-        className={`max-w-[85%] rounded-2xl rounded-bl-sm px-4 py-2.5 text-sm ${
-          isError
-            ? 'bg-red-500/10 text-red-300'
-            : 'bg-pine-800 text-pine-100'
-        }`}
-      >
-        {bubble.content}
-      </p>
-      {bubble.cards && bubble.cards.length > 0 && <CardGrid cards={bubble.cards} />}
-    </div>
+    <p
+      className={`max-w-[85%] rounded-2xl rounded-bl-sm px-4 py-2.5 text-sm ${
+        isError
+          ? 'bg-red-500/10 text-red-300'
+          : 'bg-pine-800 text-pine-100'
+      }`}
+    >
+      {bubble.content}
+    </p>
   )
 }

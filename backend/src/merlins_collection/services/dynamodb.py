@@ -138,6 +138,33 @@ class InventoryRepository:
             for card in cards:
                 batch.put_item(Item=self._catalog_item(card))
 
+    def batch_get_catalog_cards(self, card_ids):
+        """Point-read many catalog cards at once; missing ids are simply absent.
+
+        Returns ``{card_id: CatalogCard}``. Chunks at DynamoDB's 100-key
+        BatchGetItem limit and retries ``UnprocessedKeys`` until drained.
+        """
+        unique_ids = list(dict.fromkeys(card_ids))
+        found: dict[str, CatalogCard] = {}
+        for start in range(0, len(unique_ids), 100):
+            keys = [
+                {"PK": f"CARD#{cid}", "SK": "META"}
+                for cid in unique_ids[start:start + 100]
+            ]
+            while keys:
+                resp = self._resource.batch_get_item(
+                    RequestItems={self._table_name: {"Keys": keys}}
+                )
+                for item in resp.get("Responses", {}).get(self._table_name, []):
+                    card = CatalogCard.model_validate(item)
+                    found[card.card_id] = card
+                keys = (
+                    resp.get("UnprocessedKeys", {})
+                    .get(self._table_name, {})
+                    .get("Keys", [])
+                )
+        return found
+
     def list_cards_by_set(self, set_id):
         """Return every catalog card in a set via the GSI1 ``SET#`` partition."""
         items = self._query_all(

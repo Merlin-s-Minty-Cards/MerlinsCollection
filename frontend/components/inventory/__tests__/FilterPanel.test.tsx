@@ -6,7 +6,7 @@ vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }))
 
 import { apiFetch } from '@/lib/api'
 import FilterPanel from '@/components/inventory/FilterPanel'
-import type { CardSearchResponse, PokemonCard } from '@/lib/inventory'
+import type { InventoryItem, InventorySearchResult } from '@/lib/inventory'
 
 const mockedApiFetch = vi.mocked(apiFetch)
 
@@ -14,48 +14,94 @@ beforeEach(() => {
   vi.clearAllMocks()
 })
 
-const charizard: PokemonCard = {
-  id: 'base1-4',
-  name: 'Charizard',
-  supertype: 'Pokémon',
-  number: '4',
-  rarity: 'Rare Holo',
-  set: { id: 'base1', name: 'Base', series: 'Base', releaseDate: '1999', images: { symbol: '', logo: '' } },
-  images: { small: 'https://img/charizard.png', large: '' },
-  tcgplayer: { url: 'u', prices: { holofoil: { low: 1, mid: 2, high: 3, market: 250.42, directLow: null } } },
+const charizard: InventoryItem = {
+  kind: 'raw',
+  card_id: 'base1-4',
+  quantity: 1,
+  listed_price: '250.42',
+  current_market_value: '300.00',
+  acquired_at: '2026-04-01',
+  finish: 'holofoil',
+  condition: 'NM',
+  card: {
+    card_id: 'base1-4',
+    name: 'Charizard',
+    set_id: 'base1',
+    set_name: 'Base',
+    number: '4',
+    rarity: 'Rare Holo',
+    image_small: 'https://img/charizard.png',
+  },
 }
 
-function response(cards: PokemonCard[]): CardSearchResponse {
-  return { data: cards, page: 1, pageSize: cards.length, count: cards.length, totalCount: cards.length }
+function response(items: InventoryItem[]): InventorySearchResult {
+  return { items, total: items.length }
+}
+
+function sentQuery(): URLSearchParams {
+  const path = String(mockedApiFetch.mock.calls[0][0])
+  return new URLSearchParams(path.split('?')[1] ?? '')
 }
 
 describe('FilterPanel', () => {
-  it('searches on submit and renders matching cards with prices', async () => {
+  it('searches with backend param names and renders matching items', async () => {
     mockedApiFetch.mockResolvedValue(response([charizard]))
     render(<FilterPanel />)
 
     await userEvent.type(screen.getByLabelText(/name/i), 'Charizard')
     await userEvent.click(screen.getByRole('button', { name: /search/i }))
 
-    expect(mockedApiFetch).toHaveBeenCalledWith('/inventory/search?name=Charizard')
+    expect(String(mockedApiFetch.mock.calls[0][0])).toBe('/inventory/search?name=Charizard')
     expect(await screen.findByText('Charizard')).toBeInTheDocument()
     expect(screen.getByText('$250.42')).toBeInTheDocument()
+  })
+
+  it('sends the set as a set_id (display names map to pokemontcg.io ids)', async () => {
+    mockedApiFetch.mockResolvedValue(response([]))
+    render(<FilterPanel />)
+
+    await userEvent.selectOptions(screen.getByLabelText(/set/i), 'Base')
+    await userEvent.click(screen.getByRole('button', { name: /search/i }))
+
+    expect(sentQuery().get('set_id')).toBe('base1')
+    expect(sentQuery().get('set')).toBeNull()
+  })
+
+  it('offers raw-condition grades instead of a Pokémon type filter', async () => {
+    mockedApiFetch.mockResolvedValue(response([]))
+    render(<FilterPanel />)
+
+    expect(screen.queryByLabelText(/type/i)).toBeNull()
+
+    await userEvent.selectOptions(screen.getByLabelText(/condition/i), 'NM')
+    await userEvent.click(screen.getByRole('button', { name: /search/i }))
+
+    expect(sentQuery().get('condition')).toBe('NM')
+  })
+
+  it('swaps an inverted price range before searching (backend rejects it with 422)', async () => {
+    mockedApiFetch.mockResolvedValue(response([]))
+    render(<FilterPanel />)
+    await userEvent.type(screen.getByLabelText(/min price/i), '50')
+    await userEvent.type(screen.getByLabelText(/max price/i), '10')
+    await userEvent.click(screen.getByRole('button', { name: /search/i }))
+
+    expect(sentQuery().get('min_price')).toBe('10')
+    expect(sentQuery().get('max_price')).toBe('50')
   })
 
   it('submits on Enter from the name field', async () => {
     mockedApiFetch.mockResolvedValue(response([charizard]))
     render(<FilterPanel />)
     await userEvent.type(screen.getByLabelText(/name/i), 'Charizard{Enter}')
-    expect(mockedApiFetch).toHaveBeenCalledWith('/inventory/search?name=Charizard')
+    expect(String(mockedApiFetch.mock.calls[0][0])).toBe('/inventory/search?name=Charizard')
   })
 
-  it('swaps an inverted price range before searching', async () => {
-    mockedApiFetch.mockResolvedValue(response([]))
+  it('shows the total from the backend', async () => {
+    mockedApiFetch.mockResolvedValue({ items: [charizard], total: 1 })
     render(<FilterPanel />)
-    await userEvent.type(screen.getByLabelText(/min price/i), '50')
-    await userEvent.type(screen.getByLabelText(/max price/i), '10')
     await userEvent.click(screen.getByRole('button', { name: /search/i }))
-    expect(mockedApiFetch).toHaveBeenCalledWith('/inventory/search?minPrice=10&maxPrice=50')
+    expect(await screen.findByText(/1 result\b/i)).toBeInTheDocument()
   })
 
   it('shows an empty state when nothing matches', async () => {
@@ -73,11 +119,15 @@ describe('FilterPanel', () => {
   })
 
   it('ignores a stale response when a newer search resolves first', async () => {
-    let resolveFirst: (value: CardSearchResponse) => void = () => {}
-    const firstPending = new Promise<CardSearchResponse>((res) => {
+    let resolveFirst: (value: InventorySearchResult) => void = () => {}
+    const firstPending = new Promise<InventorySearchResult>((res) => {
       resolveFirst = res
     })
-    const blastoise: PokemonCard = { ...charizard, id: 'base1-2', name: 'Blastoise' }
+    const blastoise: InventoryItem = {
+      ...charizard,
+      card_id: 'base1-2',
+      card: { ...charizard.card!, card_id: 'base1-2', name: 'Blastoise' },
+    }
     mockedApiFetch
       .mockImplementationOnce(() => firstPending)
       .mockImplementationOnce(() => Promise.resolve(response([blastoise])))
