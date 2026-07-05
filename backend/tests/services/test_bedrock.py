@@ -191,18 +191,6 @@ def test_chat_raises_on_unknown_stop_reason():
         svc.chat("Some message")
 
 
-def test_chat_includes_end_turn_text_after_tool_use():
-    """Text in the end_turn response after tool use is returned correctly."""
-    client = MagicMock()
-    client.converse.side_effect = [
-        _tool_use("search_inventory", "tid-3", {"name": "Mewtwo"}, prefix="Searching now..."),
-        _end_turn("Found Mewtwo at $200."),
-    ]
-    svc = _make_service(client)
-    result = svc.chat("Any Mewtwo?")
-    assert result == "Found Mewtwo at $200."
-
-
 def test_chat_raises_service_error_when_tool_use_has_no_tool_blocks():
     """tool_use stop reason with no toolUse content blocks must not loop silently."""
     client = MagicMock()

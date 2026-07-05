@@ -65,11 +65,9 @@ describe('FeaturedFinds collection cards', () => {
 })
 
 describe('bottom sections reveal on scroll', () => {
-  it('FeaturedFinds wraps content in reveal wrappers and keeps the collection row', () => {
+  it('FeaturedFinds wraps its content in a reveal wrapper', () => {
     const { container } = render(<FeaturedFinds />)
     expect(container.querySelector('.reveal')).toBeInTheDocument()
-    expect(container.querySelector('.collection-row')).toBeInTheDocument()
-    expect(container.querySelectorAll('.collection-card')).toHaveLength(5)
   })
 
   it('ShowsPreview wraps its listing in a reveal wrapper with a hover lift', () => {

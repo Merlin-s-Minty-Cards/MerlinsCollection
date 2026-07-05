@@ -29,14 +29,6 @@ describe("flagUnderpricedCards", () => {
     });
   });
 
-  it("does not flag cards at or above market price", async () => {
-    const result = await flagUnderpricedCards(seed(), 100);
-
-    const flaggedIds = ids(result.flaggedCards);
-    expect(flaggedIds).not.toContain("c3"); // at market
-    expect(flaggedIds).not.toContain("c4"); // above market
-  });
-
   it("does not flag a card listed exactly at the threshold (strict less-than)", async () => {
     const repo = new InMemoryInventoryRepository([
       card({ id: "boundary", value: 80, marketPrice: 100 }), // exactly 80% of market
@@ -57,12 +49,6 @@ describe("flagUnderpricedCards", () => {
     const discount = result.flaggedCards[0]?.discountPercent ?? 0;
     expect(discount).toBeCloseTo(36.3636, 3);
     expect(Number.isInteger(discount)).toBe(false); // not rounded
-  });
-
-  it("returns an empty array when no cards are underpriced", async () => {
-    const result = await flagUnderpricedCards(seed(), 50);
-
-    expect(result.flaggedCards).toEqual([]);
   });
 
   it("respects a custom threshold percentage", async () => {

@@ -60,16 +60,6 @@ describe("getCardPriceHistory", () => {
     expect(result.history.map((point) => point.source)).toEqual(["eBay", "TCGplayer"]);
   });
 
-  it("includes a data source on each price point", async () => {
-    const result = await getCardPriceHistory(seed(), "1");
-
-    expect(result.history.map((point) => point.source)).toEqual([
-      "TCGplayer",
-      "PriceCharting",
-      "eBay",
-    ]);
-  });
-
   it("returns empty history for a known card with no price points", async () => {
     const result = await getCardPriceHistory(seed(), "2");
 

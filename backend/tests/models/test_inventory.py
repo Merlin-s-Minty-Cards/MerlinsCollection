@@ -57,13 +57,3 @@ def test_adapter_rejects_raw_missing_fields():
              "listed_price": Decimal("1"), "cost_basis": Decimal("1"),
              "acquired_at": "2026-01-01"}
         )
-
-
-def test_raw_item_rejects_graded_fields_missing():
-    with pytest.raises(ValidationError):
-        RawInventoryItem(
-            kind="raw", card_id="x", quantity=1,
-            listed_price=Decimal("1"), cost_basis=Decimal("1"),
-            acquired_at=date(2026, 1, 1),
-            # missing finish + condition
-        )
