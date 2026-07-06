@@ -75,9 +75,17 @@ Or in the console: DynamoDB → Create table →
 ## Phase 3 — Bedrock model access + first end-to-end run (20 min)
 
 1. Bedrock console (us-east-1) → **Model access** → request access to
-   **Anthropic Claude 3.5 Sonnet v2**. Approval for Anthropic models is
+   **Anthropic Claude Sonnet 4.5**. Approval for Anthropic models is
    usually instant. The backend's default model id is
-   `anthropic.claude-3-5-sonnet-20241022-v2:0` (`BEDROCK_MODEL_ID` to change).
+   `us.anthropic.claude-sonnet-4-5-20250929-v1:0` (`BEDROCK_MODEL_ID` to
+   change). Note the `us.` prefix — current-generation models require
+   invoking them through a **cross-region inference profile** id rather
+   than the bare model id; the bare id fails with "on-demand throughput
+   isn't supported." Run `aws bedrock list-foundation-models --region
+   us-east-1 --by-provider anthropic` to see what your account can currently
+   access — Anthropic periodically retires old model versions (they start
+   failing with `ResourceNotFoundException: ... reached the end of its
+   life`), so if chat mode 502s, this is the first thing to check.
 2. Seed some data. Two options:
    - **Real catalog data**: get a free API key at https://dev.pokemontcg.io,
      set `POKEMONTCG_API_KEY` in `backend/.env`, then run:

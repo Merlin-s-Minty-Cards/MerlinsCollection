@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     cognito_user_pool_id: str = ""
     cognito_client_id: str = ""
     dynamodb_table_name: str = "merlins-cards"
-    bedrock_model_id: str = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+    bedrock_model_id: str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
     mcp_server_path: str = "../mcp-server/dist/index.js"
     pokemontcg_api_key: str = ""
     # Comma-separated browser origins allowed to call the API (CORS).
