@@ -77,7 +77,7 @@ export default function ChatPanel() {
   return (
     <div className="flex h-[560px] flex-col rounded-2xl vault-panel">
       <div
-        className="flex-1 space-y-4 overflow-y-auto p-4 sm:p-5"
+        className="vault-scroll flex-1 space-y-4 overflow-y-auto p-4 sm:p-5"
         aria-live="polite"
         aria-atomic="false"
       >
