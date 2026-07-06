@@ -156,4 +156,25 @@ describe('ChatPanel', () => {
     await userEvent.click(screen.getByRole('button', { name: /send/i }))
     expect(await screen.findByText(/something went wrong/i)).toBeInTheDocument()
   })
+
+  it('renders markdown formatting in assistant replies', async () => {
+    mockedApiFetch.mockResolvedValue({ reply: 'The **Charizard** is from Base Set.' })
+    render(<ChatPanel />)
+
+    await userEvent.type(screen.getByRole('textbox'), 'How much is Charizard?')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    const strong = await screen.findByText('Charizard')
+    expect(strong.tagName).toBe('STRONG')
+  })
+
+  it('renders literal asterisks in user bubbles, not markdown', async () => {
+    mockedApiFetch.mockResolvedValue({ reply: 'Sure thing.' })
+    render(<ChatPanel />)
+
+    await userEvent.type(screen.getByRole('textbox'), 'What about **this** card?')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+
+    expect(await screen.findByText('What about **this** card?')).toBeInTheDocument()
+  })
 })

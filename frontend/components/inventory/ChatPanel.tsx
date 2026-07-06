@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { Send } from 'lucide-react'
 import { ApiError } from '@/lib/api'
 import { sendChat, type ChatMessage } from '@/lib/inventory'
+import MarkdownMessage from '@/components/inventory/MarkdownMessage'
 
 type Bubble = {
   role: 'user' | 'assistant' | 'error'
@@ -137,16 +138,16 @@ function ChatBubble({ bubble }: { bubble: Bubble }) {
       </div>
     )
   }
-  const isError = bubble.role === 'error'
+  if (bubble.role === 'error') {
+    return (
+      <p className="max-w-[85%] rounded-2xl rounded-bl-sm bg-red-500/10 px-4 py-2.5 text-sm text-red-300">
+        {bubble.content}
+      </p>
+    )
+  }
   return (
-    <p
-      className={`max-w-[85%] rounded-2xl rounded-bl-sm px-4 py-2.5 text-sm ${
-        isError
-          ? 'bg-red-500/10 text-red-300'
-          : 'bg-pine-800 text-pine-100'
-      }`}
-    >
-      {bubble.content}
-    </p>
+    <div className="max-w-[85%] rounded-2xl rounded-bl-sm bg-pine-800 px-4 py-2.5 text-sm text-pine-100">
+      <MarkdownMessage content={bubble.content} />
+    </div>
   )
 }
