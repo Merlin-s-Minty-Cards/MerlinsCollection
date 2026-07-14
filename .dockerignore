@@ -1,0 +1,31 @@
+# Dependencies / build output (rebuilt inside the image)
+node_modules
+**/node_modules
+.next
+**/.next
+dist
+**/dist
+*.tsbuildinfo
+
+# Python
+.venv
+venv
+**/__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+**/*.egg-info
+
+# Secrets — never in image layers
+.env
+**/.env
+**/.env.*
+
+# Repo noise
+.git
+.github
+.claude
+.superpowers
+docs
+coverage
+**/coverage
