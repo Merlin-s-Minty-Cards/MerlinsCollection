@@ -7,8 +7,8 @@ import { getAllArticles } from '@/lib/articles'
 
 export const metadata: Metadata = { title: 'Articles' }
 
-export default function ArticlesPage() {
-  const articles = getAllArticles()
+export default async function ArticlesPage() {
+  const articles = await getAllArticles()
 
   return (
     <section className="py-[clamp(48px,8vw,84px)]">

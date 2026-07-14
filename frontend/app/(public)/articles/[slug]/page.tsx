@@ -3,23 +3,25 @@ import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import Container from '@/components/ui/Container'
 import Badge from '@/components/ui/Badge'
+import ArticleBody from '@/components/articles/ArticleBody'
 import { getAllArticles, getArticleBySlug, formatArticleDate } from '@/lib/articles'
 
 type Props = { params: Promise<{ slug: string }> }
 
-export function generateStaticParams() {
-  return getAllArticles().map((a) => ({ slug: a.slug }))
+export async function generateStaticParams() {
+  const articles = await getAllArticles()
+  return articles.map((a) => ({ slug: a.slug }))
 }
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { slug } = await params
-  const article = getArticleBySlug(slug)
+  const article = await getArticleBySlug(slug)
   return { title: article ? article.title : 'Article not found' }
 }
 
 export default async function ArticlePage({ params }: Props) {
   const { slug } = await params
-  const article = getArticleBySlug(slug)
+  const article = await getArticleBySlug(slug)
   if (!article) notFound()
 
   const date = formatArticleDate(article.date, 'long')
@@ -47,9 +49,7 @@ export default async function ArticlePage({ params }: Props) {
         </div>
 
         <div className="mt-8 space-y-5 text-[17px] leading-[1.7] text-[#3f3a33]">
-          {article.body.map((paragraph, i) => (
-            <p key={i}>{paragraph}</p>
-          ))}
+          <ArticleBody value={article.body} />
         </div>
       </article>
     </Container>

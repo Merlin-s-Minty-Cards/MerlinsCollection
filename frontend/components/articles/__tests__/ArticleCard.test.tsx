@@ -10,7 +10,13 @@ const article: Article = {
   date: '2026-05-12',
   readingTime: '6 min read',
   category: 'Guides',
-  body: ['First paragraph.'],
+  body: [
+    {
+      _type: 'block',
+      _key: 'a1',
+      children: [{ _type: 'span', _key: 's1', text: 'First paragraph.' }],
+    },
+  ],
 }
 
 describe('ArticleCard', () => {

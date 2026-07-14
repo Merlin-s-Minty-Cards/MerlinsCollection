@@ -1,25 +1,88 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+
+// Sanity is a network boundary — stub the client, exercise our own mapping.
+vi.mock('@/lib/sanity', () => ({
+  sanityClient: { fetch: vi.fn() },
+}))
+
+import { sanityClient } from '@/lib/sanity'
 import { getAllArticles, getArticleBySlug, formatArticleDate } from '@/lib/articles'
 
-describe('articles data layer', () => {
-  it('returns the published sample articles', () => {
-    const all = getAllArticles()
-    expect(all.length).toBeGreaterThanOrEqual(3)
-    all.forEach((a) => {
-      expect(a.slug).toBeTruthy()
-      expect(a.title).toBeTruthy()
-    })
+const fetchMock = vi.mocked(sanityClient.fetch)
+
+/** A document shaped the way our GROQ projection returns it. */
+const sanityDoc = (overrides: Record<string, unknown> = {}) => ({
+  slug: 'grading-101',
+  title: 'Grading 101',
+  excerpt: 'When grading pays off.',
+  publishedAt: '2026-11-03T14:30:00Z',
+  readingTime: '6 min read',
+  category: 'Guides',
+  body: [{ _type: 'block', children: [{ _type: 'span', text: 'Hello' }] }],
+  ...overrides,
+})
+
+beforeEach(() => {
+  fetchMock.mockReset()
+})
+
+describe('getAllArticles', () => {
+  it('returns the articles Sanity publishes', async () => {
+    fetchMock.mockResolvedValue([sanityDoc()])
+
+    const [article] = await getAllArticles()
+
+    expect(article.slug).toBe('grading-101')
+    expect(article.title).toBe('Grading 101')
+    expect(article.excerpt).toBe('When grading pays off.')
+    expect(article.readingTime).toBe('6 min read')
+    expect(article.category).toBe('Guides')
+    expect(article.body).toEqual([
+      { _type: 'block', children: [{ _type: 'span', text: 'Hello' }] },
+    ])
   })
 
-  it('looks up an article by slug', () => {
-    const article = getArticleBySlug('grading-101')
-    expect(article).toBeDefined()
-    expect(article?.title).toMatch(/grading/i)
-    expect(article?.body.length).toBeGreaterThan(0)
+  it('narrows the publish timestamp to a date-only string', async () => {
+    // publishedAt is a datetime, but the page renders a calendar date. Keeping
+    // `date` date-only is what lets formatArticleDate stay timezone-safe.
+    fetchMock.mockResolvedValue([sanityDoc({ publishedAt: '2026-11-03T14:30:00Z' })])
+
+    const [article] = await getAllArticles()
+
+    expect(article.date).toBe('2026-11-03')
   })
 
-  it('returns undefined for an unknown slug', () => {
-    expect(getArticleBySlug('does-not-exist')).toBeUndefined()
+  it('returns an empty list when nothing is published yet', async () => {
+    fetchMock.mockResolvedValue([])
+
+    expect(await getAllArticles()).toEqual([])
+  })
+})
+
+describe('getArticleBySlug', () => {
+  it('returns the article matching the slug', async () => {
+    fetchMock.mockResolvedValue(sanityDoc({ slug: 'spotting-fakes' }))
+
+    const article = await getArticleBySlug('spotting-fakes')
+
+    expect(article?.slug).toBe('spotting-fakes')
+    expect(article?.date).toBe('2026-11-03')
+  })
+
+  it('passes the slug to Sanity as a parameter rather than string interpolation', async () => {
+    // Interpolating user input into a GROQ query is an injection risk; params
+    // keep the query and the value separate.
+    fetchMock.mockResolvedValue(sanityDoc())
+
+    await getArticleBySlug('spotting-fakes')
+
+    expect(fetchMock).toHaveBeenCalledWith(expect.any(String), { slug: 'spotting-fakes' })
+  })
+
+  it('returns undefined when no article matches the slug', async () => {
+    fetchMock.mockResolvedValue(null)
+
+    expect(await getArticleBySlug('does-not-exist')).toBeUndefined()
   })
 })
 
