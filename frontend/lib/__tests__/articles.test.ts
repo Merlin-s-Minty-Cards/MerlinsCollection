@@ -26,6 +26,42 @@ beforeEach(() => {
   fetchMock.mockReset()
 })
 
+describe('article queries', () => {
+  it('resolves inline image assets to a URL and intrinsic size', async () => {
+    // An image block holds only an asset *reference*. next/image cannot render
+    // that — it needs a URL and dimensions — so the query must dereference it.
+    fetchMock.mockResolvedValue(sanityDoc())
+
+    await getArticleBySlug('grading-101')
+
+    const [query] = fetchMock.mock.calls[0]
+    expect(query).toContain('asset->url')
+    expect(query).toContain('asset->metadata.dimensions')
+  })
+
+  it('asks for the SEO and CTA fields the article page renders', async () => {
+    fetchMock.mockResolvedValue(sanityDoc())
+
+    await getArticleBySlug('grading-101')
+
+    const [query] = fetchMock.mock.calls[0]
+    expect(query).toContain('seoDescription')
+    expect(query).toContain('shareImage')
+    expect(query).toContain('cta')
+  })
+
+  it('does not download article bodies just to list them', async () => {
+    // The listing renders titles and excerpts. Pulling every article's full body
+    // (and joining every inline image asset) to throw it away is pure waste.
+    fetchMock.mockResolvedValue([])
+
+    await getAllArticles()
+
+    const [query] = fetchMock.mock.calls[0]
+    expect(query).not.toContain('body')
+  })
+})
+
 describe('getAllArticles', () => {
   it('returns the articles Sanity publishes', async () => {
     fetchMock.mockResolvedValue([sanityDoc()])

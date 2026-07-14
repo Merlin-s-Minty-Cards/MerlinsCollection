@@ -4,7 +4,26 @@
 import type { PortableTextBlock } from '@portabletext/types'
 import { sanityClient } from '@/lib/sanity'
 
-export interface Article {
+/** An image resolved to something `next/image` can actually render. */
+export interface ArticleImage {
+  url?: string
+  dimensions?: { width: number; height: number }
+  alt?: string
+  caption?: string
+}
+
+/** An inline image an editor placed in the body. */
+export type ArticleImageBlock = ArticleImage & { _type: 'image'; _key: string }
+
+export type ArticleBodyBlock = PortableTextBlock | ArticleImageBlock
+
+export interface ArticleCta {
+  label?: string
+  href?: string
+}
+
+/** What a listing card shows. The listing never fetches the body (see LIST_FIELDS). */
+export interface ArticleSummary {
   slug: string
   title: string
   excerpt: string
@@ -12,48 +31,74 @@ export interface Article {
   date: string
   readingTime: string
   category: string
-  body: PortableTextBlock[]
 }
 
-/** An article as the GROQ projection below returns it. */
-type SanityArticle = Omit<Article, 'date'> & { publishedAt: string }
+export interface Article extends ArticleSummary {
+  body: ArticleBodyBlock[]
+  // Nothing below is required in the Studio, so it is all genuinely optional here.
+  seoDescription?: string
+  shareImage?: ArticleImage
+  cta?: ArticleCta
+}
 
-// Only articles with a slug are reachable, so unslugged drafts are skipped.
-// Newest first, matching how the listing page reads.
-const ARTICLE_FIELDS = `
+/** A document as the GROQ projections below return it, before `date` is narrowed. */
+type SanityDoc<T extends ArticleSummary> = Omit<T, 'date'> & { publishedAt: string }
+
+/** Narrow Sanity's `publishedAt` datetime to the date-only string the pages render. */
+function narrowDate<T extends ArticleSummary>(doc: SanityDoc<T>): T {
+  const { publishedAt, ...rest } = doc
+  return { ...rest, date: (publishedAt ?? '').slice(0, 10) } as unknown as T
+}
+
+// next/image refuses to render a remote image without intrinsic dimensions, and
+// an image block only holds an asset *reference* — so resolve each one to its URL
+// and size here rather than shipping a reference the renderer can't use.
+const IMAGE_PROJECTION = `"url": asset->url, "dimensions": asset->metadata.dimensions`
+
+/** What the listing cards render — deliberately no body, so no image joins. */
+const LIST_FIELDS = `
   "slug": slug.current,
   title,
   excerpt,
   publishedAt,
   readingTime,
-  category,
-  body
+  category
 `
 
+/** Everything the article page needs, including the body and its images. */
+const DETAIL_FIELDS = `
+  ${LIST_FIELDS},
+  seoDescription,
+  shareImage{ ${IMAGE_PROJECTION} },
+  cta{ label, href },
+  body[]{
+    ...,
+    _type == "image" => { ${IMAGE_PROJECTION} }
+  }
+`
+
+// Only articles with a slug are reachable. Drafts are excluded by the client's
+// `published` perspective (see lib/sanity.ts). Newest first, matching the listing.
 const ALL_ARTICLES_QUERY = `*[_type == "article" && defined(slug.current)]
-  | order(publishedAt desc) { ${ARTICLE_FIELDS} }`
+  | order(publishedAt desc) { ${LIST_FIELDS} }`
 
 // $slug is a query *parameter*, not string interpolation — the slug comes from
 // the URL, and interpolating it straight into GROQ would be an injection hole.
-const ARTICLE_BY_SLUG_QUERY = `*[_type == "article" && slug.current == $slug][0] { ${ARTICLE_FIELDS} }`
+const ARTICLE_BY_SLUG_QUERY = `*[_type == "article" && slug.current == $slug][0] { ${DETAIL_FIELDS} }`
 
 /**
  * Sanity stores `publishedAt` as a full datetime, but the pages only ever show a
  * calendar date. Truncating to `YYYY-MM-DD` here is what keeps `formatArticleDate`
  * timezone-safe downstream (see its comment).
  */
-function toArticle({ publishedAt, ...rest }: SanityArticle): Article {
-  return { ...rest, date: (publishedAt ?? '').slice(0, 10) }
-}
-
-export async function getAllArticles(): Promise<Article[]> {
-  const results = await sanityClient.fetch<SanityArticle[]>(ALL_ARTICLES_QUERY)
-  return (results ?? []).map(toArticle)
+export async function getAllArticles(): Promise<ArticleSummary[]> {
+  const results = await sanityClient.fetch<SanityDoc<ArticleSummary>[]>(ALL_ARTICLES_QUERY)
+  return (results ?? []).map(narrowDate)
 }
 
 export async function getArticleBySlug(slug: string): Promise<Article | undefined> {
-  const result = await sanityClient.fetch<SanityArticle | null>(ARTICLE_BY_SLUG_QUERY, { slug })
-  return result ? toArticle(result) : undefined
+  const result = await sanityClient.fetch<SanityDoc<Article> | null>(ARTICLE_BY_SLUG_QUERY, { slug })
+  return result ? narrowDate(result) : undefined
 }
 
 // One formatter per month style. timeZone: 'UTC' is essential: article dates are

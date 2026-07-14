@@ -1,5 +1,6 @@
 import type { NextAuthConfig } from 'next-auth'
 import Cognito from 'next-auth/providers/cognito'
+import { resolveIsAdmin } from './admin'
 
 /**
  * NextAuth config, kept separate from the `NextAuth()` call in `auth.ts` so it
@@ -21,15 +22,23 @@ export const authConfig: NextAuthConfig = {
     }),
   ],
   callbacks: {
-    async jwt({ token, account }) {
+    async jwt({ token, account, profile }) {
       // `account` is present only on the initial sign-in callback.
       if (account?.access_token) {
         token.accessToken = account.access_token
+      }
+      if (account) {
+        // Group membership is only visible at sign-in, so it is resolved once and
+        // carried on the session token. NOTE: that means removing someone from the
+        // admins group does not take effect until their session expires. Refresh-
+        // token rotation would re-derive this hourly; see the follow-up.
+        token.isAdmin = resolveIsAdmin({ account, profile })
       }
       return token
     },
     async session({ session, token }) {
       session.accessToken = token.accessToken as string | undefined
+      session.isAdmin = token.isAdmin === true
       return session
     },
   },

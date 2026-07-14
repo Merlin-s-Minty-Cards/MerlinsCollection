@@ -32,4 +32,39 @@ describe('auth config', () => {
     } as never)
     expect(session).toMatchObject({ accessToken: 'cognito-access-token' })
   })
+
+  it('jwt callback records admin status from the Cognito group on sign-in', async () => {
+    const token = await config.callbacks!.jwt!({
+      token: {},
+      account: { access_token: 'a' },
+      profile: { 'cognito:groups': ['admins'] },
+    } as never)
+    expect(token).toMatchObject({ isAdmin: true })
+  })
+
+  it('jwt callback marks an ordinary customer as not an admin', async () => {
+    // No groups claim at all — the default for every customer. Must not throw.
+    const token = await config.callbacks!.jwt!({
+      token: {},
+      account: { access_token: 'a' },
+      profile: { email: 'collector@example.com' },
+    } as never)
+    expect(token).toMatchObject({ isAdmin: false })
+  })
+
+  it('session callback exposes admin status to the client', async () => {
+    const session = await config.callbacks!.session!({
+      session: { user: {}, expires: '2026-01-01' },
+      token: { isAdmin: true },
+    } as never)
+    expect(session).toMatchObject({ isAdmin: true })
+  })
+
+  it('session callback reports non-admins as false rather than undefined', async () => {
+    const session = await config.callbacks!.session!({
+      session: { user: {}, expires: '2026-01-01' },
+      token: {},
+    } as never)
+    expect(session).toMatchObject({ isAdmin: false })
+  })
 })

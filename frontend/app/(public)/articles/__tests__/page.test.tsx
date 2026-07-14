@@ -6,7 +6,13 @@ vi.mock('@/lib/articles', async (importOriginal) => ({
   getAllArticles: vi.fn(),
 }))
 
-import ArticlesPage from '@/app/(public)/articles/page'
+// The page renders StudioLink, whose useSession() needs the SessionProvider that
+// the root layout supplies in the real app. StudioLink has its own tests.
+vi.mock('next-auth/react', () => ({
+  useSession: () => ({ data: null, status: 'unauthenticated' }),
+}))
+
+import ArticlesPage, { revalidate } from '@/app/(public)/articles/page'
 import { getAllArticles, type Article } from '@/lib/articles'
 
 const getAllArticlesMock = vi.mocked(getAllArticles)
@@ -26,6 +32,10 @@ beforeEach(() => {
 })
 
 describe('Articles page', () => {
+  it('re-fetches periodically so new articles appear without a rebuild', () => {
+    expect(revalidate).toBe(60)
+  })
+
   it('renders the page heading', async () => {
     getAllArticlesMock.mockResolvedValue([])
 
