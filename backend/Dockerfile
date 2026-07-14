@@ -7,6 +7,7 @@ FROM node:20-slim AS mcp-build
 WORKDIR /build
 COPY package.json package-lock.json ./
 COPY mcp-server/package.json mcp-server/package.json
+COPY frontend/package.json frontend/package.json
 RUN npm ci --workspace=mcp-server
 COPY mcp-server/tsconfig.json mcp-server/tsconfig.json
 COPY mcp-server/src mcp-server/src
@@ -22,12 +23,17 @@ FROM node:20-slim AS mcp-deps
 WORKDIR /build
 COPY package.json package-lock.json ./
 COPY mcp-server/package.json mcp-server/package.json
+COPY frontend/package.json frontend/package.json
 RUN npm ci --workspace=mcp-server --omit=dev
 
 # ---- Backend + MCP bundle on one image ----
 FROM python:3.12-slim AS base
 # The backend spawns the MCP server as `node dist/index.js` — it needs a Node
-# runtime. The bare binary from the build stage is enough (same Debian base).
+# runtime. Node's V8 dynamically links libstdc++6, which python:3.12-slim
+# does not ship, so install it before copying the bare Node binary in.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=mcp-build /usr/local/bin/node /usr/local/bin/node
 WORKDIR /app
 COPY backend/pyproject.toml backend/pyproject.toml
