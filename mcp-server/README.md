@@ -17,19 +17,22 @@ pure and trivially testable, and lets the data source change (in-memory today,
 DynamoDB in production) without touching a single tool.
 
 ```
-MCP client (Bedrock chat)
+MCP client (backend McpToolExecutor, spawning `node dist/index.js`)
         │  stdio
         ▼
-   src/index.ts ............ creates the McpServer, registers tools  ← see "Status" below
+   src/index.ts ............ bootstrap: env config, DynamoDB client, stdio connect
         │
+        ▼
+   src/server.ts ........... buildServer(repo): registers the 5 tools
+        │                    (names/schemas pinned to ../shared/tool-contract.json)
         ▼
    src/tools/*.ts .......... pure functions: (repo, args) -> result
         │  depends on
         ▼
    InventoryRepository ..... interface in src/repository.ts
         ▲
-        ├── InMemoryInventoryRepository ... tests (src/__tests__/fixtures/)
-        └── DynamoDB-backed repository ..... production (not yet written)
+        ├── InMemoryInventoryRepository ....... tests (src/__tests__/fixtures/)
+        └── DynamoDbInventoryRepository ....... production (src/dynamodb-repository.ts)
 ```
 
 Each tool is an `async function(repo, ...args)` that returns a plain object. It
@@ -40,10 +43,12 @@ has no knowledge of MCP, DynamoDB, or stdio — those concerns live at the edges
 
 | Path | What it holds |
 |------|---------------|
-| `src/index.ts` | Server entry point: builds the `McpServer` and connects it over stdio. |
+| `src/index.ts` | Entry point: env config (`AWS_REGION`, `DYNAMODB_TABLE_NAME`), DynamoDB client, stdio connect. |
+| `src/server.ts` | `buildServer(repo)`: registers each tool with its input schema and adapts results into MCP responses. |
+| `src/dynamodb-repository.ts` | Production `InventoryRepository` over the backend's single-table layout. |
 | `src/repository.ts` | Domain types (`Card`, `PricePoint`) and the `InventoryRepository` interface. |
 | `src/tools/` | One file per tool, plus `index.ts` re-exporting them all. |
-| `src/__tests__/tools/` | A Vitest spec per tool. |
+| `src/__tests__/` | Vitest specs: per-tool, server registration (in-memory MCP transport), and repository (stubbed DocumentClient). |
 | `src/__tests__/fixtures/` | The `card(...)` builder and `InMemoryInventoryRepository`. |
 
 ## Domain model
@@ -99,15 +104,20 @@ builder and override only the fields a test cares about.
 This package follows the repo-wide outside-in TDD process (see the root
 `CLAUDE.md`): write a failing test, make it pass, then refactor.
 
-## Status & roadmap
+## Status
 
-The five tools are fully implemented and tested, but the server is still a
-**skeleton**: `src/index.ts` creates the `McpServer` and connects it, yet does
-not register any tools, so a client currently sees an empty tool list. Two pieces
-remain (each best driven by TDD):
+Fully wired: the five tools are registered on the server (`src/server.ts`) with
+zod-validated input schemas, and `DynamoDbInventoryRepository` reads the
+backend's single-table layout in production. The backend spawns this server via
+`McpToolExecutor` (`backend/src/merlins_collection/services/mcp_client.py`), so
+**run `npm run build` here before starting the backend** — it spawns
+`node dist/index.js`.
 
-1. **A production `InventoryRepository`** — a DynamoDB-backed implementation of
-   the interface to inject into the tools.
-2. **Tool registration** — a `server.registerTool(...)` call per tool that
-   declares the input schema (validating the args these functions currently trust)
-   and adapts each function's return value into an MCP tool response.
+Two cross-service contracts to keep in mind when changing anything here:
+
+- **Tool names/schemas** are pinned by `../shared/tool-contract.json`; both this
+  package's tests and the backend's `test_tool_contract.py` assert against it.
+  Change the contract file first, then both sides.
+- **Key formats** (and the shard count) mirror
+  `backend/src/merlins_collection/services/dynamodb.py` — a schema change there
+  must be mirrored in `src/dynamodb-repository.ts`.

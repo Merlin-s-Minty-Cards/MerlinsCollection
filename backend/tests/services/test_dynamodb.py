@@ -1,3 +1,4 @@
+import time
 from datetime import date as _date
 from datetime import datetime
 from decimal import Decimal
@@ -53,6 +54,53 @@ def test_batch_upsert_handles_more_than_25(dynamo_repo):
     cards = [_card(f"big-{i}", "setBig") for i in range(30)]
     dynamo_repo.batch_upsert_catalog_cards(cards)
     assert len(dynamo_repo.list_cards_by_set("setBig")) == 30
+
+
+def test_batch_get_catalog_cards_returns_found_and_skips_missing(dynamo_repo):
+    dynamo_repo.batch_upsert_catalog_cards([_card("a-1"), _card("a-2")])
+
+    got = dynamo_repo.batch_get_catalog_cards({"a-1", "a-2", "a-missing"})
+
+    assert set(got) == {"a-1", "a-2"}
+    assert got["a-1"].name == "Celebi V"
+
+
+def test_batch_get_catalog_cards_handles_more_than_100_keys(dynamo_repo):
+    """DynamoDB caps BatchGetItem at 100 keys — the repo must chunk."""
+    dynamo_repo.batch_upsert_catalog_cards([_card(f"bulk-{i}", "setBulk") for i in range(120)])
+
+    got = dynamo_repo.batch_get_catalog_cards([f"bulk-{i}" for i in range(120)])
+
+    assert len(got) == 120
+
+
+def test_batch_get_catalog_cards_empty_input_returns_empty(dynamo_repo):
+    assert dynamo_repo.batch_get_catalog_cards([]) == {}
+
+
+def test_batch_get_catalog_cards_bounds_unprocessed_retries(dynamo_repo, monkeypatch):
+    """A perpetually-throttled BatchGetItem returns its keys in UnprocessedKeys
+    on a *successful* response (no exception), so boto3's own retries never fire.
+    The repo must bound its own retries instead of looping forever and hanging
+    the request; missing ids are simply absent, per the method contract.
+    """
+    key = {"PK": "CARD#a-1", "SK": "META"}
+    calls = []
+
+    def always_unprocessed(**kwargs):
+        calls.append(kwargs)
+        return {
+            "Responses": {},
+            "UnprocessedKeys": {dynamo_repo._table_name: {"Keys": [key]}},
+        }
+
+    monkeypatch.setattr(dynamo_repo._resource, "batch_get_item", always_unprocessed)
+    monkeypatch.setattr(time, "sleep", lambda *_: None)
+
+    got = dynamo_repo.batch_get_catalog_cards(["a-1"])
+
+    assert got == {}  # gave up gracefully — id absent rather than raising
+    assert 1 < len(calls) <= 8  # retried, but bounded; did not loop forever
 
 
 def test_graded_price_set_and_get(dynamo_repo):

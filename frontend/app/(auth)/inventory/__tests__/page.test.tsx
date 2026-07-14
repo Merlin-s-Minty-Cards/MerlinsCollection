@@ -4,6 +4,12 @@ import { describe, it, expect, vi } from 'vitest'
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }))
 
+// The panels read the NextAuth session; the layout's SessionProvider isn't in
+// this render tree, so stub the hook.
+vi.mock('next-auth/react', () => ({
+  useSession: () => ({ data: null, status: 'unauthenticated' }),
+}))
+
 import InventoryPage from '@/app/(auth)/inventory/page'
 
 describe('Inventory page', () => {

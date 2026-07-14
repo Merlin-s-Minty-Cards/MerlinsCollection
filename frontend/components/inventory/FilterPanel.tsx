@@ -1,33 +1,38 @@
 'use client'
 
 import { useRef, useState } from 'react'
+import { useSession } from 'next-auth/react'
 import { Search } from 'lucide-react'
 import CardGrid from './CardGrid'
 import {
   searchInventory,
-  type CardSearchResponse,
+  type InventorySearchResult,
   type InventoryFilters,
 } from '@/lib/inventory'
 
 type Status = 'idle' | 'loading' | 'success' | 'error'
 
-// Curated option sets (backend maps these to the pokemontcg.io query).
-const SETS = [
-  'Base',
-  'Jungle',
-  'Fossil',
-  'Team Rocket',
-  'Neo Genesis',
-  'Expedition',
-  'Ruby & Sapphire',
-  'Diamond & Pearl',
-  'Black & White',
-  'XY Evolutions',
-  'Sword & Shield',
-  'Brilliant Stars',
-  'Scarlet & Violet',
-  '151',
+// Curated sets, mapped to their pokemontcg.io ids — the backend filters by
+// set_id. A wrong id here silently returns "no cards", so ids are pinned by
+// the FilterPanel tests.
+const SETS: Array<{ label: string; id: string }> = [
+  { label: 'Base', id: 'base1' },
+  { label: 'Jungle', id: 'base2' },
+  { label: 'Fossil', id: 'base3' },
+  { label: 'Team Rocket', id: 'base5' },
+  { label: 'Neo Genesis', id: 'neo1' },
+  { label: 'Expedition', id: 'ecard1' },
+  { label: 'Ruby & Sapphire', id: 'ex1' },
+  { label: 'Diamond & Pearl', id: 'dp1' },
+  { label: 'Black & White', id: 'bw1' },
+  { label: 'Evolutions', id: 'xy12' },
+  { label: 'Sword & Shield', id: 'swsh1' },
+  { label: 'Brilliant Stars', id: 'swsh9' },
+  { label: 'Scarlet & Violet', id: 'sv1' },
+  { label: '151', id: 'sv3pt5' },
 ]
+const SET_IDS = new Map(SETS.map((s) => [s.label, s.id]))
+
 const RARITIES = [
   'Common',
   'Uncommon',
@@ -42,28 +47,26 @@ const RARITIES = [
   'Rare Rainbow',
   'Promo',
 ]
-const TYPES = [
-  'Grass',
-  'Fire',
-  'Water',
-  'Lightning',
-  'Psychic',
-  'Fighting',
-  'Darkness',
-  'Metal',
-  'Fairy',
-  'Dragon',
-  'Colorless',
+
+// Raw-card grades the backend accepts. Filtering by condition intentionally
+// excludes graded slabs (backend behavior) — hence the label note.
+const CONDITIONS: Array<{ value: string; label: string }> = [
+  { value: 'NM', label: 'NM — Near Mint' },
+  { value: 'LP', label: 'LP — Lightly Played' },
+  { value: 'MP', label: 'MP — Moderately Played' },
+  { value: 'HP', label: 'HP — Heavily Played' },
+  { value: 'DMG', label: 'DMG — Damaged' },
 ]
 
-// Guard against an inverted price range reaching the API — swap if min > max.
+// Guard against an inverted price range reaching the API — swap if min > max
+// (the backend rejects an inverted range with 422).
 function normalizePriceRange(filters: InventoryFilters): InventoryFilters {
   const out: InventoryFilters = { ...filters }
-  const min = parseFloat(out.minPrice ?? '')
-  const max = parseFloat(out.maxPrice ?? '')
+  const min = parseFloat(out.min_price ?? '')
+  const max = parseFloat(out.max_price ?? '')
   if (!Number.isNaN(min) && !Number.isNaN(max) && min > max) {
-    out.minPrice = String(max)
-    out.maxPrice = String(min)
+    out.min_price = String(max)
+    out.max_price = String(min)
   }
   return out
 }
@@ -73,9 +76,12 @@ const labelClass =
   'mb-1.5 block font-mono text-[11px] uppercase tracking-[0.12em] text-pine-300'
 
 export default function FilterPanel() {
+  const { data: session } = useSession()
   const [filters, setFilters] = useState<InventoryFilters>({})
+  // The select shows the display label; the query sends the mapped set_id.
+  const [setLabel, setSetLabel] = useState('')
   const [status, setStatus] = useState<Status>('idle')
-  const [result, setResult] = useState<CardSearchResponse | null>(null)
+  const [result, setResult] = useState<InventorySearchResult | null>(null)
   // Monotonic id so a slow earlier request can't overwrite a newer one.
   const requestId = useRef(0)
 
@@ -88,7 +94,9 @@ export default function FilterPanel() {
     const id = ++requestId.current
     setStatus('loading')
     try {
-      const res = await searchInventory(normalizePriceRange(filters))
+      const res = await searchInventory(normalizePriceRange(filters), {
+        token: session?.accessToken,
+      })
       if (id !== requestId.current) return
       setResult(res)
       setStatus('success')
@@ -126,14 +134,17 @@ export default function FilterPanel() {
             </label>
             <select
               id="flt-set"
-              value={filters.set ?? ''}
-              onChange={(e) => update('set', e.target.value)}
+              value={setLabel}
+              onChange={(e) => {
+                setSetLabel(e.target.value)
+                update('set_id', SET_IDS.get(e.target.value) ?? '')
+              }}
               className={fieldClass}
             >
               <option value="">Any set</option>
               {SETS.map((s) => (
-                <option key={s} value={s}>
-                  {s}
+                <option key={s.id} value={s.label}>
+                  {s.label}
                 </option>
               ))}
             </select>
@@ -159,19 +170,19 @@ export default function FilterPanel() {
           </div>
 
           <div>
-            <label htmlFor="flt-type" className={labelClass}>
-              Type
+            <label htmlFor="flt-condition" className={labelClass}>
+              Condition (raw cards)
             </label>
             <select
-              id="flt-type"
-              value={filters.type ?? ''}
-              onChange={(e) => update('type', e.target.value)}
+              id="flt-condition"
+              value={filters.condition ?? ''}
+              onChange={(e) => update('condition', e.target.value)}
               className={fieldClass}
             >
-              <option value="">Any type</option>
-              {TYPES.map((t) => (
-                <option key={t} value={t}>
-                  {t}
+              <option value="">Any condition</option>
+              {CONDITIONS.map((c) => (
+                <option key={c.value} value={c.value}>
+                  {c.label}
                 </option>
               ))}
             </select>
@@ -185,8 +196,8 @@ export default function FilterPanel() {
               id="flt-min"
               type="number"
               min={0}
-              value={filters.minPrice ?? ''}
-              onChange={(e) => update('minPrice', e.target.value)}
+              value={filters.min_price ?? ''}
+              onChange={(e) => update('min_price', e.target.value)}
               placeholder="0"
               className={fieldClass}
             />
@@ -200,8 +211,8 @@ export default function FilterPanel() {
               id="flt-max"
               type="number"
               min={0}
-              value={filters.maxPrice ?? ''}
-              onChange={(e) => update('maxPrice', e.target.value)}
+              value={filters.max_price ?? ''}
+              onChange={(e) => update('max_price', e.target.value)}
               placeholder="Any"
               className={fieldClass}
             />
@@ -232,7 +243,7 @@ function Results({
   result,
 }: {
   status: Status
-  result: CardSearchResponse | null
+  result: InventorySearchResult | null
 }) {
   if (status === 'idle') {
     return (
@@ -253,7 +264,7 @@ function Results({
       </p>
     )
   }
-  if (!result || result.data.length === 0) {
+  if (!result || result.items.length === 0) {
     return (
       <p className="py-10 text-center text-sm text-pine-300">
         No cards found. Try widening your filters.
@@ -263,9 +274,9 @@ function Results({
   return (
     <div className="space-y-4">
       <p className="font-mono text-xs uppercase tracking-[0.12em] text-pine-300">
-        {result.totalCount} result{result.totalCount === 1 ? '' : 's'}
+        {result.total} result{result.total === 1 ? '' : 's'}
       </p>
-      <CardGrid cards={result.data} />
+      <CardGrid items={result.items} />
     </div>
   )
 }
