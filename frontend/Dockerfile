@@ -42,9 +42,9 @@ WORKDIR /app
 ENV NODE_ENV=production HOSTNAME=0.0.0.0 PORT=3000
 # Workspace-aware standalone output mirrors the repo layout:
 # server entry is frontend/server.js, shared deps in node_modules.
-COPY --from=build /repo/frontend/.next/standalone ./
-COPY --from=build /repo/frontend/.next/static frontend/.next/static
-COPY --from=build /repo/frontend/public frontend/public
+COPY --from=build --chown=node:node /repo/frontend/.next/standalone ./
+COPY --from=build --chown=node:node /repo/frontend/.next/static frontend/.next/static
+COPY --from=build --chown=node:node /repo/frontend/public frontend/public
 USER node
 EXPOSE 3000
 CMD ["node", "frontend/server.js"]
