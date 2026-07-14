@@ -186,6 +186,10 @@ export class DynamoDbInventoryRepository implements InventoryRepository {
         };
         found.push(...(resp.Responses?.[this.tableName] ?? []));
         pending = resp.UnprocessedKeys?.[this.tableName]?.Keys ?? [];
+        if (pending.length > 0 && attempts < MAX_BATCH_ATTEMPTS) {
+          const delayMs = Math.min(50 * 2 ** (attempts - 1), 1000);
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
       }
       if (pending.length > 0) {
         console.error(`batchGet: ${pending.length} keys still unprocessed after retries`);
