@@ -1,0 +1,30 @@
+{
+  "comment": "Single source of truth for the inventory tool contract between backend/src/merlins_collection/services/bedrock.py (_TOOLS, what the model sees) and mcp-server/src/server.ts (registered MCP tools, what actually executes). Both test suites assert against this file — change it first, then both sides.",
+  "tools": [
+    {
+      "name": "search_inventory",
+      "properties": ["name", "set_id", "condition", "min_value", "max_value"],
+      "required": []
+    },
+    {
+      "name": "get_inventory_summary",
+      "properties": [],
+      "required": []
+    },
+    {
+      "name": "get_card_price_history",
+      "properties": ["card_id"],
+      "required": ["card_id"]
+    },
+    {
+      "name": "calculate_inventory_value",
+      "properties": [],
+      "required": []
+    },
+    {
+      "name": "flag_underpriced_cards",
+      "properties": ["threshold"],
+      "required": ["threshold"]
+    }
+  ]
+}

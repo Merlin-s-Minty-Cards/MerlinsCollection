@@ -1,4 +1,12 @@
 import { render, screen } from '@testing-library/react'
+import { vi } from 'vitest'
+
+// Navbar reads the session; the real SessionProvider lives in the root layout,
+// which isn't in this render tree.
+vi.mock('next-auth/react', () => ({
+  useSession: () => ({ data: { user: {} }, status: 'authenticated' }),
+  signIn: vi.fn(),
+}))
 
 import PublicLayout from '@/app/(public)/layout'
 

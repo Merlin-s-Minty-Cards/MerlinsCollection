@@ -23,6 +23,8 @@ hash of ``card_id``) so a single "all inventory" partition never goes hot;
 from __future__ import annotations
 
 import hashlib
+import logging
+import time
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from enum import Enum
@@ -33,7 +35,14 @@ from boto3.dynamodb.conditions import Key
 from merlins_collection.models.catalog import CatalogCard, PricePoint
 from merlins_collection.models.inventory import InventoryItemAdapter
 
+logger = logging.getLogger(__name__)
+
 INVENTORY_SHARD_COUNT = 10
+
+# A throttled BatchGetItem returns its keys in ``UnprocessedKeys`` on a *200*
+# response (no exception), so boto3's own retries never fire — we must bound the
+# drain loop ourselves or a sustained throttle hangs the request forever.
+_MAX_BATCH_ATTEMPTS = 8
 
 
 def _grade_key(grade) -> str:
@@ -137,6 +146,48 @@ class InventoryRepository:
         with self._table.batch_writer() as batch:  # auto-chunks to 25 + retries unprocessed
             for card in cards:
                 batch.put_item(Item=self._catalog_item(card))
+
+    def batch_get_catalog_cards(self, card_ids):
+        """Point-read many catalog cards at once; missing ids are simply absent.
+
+        Returns ``{card_id: CatalogCard}``. Chunks at DynamoDB's 100-key
+        BatchGetItem limit and retries ``UnprocessedKeys`` until drained.
+        """
+        unique_ids = list(dict.fromkeys(card_ids))
+        found: dict[str, CatalogCard] = {}
+        for start in range(0, len(unique_ids), 100):
+            keys = [
+                {"PK": f"CARD#{cid}", "SK": "META"}
+                for cid in unique_ids[start:start + 100]
+            ]
+            for attempt in range(_MAX_BATCH_ATTEMPTS):
+                resp = self._resource.batch_get_item(
+                    RequestItems={self._table_name: {"Keys": keys}}
+                )
+                for item in resp.get("Responses", {}).get(self._table_name, []):
+                    card = CatalogCard.model_validate(item)
+                    found[card.card_id] = card
+                keys = (
+                    resp.get("UnprocessedKeys", {})
+                    .get(self._table_name, {})
+                    .get("Keys", [])
+                )
+                if not keys:
+                    break
+                # Back off before retrying the throttled keys (skipped once we're
+                # about to exit the loop on the final attempt).
+                if attempt < _MAX_BATCH_ATTEMPTS - 1:
+                    time.sleep(min(0.05 * 2**attempt, 1.0))
+            else:
+                # Exhausted retries with keys still throttled — give up rather than
+                # loop forever; those ids are simply absent (enrichment degrades).
+                logger.warning(
+                    "batch_get_catalog_cards: %d keys still unprocessed after %d "
+                    "attempts; returning partial result",
+                    len(keys),
+                    _MAX_BATCH_ATTEMPTS,
+                )
+        return found
 
     def list_cards_by_set(self, set_id):
         """Return every catalog card in a set via the GSI1 ``SET#`` partition."""

@@ -8,8 +8,8 @@ token (401 on missing/invalid, 503 when signing keys can't be fetched), and
 
 from __future__ import annotations
 
-import json
 from functools import lru_cache
+from pathlib import Path
 
 import boto3
 from fastapi import Depends, HTTPException, status
@@ -24,10 +24,14 @@ from merlins_collection.services.cognito import (
     JwksUnavailableError,
 )
 from merlins_collection.services.dynamodb import InventoryRepository
+from merlins_collection.services.mcp_client import McpToolExecutor
 
 # auto_error=False so a missing credential yields our own 401 (with a
 # WWW-Authenticate header) rather than FastAPI's default 403.
 _bearer_scheme = HTTPBearer(auto_error=False)
+
+# settings.mcp_server_path is documented as relative to the backend directory.
+_BACKEND_DIR = Path(__file__).resolve().parents[2]
 
 
 @lru_cache
@@ -36,28 +40,57 @@ def get_repo() -> InventoryRepository:
     return InventoryRepository(settings.dynamodb_table_name, region_name=settings.aws_region)
 
 
-def get_bedrock_service() -> BedrockChatService:
-    """Provide a Bedrock chat service with a (temporary) stub tool executor.
+@lru_cache
+def get_mcp_executor() -> McpToolExecutor:
+    """Provide the MCP tool executor as a cached singleton.
 
-    Not cached: the MCP-backed tool executor isn't wired up yet, so this is
-    expected to be rebuilt once ``mcp_client`` lands. Until then the stub makes
-    every tool call return a "not configured" message instead of real data.
+    One executor per process: it owns the MCP server subprocess (spawned
+    lazily on the first tool call), which every chat request shares.
+    """
+    path = Path(settings.mcp_server_path)
+    if not path.is_absolute():
+        path = (_BACKEND_DIR / path).resolve()
+    return McpToolExecutor(
+        ["node", str(path)],
+        # pydantic-settings reads .env without exporting to os.environ, so the
+        # config the MCP server needs must be handed over explicitly.
+        env={
+            "AWS_REGION": settings.aws_region,
+            "DYNAMODB_TABLE_NAME": settings.dynamodb_table_name,
+        },
+    )
+
+
+def shutdown_mcp_executor() -> None:
+    """Close the executor's subprocess if one was ever created (app shutdown)."""
+    if get_mcp_executor.cache_info().currsize:
+        get_mcp_executor().close()
+
+
+def get_bedrock_service() -> BedrockChatService:
+    """Provide a Bedrock chat service wired to the MCP tool executor.
+
+    Not cached: the boto3 client build is cheap, and per-request construction
+    keeps tests free to override this dependency; the expensive part (the MCP
+    subprocess) is the cached executor singleton.
     """
     client = boto3.client("bedrock-runtime", region_name=settings.aws_region)
-
-    def _stub_executor(tool_name: str, tool_input: dict) -> str:
-        return json.dumps({"error": "MCP tool executor not yet configured", "tool": tool_name})
-
     return BedrockChatService(
         client=client,
         model_id=settings.bedrock_model_id,
-        tool_executor=_stub_executor,
+        tool_executor=get_mcp_executor(),
     )
 
 
 @lru_cache
-def get_verifier() -> CognitoJwtVerifier:
-    """Provide the Cognito JWT verifier as a cached singleton (keeps the JWKS cache warm)."""
+def get_verifier() -> CognitoJwtVerifier | None:
+    """Provide the Cognito JWT verifier as a cached singleton (keeps the JWKS cache warm).
+
+    Returns ``None`` when auth is disabled (dev bypass) so a missing Cognito
+    config can't 500 requests before ``get_current_user`` short-circuits.
+    """
+    if settings.auth_disabled:
+        return None
     return CognitoJwtVerifier(
         region=settings.aws_region,
         user_pool_id=settings.cognito_user_pool_id,
@@ -67,8 +100,11 @@ def get_verifier() -> CognitoJwtVerifier:
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
-    verifier: CognitoJwtVerifier = Depends(get_verifier),
+    verifier: CognitoJwtVerifier | None = Depends(get_verifier),
 ) -> AuthenticatedUser:
+    if settings.auth_disabled:
+        # Dev-only bypass (AUTH_DISABLED=true): fake user, never admin.
+        return AuthenticatedUser(sub="dev-user", username="dev", is_admin=False)
     if credentials is None or not credentials.credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

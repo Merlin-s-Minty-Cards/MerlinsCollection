@@ -52,3 +52,6 @@ Thumbs.db
 
 # Superpowers brainstorming companion (mockups, server state)
 .superpowers/
+
+# Personal learning notes (not project docs)
+docs/learning/

@@ -12,7 +12,6 @@ from merlins_collection.models.inventory import (
     RawInventoryItem,
 )
 
-
 # ---- seed helpers ----
 
 def _catalog(card_id, name, *, set_id="sv1", set_name="Scarlet & Violet", rarity="Common"):
@@ -285,6 +284,76 @@ def test_search_condition_excludes_graded_items_even_when_price_matches(inv_clie
     body = resp.json()
     assert body["total"] == 1
     assert body["items"][0]["card_id"] == "sv1-raw"
+
+
+def test_search_items_include_card_catalog_summary(inv_client, mint_token):
+    """Items are enriched with the catalog data the UI needs (name, set, image)."""
+    client, repo = inv_client
+    repo.batch_upsert_catalog_cards([
+        _catalog("sv1-1", "Sprigatito", set_id="sv1", set_name="Scarlet & Violet",
+                 rarity="Common"),
+    ])
+    repo.put_inventory_item(_raw("sv1-1"))
+
+    resp = client.get(
+        "/inventory/search",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    assert resp.status_code == 200
+    card = resp.json()["items"][0]["card"]
+    assert card["name"] == "Sprigatito"
+    assert card["set_id"] == "sv1"
+    assert card["set_name"] == "Scarlet & Violet"
+    assert card["number"] == "001"
+    assert card["rarity"] == "Common"
+    assert card["image_small"] == "https://images.pokemontcg.io/sv1/1_hires.png"
+
+
+def test_search_item_card_is_null_when_catalog_missing(inv_client, mint_token):
+    """An inventory item with no synced catalog row still returns, with card=null."""
+    client, repo = inv_client
+    repo.put_inventory_item(_raw("sv1-orphan"))
+
+    resp = client.get(
+        "/inventory/search",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["items"][0]["card"] is None
+
+
+def test_search_enriches_items_when_name_filter_already_loaded_catalog(inv_client, mint_token):
+    """Enrichment also works on the filter path that fetches catalog rows itself."""
+    client, repo = inv_client
+    repo.batch_upsert_catalog_cards([_catalog("sv1-1", "Sprigatito")])
+    repo.put_inventory_item(_raw("sv1-1"))
+
+    resp = client.get(
+        "/inventory/search?name=sprig",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["items"][0]["card"]["name"] == "Sprigatito"
+
+
+def test_search_response_serializes_decimals_as_strings(inv_client, mint_token):
+    """Pins the wire format the frontend relies on: Decimal fields are JSON strings."""
+    client, repo = inv_client
+    item = _raw("sv1-1", price="10.00")
+    item.current_market_value = Decimal("12.50")
+    repo.put_inventory_item(item)
+    repo.put_inventory_item(_graded("sv1-2", grade="9.5", price="50.00"))
+
+    resp = client.get(
+        "/inventory/search",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    by_id = {i["card_id"]: i for i in resp.json()["items"]}
+    assert by_id["sv1-1"]["listed_price"] == "10.00"
+    assert by_id["sv1-1"]["current_market_value"] == "12.50"
+    assert by_id["sv1-2"]["grade"] == "9.5"
 
 
 def test_search_response_does_not_expose_cost_basis(inv_client, mint_token):

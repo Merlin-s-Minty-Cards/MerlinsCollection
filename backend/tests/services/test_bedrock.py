@@ -11,7 +11,6 @@ from merlins_collection.services.bedrock import (
     BedrockThrottledError,
 )
 
-
 # ---- response builders ----
 
 def _end_turn(text: str) -> dict:
@@ -76,6 +75,45 @@ def test_chat_sends_user_message_in_first_call():
 
     call_kwargs = client.converse.call_args[1]
     messages = call_kwargs["messages"]
+    assert messages[0]["role"] == "user"
+    assert messages[0]["content"][0]["text"] == "Any Pikachu?"
+
+
+def test_chat_threads_history_before_the_new_message():
+    """Prior turns are sent to Converse ahead of the new user message, in order."""
+    from merlins_collection.models.chat import ChatTurn
+
+    client = MagicMock()
+    client.converse.return_value = _end_turn("The LP copy at $85.")
+    svc = _make_service(client)
+
+    svc.chat(
+        "Which are under $100?",
+        [
+            ChatTurn(role="user", content="What Charizards do you have?"),
+            ChatTurn(role="assistant", content="3 in stock."),
+        ],
+    )
+
+    messages = client.converse.call_args[1]["messages"]
+    assert [m["role"] for m in messages[:3]] == ["user", "assistant", "user"]
+    assert messages[0]["content"][0]["text"] == "What Charizards do you have?"
+    assert messages[1]["content"][0]["text"] == "3 in stock."
+    assert messages[2]["content"][0]["text"] == "Which are under $100?"
+
+
+def test_chat_without_history_starts_with_the_new_message():
+    """No history means nothing precedes the new user message.
+
+    (The service mutates the messages list in place, so only the head of the
+    list is a reliable assertion target — see test_chat_appends_tool_result...)
+    """
+    client = MagicMock()
+    client.converse.return_value = _end_turn("Hello!")
+    svc = _make_service(client)
+    svc.chat("Any Pikachu?")
+
+    messages = client.converse.call_args[1]["messages"]
     assert messages[0]["role"] == "user"
     assert messages[0]["content"][0]["text"] == "Any Pikachu?"
 
