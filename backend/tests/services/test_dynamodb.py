@@ -1,3 +1,4 @@
+import time
 from datetime import date as _date
 from datetime import datetime
 from decimal import Decimal
@@ -75,6 +76,31 @@ def test_batch_get_catalog_cards_handles_more_than_100_keys(dynamo_repo):
 
 def test_batch_get_catalog_cards_empty_input_returns_empty(dynamo_repo):
     assert dynamo_repo.batch_get_catalog_cards([]) == {}
+
+
+def test_batch_get_catalog_cards_bounds_unprocessed_retries(dynamo_repo, monkeypatch):
+    """A perpetually-throttled BatchGetItem returns its keys in UnprocessedKeys
+    on a *successful* response (no exception), so boto3's own retries never fire.
+    The repo must bound its own retries instead of looping forever and hanging
+    the request; missing ids are simply absent, per the method contract.
+    """
+    key = {"PK": "CARD#a-1", "SK": "META"}
+    calls = []
+
+    def always_unprocessed(**kwargs):
+        calls.append(kwargs)
+        return {
+            "Responses": {},
+            "UnprocessedKeys": {dynamo_repo._table_name: {"Keys": [key]}},
+        }
+
+    monkeypatch.setattr(dynamo_repo._resource, "batch_get_item", always_unprocessed)
+    monkeypatch.setattr(time, "sleep", lambda *_: None)
+
+    got = dynamo_repo.batch_get_catalog_cards(["a-1"])
+
+    assert got == {}  # gave up gracefully — id absent rather than raising
+    assert 1 < len(calls) <= 8  # retried, but bounded; did not loop forever
 
 
 def test_graded_price_set_and_get(dynamo_repo):

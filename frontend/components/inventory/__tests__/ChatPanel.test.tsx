@@ -8,6 +8,14 @@ vi.mock('@/lib/api', async (importOriginal) => ({
   apiFetch: vi.fn(),
 }))
 
+// The panel reads the Cognito access token from the NextAuth session.
+vi.mock('next-auth/react', () => ({
+  useSession: () => ({
+    data: { accessToken: 'test-token' },
+    status: 'authenticated',
+  }),
+}))
+
 import { apiFetch, ApiError } from '@/lib/api'
 import ChatPanel from '@/components/inventory/ChatPanel'
 
@@ -131,10 +139,49 @@ describe('ChatPanel', () => {
     )
   })
 
+  it('truncates an over-long assistant reply in history so the backend cap cannot 422 the next turn', async () => {
+    // Backend ChatTurn.content caps at 4000 chars; an unbounded reply replayed
+    // as history would 422 every following request and stick the conversation.
+    const longReply = 'x'.repeat(5000)
+    mockedApiFetch
+      .mockResolvedValueOnce({ reply: longReply })
+      .mockResolvedValueOnce({ reply: 'second answer' })
+    render(<ChatPanel />)
+    const box = screen.getByRole('textbox')
+
+    await userEvent.type(box, 'first question')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    expect(await screen.findByText(longReply)).toBeInTheDocument()
+
+    await userEvent.type(box, 'second question')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    expect(await screen.findByText('second answer')).toBeInTheDocument()
+
+    const lastBody = JSON.parse(
+      String((mockedApiFetch.mock.lastCall![1] as RequestInit).body),
+    ) as { history: Array<{ role: string; content: string }> }
+    expect(lastBody.history[1].role).toBe('assistant')
+    expect(lastBody.history[1].content.length).toBeLessThanOrEqual(4000)
+  })
+
   it('does not send an empty message', async () => {
     render(<ChatPanel />)
     await userEvent.click(screen.getByRole('button', { name: /send/i }))
     expect(mockedApiFetch).not.toHaveBeenCalled()
+  })
+
+  it('forwards the Cognito access token from the session as a bearer token', async () => {
+    mockedApiFetch.mockResolvedValue({ reply: 'ok' })
+    render(<ChatPanel />)
+
+    await userEvent.type(screen.getByRole('textbox'), 'hi')
+    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    expect(await screen.findByText('ok')).toBeInTheDocument()
+
+    expect(mockedApiFetch).toHaveBeenCalledWith(
+      '/chat/',
+      expect.objectContaining({ token: 'test-token' }),
+    )
   })
 
   it('shows the backend detail message when the API returns a typed error', async () => {

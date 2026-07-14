@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { useSession } from 'next-auth/react'
 import { Send } from 'lucide-react'
 import { ApiError } from '@/lib/api'
 import { sendChat, type ChatMessage } from '@/lib/inventory'
@@ -16,13 +17,18 @@ const GENERIC_ERROR = 'Something went wrong. Try asking again.'
 // The backend caps history at 20 turns (10 exchanges) — send only the newest.
 const MAX_HISTORY_TURNS = 20
 
+// The backend caps each turn's content at 4000 chars (ChatTurn.content). A
+// long assistant reply replayed verbatim would 422 the whole request and stick
+// the conversation, so clamp each turn to the same limit before sending.
+const MAX_TURN_CHARS = 4000
+
 /**
  * Build the history the backend will replay into Bedrock. Converse demands
  * strict user/assistant alternation starting with a user turn, so only
  * completed exchanges survive: a user bubble immediately answered by a
- * non-empty assistant bubble. Failed or empty turns are dropped, and the
- * result is capped to the newest MAX_HISTORY_TURNS (an even slice of an even
- * list, so alternation is preserved).
+ * non-empty assistant bubble. Failed or empty turns are dropped, each surviving
+ * turn is clamped to MAX_TURN_CHARS, and the result is capped to the newest
+ * MAX_HISTORY_TURNS (an even slice of an even list, so alternation is preserved).
  */
 function buildHistory(messages: Bubble[]): ChatMessage[] {
   const turns: ChatMessage[] = []
@@ -36,8 +42,8 @@ function buildHistory(messages: Bubble[]): ChatMessage[] {
       answer.content !== ''
     ) {
       turns.push(
-        { role: 'user', content: question.content },
-        { role: 'assistant', content: answer.content },
+        { role: 'user', content: question.content.slice(0, MAX_TURN_CHARS) },
+        { role: 'assistant', content: answer.content.slice(0, MAX_TURN_CHARS) },
       )
       i++ // consume the pair
     }
@@ -46,6 +52,7 @@ function buildHistory(messages: Bubble[]): ChatMessage[] {
 }
 
 export default function ChatPanel() {
+  const { data: session } = useSession()
   const [input, setInput] = useState('')
   const [messages, setMessages] = useState<Bubble[]>([])
   const [sending, setSending] = useState(false)
@@ -63,7 +70,7 @@ export default function ChatPanel() {
     setInput('')
     setSending(true)
     try {
-      const res = await sendChat(text, history)
+      const res = await sendChat(text, history, { token: session?.accessToken })
       setMessages((prev) => [...prev, { role: 'assistant', content: res.reply }])
     } catch (err) {
       // The backend sends actionable detail for 429/503/422 — show it.

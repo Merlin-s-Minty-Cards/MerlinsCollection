@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { useSession, signIn } from 'next-auth/react'
 import Link from 'next/link'
 import Image from 'next/image'
 import { Menu } from 'lucide-react'
@@ -15,7 +16,16 @@ const links = [
 ]
 
 export default function Navbar() {
+  const { status } = useSession()
   const [open, setOpen] = useState(false)
+
+  // The inventory tool is gated: show a Sign in CTA until we know the visitor is
+  // authenticated (optimistically show Inventory while the session is loading).
+  const signedOut = status === 'unauthenticated'
+  const startSignIn = () => {
+    setOpen(false)
+    signIn('cognito', { callbackUrl: '/inventory' })
+  }
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -60,21 +70,40 @@ export default function Navbar() {
               </li>
             ))}
             <li className="nav:hidden px-7 pt-1 pb-2">
-              <Link
-                href="/inventory"
-                onClick={() => setOpen(false)}
-                className="block rounded-full bg-forest text-white text-center font-semibold text-[15px] px-5 py-3 shadow-[0_8px_20px_rgba(31,110,50,0.25)] active:translate-y-px"
-              >
-                Inventory
-              </Link>
+              {signedOut ? (
+                <button
+                  type="button"
+                  onClick={startSignIn}
+                  className="block w-full rounded-full bg-forest text-white text-center font-semibold text-[15px] px-5 py-3 shadow-[0_8px_20px_rgba(31,110,50,0.25)] active:translate-y-px"
+                >
+                  Sign in
+                </button>
+              ) : (
+                <Link
+                  href="/inventory"
+                  onClick={() => setOpen(false)}
+                  className="block rounded-full bg-forest text-white text-center font-semibold text-[15px] px-5 py-3 shadow-[0_8px_20px_rgba(31,110,50,0.25)] active:translate-y-px"
+                >
+                  Inventory
+                </Link>
+              )}
             </li>
           </ul>
 
           <span className="flex-1" />
 
-          <Button href="/inventory" className="hidden nav:inline-block px-5 py-2.5 text-sm">
-            Inventory
-          </Button>
+          {signedOut ? (
+            <Button
+              onClick={startSignIn}
+              className="hidden nav:inline-block px-5 py-2.5 text-sm"
+            >
+              Sign in
+            </Button>
+          ) : (
+            <Button href="/inventory" className="hidden nav:inline-block px-5 py-2.5 text-sm">
+              Inventory
+            </Button>
+          )}
 
           <button
             type="button"

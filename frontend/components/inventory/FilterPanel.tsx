@@ -1,6 +1,7 @@
 'use client'
 
 import { useRef, useState } from 'react'
+import { useSession } from 'next-auth/react'
 import { Search } from 'lucide-react'
 import CardGrid from './CardGrid'
 import {
@@ -75,6 +76,7 @@ const labelClass =
   'mb-1.5 block font-mono text-[11px] uppercase tracking-[0.12em] text-pine-300'
 
 export default function FilterPanel() {
+  const { data: session } = useSession()
   const [filters, setFilters] = useState<InventoryFilters>({})
   // The select shows the display label; the query sends the mapped set_id.
   const [setLabel, setSetLabel] = useState('')
@@ -92,7 +94,9 @@ export default function FilterPanel() {
     const id = ++requestId.current
     setStatus('loading')
     try {
-      const res = await searchInventory(normalizePriceRange(filters))
+      const res = await searchInventory(normalizePriceRange(filters), {
+        token: session?.accessToken,
+      })
       if (id !== requestId.current) return
       setResult(res)
       setStatus('success')

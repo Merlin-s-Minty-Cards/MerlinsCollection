@@ -4,6 +4,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }))
 
+// The panel reads the Cognito access token from the NextAuth session.
+vi.mock('next-auth/react', () => ({
+  useSession: () => ({
+    data: { accessToken: 'test-token' },
+    status: 'authenticated',
+  }),
+}))
+
 import { apiFetch } from '@/lib/api'
 import FilterPanel from '@/components/inventory/FilterPanel'
 import type { InventoryItem, InventorySearchResult } from '@/lib/inventory'
@@ -88,6 +96,18 @@ describe('FilterPanel', () => {
 
     expect(sentQuery().get('min_price')).toBe('10')
     expect(sentQuery().get('max_price')).toBe('50')
+  })
+
+  it('forwards the Cognito access token from the session as a bearer token', async () => {
+    mockedApiFetch.mockResolvedValue(response([]))
+    render(<FilterPanel />)
+
+    await userEvent.click(screen.getByRole('button', { name: /search/i }))
+
+    expect(mockedApiFetch).toHaveBeenCalledWith(
+      expect.stringContaining('/inventory/search'),
+      expect.objectContaining({ token: 'test-token' }),
+    )
   })
 
   it('submits on Enter from the name field', async () => {
