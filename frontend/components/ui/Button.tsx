@@ -14,19 +14,21 @@ const variantClasses: Record<Variant, string> = {
 
 /**
  * Brand call-to-action. Renders a Next.js `<Link>` when `href` is provided,
- * otherwise a plain `<button>`. `variant` selects the look — solid forest
- * (`primary`) or outlined (`ghost`) — and is mirrored to a `data-variant`
- * attribute so tests and styles can target it.
+ * otherwise a plain `<button>` (pass `onClick` for that case). `variant`
+ * selects the look — solid forest (`primary`) or outlined (`ghost`) — and is
+ * mirrored to a `data-variant` attribute so tests and styles can target it.
  */
 export default function Button({
   href,
   variant = 'primary',
   className = '',
+  onClick,
   children,
 }: {
   href?: string
   variant?: Variant
   className?: string
+  onClick?: () => void
   children: ReactNode
 }) {
   const classes = `${base} ${variantClasses[variant]} ${className}`
@@ -38,7 +40,7 @@ export default function Button({
     )
   }
   return (
-    <button type="button" data-variant={variant} className={classes}>
+    <button type="button" data-variant={variant} className={classes} onClick={onClick}>
       {children}
     </button>
   )

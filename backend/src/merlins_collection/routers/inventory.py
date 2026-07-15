@@ -12,7 +12,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from merlins_collection.dependencies import get_current_user, get_repo
 from merlins_collection.models.auth import AuthenticatedUser
-from merlins_collection.models.inventory import Condition, InventorySearchResult
+from merlins_collection.models.catalog import CatalogCard
+from merlins_collection.models.inventory import (
+    CardSummary,
+    Condition,
+    EnrichedGradedInventoryItem,
+    EnrichedInventoryItem,
+    EnrichedRawInventoryItem,
+    InventoryItem,
+    InventorySearchResult,
+)
 from merlins_collection.services.dynamodb import InventoryRepository
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
@@ -47,6 +56,8 @@ def search_inventory(
         )
 
     items = repo.list_inventory()
+    # Catalog rows fetched along the way are kept for response enrichment.
+    catalog: dict[str, CatalogCard | None] = {}
 
     # condition: raw items only; graded items are excluded when this filter is set
     if condition is not None:
@@ -59,13 +70,14 @@ def search_inventory(
 
     # set_id: use the catalog GSI to get valid card_ids for the set
     if set_id is not None:
-        set_card_ids = {c.card_id for c in repo.list_cards_by_set(set_id)}
+        set_cards = repo.list_cards_by_set(set_id)
+        catalog.update({c.card_id: c for c in set_cards})
+        set_card_ids = {c.card_id for c in set_cards}
         items = [i for i in items if i.card_id in set_card_ids]
 
     # name / rarity: require catalog lookup per remaining unique card_id
     if name is not None or rarity is not None:
-        unique_card_ids = {i.card_id for i in items}
-        catalog = {cid: repo.get_catalog_card(cid) for cid in unique_card_ids}
+        _load_catalog(repo, items, catalog)
 
         if name is not None:
             name_lower = name.lower()
@@ -81,4 +93,33 @@ def search_inventory(
                 and catalog[i.card_id].rarity == rarity
             ]
 
-    return InventorySearchResult(items=items, total=len(items))
+    # Enrich the surviving items with the catalog summary the UI renders.
+    _load_catalog(repo, items, catalog)
+
+    enriched = [_enrich(item, catalog.get(item.card_id)) for item in items]
+    return InventorySearchResult(items=enriched, total=len(enriched))
+
+
+def _load_catalog(
+    repo: InventoryRepository,
+    items: list[InventoryItem],
+    catalog: dict[str, CatalogCard | None],
+) -> None:
+    """Batch-fetch catalog rows for any item not already in ``catalog``.
+
+    Missing ids are recorded as ``None`` so they are never re-fetched.
+    """
+    missing = {i.card_id for i in items} - catalog.keys()
+    if not missing:
+        return
+    found = repo.batch_get_catalog_cards(missing)
+    catalog.update(found)
+    catalog.update(dict.fromkeys(missing - found.keys()))
+
+
+def _enrich(item: InventoryItem, card: CatalogCard | None) -> EnrichedInventoryItem:
+    summary = CardSummary.from_catalog(card) if card is not None else None
+    data = item.model_dump()
+    if item.kind == "raw":
+        return EnrichedRawInventoryItem(**data, card=summary)
+    return EnrichedGradedInventoryItem(**data, card=summary)

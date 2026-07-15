@@ -1,17 +1,58 @@
 'use client'
 
 import { useState } from 'react'
+import { useSession } from 'next-auth/react'
 import { Send } from 'lucide-react'
-import CardGrid from './CardGrid'
-import { sendChat, type ChatMessage, type PokemonCard } from '@/lib/inventory'
+import { ApiError } from '@/lib/api'
+import { sendChat, type ChatMessage } from '@/lib/inventory'
+import MarkdownMessage from '@/components/inventory/MarkdownMessage'
 
 type Bubble = {
   role: 'user' | 'assistant' | 'error'
   content: string
-  cards?: PokemonCard[]
+}
+
+const GENERIC_ERROR = 'Something went wrong. Try asking again.'
+
+// The backend caps history at 20 turns (10 exchanges) — send only the newest.
+const MAX_HISTORY_TURNS = 20
+
+// The backend caps each turn's content at 4000 chars (ChatTurn.content). A
+// long assistant reply replayed verbatim would 422 the whole request and stick
+// the conversation, so clamp each turn to the same limit before sending.
+const MAX_TURN_CHARS = 4000
+
+/**
+ * Build the history the backend will replay into Bedrock. Converse demands
+ * strict user/assistant alternation starting with a user turn, so only
+ * completed exchanges survive: a user bubble immediately answered by a
+ * non-empty assistant bubble. Failed or empty turns are dropped, each surviving
+ * turn is clamped to MAX_TURN_CHARS, and the result is capped to the newest
+ * MAX_HISTORY_TURNS (an even slice of an even list, so alternation is preserved).
+ */
+function buildHistory(messages: Bubble[]): ChatMessage[] {
+  const turns: ChatMessage[] = []
+  for (let i = 0; i < messages.length - 1; i++) {
+    const question = messages[i]
+    const answer = messages[i + 1]
+    if (
+      question.role === 'user' &&
+      answer.role === 'assistant' &&
+      question.content !== '' &&
+      answer.content !== ''
+    ) {
+      turns.push(
+        { role: 'user', content: question.content.slice(0, MAX_TURN_CHARS) },
+        { role: 'assistant', content: answer.content.slice(0, MAX_TURN_CHARS) },
+      )
+      i++ // consume the pair
+    }
+  }
+  return turns.slice(-MAX_HISTORY_TURNS)
 }
 
 export default function ChatPanel() {
+  const { data: session } = useSession()
   const [input, setInput] = useState('')
   const [messages, setMessages] = useState<Bubble[]>([])
   const [sending, setSending] = useState(false)
@@ -21,24 +62,20 @@ export default function ChatPanel() {
     const text = input.trim()
     if (!text || sending) return
 
-    const history: ChatMessage[] = messages
-      .filter((m): m is Bubble & { role: 'user' | 'assistant' } => m.role !== 'error')
-      .map((m) => ({ role: m.role, content: m.content }))
+    // Prior turns travel with the request — the backend replays them into the
+    // Bedrock conversation so follow-up questions keep their context.
+    const history = buildHistory(messages)
 
     setMessages((prev) => [...prev, { role: 'user', content: text }])
     setInput('')
     setSending(true)
     try {
-      const res = await sendChat(text, history)
-      setMessages((prev) => [
-        ...prev,
-        { role: 'assistant', content: res.reply, cards: res.cards },
-      ])
-    } catch {
-      setMessages((prev) => [
-        ...prev,
-        { role: 'error', content: 'Something went wrong. Try asking again.' },
-      ])
+      const res = await sendChat(text, history, { token: session?.accessToken })
+      setMessages((prev) => [...prev, { role: 'assistant', content: res.reply }])
+    } catch (err) {
+      // The backend sends actionable detail for 429/503/422 — show it.
+      const detail = err instanceof ApiError && err.detail ? err.detail : GENERIC_ERROR
+      setMessages((prev) => [...prev, { role: 'error', content: detail }])
     } finally {
       setSending(false)
     }
@@ -47,7 +84,7 @@ export default function ChatPanel() {
   return (
     <div className="flex h-[560px] flex-col rounded-2xl vault-panel">
       <div
-        className="flex-1 space-y-4 overflow-y-auto p-4 sm:p-5"
+        className="vault-scroll flex-1 space-y-4 overflow-y-auto p-4 sm:p-5"
         aria-live="polite"
         aria-atomic="false"
       >
@@ -108,19 +145,16 @@ function ChatBubble({ bubble }: { bubble: Bubble }) {
       </div>
     )
   }
-  const isError = bubble.role === 'error'
-  return (
-    <div className="space-y-3">
-      <p
-        className={`max-w-[85%] rounded-2xl rounded-bl-sm px-4 py-2.5 text-sm ${
-          isError
-            ? 'bg-red-500/10 text-red-300'
-            : 'bg-pine-800 text-pine-100'
-        }`}
-      >
+  if (bubble.role === 'error') {
+    return (
+      <p className="max-w-[85%] rounded-2xl rounded-bl-sm bg-red-500/10 px-4 py-2.5 text-sm text-red-300">
         {bubble.content}
       </p>
-      {bubble.cards && bubble.cards.length > 0 && <CardGrid cards={bubble.cards} />}
+    )
+  }
+  return (
+    <div className="max-w-[85%] rounded-2xl rounded-bl-sm bg-pine-800 px-4 py-2.5 text-sm text-pine-100">
+      <MarkdownMessage content={bubble.content} />
     </div>
   )
 }

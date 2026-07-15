@@ -79,8 +79,51 @@ InventoryItem = Annotated[
 InventoryItemAdapter: TypeAdapter[InventoryItem] = TypeAdapter(InventoryItem)
 
 
-class InventorySearchResult(BaseModel):
-    """Search response: the matching items plus their count."""
+class CardSummary(BaseModel):
+    """The slice of catalog data the search UI needs to render a result tile."""
 
-    items: list[InventoryItem]
+    card_id: str
+    name: str
+    set_id: str
+    set_name: str
+    number: str
+    rarity: str | None = None
+    image_small: str | None = None
+
+    @classmethod
+    def from_catalog(cls, card) -> CardSummary:
+        """Build from a ``CatalogCard`` (typed loosely to avoid a module cycle)."""
+        return cls(
+            card_id=card.card_id,
+            name=card.name,
+            set_id=card.set_id,
+            set_name=card.set_name,
+            number=card.number,
+            rarity=card.rarity,
+            image_small=card.images.small,
+        )
+
+
+class EnrichedRawInventoryItem(RawInventoryItem):
+    """A raw item joined with its catalog summary (``None`` if not yet synced)."""
+
+    card: CardSummary | None = None
+
+
+class EnrichedGradedInventoryItem(GradedInventoryItem):
+    """A graded item joined with its catalog summary (``None`` if not yet synced)."""
+
+    card: CardSummary | None = None
+
+
+EnrichedInventoryItem = Annotated[
+    Union[EnrichedRawInventoryItem, EnrichedGradedInventoryItem],
+    Field(discriminator="kind"),
+]
+
+
+class InventorySearchResult(BaseModel):
+    """Search response: the matching (catalog-enriched) items plus their count."""
+
+    items: list[EnrichedInventoryItem]
     total: int

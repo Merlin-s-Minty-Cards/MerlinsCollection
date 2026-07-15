@@ -1,7 +1,16 @@
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { vi } from 'vitest'
 import Button from '@/components/ui/Button'
 
 describe('Button', () => {
+  it('calls onClick when rendered as a button (no href)', async () => {
+    const onClick = vi.fn()
+    render(<Button onClick={onClick}>Sign in</Button>)
+    await userEvent.click(screen.getByRole('button', { name: 'Sign in' }))
+    expect(onClick).toHaveBeenCalledTimes(1)
+  })
+
   it('still renders a primary link with its href, label, and variant', () => {
     render(<Button href="/about">Read our story</Button>)
     const link = screen.getByRole('link', { name: 'Read our story' })

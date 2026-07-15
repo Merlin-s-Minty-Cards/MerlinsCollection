@@ -13,9 +13,11 @@ execution is delegated, keeping this class free of MCP/transport details.
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, Sequence
 
 from botocore.exceptions import ClientError
+
+from merlins_collection.models.chat import ChatTurn
 
 _SYSTEM_PROMPT = (
     "You are an inventory assistant for Merlin's Minty Cards, a Pokemon card business. "
@@ -26,8 +28,9 @@ _SYSTEM_PROMPT = (
     "Do not answer questions unrelated to Pokemon cards or this business."
 )
 
-# Tool schemas mirror the MCP server definitions in mcp-server/src/index.ts.
-# If those signatures change, update these definitions to match.
+# Tool schemas are pinned to shared/tool-contract.json (asserted by
+# tests/test_tool_contract.py); the MCP server registers the matching
+# implementations in mcp-server/src/server.ts. Change the contract file first.
 _TOOLS: list[dict] = [
     {
         "toolSpec": {
@@ -86,6 +89,8 @@ _TOOLS: list[dict] = [
                     "properties": {
                         "threshold": {
                             "type": "number",
+                            "exclusiveMinimum": 0,
+                            "exclusiveMaximum": 1,
                             "description": "Fraction below market to flag (e.g. 0.2 = 20% below)",
                         }
                     },
@@ -134,14 +139,19 @@ class BedrockChatService:
         self._model_id = model_id
         self._tool_executor = tool_executor
 
-    def chat(self, message: str) -> str:
-        """Answer a single user message, running tools until the model is done.
+    def chat(self, message: str, history: Sequence[ChatTurn] = ()) -> str:
+        """Answer a user message, running tools until the model is done.
 
-        Returns the model's final text. Raises a ``BedrockServiceError`` subclass
-        on throttling, content filtering, an unexpected stop reason, or if the
-        tool-use loop exceeds ``_MAX_TOOL_TURNS`` without finishing.
+        ``history`` (prior user/assistant turns) is replayed ahead of the new
+        message so follow-up questions keep their context. Returns the model's
+        final text. Raises a ``BedrockServiceError`` subclass on throttling,
+        content filtering, an unexpected stop reason, or if the tool-use loop
+        exceeds ``_MAX_TOOL_TURNS`` without finishing.
         """
-        messages: list[dict] = [{"role": "user", "content": [{"text": message}]}]
+        messages: list[dict] = [
+            {"role": turn.role, "content": [{"text": turn.content}]} for turn in history
+        ]
+        messages.append({"role": "user", "content": [{"text": message}]})
 
         for _ in range(_MAX_TOOL_TURNS + 1):
             try:
