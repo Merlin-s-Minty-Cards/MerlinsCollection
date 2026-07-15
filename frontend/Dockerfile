@@ -7,6 +7,7 @@ FROM node:20-slim AS deps
 WORKDIR /repo
 COPY package.json package-lock.json ./
 COPY frontend/package.json frontend/package.json
+COPY mcp-server/package.json mcp-server/package.json
 RUN npm ci --workspace=frontend
 
 # ---- Production build ----

@@ -47,8 +47,10 @@ services:
     environment:
       NEXT_PUBLIC_API_URL: http://localhost:8000
     volumes:
+      # Bind mount syncs source for hot reload; the anonymous volumes keep the
+      # container's build artifacts (hoisted deps live at /repo/node_modules;
+      # .next is container-built) from being shadowed by the host mount.
       - ./frontend:/repo/frontend
-      # Mask host node_modules/.next (Windows-built binaries must not leak in).
       - /repo/frontend/node_modules
       - /repo/frontend/.next
     depends_on:

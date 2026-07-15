@@ -32,7 +32,7 @@ FROM python:3.12-slim AS base
 # runtime. Node's V8 dynamically links libstdc++6, which python:3.12-slim
 # does not ship, so install it before copying the bare Node binary in.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libstdc++6 \
+    && apt-get install -y --no-install-recommends libstdc++6 libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=mcp-build /usr/local/bin/node /usr/local/bin/node
 WORKDIR /app

@@ -81,7 +81,7 @@ See `frontend/.env.example` and `backend/.env.example` for required variables.
 
 ## Docker
 
-Everything runs in containers so dev, test, and deploy behave the same on every machine. Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/).
+Everything runs in containers so dev, test, and deploy behave the same on every machine. Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/) and Docker Compose v2.24+ (the `env_file` optional-file syntax depends on it), which modern Docker Desktop already includes.
 
 ### Local dev
 
