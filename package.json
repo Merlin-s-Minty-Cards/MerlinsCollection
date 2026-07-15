@@ -7,6 +7,6 @@
     "test:frontend": "npm run test --workspace=frontend",
     "test:mcp": "npm run test --workspace=mcp-server",
     "test:backend": "python -m pytest backend/tests -q --tb=short",
-    "docker:test": "docker compose -f docker-compose.test.yml run --rm backend-tests && docker compose -f docker-compose.test.yml run --rm frontend-tests && docker compose -f docker-compose.test.yml run --rm mcp-tests"
+    "docker:test": "docker compose -f docker-compose.test.yml run --rm --build backend-tests && docker compose -f docker-compose.test.yml run --rm --build frontend-tests && docker compose -f docker-compose.test.yml run --rm --build mcp-tests"
   }
 }

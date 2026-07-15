@@ -81,6 +81,8 @@ jobs:
           file: backend/Dockerfile
           target: runtime
           push: false
+          load: true
+          tags: merlins-backend:ci
           cache-from: type=gha,scope=backend
           cache-to: type=gha,scope=backend,mode=max
       - name: Build frontend image
@@ -90,5 +92,28 @@ jobs:
           file: frontend/Dockerfile
           target: runtime
           push: false
+          load: true
+          tags: merlins-frontend:ci
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,scope=frontend,mode=max
+      # Building proves the images compile; booting proves the entrypoints work
+      # (standalone server path, uvicorn start) — a bad CMD would otherwise pass
+      # CI and only fail at deploy.
+      - name: Smoke-boot backend image
+        run: |
+          docker run -d --name backend-smoke -p 8000:8000 merlins-backend:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/health; then echo " backend healthy"; ok=1; break; fi
+            sleep 2
+          done
+          if [ -z "$ok" ]; then echo "backend never became healthy"; docker logs backend-smoke; exit 1; fi
+          docker rm -f backend-smoke
+      - name: Smoke-boot frontend image
+        run: |
+          docker run -d --name frontend-smoke -p 3000:3000 merlins-frontend:ci
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://localhost:3000/; then echo "frontend healthy"; ok=1; break; fi
+            sleep 2
+          done
+          if [ -z "$ok" ]; then echo "frontend never became healthy"; docker logs frontend-smoke; exit 1; fi
+          docker rm -f frontend-smoke
