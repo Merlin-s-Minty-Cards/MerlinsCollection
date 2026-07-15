@@ -66,6 +66,11 @@ def test_verify_rejects_wrong_client_id(make_verifier, mint_token):
         make_verifier().verify(mint_token({"client_id": "some-other-client"}))
 
 
+def test_verify_rejects_missing_client_id(make_verifier, mint_token):
+    with pytest.raises(InvalidTokenError):
+        make_verifier().verify(mint_token({"client_id": None}))
+
+
 def test_verify_rejects_id_token(make_verifier, mint_token):
     # Only access tokens authorize the API; an ID token must be refused.
     id_token = mint_token({"token_use": "id", "client_id": None, "aud": "test-client-id"})
@@ -194,4 +199,13 @@ def test_verifier_rejects_empty_client_id(cognito_config):
             region=cognito_config["region"],
             user_pool_id=cognito_config["user_pool_id"],
             client_id="",
+        )
+
+
+def test_verifier_rejects_empty_user_pool_id(cognito_config):
+    with pytest.raises(ValueError):
+        CognitoJwtVerifier(
+            region=cognito_config["region"],
+            user_pool_id="",
+            client_id=cognito_config["client_id"],
         )

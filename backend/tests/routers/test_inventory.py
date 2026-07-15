@@ -272,6 +272,21 @@ def test_search_set_id_with_no_matching_inventory_returns_empty(inv_client, mint
     assert body["items"] == []
 
 
+def test_search_condition_excludes_graded_items_even_when_price_matches(inv_client, mint_token):
+    """A graded item matching the price range is still excluded when a condition filter is set."""
+    client, repo = inv_client
+    repo.put_inventory_item(_raw("sv1-raw", condition=Condition.NM, price="50.00"))
+    repo.put_inventory_item(_graded("sv1-graded", price="50.00"))  # same price, but graded
+
+    resp = client.get(
+        "/inventory/search?condition=NM&min_price=40.00&max_price=60.00",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["items"][0]["card_id"] == "sv1-raw"
+
+
 def test_search_response_does_not_expose_cost_basis(inv_client, mint_token):
     """cost_basis (purchase price) is internal data and must not appear in search results."""
     client, repo = inv_client

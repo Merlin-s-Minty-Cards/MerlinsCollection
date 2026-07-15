@@ -70,4 +70,10 @@ describe("searchInventory", () => {
 
     expect(ids(result)).toEqual(["4"]); // Charizard in Jungle only, not the Base Set Charizard
   });
+
+  it("returns empty array when no cards match filters", async () => {
+    const result = await searchInventory(seed(), { name: "Mewtwo" });
+
+    expect(result).toEqual([]);
+  });
 });
