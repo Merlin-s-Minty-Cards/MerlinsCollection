@@ -16,12 +16,14 @@ const links = [
 ]
 
 export default function Navbar() {
-  const { status } = useSession()
+  const { data: session, status } = useSession()
   const [open, setOpen] = useState(false)
 
   // The inventory tool is gated: show a Sign in CTA until we know the visitor is
   // authenticated (optimistically show Inventory while the session is loading).
-  const signedOut = status === 'unauthenticated'
+  // A `session.error` means the Cognito token could not be refreshed — the
+  // NextAuth cookie is still valid, but the visitor is effectively signed out.
+  const signedOut = status === 'unauthenticated' || Boolean(session?.error)
   const startSignIn = () => {
     setOpen(false)
     signIn('cognito', { callbackUrl: '/inventory' })
