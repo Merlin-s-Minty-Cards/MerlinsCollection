@@ -327,6 +327,13 @@ def test_transactions_query_by_show(dynamo_repo):
     assert [t.txn_id for t in found] == [at_show.txn_id]
 
 
+def test_item_price_points_round_trip_sorted(dynamo_repo):
+    dynamo_repo.append_item_price_point("item-1", _date(2026, 3, 2), Decimal("410"))
+    dynamo_repo.append_item_price_point("item-1", _date(2026, 3, 1), Decimal("400"))
+    history = dynamo_repo.get_item_price_history("item-1")
+    assert [h["market_value"] for h in history] == [Decimal("400"), Decimal("410")]
+
+
 def test_grade_key_canonicalizes():
     assert _grade_key(Decimal("9.50")) == "9.5"
     assert _grade_key(Decimal("10")) == "10"

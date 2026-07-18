@@ -440,6 +440,22 @@ class InventoryRepository:
     def list_payment_methods(self):
         return self._list_config("PAYMETHOD#", PaymentMethod)
 
+    # ---- per-item price history (sealed/bulk have no card to hang history on) ----
+    def append_item_price_point(self, item_id: str, day: date, value: Decimal):
+        """Record one dated market-value point for a non-card item."""
+        self._table.put_item(Item={
+            "PK": f"ITEM#{item_id}", "SK": f"PRICE#{day.isoformat()}",
+            "entity": "item_price_point", "item_id": item_id,
+            "date": day.isoformat(), "market_value": value,
+        })
+
+    def get_item_price_history(self, item_id: str):
+        """Return an item's price points as raw dicts, oldest first."""
+        return self._query_all(
+            KeyConditionExpression=Key("PK").eq(f"ITEM#{item_id}")
+            & Key("SK").begins_with("PRICE#")
+        )
+
     # ---- price history ----
     def _price_point_item(self, p: PricePoint) -> dict:
         if p.kind == "raw":

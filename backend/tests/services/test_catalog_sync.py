@@ -6,11 +6,13 @@ from merlins_collection.models.inventory import (
     GradedInventoryItem,
     GradingCompany,
     RawInventoryItem,
+    SealedInventoryItem,
 )
 from merlins_collection.services.catalog_sync import (
     refresh_inventory_market_values,
     run_daily_sync,
     snapshot_graded_prices,
+    snapshot_sealed_prices,
     sync_catalog,
 )
 
@@ -93,6 +95,22 @@ def test_sync_catalog_skips_bad_cards(dynamo_repo):
     summary = sync_catalog(dynamo_repo, FakeClient([{"bad": "no id"}, RAW]), date(2026, 6, 22))
     assert summary["failures"] == 1
     assert summary["cards_synced"] == 1
+
+
+def test_sync_skips_unlinked_items_and_snapshots_sealed(dynamo_repo):
+    unlinked = RawInventoryItem(card_id=None, finish="normal", condition="NM",
+                                cost_basis=Decimal("1"), acquired_at=date(2026, 1, 1))
+    sealed = SealedInventoryItem(product_name="Box", product_type="booster_box",
+                                 cost_basis=Decimal("400"),
+                                 current_market_value=Decimal("500"),
+                                 acquired_at=date(2026, 1, 1))
+    dynamo_repo.put_inventory_item(unlinked)
+    dynamo_repo.put_inventory_item(sealed)
+    # must not raise on card_id=None / non-card kinds:
+    assert refresh_inventory_market_values(dynamo_repo) == 0
+    summary = snapshot_sealed_prices(dynamo_repo, date(2026, 3, 1))
+    assert summary == {"sealed_points_written": 1}
+    assert len(dynamo_repo.get_item_price_history(sealed.item_id)) == 1
 
 
 def test_run_daily_sync_includes_graded_snapshot_and_refresh(dynamo_repo):
