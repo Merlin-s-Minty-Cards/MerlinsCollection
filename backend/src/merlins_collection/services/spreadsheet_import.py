@@ -23,10 +23,13 @@ from merlins_collection.models.business import (
     TransactionType,
 )
 from merlins_collection.models.inventory import (
+    BulkInventoryItem,
     Condition,
     ConditionModifier,
+    GradedInventoryItem,
     ItemStatus,
     RawInventoryItem,
+    SealedInventoryItem,
 )
 
 logger = logging.getLogger(__name__)
@@ -193,5 +196,113 @@ def import_singles(rows: list[dict], ctx: ImportContext) -> dict:
                 summary["sales"] += 1
         except Exception:
             logger.exception("Singles row skipped: %r", row.get("Name"))
+            summary["skipped"] += 1
+    return summary
+
+
+def import_slabs(rows: list[dict], ctx: ImportContext) -> dict:
+    summary = {"imported": 0, "sales": 0, "skipped": 0, "needs_review": 0}
+    for row in rows:
+        try:
+            card_id = _match_card(ctx, row["Name"], row.get("card#", ""))
+            item = GradedInventoryItem(
+                item_id=deterministic_id("Slabs", row),
+                card_id=card_id,
+                company="PSA",  # sheet has no company column; flagged for review
+                grade=Decimal(str(row["Grade"]).strip()),
+                cert_number=str(row.get("Cert #") or "").strip() or "unknown",
+                cost_basis=parse_money(row.get("Amount Paid")) or Decimal("0"),
+                market_value_at_purchase=parse_money(row.get("Market @ purchase")),
+                listed_price=parse_money(row.get("Sticker")),
+                acquired_at=parse_date(row.get("Date Recieved")) or date(2026, 1, 1),
+                notes=f"{row['Name']} — {row.get('Set', '')} #{row.get('card#', '')}",
+                needs_review=True,
+            )
+            ctx.repo.put_inventory_item(item)
+            summary["imported"] += 1
+            summary["needs_review"] += 1
+            sold = parse_money(row.get("Sold"))
+            date_sold = parse_date(row.get("Date Sold"))
+            if sold is not None and date_sold is not None:
+                _record_sheet_sale(ctx, item, sold=sold, date_sold=date_sold,
+                                   venmo=parse_bool(row.get("Venmo?")),
+                                   venmo_fees=parse_money(row.get("Venmo Fees")),
+                                   category=ItemCategory.GRADED)
+                summary["sales"] += 1
+        except Exception:
+            logger.exception("Slabs row skipped: %r", row.get("Name"))
+            summary["skipped"] += 1
+    return summary
+
+
+_PRODUCT_KEYWORDS = [("booster box", "booster_box"), ("elite trainer", "etb"),
+                     ("etb", "etb"), ("bundle", "bundle"),
+                     ("booster pack", "booster_pack"), ("collection", "collection_box")]
+
+
+def _guess_product_type(name: str) -> tuple[str, bool]:
+    lowered = name.lower()
+    for keyword, ptype in _PRODUCT_KEYWORDS:
+        if keyword in lowered:
+            return ptype, False
+    return "other", True  # unrecognized -> needs review
+
+
+def import_sealed(rows: list[dict], ctx: ImportContext) -> dict:
+    summary = {"imported": 0, "sales": 0, "skipped": 0, "needs_review": 0}
+    for row in rows:
+        try:
+            product_type, needs_review = _guess_product_type(row["Name"])
+            item = SealedInventoryItem(
+                item_id=deterministic_id("Sealed", row),
+                product_name=str(row["Name"]).strip(),
+                product_type=product_type,
+                status="on_hold" if parse_bool(row.get("Hold")) else "available",
+                cost_basis=parse_money(row.get("Amount Paid")) or Decimal("0"),
+                market_value_at_purchase=parse_money(row.get("Market @ time of purchase")),
+                listed_price=parse_money(row.get("Sticker")),
+                acquired_at=parse_date(row.get("Date")) or date(2026, 1, 1),
+                tcg_url=str(row.get("TCG Link") or "").strip() or None,
+                needs_review=needs_review,
+            )
+            ctx.repo.put_inventory_item(item)
+            summary["imported"] += 1
+            summary["needs_review"] += int(needs_review)
+            sold = parse_money(row.get("Sold"))
+            date_sold = parse_date(row.get("Date Sold"))
+            if sold is not None and date_sold is not None:
+                _record_sheet_sale(ctx, item, sold=sold, date_sold=date_sold,
+                                   venmo=parse_bool(row.get("Venmo?")),
+                                   venmo_fees=parse_money(row.get("Venmo Fees")),
+                                   category=ItemCategory.SEALED)
+                summary["sales"] += 1
+        except Exception:
+            logger.exception("Sealed row skipped: %r", row.get("Name"))
+            summary["skipped"] += 1
+    return summary
+
+
+def import_bulk(rows: list[dict], ctx: ImportContext) -> dict:
+    summary = {"imported": 0, "sales": 0, "skipped": 0, "needs_review": 0}
+    for row in rows:
+        try:
+            item = BulkInventoryItem(
+                item_id=deterministic_id("Bulk", row),
+                description=str(row["Name"]).strip(),
+                cost_basis=parse_money(row.get("Amount Paid")) or Decimal("0"),
+                acquired_at=date(2026, 1, 1),  # tab has no acquisition date
+            )
+            ctx.repo.put_inventory_item(item)
+            summary["imported"] += 1
+            sold = parse_money(row.get("Sold"))
+            date_sold = parse_date(row.get("Date Sold"))
+            if sold is not None and date_sold is not None:
+                _record_sheet_sale(ctx, item, sold=sold, date_sold=date_sold,
+                                   venmo=parse_bool(row.get("Venmo?")),
+                                   venmo_fees=parse_money(row.get("Venmo Fees")),
+                                   category=ItemCategory.BULK)
+                summary["sales"] += 1
+        except Exception:
+            logger.exception("Bulk row skipped: %r", row.get("Name"))
             summary["skipped"] += 1
     return summary

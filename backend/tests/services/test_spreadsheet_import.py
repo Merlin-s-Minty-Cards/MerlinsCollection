@@ -8,7 +8,10 @@ from merlins_collection.models.inventory import Condition, ConditionModifier
 from merlins_collection.services.spreadsheet_import import (
     ImportContext,
     deterministic_id,
+    import_bulk,
+    import_sealed,
     import_singles,
+    import_slabs,
     map_location,
     nearest_show_id,
     parse_bool,
@@ -130,3 +133,47 @@ def test_import_singles_skips_malformed_row(dynamo_repo):
     summary = import_singles([_singles_row(Condition="???")], ctx)
     assert summary["skipped"] == 1
     assert dynamo_repo.list_inventory() == []
+
+
+# ---- Slabs / Sealed / Bulk tabs ----
+
+def test_import_slabs_defaults_psa_needs_review(dynamo_repo):
+    ctx = ImportContext(repo=dynamo_repo)
+    row = {"Date Recieved": "1/5/2026", "Name": "Charizard", "Set": "Base",
+           "card#": "4", "Grade": "9.5", "Cert #": "12345678",
+           "Market @ purchase": "$300", "Amount Paid": "$250", "Percentage": "",
+           "Sold": "", "Date Sold": "", "Venmo?": "", "Net": "", "Sticker": "",
+           "Current Market": "", "# Of Show Days had": "", "Venmo Fees": ""}
+    summary = import_slabs([row], ctx)
+    assert summary["imported"] == 1
+    [item] = dynamo_repo.list_inventory()
+    assert item.kind == "graded"
+    assert item.company.value == "PSA"
+    assert item.grade == Decimal("9.5")
+    assert item.cert_number == "12345678"
+    assert item.needs_review is True
+
+
+def test_import_sealed_maps_product_type_and_hold(dynamo_repo):
+    ctx = ImportContext(repo=dynamo_repo)
+    row = {"Date": "1/5/2026", "Name": "Evolving Skies Booster Box",
+           "Market @ time of purchase": "$400", "Amount Paid": "$350",
+           "Percentage": "", "Sold": "", "Date Sold": "", "Venmo?": "", "Net": "",
+           "Sticker": "", "Current Market (2/25)": "", "Hold": "TRUE",
+           "TCG Link": "", "of days had": "", "Venmo Fees": ""}
+    import_sealed([row], ctx)
+    [item] = dynamo_repo.list_inventory()
+    assert item.kind == "sealed"
+    assert item.product_type.value == "booster_box"
+    assert item.status.value == "on_hold"
+
+
+def test_import_bulk_sold_lot(dynamo_repo):
+    ctx = ImportContext(repo=dynamo_repo)
+    row = {"Name": "5k bulk lot", "Amount Paid": "$50", "Sold": "$80",
+           "Date Sold": "3/7/2026", "Venmo?": "No", "Net": "", "Venmo Fees": ""}
+    summary = import_bulk([row], ctx)
+    assert summary == {"imported": 1, "sales": 1, "skipped": 0, "needs_review": 0}
+    [txn] = dynamo_repo.list_transactions(date(2026, 3, 1), date(2026, 3, 31))
+    assert txn.category.value == "bulk"
+    assert txn.payment_method == "cash"
