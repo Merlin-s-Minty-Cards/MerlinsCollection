@@ -6,10 +6,13 @@ from fastapi.testclient import TestClient
 
 from merlins_collection.models.catalog import CardImages, CatalogCard
 from merlins_collection.models.inventory import (
+    BulkInventoryItem,
     Condition,
+    ConsignmentTerms,
     GradedInventoryItem,
     GradingCompany,
     RawInventoryItem,
+    SealedInventoryItem,
 )
 
 # ---- seed helpers ----
@@ -30,7 +33,7 @@ def _catalog(card_id, name, *, set_id="sv1", set_name="Scarlet & Violet", rarity
     )
 
 
-def _raw(card_id, *, condition=Condition.NM, price="10.00", finish="holofoil"):
+def _raw(card_id, *, condition=Condition.NM, price="10.00", finish="holofoil", **extra):
     return RawInventoryItem(
         card_id=card_id,
         listed_price=Decimal(price),
@@ -38,6 +41,7 @@ def _raw(card_id, *, condition=Condition.NM, price="10.00", finish="holofoil"):
         acquired_at=date.today(),
         finish=finish,
         condition=condition,
+        **extra,
     )
 
 
@@ -352,6 +356,83 @@ def test_search_response_serializes_decimals_as_strings(inv_client, mint_token):
     assert by_id["sv1-1"]["listed_price"] == "10.00"
     assert by_id["sv1-1"]["current_market_value"] == "12.50"
     assert by_id["sv1-2"]["grade"] == "9.5"
+
+
+def test_search_excludes_bulk_and_non_available_items(inv_client, mint_token):
+    client, repo = inv_client
+    repo.put_inventory_item(_raw("sv1-sold", status="sold"))
+    repo.put_inventory_item(_raw("sv1-hold", status="on_hold"))
+    repo.put_inventory_item(BulkInventoryItem(
+        description="lot", cost_basis=Decimal("5"), acquired_at=date(2026, 1, 1)))
+    available = _raw("sv1-ok")
+    repo.put_inventory_item(available)
+
+    body = client.get(
+        "/inventory/search",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    ).json()
+    assert [i["item_id"] for i in body["items"]] == [available.item_id]
+
+
+def test_search_returns_sealed_products_with_null_card(inv_client, mint_token):
+    client, repo = inv_client
+    sealed = SealedInventoryItem(product_name="ES Booster Box", product_type="booster_box",
+                                 cost_basis=Decimal("400"), listed_price=Decimal("550"),
+                                 acquired_at=date(2026, 1, 1))
+    repo.put_inventory_item(sealed)
+
+    body = client.get(
+        "/inventory/search",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    ).json()
+    match = next(i for i in body["items"] if i["kind"] == "sealed")
+    assert match["product_name"] == "ES Booster Box"
+    assert match["card"] is None
+
+
+def test_condition_filter_matches_modifier_variants(inv_client, mint_token):
+    client, repo = inv_client
+    repo.put_inventory_item(_raw("sv1-1", condition=Condition.LP, condition_modifier="+"))
+    repo.put_inventory_item(_raw("sv1-2", condition=Condition.LP, condition_modifier="-"))
+    repo.put_inventory_item(_raw("sv1-3", condition=Condition.NM))
+
+    body = client.get(
+        "/inventory/search?condition=LP",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    ).json()
+    assert body["total"] == 2
+
+
+def test_price_filter_falls_back_to_market_value(inv_client, mint_token):
+    client, repo = inv_client
+    repo.put_inventory_item(_raw("sv1-1", price="30"))
+    no_sticker = _raw("sv1-2")
+    no_sticker.listed_price = None
+    no_sticker.current_market_value = Decimal("80")
+    repo.put_inventory_item(no_sticker)
+    no_price = _raw("sv1-3")
+    no_price.listed_price = None
+    repo.put_inventory_item(no_price)
+
+    body = client.get(
+        "/inventory/search?min_price=50",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    ).json()
+    assert body["total"] == 1
+
+
+def test_response_strips_internal_fields(inv_client, mint_token):
+    client, repo = inv_client
+    terms = ConsignmentTerms(consignor_id="c-1", split_percent=Decimal("20"))
+    repo.put_inventory_item(_raw("sv1-1", consignment=terms, needs_review=True))
+
+    item = client.get(
+        "/inventory/search",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    ).json()["items"][0]
+    assert "cost_basis" not in item
+    assert "consignment" not in item
+    assert "needs_review" not in item
 
 
 def test_search_response_does_not_expose_cost_basis(inv_client, mint_token):
