@@ -9,6 +9,7 @@ from merlins_collection.models.business import (
     Consignor,
     PaymentMethod,
     Show,
+    Transaction,
 )
 from merlins_collection.models.catalog import CatalogCard, PricePoint
 from merlins_collection.models.inventory import (
@@ -295,6 +296,35 @@ def test_config_entities_round_trip(dynamo_repo):
     assert dynamo_repo.get_payment_method("venmo") == venmo
     assert dynamo_repo.get_payment_method("zelle") is None
     assert [m.method for m in dynamo_repo.list_payment_methods()] == ["venmo"]
+
+
+def _txn(**over):
+    kw = dict(type="sale", item_id="i-1", category="raw", date=_date(2026, 3, 10),
+              amount=Decimal("40.00"), payment_method="cash")
+    kw.update(over)
+    return Transaction(**kw)
+
+
+def test_transactions_query_by_date_range_across_months(dynamo_repo):
+    feb = _txn(date=_date(2026, 2, 27))
+    mar = _txn(date=_date(2026, 3, 5))
+    apr = _txn(date=_date(2026, 4, 1))
+    for t in (feb, mar, apr):
+        dynamo_repo.put_transaction(t)
+    found = dynamo_repo.list_transactions(_date(2026, 2, 1), _date(2026, 3, 31))
+    assert sorted(t.txn_id for t in found) == sorted([feb.txn_id, mar.txn_id])
+    # sub-month range bounds within the partition
+    found = dynamo_repo.list_transactions(_date(2026, 3, 1), _date(2026, 3, 4))
+    assert found == []
+
+
+def test_transactions_query_by_show(dynamo_repo):
+    at_show = _txn(show_id="show-1")
+    off_show = _txn()
+    dynamo_repo.put_transaction(at_show)
+    dynamo_repo.put_transaction(off_show)
+    found = dynamo_repo.list_transactions_for_show("show-1")
+    assert [t.txn_id for t in found] == [at_show.txn_id]
 
 
 def test_grade_key_canonicalizes():

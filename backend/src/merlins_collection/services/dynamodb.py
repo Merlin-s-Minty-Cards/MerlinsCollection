@@ -39,6 +39,7 @@ from merlins_collection.models.business import (
     Consignor,
     PaymentMethod,
     Show,
+    Transaction,
 )
 from merlins_collection.models.catalog import CatalogCard, PricePoint
 from merlins_collection.models.inventory import InventoryItemAdapter
@@ -106,6 +107,8 @@ class InventoryRepository:
                 {"AttributeName": "SK", "AttributeType": "S"},
                 {"AttributeName": "GSI1PK", "AttributeType": "S"},
                 {"AttributeName": "GSI1SK", "AttributeType": "S"},
+                {"AttributeName": "GSI2PK", "AttributeType": "S"},
+                {"AttributeName": "GSI2SK", "AttributeType": "S"},
             ],
             GlobalSecondaryIndexes=[
                 {
@@ -115,7 +118,15 @@ class InventoryRepository:
                         {"AttributeName": "GSI1SK", "KeyType": "RANGE"},
                     ],
                     "Projection": {"ProjectionType": "ALL"},
-                }
+                },
+                {
+                    "IndexName": "GSI2",
+                    "KeySchema": [
+                        {"AttributeName": "GSI2PK", "KeyType": "HASH"},
+                        {"AttributeName": "GSI2SK", "KeyType": "RANGE"},
+                    ],
+                    "Projection": {"ProjectionType": "ALL"},
+                },
             ],
         )
         self._table.wait_until_exists()
@@ -278,6 +289,48 @@ class InventoryRepository:
             Key={"PK": f"CARD#{card_id}", "SK": f"GRADEDPRICE#{company}#{_grade_key(grade)}"}
         ).get("Item")
         return item["market_value"] if item else None
+
+    # ---- transaction ledger ----
+    @staticmethod
+    def _txn_keys(txn: Transaction) -> dict:
+        keys = {
+            "PK": f"TXN#{txn.date.strftime('%Y-%m')}",
+            "SK": f"{txn.date.isoformat()}#{txn.txn_id}",
+        }
+        if txn.show_id:
+            keys["GSI2PK"] = f"SHOW#{txn.show_id}"
+            keys["GSI2SK"] = f"{txn.date.isoformat()}#{txn.txn_id}"
+        return keys
+
+    def put_transaction(self, txn: Transaction):
+        """Append one ledger record (purchase or sale)."""
+        body = _serialize(txn.model_dump(mode="python"))
+        self._table.put_item(Item={**self._txn_keys(txn), "entity": "transaction", **body})
+
+    def list_transactions(self, start: date, end: date):
+        """All ledger records with start <= date <= end (month-partition walk).
+
+        The upper bound gets a ``#~`` suffix: ``~`` sorts after every txn-id
+        character, making the ``between`` inclusive of the end date.
+        """
+        results = []
+        year, month = start.year, start.month
+        while (year, month) <= (end.year, end.month):
+            results.extend(self._query_all(
+                KeyConditionExpression=Key("PK").eq(f"TXN#{year:04d}-{month:02d}")
+                & Key("SK").between(start.isoformat(), end.isoformat() + "#~"),
+            ))
+            month += 1
+            if month == 13:
+                year, month = year + 1, 1
+        return [Transaction.model_validate(i) for i in results]
+
+    def list_transactions_for_show(self, show_id: str):
+        items = self._query_all(
+            IndexName="GSI2",
+            KeyConditionExpression=Key("GSI2PK").eq(f"SHOW#{show_id}"),
+        )
+        return [Transaction.model_validate(i) for i in items]
 
     # ---- shows ----
     def put_show(self, show: Show):
