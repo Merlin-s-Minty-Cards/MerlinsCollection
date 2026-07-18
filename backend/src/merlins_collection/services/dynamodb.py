@@ -9,15 +9,16 @@ layout (see ``backend/README.md`` for the access patterns):
 entity                PK                    SK
 ====================  ====================  ============================================
 catalog_card          ``CARD#<id>``         ``META``
-inventory_item (raw)  ``INV#<shard>``       ``CARD#<id>#RAW#<finish>#<condition>``
-inventory_item (grd)  ``INV#<shard>``       ``CARD#<id>#GRADED#<company>#<grade>#<cert>``
+inventory_item        ``INV#<shard>``       ``ITEM#<item_id>``
 graded_price          ``CARD#<id>``         ``GRADEDPRICE#<company>#<grade>``
 price_point           ``CARD#<id>``         ``PRICE#RAW#<finish>#<date>`` / ``PRICE#GRADED#...``
 ====================  ====================  ============================================
 
 Inventory is sharded across ``INVENTORY_SHARD_COUNT`` partitions (by a stable
-hash of ``card_id``) so a single "all inventory" partition never goes hot;
-``list_inventory`` fans out across every shard.
+hash of ``item_id``) so a single "all inventory" partition never goes hot;
+``list_inventory`` fans out across every shard. Card-linked items also carry
+sparse GSI1 keys (``CARD#<card_id>`` / ``ITEM#<item_id>``) for by-card lookups;
+sealed/bulk items have no card and stay out of GSI1.
 """
 
 from __future__ import annotations
@@ -198,45 +199,34 @@ class InventoryRepository:
         )
         return [CatalogCard.model_validate(i) for i in items]
 
-    # ---- inventory ----
-    def _inventory_keys(self, item) -> tuple[str, str, str]:
-        """Compose ``(PK, SK, GSI1SK)`` for an inventory item from its identity."""
-        pk = f"INV#{_bucket(item.card_id)}"
-        if item.kind == "raw":
-            sk = f"CARD#{item.card_id}#RAW#{item.finish}#{item.condition}"
-            gsi1sk = f"INV#RAW#{item.finish}#{item.condition}"
-        else:
-            grade_key = _grade_key(item.grade)
-            sk = f"CARD#{item.card_id}#GRADED#{item.company}#{grade_key}#{item.cert_number}"
-            gsi1sk = f"INV#GRADED#{item.company}#{grade_key}"
-        return pk, sk, gsi1sk
-
+    # ---- inventory (keyed by item_id; card link is a sparse GSI1) ----
     def put_inventory_item(self, item):
-        """Insert or overwrite a single inventory item (keyed by its identity)."""
-        pk, sk, gsi1sk = self._inventory_keys(item)
+        """Insert or overwrite one inventory item (one physical unit)."""
         body = _serialize(item.model_dump(mode="python"))
-        self._table.put_item(
-            Item={
-                "PK": pk, "SK": sk,
-                "GSI1PK": f"CARD#{item.card_id}", "GSI1SK": gsi1sk,
-                "entity": "inventory_item", **body,
-            }
-        )
+        record = {
+            "PK": f"INV#{_bucket(item.item_id)}",
+            "SK": f"ITEM#{item.item_id}",
+            "entity": "inventory_item",
+            **body,
+        }
+        card_id = getattr(item, "card_id", None)
+        if card_id:
+            record["GSI1PK"] = f"CARD#{card_id}"
+            record["GSI1SK"] = f"ITEM#{item.item_id}"
+        self._table.put_item(Item=record)
 
-    def get_inventory_item(self, item):
-        """Fetch the stored copy of an item by identity, or ``None`` if absent.
-
-        Takes a model so the caller can round-trip an item it already holds; only
-        the key fields are used to locate it.
-        """
-        pk, sk, _ = self._inventory_keys(item)
-        found = self._table.get_item(Key={"PK": pk, "SK": sk}).get("Item")
+    def get_inventory_item(self, item_id: str):
+        """Fetch one item by id, or ``None`` if absent."""
+        found = self._table.get_item(
+            Key={"PK": f"INV#{_bucket(item_id)}", "SK": f"ITEM#{item_id}"}
+        ).get("Item")
         return InventoryItemAdapter.validate_python(found) if found else None
 
-    def delete_inventory_item(self, item):
-        """Delete an inventory item identified by its key fields."""
-        pk, sk, _ = self._inventory_keys(item)
-        self._table.delete_item(Key={"PK": pk, "SK": sk})
+    def delete_inventory_item(self, item_id: str):
+        """Delete one item by id."""
+        self._table.delete_item(
+            Key={"PK": f"INV#{_bucket(item_id)}", "SK": f"ITEM#{item_id}"}
+        )
 
     def list_inventory(self):
         """Return the entire inventory, fanning out across all shard partitions."""
@@ -250,7 +240,7 @@ class InventoryRepository:
         items = self._query_all(
             IndexName="GSI1",
             KeyConditionExpression=Key("GSI1PK").eq(f"CARD#{card_id}")
-            & Key("GSI1SK").begins_with("INV#"),
+            & Key("GSI1SK").begins_with("ITEM#"),
         )
         return [InventoryItemAdapter.validate_python(i) for i in items]
 

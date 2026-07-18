@@ -5,10 +5,12 @@ from decimal import Decimal
 
 from merlins_collection.models.catalog import CatalogCard, PricePoint
 from merlins_collection.models.inventory import (
+    BulkInventoryItem,
     Condition,
     GradedInventoryItem,
     GradingCompany,
     RawInventoryItem,
+    SealedInventoryItem,
 )
 from merlins_collection.services.dynamodb import INVENTORY_SHARD_COUNT, _bucket, _grade_key
 
@@ -184,21 +186,33 @@ def test_bucket_is_stable_and_in_range():
     assert 0 <= _bucket("swsh1-1") < INVENTORY_SHARD_COUNT
 
 
-def test_put_then_get_inventory_item(dynamo_repo):
+def test_inventory_item_round_trip_by_item_id(dynamo_repo):
     item = _raw_item()
     dynamo_repo.put_inventory_item(item)
-    assert dynamo_repo.get_inventory_item(item) == item
+    assert dynamo_repo.get_inventory_item(item.item_id) == item
+    dynamo_repo.delete_inventory_item(item.item_id)
+    assert dynamo_repo.get_inventory_item(item.item_id) is None
 
 
-def test_delete_inventory_item(dynamo_repo):
-    item = _raw_item()
-    dynamo_repo.put_inventory_item(item)
-    dynamo_repo.delete_inventory_item(item)
-    assert dynamo_repo.get_inventory_item(item) is None
+def test_sealed_and_bulk_items_store_without_card_id(dynamo_repo):
+    sealed = SealedInventoryItem(product_name="ES Booster Box", product_type="booster_box",
+                                 cost_basis=Decimal("400"), acquired_at=_date(2026, 1, 5))
+    bulk = BulkInventoryItem(description="bulk lot", cost_basis=Decimal("20"),
+                             acquired_at=_date(2026, 1, 5))
+    dynamo_repo.put_inventory_item(sealed)
+    dynamo_repo.put_inventory_item(bulk)
+    kinds = {i.kind for i in dynamo_repo.list_inventory()}
+    assert kinds == {"sealed", "bulk"}
+
+
+def test_two_identical_cards_are_distinct_items(dynamo_repo):
+    a, b = _raw_item(), _raw_item()  # same card/finish/condition, different item_id
+    dynamo_repo.put_inventory_item(a)
+    dynamo_repo.put_inventory_item(b)
+    assert len(dynamo_repo.list_inventory()) == 2
 
 
 def test_list_inventory_gathers_across_shards(dynamo_repo):
-    # card_ids chosen so they land in different buckets in a real run; the count is what matters
     items = [_raw_item(card_id=f"card-{i}") for i in range(25)]
     for it in items:
         dynamo_repo.put_inventory_item(it)
@@ -207,10 +221,11 @@ def test_list_inventory_gathers_across_shards(dynamo_repo):
     assert {i.card_id for i in listed} == {f"card-{i}" for i in range(25)}
 
 
-def test_list_inventory_for_card(dynamo_repo):
+def test_list_inventory_for_card_only_returns_card_linked_items(dynamo_repo):
     dynamo_repo.put_inventory_item(_raw_item(condition="NM"))
     dynamo_repo.put_inventory_item(_raw_item(condition="LP"))
     dynamo_repo.put_inventory_item(_raw_item(card_id="other"))
+    dynamo_repo.put_inventory_item(_raw_item(card_id=None))
     rows = dynamo_repo.list_inventory_for_card("swsh1-1")
     assert len(rows) == 2
     assert {r.condition for r in rows} == {Condition.NM, Condition.LP}
@@ -223,7 +238,7 @@ def test_put_then_get_graded_inventory_item(dynamo_repo):
         company=GradingCompany.PSA, grade=Decimal("10"), cert_number="12345678",
     )
     dynamo_repo.put_inventory_item(item)
-    assert dynamo_repo.get_inventory_item(item) == item
+    assert dynamo_repo.get_inventory_item(item.item_id) == item
 
 
 def test_price_history_start_only(dynamo_repo):

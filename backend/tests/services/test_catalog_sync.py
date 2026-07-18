@@ -48,10 +48,11 @@ def _graded_item(card_id="swsh1-1"):
 
 def test_refresh_sets_current_market_value_from_catalog(dynamo_repo):
     sync_catalog(dynamo_repo, FakeClient([RAW]), date(2026, 6, 22))
-    dynamo_repo.put_inventory_item(_raw_item())
+    item = _raw_item()
+    dynamo_repo.put_inventory_item(item)
     updated = refresh_inventory_market_values(dynamo_repo)
     assert updated == 1
-    assert dynamo_repo.get_inventory_item(_raw_item()).current_market_value == Decimal("9.25")
+    assert dynamo_repo.get_inventory_item(item.item_id).current_market_value == Decimal("9.25")
 
 
 def test_snapshot_graded_prices_writes_history_for_owned_slabs(dynamo_repo):
@@ -66,11 +67,12 @@ def test_snapshot_graded_prices_writes_history_for_owned_slabs(dynamo_repo):
 
 
 def test_run_daily_sync_combines_steps(dynamo_repo):
-    dynamo_repo.put_inventory_item(_raw_item())
+    item = _raw_item()
+    dynamo_repo.put_inventory_item(item)
     summary = run_daily_sync(dynamo_repo, FakeClient([RAW]), date(2026, 6, 22))
     assert summary["cards_synced"] == 1
     assert summary["items_refreshed"] == 1
-    assert dynamo_repo.get_inventory_item(_raw_item()).current_market_value == Decimal("9.25")
+    assert dynamo_repo.get_inventory_item(item.item_id).current_market_value == Decimal("9.25")
 
 
 def test_sync_catalog_upserts_card_and_price_point(dynamo_repo):
@@ -98,11 +100,12 @@ def test_run_daily_sync_includes_graded_snapshot_and_refresh(dynamo_repo):
     dynamo_repo.set_graded_market_value(
         "swsh1-1", GradingCompany.PSA, Decimal("10"), Decimal("500")
     )
-    dynamo_repo.put_inventory_item(_graded_item())
+    item = _graded_item()
+    dynamo_repo.put_inventory_item(item)
 
     summary = run_daily_sync(dynamo_repo, FakeClient([RAW]), date(2026, 6, 22))
 
     # merge completeness: graded snapshot key is present and counted
     assert summary["graded_points_written"] == 1
     # graded refresh write-back path: current_market_value denormalized from the manual graded value
-    assert dynamo_repo.get_inventory_item(_graded_item()).current_market_value == Decimal("500")
+    assert dynamo_repo.get_inventory_item(item.item_id).current_market_value == Decimal("500")
