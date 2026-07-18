@@ -32,6 +32,7 @@ from enum import Enum
 
 import boto3
 from boto3.dynamodb.conditions import Key
+from botocore.exceptions import ClientError
 
 from merlins_collection.models.business import (
     BuyingPolicy,
@@ -75,6 +76,10 @@ def _serialize(value):
     if isinstance(value, list):
         return [_serialize(v) for v in value]
     return value
+
+
+class ItemAlreadySoldError(Exception):
+    """The sale's target item is already sold (or doesn't exist)."""
 
 
 class InventoryRepository:
@@ -324,6 +329,40 @@ class InventoryRepository:
             if month == 13:
                 year, month = year + 1, 1
         return [Transaction.model_validate(i) for i in results]
+
+    def record_sale(self, txn: Transaction):
+        """Atomically append the sale txn and flip its item to ``sold``.
+
+        Condition-guarded: if the item is missing or already sold, nothing is
+        written and ``ItemAlreadySoldError`` is raised. The resource-derived
+        client auto-marshals plain Python values (boto3 injects the DynamoDB
+        document transform), so values are passed unmarshalled here.
+        """
+        txn_item = {**self._txn_keys(txn), "entity": "transaction",
+                    **_serialize(txn.model_dump(mode="python"))}
+        try:
+            self._resource.meta.client.transact_write_items(TransactItems=[
+                {"Put": {
+                    "TableName": self._table_name,
+                    "Item": txn_item,
+                }},
+                {"Update": {
+                    "TableName": self._table_name,
+                    "Key": {
+                        "PK": f"INV#{_bucket(txn.item_id)}",
+                        "SK": f"ITEM#{txn.item_id}",
+                    },
+                    "UpdateExpression": "SET #status = :sold",
+                    "ConditionExpression":
+                        "attribute_exists(PK) AND #status <> :sold",
+                    "ExpressionAttributeNames": {"#status": "status"},
+                    "ExpressionAttributeValues": {":sold": "sold"},
+                }},
+            ])
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "TransactionCanceledException":
+                raise ItemAlreadySoldError(txn.item_id) from exc
+            raise
 
     def list_transactions_for_show(self, show_id: str):
         items = self._query_all(
