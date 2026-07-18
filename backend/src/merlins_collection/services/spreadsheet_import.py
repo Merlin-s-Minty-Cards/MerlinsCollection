@@ -17,7 +17,11 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
 from merlins_collection.models.business import (
+    BuyingPolicy,
+    CashAccount,
+    Consignor,
     ItemCategory,
+    PaymentMethod,
     Show,
     Transaction,
     TransactionType,
@@ -26,6 +30,7 @@ from merlins_collection.models.inventory import (
     BulkInventoryItem,
     Condition,
     ConditionModifier,
+    ConsignmentTerms,
     GradedInventoryItem,
     ItemStatus,
     RawInventoryItem,
@@ -306,3 +311,171 @@ def import_bulk(rows: list[dict], ctx: ImportContext) -> dict:
             logger.exception("Bulk row skipped: %r", row.get("Name"))
             summary["skipped"] += 1
     return summary
+
+
+def _parse_percent(text) -> Decimal | None:
+    return parse_money(str(text or "").replace("%", ""))
+
+
+def import_shows(rows: list[dict], ctx: ImportContext) -> dict:
+    summary = {"imported": 0, "skipped": 0}
+    for row in rows:
+        day = parse_date(row.get("Day"))
+        name = str(row.get("Show") or "").strip()
+        if day is None or not name:
+            summary["skipped"] += 1
+            continue
+        show = Show(
+            show_id=deterministic_id("Show", {"Day": row.get("Day"), "Show": name}),
+            name=name,
+            date=day,
+            sales_goal=parse_money(row.get("Goal")),
+            cash_at_start=parse_money(row.get("Cash at Beginning of Every Show Day")),
+            inventory_value_at_start=parse_money(
+                row.get("Inventory Value at Beginning of show")),
+        )
+        ctx.repo.put_show(show)
+        ctx.shows.append(show)
+        summary["imported"] += 1
+    return summary
+
+
+def import_consignments(rows: list[dict], ctx: ImportContext) -> dict:
+    summary = {"imported": 0, "sales": 0, "skipped": 0, "needs_review": 0}
+    consignors: dict[str, Consignor] = {}
+    for row in rows:
+        try:
+            person = str(row["Persons Name"]).strip()
+            if person not in consignors:
+                consignor = Consignor(
+                    consignor_id=deterministic_id("Consignor", {"name": person}),
+                    name=person,
+                )
+                ctx.repo.put_consignor(consignor)
+                consignors[person] = consignor
+            terms = ConsignmentTerms(
+                consignor_id=consignors[person].consignor_id,
+                split_percent=_parse_percent(row.get("Percentage we get")) or Decimal("0"),
+                minimum_price=parse_money(row.get("Minimum")),
+                paid_out=parse_bool(row.get("Paid Out?")),
+            )
+            returned = str(row.get("Sold/Returned") or "").strip().lower() == "returned"
+            common = dict(
+                item_id=deterministic_id("Consignments", row),
+                status="returned_to_consignor" if returned else "available",
+                cost_basis=Decimal("0"),  # not ours; we never paid for it
+                market_value_at_purchase=parse_money(row.get("Market")),
+                acquired_at=parse_date(row.get("Date recieved")) or date(2026, 1, 1),
+                consignment=terms,
+                notes=f"{row['Card Name']} #{row.get('Card #', '')}".strip(" #"),
+            )
+            if parse_bool(row.get("Slab")):
+                grade_text = str(row.get("Condition") or "").strip()
+                grade = (Decimal(grade_text)
+                         if grade_text.replace(".", "", 1).isdigit() else Decimal("10"))
+                item = GradedInventoryItem(company="PSA", grade=grade,
+                                           cert_number="unknown", needs_review=True,
+                                           **common)
+                summary["needs_review"] += 1
+            else:
+                condition, modifier = parse_condition(row.get("Condition") or "NM")
+                item = RawInventoryItem(finish="normal", condition=condition,
+                                        condition_modifier=modifier, **common)
+            ctx.repo.put_inventory_item(item)
+            summary["imported"] += 1
+            sold = parse_money(row.get("Sold"))
+            date_sold = parse_date(row.get("Date Sold"))
+            if sold is not None and date_sold is not None and not returned:
+                payout = parse_money(row.get("To payout"))
+                if payout is None:
+                    payout = sold - (sold * terms.split_percent / Decimal("100"))
+                ctx.repo.put_inventory_item(
+                    item.model_copy(update={"status": ItemStatus.SOLD}))
+                ctx.repo.put_transaction(Transaction(
+                    txn_id=deterministic_id("txn", {"item": item.item_id}),
+                    type=TransactionType.SALE,
+                    item_id=item.item_id,
+                    category=ItemCategory.CONSIGNMENT,
+                    date=date_sold,
+                    amount=sold,
+                    payment_method="venmo" if parse_bool(row.get("Venmo?")) else "cash",
+                    fee=parse_money(row.get("Venmo Fees")) or Decimal("0"),
+                    show_id=nearest_show_id(date_sold, ctx.shows),
+                    consignor_payout=payout,
+                ))
+                summary["sales"] += 1
+        except Exception:
+            logger.exception("Consignments row skipped: %r", row.get("Card Name"))
+            summary["skipped"] += 1
+    return summary
+
+
+def import_cash(rows: list[dict], ctx: ImportContext) -> dict:
+    summary = {"imported": 0, "skipped": 0}
+    for row in rows:
+        account = str(row.get("Type") or "").strip().lower()
+        amount = parse_money(row.get("Amount"))
+        if not account or account == "total" or amount is None:
+            summary["skipped"] += 1
+            continue
+        ctx.repo.put_cash_account(CashAccount(account=account, balance=amount))
+        summary["imported"] += 1
+    return summary
+
+
+def import_buying_guidelines(rows: list[dict], ctx: ImportContext) -> dict:
+    summary = {"imported": 0, "skipped": 0}
+    for row in rows:
+        product_type = str(row.get("Product Type") or "").strip().lower()
+        if not product_type:
+            summary["skipped"] += 1
+            continue
+        ctx.repo.put_buying_policy(BuyingPolicy(
+            product_type=product_type,
+            cash_pct_min=_parse_percent(row.get("Cash % Min")),
+            cash_pct_max=_parse_percent(row.get("Cash % Max")),
+            trade_pct_min=_parse_percent(row.get("Trade % Min")),
+            trade_pct_max=_parse_percent(row.get("Trade % Max")),
+        ))
+        summary["imported"] += 1
+    return summary
+
+
+def seed_payment_methods(repo) -> None:
+    repo.put_payment_method(PaymentMethod(method="venmo", fee_percent=Decimal("1.9"),
+                                          fee_fixed=Decimal("0.10")))
+    repo.put_payment_method(PaymentMethod(method="cash"))
+
+
+_TAB_IMPORTERS = [  # shows first: everything else matches sales to them
+    ("Vending Net", import_shows),
+    ("Cash", import_cash),
+    ("Buying Guidelines", import_buying_guidelines),
+    ("Singles", import_singles),
+    ("Slabs", import_slabs),
+    ("Sealed", import_sealed),
+    ("Bulk", import_bulk),
+    ("Consignments", import_consignments),
+]
+
+
+def run_import(csv_dir, repo) -> dict:
+    """Import every recognized ``<Tab>.csv`` in ``csv_dir``; returns per-tab summaries."""
+    import csv
+    from pathlib import Path
+
+    csv_dir = Path(csv_dir)
+    seed_payment_methods(repo)
+    catalog_index: dict = {}
+    for card in repo.iter_catalog_cards():
+        catalog_index.setdefault((card.name.lower(), card.number), []).append(card)
+    ctx = ImportContext(repo=repo, catalog_index=catalog_index)
+    summaries = {}
+    for tab, importer in _TAB_IMPORTERS:
+        path = csv_dir / f"{tab}.csv"
+        if not path.exists():
+            continue
+        with path.open(newline="", encoding="utf-8-sig") as f:
+            rows = list(csv.DictReader(f))
+        summaries[tab] = importer(rows, ctx)
+    return summaries

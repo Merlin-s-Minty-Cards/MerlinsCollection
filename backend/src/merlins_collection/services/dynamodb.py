@@ -213,6 +213,20 @@ class InventoryRepository:
                 )
         return found
 
+    def iter_catalog_cards(self):
+        """Yield every catalog card (paginated scan; import-time only)."""
+        from boto3.dynamodb.conditions import Attr
+
+        kwargs = {"FilterExpression": Attr("entity").eq("catalog_card")}
+        while True:
+            resp = self._table.scan(**kwargs)
+            for item in resp.get("Items", []):
+                yield CatalogCard.model_validate(item)
+            last = resp.get("LastEvaluatedKey")
+            if not last:
+                return
+            kwargs["ExclusiveStartKey"] = last
+
     def list_cards_by_set(self, set_id):
         """Return every catalog card in a set via the GSI1 ``SET#`` partition."""
         items = self._query_all(

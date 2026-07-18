@@ -9,7 +9,11 @@ from merlins_collection.services.spreadsheet_import import (
     ImportContext,
     deterministic_id,
     import_bulk,
+    import_buying_guidelines,
+    import_cash,
+    import_consignments,
     import_sealed,
+    import_shows,
     import_singles,
     import_slabs,
     map_location,
@@ -18,6 +22,7 @@ from merlins_collection.services.spreadsheet_import import (
     parse_condition,
     parse_date,
     parse_money,
+    run_import,
 )
 
 
@@ -177,3 +182,72 @@ def test_import_bulk_sold_lot(dynamo_repo):
     [txn] = dynamo_repo.list_transactions(date(2026, 3, 1), date(2026, 3, 31))
     assert txn.category.value == "bulk"
     assert txn.payment_method == "cash"
+
+
+# ---- Shows / Consignments / Cash / Buying Guidelines / run_import ----
+
+def test_import_shows_builds_context(dynamo_repo):
+    ctx = ImportContext(repo=dynamo_repo)
+    rows = [{"Day": "3/8/2026", "Show": "Mint City", "Goal": "$500",
+             "Cash at Beginning of Every Show Day": "$200",
+             "Assets At start of every show day": "",
+             "Inventory Value at Beginning of show": "$3,000"},
+            {"Day": "", "Show": "junk row"}]
+    summary = import_shows(rows, ctx)
+    assert summary == {"imported": 1, "skipped": 1}
+    [show] = dynamo_repo.list_shows()
+    assert show.name == "Mint City"
+    assert show.sales_goal == Decimal("500")
+    assert show.inventory_value_at_start == Decimal("3000")
+    assert ctx.shows == [show]
+
+
+def test_import_consignments_creates_consignor_terms_and_payout(dynamo_repo):
+    ctx = ImportContext(repo=dynamo_repo)
+    row = {"Date recieved": "2/1/2026", "Card Name": "Umbreon VMAX", "Condition": "NM",
+           "Slab": "", "Card #": "215", "Amount we get": "", "Sold": "$100",
+           "Date Sold": "3/7/2026", "Venmo?": "No", "Net": "", "Persons Name": "David",
+           "Market": "$110", "Minimum": "$90", "To payout": "$80",
+           "Percentage we get": "20%", "# of Show Days": "", "Paid Out?": "No",
+           "Sold/Returned": "Sold", "Venmo Fees": ""}
+    summary = import_consignments([row], ctx)
+    assert summary["imported"] == 1 and summary["sales"] == 1
+    [consignor] = dynamo_repo.list_consignors()
+    assert consignor.name == "David"
+    [item] = dynamo_repo.list_inventory()
+    assert item.consignment.consignor_id == consignor.consignor_id
+    assert item.consignment.split_percent == Decimal("20")
+    assert item.consignment.minimum_price == Decimal("90")
+    [txn] = dynamo_repo.list_transactions(date(2026, 3, 1), date(2026, 3, 31))
+    assert txn.category.value == "consignment"
+    assert txn.consignor_payout == Decimal("80")
+
+
+def test_import_cash_and_buying_guidelines(dynamo_repo):
+    ctx = ImportContext(repo=dynamo_repo)
+    import_cash([{"Type": "Venmo", "Amount": "$321.50"},
+                 {"Type": "Total", "Amount": "$999"}], ctx)
+    accounts = dynamo_repo.list_cash_accounts()
+    assert [a.account for a in accounts] == ["venmo"]
+    import_buying_guidelines([{"Product Type": "Slabs", "Cash % Min": "60%",
+                               "Cash % Max": "75%", "Trade % Min": "70%",
+                               "Trade % Max": "85%"}], ctx)
+    [policy] = dynamo_repo.list_buying_policies()
+    assert policy.product_type == "slabs"
+    assert policy.cash_pct_max == Decimal("75")
+
+
+def test_run_import_end_to_end(tmp_path, dynamo_repo):
+    (tmp_path / "Vending Net.csv").write_text(
+        "Day,Show,Goal\n3/8/2026,Mint City,$500\n", encoding="utf-8")
+    (tmp_path / "Bulk.csv").write_text(
+        "Name,Amount Paid,Sold,Date Sold,Venmo?,Net,Venmo Fees\n"
+        "bulk lot,$50,$80,3/7/2026,No,,\n", encoding="utf-8")
+    summaries = run_import(tmp_path, dynamo_repo)
+    assert summaries["Vending Net"]["imported"] == 1
+    assert summaries["Bulk"]["sales"] == 1
+    # the bulk sale matched the imported show
+    [txn] = dynamo_repo.list_transactions(date(2026, 3, 1), date(2026, 3, 31))
+    assert txn.show_id is not None
+    # payment methods were seeded
+    assert dynamo_repo.get_payment_method("venmo") is not None
