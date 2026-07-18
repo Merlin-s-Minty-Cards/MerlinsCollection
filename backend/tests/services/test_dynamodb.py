@@ -3,6 +3,13 @@ from datetime import date as _date
 from datetime import datetime
 from decimal import Decimal
 
+from merlins_collection.models.business import (
+    BuyingPolicy,
+    CashAccount,
+    Consignor,
+    PaymentMethod,
+    Show,
+)
 from merlins_collection.models.catalog import CatalogCard, PricePoint
 from merlins_collection.models.inventory import (
     BulkInventoryItem,
@@ -257,6 +264,37 @@ def test_price_history_end_only(dynamo_repo):
     ])
     got = dynamo_repo.get_price_history("c4", finish="holofoil", end=_date(2026, 6, 21))
     assert [p.date for p in got] == [_date(2026, 6, 20)]
+
+
+def test_shows_round_trip_chronological(dynamo_repo):
+    later = Show(name="B Show", date=_date(2026, 5, 2))
+    earlier = Show(name="A Show", date=_date(2026, 4, 4))
+    dynamo_repo.put_show(later)
+    dynamo_repo.put_show(earlier)
+    names = [s.name for s in dynamo_repo.list_shows()]
+    assert names == ["A Show", "B Show"]  # SK sorts by date
+    assert dynamo_repo.get_show(later.show_id) == later
+    assert dynamo_repo.get_show("nope") is None
+
+
+def test_consignors_round_trip(dynamo_repo):
+    c = Consignor(name="David", contact="555-1234")
+    dynamo_repo.put_consignor(c)
+    assert dynamo_repo.list_consignors() == [c]
+
+
+def test_config_entities_round_trip(dynamo_repo):
+    dynamo_repo.put_cash_account(CashAccount(account="venmo", balance=Decimal("100")))
+    dynamo_repo.put_buying_policy(BuyingPolicy(product_type="slabs",
+                                               cash_pct_min=Decimal("60")))
+    venmo = PaymentMethod(method="venmo", fee_percent=Decimal("1.9"),
+                          fee_fixed=Decimal("0.10"))
+    dynamo_repo.put_payment_method(venmo)
+    assert dynamo_repo.list_cash_accounts()[0].balance == Decimal("100")
+    assert dynamo_repo.list_buying_policies()[0].product_type == "slabs"
+    assert dynamo_repo.get_payment_method("venmo") == venmo
+    assert dynamo_repo.get_payment_method("zelle") is None
+    assert [m.method for m in dynamo_repo.list_payment_methods()] == ["venmo"]
 
 
 def test_grade_key_canonicalizes():

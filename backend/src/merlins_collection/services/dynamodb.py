@@ -33,6 +33,13 @@ from enum import Enum
 import boto3
 from boto3.dynamodb.conditions import Key
 
+from merlins_collection.models.business import (
+    BuyingPolicy,
+    CashAccount,
+    Consignor,
+    PaymentMethod,
+    Show,
+)
 from merlins_collection.models.catalog import CatalogCard, PricePoint
 from merlins_collection.models.inventory import InventoryItemAdapter
 
@@ -271,6 +278,75 @@ class InventoryRepository:
             Key={"PK": f"CARD#{card_id}", "SK": f"GRADEDPRICE#{company}#{_grade_key(grade)}"}
         ).get("Item")
         return item["market_value"] if item else None
+
+    # ---- shows ----
+    def put_show(self, show: Show):
+        """Insert or overwrite one show/event day."""
+        body = _serialize(show.model_dump(mode="python"))
+        self._table.put_item(Item={
+            "PK": "SHOWLIST",
+            "SK": f"SHOW#{show.date.isoformat()}#{show.show_id}",
+            "entity": "show", **body,
+        })
+
+    def list_shows(self):
+        """Return every show, oldest first (SK embeds the date)."""
+        items = self._query_all(KeyConditionExpression=Key("PK").eq("SHOWLIST"))
+        return [Show.model_validate(i) for i in items]
+
+    def get_show(self, show_id: str):
+        """Return one show by id, or ``None``. (SK embeds the date, so a point
+        read would need it; the show list is tiny, so filter instead.)"""
+        return next((s for s in self.list_shows() if s.show_id == show_id), None)
+
+    # ---- consignors ----
+    def put_consignor(self, consignor: Consignor):
+        """Insert or overwrite one consignor."""
+        body = _serialize(consignor.model_dump(mode="python"))
+        self._table.put_item(Item={
+            "PK": "CONSIGNORLIST",
+            "SK": f"CONSIGNOR#{consignor.consignor_id}",
+            "entity": "consignor", **body,
+        })
+
+    def list_consignors(self):
+        items = self._query_all(KeyConditionExpression=Key("PK").eq("CONSIGNORLIST"))
+        return [Consignor.model_validate(i) for i in items]
+
+    # ---- config entities (CONFIG partition) ----
+    def _put_config(self, sk: str, entity: str, model):
+        body = _serialize(model.model_dump(mode="python"))
+        self._table.put_item(Item={"PK": "CONFIG", "SK": sk, "entity": entity, **body})
+
+    def _list_config(self, prefix: str, model_cls):
+        items = self._query_all(
+            KeyConditionExpression=Key("PK").eq("CONFIG") & Key("SK").begins_with(prefix)
+        )
+        return [model_cls.model_validate(i) for i in items]
+
+    def put_cash_account(self, account: CashAccount):
+        self._put_config(f"CASH#{account.account}", "cash_account", account)
+
+    def list_cash_accounts(self):
+        return self._list_config("CASH#", CashAccount)
+
+    def put_buying_policy(self, policy: BuyingPolicy):
+        self._put_config(f"BUYPOLICY#{policy.product_type}", "buying_policy", policy)
+
+    def list_buying_policies(self):
+        return self._list_config("BUYPOLICY#", BuyingPolicy)
+
+    def put_payment_method(self, method: PaymentMethod):
+        self._put_config(f"PAYMETHOD#{method.method}", "payment_method", method)
+
+    def get_payment_method(self, method: str):
+        item = self._table.get_item(
+            Key={"PK": "CONFIG", "SK": f"PAYMETHOD#{method}"}
+        ).get("Item")
+        return PaymentMethod.model_validate(item) if item else None
+
+    def list_payment_methods(self):
+        return self._list_config("PAYMETHOD#", PaymentMethod)
 
     # ---- price history ----
     def _price_point_item(self, p: PricePoint) -> dict:
