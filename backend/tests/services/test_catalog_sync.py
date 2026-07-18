@@ -32,7 +32,7 @@ class FakeClient:
 
 def _raw_item(card_id="swsh1-1"):
     return RawInventoryItem(
-        card_id=card_id, quantity=2, listed_price=Decimal("10"),
+        card_id=card_id, listed_price=Decimal("10"),
         cost_basis=Decimal("4"), acquired_at=date(2026, 1, 1),
         finish="holofoil", condition=Condition.NM,
     )
@@ -40,7 +40,7 @@ def _raw_item(card_id="swsh1-1"):
 
 def _graded_item(card_id="swsh1-1"):
     return GradedInventoryItem(
-        card_id=card_id, quantity=1, listed_price=Decimal("700"),
+        card_id=card_id, listed_price=Decimal("700"),
         cost_basis=Decimal("300"), acquired_at=date(2026, 1, 1),
         company=GradingCompany.PSA, grade=Decimal("10"), cert_number="123",
     )

@@ -13,9 +13,9 @@ from merlins_collection.models.inventory import (
 from merlins_collection.services.dynamodb import INVENTORY_SHARD_COUNT, _bucket, _grade_key
 
 
-def _raw_item(card_id="swsh1-1", finish="holofoil", condition="NM", qty=1):
+def _raw_item(card_id="swsh1-1", finish="holofoil", condition="NM"):
     return RawInventoryItem(
-        card_id=card_id, quantity=qty, listed_price=Decimal("10"),
+        card_id=card_id, listed_price=Decimal("10"),
         cost_basis=Decimal("4"), acquired_at=_date(2026, 1, 1),
         finish=finish, condition=Condition(condition),
     )
@@ -218,7 +218,7 @@ def test_list_inventory_for_card(dynamo_repo):
 
 def test_put_then_get_graded_inventory_item(dynamo_repo):
     item = GradedInventoryItem(
-        card_id="swsh1-1", quantity=1, listed_price=Decimal("600"),
+        card_id="swsh1-1", listed_price=Decimal("600"),
         cost_basis=Decimal("300"), acquired_at=_date(2026, 1, 1),
         company=GradingCompany.PSA, grade=Decimal("10"), cert_number="12345678",
     )

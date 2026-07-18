@@ -33,7 +33,6 @@ def _catalog(card_id, name, *, set_id="sv1", set_name="Scarlet & Violet", rarity
 def _raw(card_id, *, condition=Condition.NM, price="10.00", finish="holofoil"):
     return RawInventoryItem(
         card_id=card_id,
-        quantity=1,
         listed_price=Decimal(price),
         cost_basis=Decimal("5.00"),
         acquired_at=date.today(),
@@ -45,7 +44,6 @@ def _raw(card_id, *, condition=Condition.NM, price="10.00", finish="holofoil"):
 def _graded(card_id, *, grade="9", price="50.00"):
     return GradedInventoryItem(
         card_id=card_id,
-        quantity=1,
         listed_price=Decimal(price),
         cost_basis=Decimal("30.00"),
         acquired_at=date.today(),
