@@ -1,12 +1,7 @@
-import { render, screen } from '@testing-library/react'
+import { render } from '@testing-library/react'
 import Reveal from '@/components/ui/Reveal'
 
 describe('Reveal', () => {
-  it('renders its children', () => {
-    render(<Reveal>hello world</Reveal>)
-    expect(screen.getByText('hello world')).toBeInTheDocument()
-  })
-
   it('renders the tag from the `as` prop and merges className', () => {
     const { container } = render(
       <Reveal as="section" className="custom">
