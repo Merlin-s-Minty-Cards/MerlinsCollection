@@ -30,4 +30,17 @@ describe('auth layout gate', () => {
     await AuthLayout({ children: 'page' })
     expect(mockedRedirect).not.toHaveBeenCalled()
   })
+
+  it('redirects when the session token refresh has failed', async () => {
+    // Session cookie exists, but the embedded Cognito token could not be
+    // refreshed — the visitor is effectively signed out and must not load the
+    // protected page.
+    mockedAuth.mockResolvedValue({
+      user: {},
+      expires: '2026-01-01',
+      error: 'RefreshAccessTokenError',
+    } as never)
+    await AuthLayout({ children: 'page' })
+    expect(mockedRedirect).toHaveBeenCalledWith(expect.stringContaining('/api/auth/signin'))
+  })
 })
