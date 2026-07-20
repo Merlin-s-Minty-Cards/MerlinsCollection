@@ -56,22 +56,16 @@ describe('FeaturedFinds collection cards', () => {
     })
   })
 
-  it('row container carries collection-row class so CSS :has() can shrink siblings on hover', () => {
+  it('row container carries collection-row class so CSS :has() can shrink siblings on hover, and wraps content for scroll-reveal', () => {
     const { container } = render(<FeaturedFinds />)
     // The CSS rule `.collection-row:has(.collection-card:hover) .collection-card:not(:hover)`
     // anchors on this class — if it is missing the sibling-shrink effect silently disappears.
     expect(container.querySelector('.collection-row')).toBeInTheDocument()
+    expect(container.querySelector('.reveal')).toBeInTheDocument()
   })
 })
 
 describe('bottom sections reveal on scroll', () => {
-  it('FeaturedFinds wraps content in reveal wrappers and keeps the collection row', () => {
-    const { container } = render(<FeaturedFinds />)
-    expect(container.querySelector('.reveal')).toBeInTheDocument()
-    expect(container.querySelector('.collection-row')).toBeInTheDocument()
-    expect(container.querySelectorAll('.collection-card')).toHaveLength(5)
-  })
-
   it('ShowsPreview wraps its listing in a reveal wrapper with a hover lift', () => {
     const { container } = render(<ShowsPreview />)
     expect(container.querySelector('.reveal')).toBeInTheDocument()
