@@ -1,6 +1,10 @@
 import type { NextAuthConfig } from 'next-auth'
+import type { JWT } from 'next-auth/jwt'
 import Cognito from 'next-auth/providers/cognito'
 import { resolveIsAdmin } from './admin'
+
+/** Refresh this long before the access token's hard expiry to absorb clock skew. */
+const REFRESH_BUFFER_MS = 60 * 1000
 
 /**
  * NextAuth config, kept separate from the `NextAuth()` call in `auth.ts` so it
@@ -23,23 +27,98 @@ export const authConfig: NextAuthConfig = {
   ],
   callbacks: {
     async jwt({ token, account, profile }) {
-      // `account` is present only on the initial sign-in callback.
+      // `account` is present only on the initial sign-in callback: capture the
+      // access token, the refresh token, when the access token expires, and the
+      // admin group membership.
       if (account?.access_token) {
         token.accessToken = account.access_token
-      }
-      if (account) {
+        token.refreshToken = account.refresh_token
+        token.accessTokenExpires =
+          Date.now() + Number(account.expires_in ?? 0) * 1000
         // Group membership is only visible at sign-in, so it is resolved once and
         // carried on the session token. NOTE: that means removing someone from the
         // admins group does not take effect until their session expires. Refresh-
         // token rotation would re-derive this hourly; see the follow-up.
         token.isAdmin = resolveIsAdmin({ account, profile })
+        return token
       }
-      return token
+
+      // Subsequent calls: if the access token is still comfortably valid, use it
+      // as-is. Refresh a little before the hard expiry (REFRESH_BUFFER_MS) so a
+      // request in flight near the boundary — or a backend clock running ahead —
+      // doesn't reach Cognito with an already-expired token.
+      const expires = token.accessTokenExpires
+      if (typeof expires === 'number' && Date.now() < expires - REFRESH_BUFFER_MS) {
+        return token
+      }
+
+      // Expired but nothing to refresh with — leave the token untouched.
+      if (!token.refreshToken) {
+        return token
+      }
+
+      // Expired: exchange the refresh token for a fresh access token.
+      return refreshAccessToken(token)
     },
     async session({ session, token }) {
+      // A refresh failure means the embedded access token is no longer usable;
+      // don't expose it, and forward the error so the client can react.
+      if (token.error) {
+        session.accessToken = undefined
+        session.error = token.error
+        return session
+      }
       session.accessToken = token.accessToken as string | undefined
       session.isAdmin = token.isAdmin === true
       return session
     },
   },
+}
+
+/**
+ * Exchange the stored Cognito refresh token for a new access token. On success
+ * returns the token with a fresh `accessToken`/`accessTokenExpires` (and the
+ * rotated `refreshToken`, if Cognito issued one). On failure it flags the token
+ * with `error = 'RefreshAccessTokenError'` rather than throwing, so the session
+ * callback can degrade the session to signed-out instead of crashing.
+ */
+async function refreshAccessToken(token: JWT): Promise<JWT> {
+  try {
+    const issuer = process.env.AWS_COGNITO_ISSUER
+    const clientId = process.env.AWS_COGNITO_CLIENT_ID ?? ''
+    const clientSecret = process.env.AWS_COGNITO_CLIENT_SECRET ?? ''
+
+    const body = new URLSearchParams({
+      grant_type: 'refresh_token',
+      client_id: clientId,
+      refresh_token: token.refreshToken as string,
+    })
+
+    const response = await fetch(`${issuer}/oauth2/token`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Authorization: `Basic ${Buffer.from(
+          `${clientId}:${clientSecret}`,
+        ).toString('base64')}`,
+      },
+      body,
+    })
+
+    const refreshed = await response.json()
+    if (!response.ok) {
+      throw new Error('Failed to refresh access token')
+    }
+
+    return {
+      ...token,
+      accessToken: refreshed.access_token,
+      accessTokenExpires: Date.now() + Number(refreshed.expires_in ?? 0) * 1000,
+      // Cognito may rotate the refresh token; fall back to the existing one.
+      refreshToken: refreshed.refresh_token ?? token.refreshToken,
+      error: undefined,
+    }
+  } catch {
+    return { ...token, error: 'RefreshAccessTokenError' }
+  }
 }
