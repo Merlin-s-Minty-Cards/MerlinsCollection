@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from merlins_collection.config import settings
-from merlins_collection.routers import auth, chat, inventory
+from merlins_collection.routers import auth, chat, health, inventory
 
 logger = logging.getLogger(__name__)
 
@@ -44,3 +44,4 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(inventory.router)
 app.include_router(chat.router)
+app.include_router(health.router)
