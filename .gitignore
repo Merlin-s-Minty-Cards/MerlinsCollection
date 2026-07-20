@@ -55,3 +55,6 @@ Thumbs.db
 
 # Personal learning notes (not project docs)
 docs/learning/
+
+# Agent workflow progress/roadmap scaffolding (not project docs)
+claude-progress.txt

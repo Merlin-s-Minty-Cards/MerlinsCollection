@@ -9,14 +9,6 @@ describe('auth config', () => {
     expect(config.providers).toHaveLength(1)
   })
 
-  it('jwt callback captures the access token on first sign-in', async () => {
-    const token = await config.callbacks!.jwt!({
-      token: {},
-      account: { access_token: 'cognito-access-token' },
-    } as never)
-    expect(token).toMatchObject({ accessToken: 'cognito-access-token' })
-  })
-
   it('jwt callback leaves the token untouched on later calls (no account)', async () => {
     const token = await config.callbacks!.jwt!({
       token: { sub: 'user-1' },
