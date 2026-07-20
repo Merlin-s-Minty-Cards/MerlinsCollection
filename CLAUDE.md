@@ -5,6 +5,14 @@ Always follow the outside-in Test-Driven Development (TDD) process.
 3. REFACTOR: Improve code quality, ensuring tests remain green.
 Never combine phases. Wait for user confirmation after confirming tests fail.
 
+# Agent Workflow
+Custom sub-agents live in `.claude/agents/`. For **non-trivial feature work** (new functionality, multi-step changes, anything that will touch more than a couple of files), default to this flow without waiting to be asked:
+1. Start with the `initializer` agent to audit the workspace and create/update `claude-progress.txt`, unless one already exists and is current for the active feature.
+2. Route each roadmap item to the appropriate agent (`design-doc`, `code-writer`, `test-qa`, `doc-writer`, `pull-request`, `web-browser`) based on its own description.
+3. Every `code-writer` submission must clear the Council Loop (`advisor-contrarian`, `advisor-security`, `advisor-chaos`, `advisor-architect` → `council-judge`) before being considered done.
+
+Skip this default for small fixes, one-off questions, or anything the user frames as quick — go straight to the relevant single agent (or no agent) instead. The user can also override explicitly at any time (e.g. "skip the initializer", "just write the code").
+
 # Project Overview
 Merlin's Minty Cards — a Pokemon card business website.
 - Public website: Home, Shows, About, Collectors Dictionary, Articles
