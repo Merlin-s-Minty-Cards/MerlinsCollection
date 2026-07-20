@@ -15,3 +15,6 @@
 
 ## Test Plan
 <!-- How was this verified? Paste relevant test output. -->
+
+## Notes
+<!-- Anything else reviewers should know: follow-ups, open questions, deployment/config steps, screenshots. -->
