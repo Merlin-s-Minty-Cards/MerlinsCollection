@@ -11,7 +11,10 @@ import Footer from '@/components/layout/Footer'
 // lives inside it (see the .vault-* styles in globals.css).
 export default async function AuthLayout({ children }: { children: React.ReactNode }) {
   const session = await auth()
-  if (!session) {
+  // No session, or a session whose Cognito token could no longer be refreshed
+  // (`session.error`): either way the visitor is effectively signed out and must
+  // not load the protected page.
+  if (!session || session.error) {
     redirect('/api/auth/signin?callbackUrl=/inventory')
   }
   return (

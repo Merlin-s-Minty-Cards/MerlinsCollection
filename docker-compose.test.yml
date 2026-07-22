@@ -1,0 +1,24 @@
+# Containerized test suites — run each as a one-shot container so the exit
+# code propagates:
+#   docker compose -f docker-compose.test.yml run --rm backend-tests
+#   docker compose -f docker-compose.test.yml run --rm frontend-tests
+#   docker compose -f docker-compose.test.yml run --rm mcp-tests
+# Or all three: npm run docker:test
+services:
+  backend-tests:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: test
+
+  frontend-tests:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      target: test
+
+  mcp-tests:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: mcp-test

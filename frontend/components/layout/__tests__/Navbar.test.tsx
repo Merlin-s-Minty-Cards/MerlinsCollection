@@ -47,6 +47,23 @@ describe('Navbar', () => {
     expect(mockSignIn).toHaveBeenCalledWith('cognito', { callbackUrl: '/inventory' })
   })
 
+  it('treats a session whose token refresh failed as signed out', async () => {
+    // The NextAuth cookie is still valid (status stays 'authenticated'), but the
+    // embedded Cognito token could not be refreshed. The visitor is effectively
+    // signed out, so the Inventory CTA must give way to Sign in.
+    mockUseSession.mockReturnValue({
+      data: { user: {}, error: 'RefreshAccessTokenError' },
+      status: 'authenticated',
+    })
+    render(<Navbar />)
+
+    expect(screen.queryByRole('link', { name: 'Inventory' })).toBeNull()
+    const signIns = screen.getAllByRole('button', { name: 'Sign in' })
+    expect(signIns.length).toBeGreaterThan(0)
+    await userEvent.click(signIns[0])
+    expect(mockSignIn).toHaveBeenCalledWith('cognito', { callbackUrl: '/inventory' })
+  })
+
   it('toggles the mobile menu open and closed', async () => {
     const user = userEvent.setup()
     render(<Navbar />)
