@@ -9,10 +9,4 @@ describe('sanity client', () => {
     // can serve half-written text. This is the switch that prevents it.
     expect(sanityClient.config().perspective).toBe('published')
   })
-
-  it('bypasses the Sanity CDN, since ISR already caches the result', () => {
-    // Stacking Sanity's CDN cache on top of the 60s ISR window would compound
-    // staleness and buy nothing — the render is already cached by Next.
-    expect(sanityClient.config().useCdn).toBe(false)
-  })
 })

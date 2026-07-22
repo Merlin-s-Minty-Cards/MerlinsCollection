@@ -1,8 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 // Sanity is a network boundary — stub the client, exercise our own mapping.
+// isSanityConfigured is true here: these tests cover the configured path where
+// the article layer actually queries Sanity (the unconfigured path is covered in
+// sanity-unconfigured.test.ts).
 vi.mock('@/lib/sanity', () => ({
   sanityClient: { fetch: vi.fn() },
+  isSanityConfigured: true,
 }))
 
 import { sanityClient } from '@/lib/sanity'

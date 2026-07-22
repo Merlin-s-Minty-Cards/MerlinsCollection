@@ -2,7 +2,7 @@
 // articles at /studio; these functions read what they publish.
 
 import type { PortableTextBlock } from '@portabletext/types'
-import { sanityClient } from '@/lib/sanity'
+import { sanityClient, isSanityConfigured } from '@/lib/sanity'
 
 /** An image resolved to something `next/image` can actually render. */
 export interface ArticleImage {
@@ -92,11 +92,15 @@ const ARTICLE_BY_SLUG_QUERY = `*[_type == "article" && slug.current == $slug][0]
  * timezone-safe downstream (see its comment).
  */
 export async function getAllArticles(): Promise<ArticleSummary[]> {
+  // No CMS credentials at build time (see isSanityConfigured) — return nothing so
+  // the build succeeds; the ISR page fetches for real once env is present.
+  if (!isSanityConfigured) return []
   const results = await sanityClient.fetch<SanityDoc<ArticleSummary>[]>(ALL_ARTICLES_QUERY)
   return (results ?? []).map(narrowDate)
 }
 
 export async function getArticleBySlug(slug: string): Promise<Article | undefined> {
+  if (!isSanityConfigured) return undefined
   const result = await sanityClient.fetch<SanityDoc<Article> | null>(ARTICLE_BY_SLUG_QUERY, { slug })
   return result ? narrowDate(result) : undefined
 }
