@@ -75,7 +75,7 @@ class ConsignmentTerms(BaseModel):
     """Terms for an item we sell on someone else's behalf (we don't own it)."""
 
     consignor_id: str
-    split_percent: Decimal  # our cut, 0-100
+    split_percent: Decimal  # our cut as a 0-1 fraction (0.05 = a 5% cut)
     minimum_price: Decimal | None = None
     paid_out: bool = False
 

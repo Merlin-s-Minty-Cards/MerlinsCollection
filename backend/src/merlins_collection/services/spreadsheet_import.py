@@ -1,9 +1,14 @@
 """One-shot importer: spreadsheet CSV exports -> the DynamoDB schema.
 
 Each tab has an ``import_<tab>`` function taking parsed CSV rows plus an
-``ImportContext``. Ids are deterministic (tab + row content hash) so re-running
-the import overwrites instead of duplicating. Ambiguity never guesses silently:
-unmappable rows are skipped-and-counted, uncertain mappings set
+``ImportContext``. The import uses SAFE REPLACE semantics: ``run_import`` refuses
+to run unless the export is complete, stamps every write with a generation id,
+loads the whole new dataset, and deletes the previous generation only once every
+tab commits (rolling this run back otherwise) — so a re-run is idempotent under
+any sheet edit (insert/delete/sort rows) and a missing/failed tab can never
+silently wipe a live ledger. Row-based records get fresh ULIDs; natural-keyed
+entities (shows, consignors) key on their business identity. Ambiguity never
+guesses silently: unmappable rows are skipped-and-counted, uncertain mappings set
 ``needs_review=True``.
 """
 
@@ -12,16 +17,27 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from functools import partial
+
+from pydantic import ValidationError
 
 from merlins_collection.models.business import (
+    BalanceSheetLine,
+    BalanceSheetSnapshot,
     BuyingPolicy,
     CashAccount,
     Consignor,
+    Debt,
+    DebtDirection,
+    Expense,
+    ExpenseCategory,
     ItemCategory,
     PaymentMethod,
+    Payout,
     Show,
     Transaction,
     TransactionType,
@@ -32,12 +48,19 @@ from merlins_collection.models.inventory import (
     ConditionModifier,
     ConsignmentTerms,
     GradedInventoryItem,
-    ItemStatus,
     RawInventoryItem,
     SealedInventoryItem,
+    new_ulid,
 )
 
 logger = logging.getLogger(__name__)
+
+# A per-row guard skips only genuine DATA problems (a bad cell). Infrastructure
+# errors (a DynamoDB throttle / ClientError) must NOT be swallowed as a "skipped"
+# row — they propagate to the per-tab envelope, fail that tab, and trigger the
+# import rollback instead of silently dropping a real record.
+_DATA_ERRORS = (ValueError, KeyError, TypeError, ArithmeticError,
+                InvalidOperation, ValidationError)
 
 
 def parse_money(text) -> Decimal | None:
@@ -47,9 +70,20 @@ def parse_money(text) -> Decimal | None:
     if cleaned in ("", "-"):
         return None
     try:
-        return Decimal(cleaned)
+        value = Decimal(cleaned)
     except InvalidOperation:
         return None
+    # DynamoDB rejects non-finite (NaN/Infinity), out-of-range magnitudes, and
+    # numbers with >38 significant digits (a boto3 decimal.Inexact at write time).
+    # Refuse all three at the boundary so one poison cell can't abort a mid-import
+    # write into the live table.
+    if not value.is_finite():
+        return None
+    if value != 0 and not (Decimal("1E-130") <= abs(value) <= Decimal("9.9E125")):
+        return None
+    if len(value.as_tuple().digits) > 38:
+        return None
+    return value
 
 
 def parse_date(text) -> date | None:
@@ -66,6 +100,53 @@ def parse_date(text) -> date | None:
 
 def parse_bool(text) -> bool:
     return str(text or "").strip().lower() in ("yes", "y", "true", "x", "1")
+
+
+# Only a WHOLE label equal to one of these is a summary row. Matching any name
+# that merely *contains* a "total" word would silently drop real records like the
+# vendor "Total Wine & More" or event "Total Sports Card Expo" (C2).
+_TOTAL_LABELS = frozenset({
+    "total", "totals", "subtotal", "subtotals", "grand total", "total cogs",
+})
+
+
+def _is_total_label(text) -> bool:
+    """True only when the ENTIRE normalized label is a summary/total label —
+    'Total', 'Totals', 'Grand Total', 'Total COGS', 'Subtotal' (punctuation and
+    case ignored). A multi-word name that merely starts with 'Total' is NOT a
+    total and is kept."""
+    norm = " ".join(re.sub(r"[^a-z ]", " ", str(text or "").lower()).split())
+    return norm in _TOTAL_LABELS
+
+
+_FIND_FUZZY_MIN = 6  # shortest alias length allowed to prefix-match (B3)
+
+
+def _find(row: dict, *names: str):
+    """Look up a value tolerating the real workbook's header drift.
+
+    Resolution order: exact header, then whitespace-stripped header, then — only
+    as a last resort — a prefix match against the shortest alias. That fuzzy
+    branch exists to survive dated-suffix renames (e.g. "Sticker" -> "Sticker
+    updated 7/16"), but it is gated to aliases of length >= ``_FIND_FUZZY_MIN``
+    so short, ambiguous cores like "Date"/"Name" can never silently bind a
+    sibling column ("Date Sold", "Name of Charge"). For a short/ambiguous field
+    whose header is verbose, pass the full header as an explicit alias instead of
+    relying on the prefix match.
+    """
+    for name in names:
+        if name in row:
+            return row[name]
+    stripped = {k.strip(): v for k, v in row.items() if isinstance(k, str)}
+    for name in names:
+        if name in stripped:
+            return stripped[name]
+    core = min(names, key=len).strip().lower()
+    if len(core) >= _FIND_FUZZY_MIN:
+        for key, value in row.items():
+            if isinstance(key, str) and key.strip().lower().startswith(core):
+                return value
+    return None
 
 
 def parse_condition(text: str) -> tuple[Condition, ConditionModifier | None]:
@@ -110,10 +191,18 @@ def map_location(text) -> dict:
     return out
 
 
-def deterministic_id(tab: str, row: dict) -> str:
-    """26-char id from the tab + row content, so re-imports overwrite in place."""
+def deterministic_id(tab: str, key) -> str:
+    """26-char id from the tab + a stable NATURAL/business key.
+
+    Used only for entities that have a real business identity in the sheet — a
+    show (day + name), a consignor (name), a balance-sheet snapshot (label) — so
+    a re-import overwrites the same record. Row-based records with no natural key
+    (inventory items, transactions, expenses, debts, payouts) instead get a fresh
+    ``new_ulid`` on each run; ``run_import``'s load-then-swap generation replace
+    makes that a clean replace rather than a duplicate.
+    """
     digest = hashlib.sha1(
-        (tab + "|" + json.dumps(row, sort_keys=True, default=str)).encode("utf-8")
+        (tab + "|" + json.dumps(key, sort_keys=True, default=str)).encode("utf-8")
     ).hexdigest()
     return digest[:26]
 
@@ -139,11 +228,15 @@ def _match_card(ctx: ImportContext, name: str, number: str):
     return hits[0].card_id if len(hits) == 1 else None
 
 
-def _record_sheet_sale(ctx, item, *, sold, date_sold, venmo, venmo_fees, category):
-    """Persist the item as sold + its ledger record (import path)."""
-    ctx.repo.put_inventory_item(item.model_copy(update={"status": ItemStatus.SOLD}))
+def _record_sheet_sale(ctx, item, *, sold, date_sold, venmo, venmo_fees, category,
+                       consignor_payout=None):
+    """Record a sheet sale ATOMICALLY: flip the already-persisted (available) item
+    to sold and append its ledger row in one ``record_sale`` transaction, so a
+    failed ledger write never leaves a half-sold item with no revenue row. The
+    txn gets a fresh ULID; run_import's load-then-swap generation replace makes a
+    re-import a clean replace rather than a double-count."""
     txn = Transaction(
-        txn_id=deterministic_id("txn", {"item": item.item_id}),
+        txn_id=new_ulid(),
         type=TransactionType.SALE,
         item_id=item.item_id,
         category=(ItemCategory.CONSIGNMENT if item.consignment else category),
@@ -152,25 +245,32 @@ def _record_sheet_sale(ctx, item, *, sold, date_sold, venmo, venmo_fees, categor
         payment_method="venmo" if venmo else "cash",
         fee=venmo_fees or Decimal("0"),
         show_id=nearest_show_id(date_sold, ctx.shows),
+        consignor_payout=consignor_payout,
     )
-    ctx.repo.put_transaction(txn)
+    ctx.repo.record_sale(txn)
 
 
 def import_singles(rows: list[dict], ctx: ImportContext) -> dict:
     summary = {"imported": 0, "sales": 0, "skipped": 0, "needs_review": 0}
     for row in rows:
         try:
-            condition, modifier = parse_condition(row["Condition"])
+            raw_condition = str(row.get("Condition") or "").strip()
+            if raw_condition:
+                condition, modifier = parse_condition(raw_condition)
+                blank_condition = False
+            else:
+                # A card with no condition: default NM but flag it rather than drop.
+                condition, modifier, blank_condition = Condition.NM, None, True
             loc = map_location(row.get("Location"))
             card_id = _match_card(ctx, row["Name"], row.get("Card #", ""))
-            needs_review = card_id is None
+            needs_review = card_id is None or blank_condition
             notes = " — ".join(x for x in (
                 f"{row['Name']} #{row.get('Card #', '')}".strip(" #"),
                 str(row.get("Notes") or "").strip() or None,
                 loc["notes_extra"],
             ) if x)
             item = RawInventoryItem(
-                item_id=deterministic_id("Singles", row),
+                item_id=new_ulid(),
                 card_id=card_id,
                 finish="normal",
                 condition=condition,
@@ -180,7 +280,7 @@ def import_singles(rows: list[dict], ctx: ImportContext) -> dict:
                 location=loc["location"],
                 cost_basis=parse_money(row.get("Amount Paid")) or Decimal("0"),
                 market_value_at_purchase=parse_money(row.get("Market @ purchase")),
-                listed_price=parse_money(row.get("Sticker")),
+                listed_price=parse_money(_find(row, "Sticker")),
                 acquired_at=parse_date(row.get("Date")) or date(2026, 1, 1),
                 notes=notes or None,
                 tcg_url=str(row.get("TCG Link") or "").strip() or None,
@@ -199,7 +299,7 @@ def import_singles(rows: list[dict], ctx: ImportContext) -> dict:
                     category=ItemCategory.RAW,
                 )
                 summary["sales"] += 1
-        except Exception:
+        except _DATA_ERRORS:
             logger.exception("Singles row skipped: %r", row.get("Name"))
             summary["skipped"] += 1
     return summary
@@ -209,18 +309,20 @@ def import_slabs(rows: list[dict], ctx: ImportContext) -> dict:
     summary = {"imported": 0, "sales": 0, "skipped": 0, "needs_review": 0}
     for row in rows:
         try:
-            card_id = _match_card(ctx, row["Name"], row.get("card#", ""))
+            name = _find(row, "Name", "Name (pkm + rarity + language )") or ""
+            card_id = _match_card(ctx, name, row.get("card#", ""))
             item = GradedInventoryItem(
-                item_id=deterministic_id("Slabs", row),
+                item_id=new_ulid(),
                 card_id=card_id,
                 company="PSA",  # sheet has no company column; flagged for review
                 grade=Decimal(str(row["Grade"]).strip()),
                 cert_number=str(row.get("Cert #") or "").strip() or "unknown",
                 cost_basis=parse_money(row.get("Amount Paid")) or Decimal("0"),
-                market_value_at_purchase=parse_money(row.get("Market @ purchase")),
-                listed_price=parse_money(row.get("Sticker")),
+                market_value_at_purchase=parse_money(
+                    _find(row, "Market @ purchase", "Market @ time of purchase")),
+                listed_price=parse_money(_find(row, "Sticker")),
                 acquired_at=parse_date(row.get("Date Recieved")) or date(2026, 1, 1),
-                notes=f"{row['Name']} — {row.get('Set', '')} #{row.get('card#', '')}",
+                notes=f"{name} — {row.get('Set', '')} #{row.get('card#', '')}",
                 needs_review=True,
             )
             ctx.repo.put_inventory_item(item)
@@ -234,7 +336,7 @@ def import_slabs(rows: list[dict], ctx: ImportContext) -> dict:
                                    venmo_fees=parse_money(row.get("Venmo Fees")),
                                    category=ItemCategory.GRADED)
                 summary["sales"] += 1
-        except Exception:
+        except _DATA_ERRORS:
             logger.exception("Slabs row skipped: %r", row.get("Name"))
             summary["skipped"] += 1
     return summary
@@ -259,14 +361,14 @@ def import_sealed(rows: list[dict], ctx: ImportContext) -> dict:
         try:
             product_type, needs_review = _guess_product_type(row["Name"])
             item = SealedInventoryItem(
-                item_id=deterministic_id("Sealed", row),
+                item_id=new_ulid(),
                 product_name=str(row["Name"]).strip(),
                 product_type=product_type,
                 status="on_hold" if parse_bool(row.get("Hold")) else "available",
                 cost_basis=parse_money(row.get("Amount Paid")) or Decimal("0"),
                 market_value_at_purchase=parse_money(row.get("Market @ time of purchase")),
-                listed_price=parse_money(row.get("Sticker")),
-                acquired_at=parse_date(row.get("Date")) or date(2026, 1, 1),
+                listed_price=parse_money(_find(row, "Sticker")),
+                acquired_at=parse_date(_find(row, "Date", "Column 1")) or date(2026, 1, 1),
                 tcg_url=str(row.get("TCG Link") or "").strip() or None,
                 needs_review=needs_review,
             )
@@ -281,7 +383,7 @@ def import_sealed(rows: list[dict], ctx: ImportContext) -> dict:
                                    venmo_fees=parse_money(row.get("Venmo Fees")),
                                    category=ItemCategory.SEALED)
                 summary["sales"] += 1
-        except Exception:
+        except _DATA_ERRORS:
             logger.exception("Sealed row skipped: %r", row.get("Name"))
             summary["skipped"] += 1
     return summary
@@ -292,7 +394,7 @@ def import_bulk(rows: list[dict], ctx: ImportContext) -> dict:
     for row in rows:
         try:
             item = BulkInventoryItem(
-                item_id=deterministic_id("Bulk", row),
+                item_id=new_ulid(),
                 description=str(row["Name"]).strip(),
                 cost_basis=parse_money(row.get("Amount Paid")) or Decimal("0"),
                 acquired_at=date(2026, 1, 1),  # tab has no acquisition date
@@ -307,7 +409,7 @@ def import_bulk(rows: list[dict], ctx: ImportContext) -> dict:
                                    venmo_fees=parse_money(row.get("Venmo Fees")),
                                    category=ItemCategory.BULK)
                 summary["sales"] += 1
-        except Exception:
+        except _DATA_ERRORS:
             logger.exception("Bulk row skipped: %r", row.get("Name"))
             summary["skipped"] += 1
     return summary
@@ -317,26 +419,53 @@ def _parse_percent(text) -> Decimal | None:
     return parse_money(str(text or "").replace("%", ""))
 
 
+def _parse_fraction(text) -> Decimal | None:
+    """A cut expressed as a 0-1 fraction. "5%", "5" and "0.05" all mean 0.05.
+
+    A "%" divides by 100; a bare number > 1 is read as a whole-number percent (so
+    "5" -> 0.05, never 500%). Anything still outside [0, 1] is rejected (None)
+    rather than poisoning payout math with a negative or over-100% split.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    value = parse_money(raw.replace("%", ""))
+    if value is None:
+        return None
+    if "%" in raw or value > 1:
+        value = value / Decimal("100")
+    if not (Decimal("0") <= value <= Decimal("1")):
+        return None
+    return value
+
+
 def import_shows(rows: list[dict], ctx: ImportContext) -> dict:
     summary = {"imported": 0, "skipped": 0}
     for row in rows:
-        day = parse_date(row.get("Day"))
-        name = str(row.get("Show") or "").strip()
-        if day is None or not name:
+        try:
+            day = parse_date(row.get("Day"))
+            name = str(row.get("Show") or "").strip()
+            if day is None or not name:
+                summary["skipped"] += 1
+                continue
+            # Natural key (day + name): editing a show's goal/cash keeps its id.
+            show = Show(
+                show_id=deterministic_id("Show", {"Day": row.get("Day"), "Show": name}),
+                name=name,
+                date=day,
+                sales_goal=parse_money(row.get("Goal")),
+                cash_at_start=parse_money(_find(
+                    row, "Cash at Beginning of Every Show Day", "Cash at Beginning of Show")),
+                inventory_value_at_start=parse_money(_find(
+                    row, "Inventory Value at Beginning of show",
+                    "Inventory Value heading into the show")),
+            )
+            ctx.repo.put_show(show)
+            ctx.shows.append(show)
+            summary["imported"] += 1
+        except _DATA_ERRORS:
+            logger.exception("Vending Net row skipped: %r", row.get("Show"))
             summary["skipped"] += 1
-            continue
-        show = Show(
-            show_id=deterministic_id("Show", {"Day": row.get("Day"), "Show": name}),
-            name=name,
-            date=day,
-            sales_goal=parse_money(row.get("Goal")),
-            cash_at_start=parse_money(row.get("Cash at Beginning of Every Show Day")),
-            inventory_value_at_start=parse_money(
-                row.get("Inventory Value at Beginning of show")),
-        )
-        ctx.repo.put_show(show)
-        ctx.shows.append(show)
-        summary["imported"] += 1
     return summary
 
 
@@ -355,13 +484,13 @@ def import_consignments(rows: list[dict], ctx: ImportContext) -> dict:
                 consignors[person] = consignor
             terms = ConsignmentTerms(
                 consignor_id=consignors[person].consignor_id,
-                split_percent=_parse_percent(row.get("Percentage we get")) or Decimal("0"),
+                split_percent=_parse_fraction(row.get("Percentage we get")) or Decimal("0"),
                 minimum_price=parse_money(row.get("Minimum")),
                 paid_out=parse_bool(row.get("Paid Out?")),
             )
             returned = str(row.get("Sold/Returned") or "").strip().lower() == "returned"
             common = dict(
-                item_id=deterministic_id("Consignments", row),
+                item_id=new_ulid(),
                 status="returned_to_consignor" if returned else "available",
                 cost_basis=Decimal("0"),  # not ours; we never paid for it
                 market_value_at_purchase=parse_money(row.get("Market")),
@@ -384,27 +513,19 @@ def import_consignments(rows: list[dict], ctx: ImportContext) -> dict:
             ctx.repo.put_inventory_item(item)
             summary["imported"] += 1
             sold = parse_money(row.get("Sold"))
-            date_sold = parse_date(row.get("Date Sold"))
+            date_sold = parse_date(_find(row, "Date Sold", "Date Sold or Returned"))
             if sold is not None and date_sold is not None and not returned:
                 payout = parse_money(row.get("To payout"))
                 if payout is None:
-                    payout = sold - (sold * terms.split_percent / Decimal("100"))
-                ctx.repo.put_inventory_item(
-                    item.model_copy(update={"status": ItemStatus.SOLD}))
-                ctx.repo.put_transaction(Transaction(
-                    txn_id=deterministic_id("txn", {"item": item.item_id}),
-                    type=TransactionType.SALE,
-                    item_id=item.item_id,
-                    category=ItemCategory.CONSIGNMENT,
-                    date=date_sold,
-                    amount=sold,
-                    payment_method="venmo" if parse_bool(row.get("Venmo?")) else "cash",
-                    fee=parse_money(row.get("Venmo Fees")) or Decimal("0"),
-                    show_id=nearest_show_id(date_sold, ctx.shows),
-                    consignor_payout=payout,
-                ))
+                    payout = sold - (sold * terms.split_percent)
+                _record_sheet_sale(
+                    ctx, item, sold=sold, date_sold=date_sold,
+                    venmo=parse_bool(row.get("Venmo?")),
+                    venmo_fees=parse_money(row.get("Venmo Fees")),
+                    category=ItemCategory.CONSIGNMENT, consignor_payout=payout,
+                )
                 summary["sales"] += 1
-        except Exception:
+        except _DATA_ERRORS:
             logger.exception("Consignments row skipped: %r", row.get("Card Name"))
             summary["skipped"] += 1
     return summary
@@ -413,41 +534,317 @@ def import_consignments(rows: list[dict], ctx: ImportContext) -> dict:
 def import_cash(rows: list[dict], ctx: ImportContext) -> dict:
     summary = {"imported": 0, "skipped": 0}
     for row in rows:
-        account = str(row.get("Type") or "").strip().lower()
-        amount = parse_money(row.get("Amount"))
-        if not account or account == "total" or amount is None:
+        try:
+            account = str(row.get("Type") or "").strip().lower()
+            amount = parse_money(row.get("Amount"))
+            if not account or _is_total_label(account) or amount is None:
+                summary["skipped"] += 1
+                continue
+            ctx.repo.put_cash_account(CashAccount(account=account, balance=amount))
+            summary["imported"] += 1
+        except _DATA_ERRORS:
+            logger.exception("Cash row skipped: %r", row.get("Type"))
             summary["skipped"] += 1
-            continue
-        ctx.repo.put_cash_account(CashAccount(account=account, balance=amount))
-        summary["imported"] += 1
     return summary
 
 
 def import_buying_guidelines(rows: list[dict], ctx: ImportContext) -> dict:
     summary = {"imported": 0, "skipped": 0}
     for row in rows:
-        product_type = str(row.get("Product Type") or "").strip().lower()
-        if not product_type:
+        try:
+            product_type = str(_find(row, "Product Type") or "").strip().lower()
+            if not product_type:
+                summary["skipped"] += 1
+                continue
+            ctx.repo.put_buying_policy(BuyingPolicy(
+                product_type=product_type,
+                cash_pct_min=_parse_percent(row.get("Cash % Min")),
+                cash_pct_max=_parse_percent(row.get("Cash % Max")),
+                trade_pct_min=_parse_percent(row.get("Trade % Min")),
+                trade_pct_max=_parse_percent(row.get("Trade % Max")),
+            ))
+            summary["imported"] += 1
+        except _DATA_ERRORS:
+            logger.exception("Buying Guidelines row skipped: %r", row.get("Product Type"))
             summary["skipped"] += 1
-            continue
-        ctx.repo.put_buying_policy(BuyingPolicy(
-            product_type=product_type,
-            cash_pct_min=_parse_percent(row.get("Cash % Min")),
-            cash_pct_max=_parse_percent(row.get("Cash % Max")),
-            trade_pct_min=_parse_percent(row.get("Trade % Min")),
-            trade_pct_max=_parse_percent(row.get("Trade % Max")),
-        ))
-        summary["imported"] += 1
     return summary
 
 
+def import_expenses(rows: list[dict], ctx: ImportContext, category: ExpenseCategory,
+                    *, link_show: bool = False) -> dict:
+    """Flat expense tabs (Show Fees / Other COGS / Marketing / Supplies).
+
+    Amount keeps its sign (negative = money came in). A ``Total(s)`` summary row
+    and rows lacking a name+amount are skipped. ``link_show`` ties show-day costs
+    to the nearest show; general overhead (marketing/supplies) stays unlinked.
+    """
+    summary = {"imported": 0, "skipped": 0}
+    for row in rows:
+        try:
+            name = str(_find(row, "Name") or "").strip()
+            amount = parse_money(_find(row, "Amount",
+                                       "Amount (neg numbers is money coming in)"))
+            if not name or _is_total_label(name) or amount is None:
+                summary["skipped"] += 1
+                continue
+            day = parse_date(_find(row, "Date of Transaction", "Date")) or date(2026, 1, 1)
+            platform = str(_find(row, "Platform") or "").strip().lower() or "cash"
+            reason = str(
+                _find(row, "Reason", "Why is this COGS?", "Notes") or "").strip() or None
+            ctx.repo.put_expense(Expense(
+                expense_id=new_ulid(),
+                category=category, date=day, amount=amount,
+                payment_method=platform, description=name, reason=reason,
+                show_id=nearest_show_id(day, ctx.shows) if link_show else None,
+            ))
+            summary["imported"] += 1
+        except _DATA_ERRORS:
+            logger.exception("%s row skipped: %r", category.value, row.get("Name"))
+            summary["skipped"] += 1
+    return summary
+
+
+_WAGE_PERSON_COLS = ("Person 1 Amt", "Person 2 Amt", "Person 3 Amt")
+
+
+def import_employee_wages(rows: list[dict], ctx: ImportContext) -> dict:
+    """Per-show wages: one expense per person with a non-zero amount."""
+    summary = {"imported": 0, "skipped": 0}
+    for row in rows:
+        try:
+            day = parse_date(_find(row, "Date")) or date(2026, 1, 1)
+            show_id = nearest_show_id(day, ctx.shows)
+            paid = parse_bool(row.get("Paid?"))
+            wrote = False
+            for person_col in _WAGE_PERSON_COLS:
+                amount = parse_money(row.get(person_col))
+                if amount is None or amount == 0:
+                    continue
+                ctx.repo.put_expense(Expense(
+                    expense_id=new_ulid(),
+                    category=ExpenseCategory.EMPLOYEE_WAGE, date=day, amount=amount,
+                    payment_method="cash", person=person_col.replace(" Amt", ""),
+                    description=str(row.get("Show") or "").strip() or None,
+                    show_id=show_id, paid=paid,
+                    notes=str(row.get("Notes") or "").strip() or None,
+                ))
+                summary["imported"] += 1
+                wrote = True
+            if not wrote:
+                summary["skipped"] += 1
+        except _DATA_ERRORS:
+            logger.exception("Wages row skipped: %r", row.get("Show"))
+            summary["skipped"] += 1
+    return summary
+
+
+def import_employee_expenses(rows: list[dict], ctx: ImportContext) -> dict:
+    """Employee reimbursements (food/travel at an event)."""
+    summary = {"imported": 0, "skipped": 0}
+    for row in rows:
+        try:
+            name = str(_find(row, "Name of Charge") or "").strip()
+            amount = parse_money(_find(row, "Amount"))
+            if not name or _is_total_label(name) or amount is None:
+                summary["skipped"] += 1
+                continue
+            day = parse_date(_find(row, "Event Date", "Date")) or date(2026, 1, 1)
+            ctx.repo.put_expense(Expense(
+                expense_id=new_ulid(),
+                category=ExpenseCategory.EMPLOYEE_EXPENSE, date=day, amount=amount,
+                payment_method="cash", description=name,
+                reason=str(_find(row, "Reason") or "").strip() or None,
+                show_id=nearest_show_id(day, ctx.shows),
+                paid=parse_bool(row.get("Paid?")),
+                notes=str(row.get("Event name") or "").strip() or None,
+            ))
+            summary["imported"] += 1
+        except _DATA_ERRORS:
+            logger.exception("Employee Expenses row skipped: %r", row.get("Name of Charge"))
+            summary["skipped"] += 1
+    return summary
+
+
+_DEBT_SIDES = (
+    # direction, amount-column aliases, and the (deduped) date/who/reason/cleared
+    # columns. Amounts go through ``_find`` like every other importer so a
+    # reworded/dated header ("Amount Owed to Company (as of 7/16)") still binds
+    # instead of silently skipping the whole side.
+    (DebtDirection.OWED_TO_US,
+     ("Amount Owed to Company", "Amount Owed to Us", "Amount Owed"),
+     "Date", "Who", "Reason", "Cleared"),
+    (DebtDirection.WE_OWE,
+     ("Amount in Debt to Others", "Amount We Owe", "Amount in Debt"),
+     "Date_2", "Who_2", "Reason_2", "Cleared_2"),
+)
+
+
+def import_debts(rows: list[dict], ctx: ImportContext) -> dict:
+    """The Debts tab is two ledgers side by side (owed-to-us | we-owe) that reuse
+    the same header names; ``run_import`` de-dupes repeats to ``_2`` so both are
+    reachable. A row can contribute a debt on either or both sides."""
+    summary = {"imported": 0, "skipped": 0}
+    for row in rows:
+        try:
+            wrote = False
+            for direction, amount_cols, date_col, who_col, reason_col, cleared_col in _DEBT_SIDES:
+                amount = parse_money(_find(row, *amount_cols))
+                who = str(row.get(who_col) or "").strip()
+                if amount is None or not who:
+                    continue
+                ctx.repo.put_debt(Debt(
+                    debt_id=new_ulid(),
+                    direction=direction,
+                    date=parse_date(row.get(date_col)) or date(2026, 1, 1),
+                    amount=amount,
+                    counterparty=who,
+                    reason=str(row.get(reason_col) or "").strip() or None,
+                    cleared=parse_bool(row.get(cleared_col)),
+                ))
+                summary["imported"] += 1
+                wrote = True
+            if not wrote:
+                summary["skipped"] += 1
+        except _DATA_ERRORS:
+            # Log only the counterparty name, never the whole row — the amount
+            # columns are the owner's financial data and must not reach logs.
+            logger.exception("Debts row skipped: %r", row.get("Who"))
+            summary["skipped"] += 1
+    return summary
+
+
+# Columns on the Payouts tab that are NOT partners. A partner is any *other*
+# column; we deny-list the known meta/derived/total columns (and de-duped blank
+# spacers like "_2") so a per-row Total/Revenue column can't become a phantom
+# partner with the summed amount.
+_PAYOUT_NON_PARTNER_COLS = {
+    "event", "note", "notes", "percentage", "total", "totals", "subtotal",
+    "revenue", "gross", "day", "date", "",
+}
+
+
+def import_payouts(rows: list[dict], ctx: ImportContext) -> dict:
+    """Payouts tab: each row is one event; every column that is NOT a known
+    meta/total column is a partner, and a non-zero cell is that partner's cut. A
+    totals row (no event, or an event labelled 'Total') is skipped."""
+    summary = {"imported": 0, "skipped": 0}
+    for row in rows:
+        try:
+            event = str(_find(row, "Event") or "").strip()
+            if not event or _is_total_label(event):
+                summary["skipped"] += 1
+                continue
+            percent = _parse_fraction(_find(row, "Percentage"))
+            note = str(_find(row, "Note", "Notes") or "").strip() or None
+            wrote = False
+            for col, value in row.items():
+                if not isinstance(col, str):
+                    continue
+                key = col.strip().lower()
+                # Not a partner: known meta columns, de-duped blank spacers ("_2"),
+                # or any header carrying a "total"/"subtotal" word (Total Cut,
+                # Running Total, Net Total) — partners are people's names, never
+                # these. (F3: fail closed on derived-total columns.)
+                if (key in _PAYOUT_NON_PARTNER_COLS or re.fullmatch(r"_\d+", key)
+                        or any(w.startswith(("total", "subtotal")) for w in key.split())):
+                    continue
+                amount = parse_money(value)
+                if amount is None or amount == 0:
+                    continue
+                ctx.repo.put_payout(Payout(
+                    payout_id=new_ulid(),
+                    event=event, partner=col.strip(), amount=amount,
+                    percent=percent, notes=note,
+                ))
+                summary["imported"] += 1
+                wrote = True
+            if not wrote:
+                summary["skipped"] += 1
+        except _DATA_ERRORS:
+            logger.exception("Payouts row skipped: %r", row.get("Event"))
+            summary["skipped"] += 1
+    return summary
+
+
+_BS_SECTIONS = {"assets": "asset", "liabilities": "liability", "equity": "equity"}
+
+
+def import_balance_sheet(rows: list[dict], ctx: ImportContext, *,
+                         label: str, frozen: bool) -> dict:
+    """A balance-sheet tab (col 1 = line label, col 2 = amount, col 3 = note).
+
+    Tracks the current top-level section from ``Assets``/``Liabilities``/``Equity``
+    header rows and stores only leaf lines — section headers and ``Total ...``
+    subtotals are computed, so they are skipped.
+
+    The FROZEN baseline is WRITE-ONCE: once captured it is an immutable,
+    non-re-derivable point-in-time record, so a later import never re-writes it.
+    That is what makes a *partially* truncated Beginning tab harmless — it can no
+    longer overwrite the complete baseline in place with a subset (BLOCKING-1a).
+    """
+    if frozen:
+        existing = ctx.repo.get_frozen_balance_sheet(label)
+        if existing is not None:
+            logger.info(
+                "Frozen balance sheet %r already captured — immutable baseline, "
+                "leaving it untouched (%d lines).", label, len(existing.lines))
+            return {"imported": 0, "skipped": len(rows), "preserved": True}
+    section = None
+    lines = []
+    for row in rows:
+        try:
+            label_cell = str(row.get("Column 1") or "").strip()
+            low = label_cell.lower()
+            if low in _BS_SECTIONS:
+                section = _BS_SECTIONS[low]
+                continue
+            amount = parse_money(row.get("Column 2"))
+            # Balance-sheet Column-1 labels are structured accounting terms (no
+            # free-text vendor names), so a plain startswith is safe here and
+            # correctly drops subtotals like "Total Current Assets".
+            if (not label_cell or amount is None or low.startswith("total")
+                    or section is None):
+                continue
+            lines.append(BalanceSheetLine(
+                section=section, label=label_cell, amount=amount,
+                note=str(row.get("Column 3") or "").strip() or None))
+        except _DATA_ERRORS:
+            # Log only the non-financial line label — never the whole row, which
+            # carries the amount (Column 2).
+            logger.exception("Balance sheet %r line skipped: %r",
+                             label, row.get("Column 1"))
+    # A present balance-sheet tab always has content, so ZERO leaf lines means the
+    # export is broken: a renamed label column / reworded section header (drift),
+    # or a truncated/empty download. Persisting a valid-looking empty snapshot
+    # would let the commit delete the prior — non-re-derivable — frozen baseline.
+    # FAIL the tab instead so the run rolls back and the prior snapshot survives;
+    # never return a success dict that authorizes the destructive swap.
+    if not lines:
+        raise ValueError(
+            f"Balance sheet {label!r}: tab produced zero leaf lines (layout drift "
+            "or truncated/empty export?) — refusing to store an empty snapshot")
+    ctx.repo.put_balance_sheet(BalanceSheetSnapshot(
+        snapshot_id=deterministic_id("BalanceSheet", label),
+        label=label, frozen=frozen, lines=lines))
+    return {"imported": len(lines), "skipped": 0}
+
+
 def seed_payment_methods(repo) -> None:
+    """Seed the payment methods the sheet actually uses. Only Venmo charges a
+    fee today; the rest (cash, card, bank, trade, cashapp, zelle, reimbursed)
+    are fee-free but recorded so a transaction's method always resolves."""
     repo.put_payment_method(PaymentMethod(method="venmo", fee_percent=Decimal("1.9"),
                                           fee_fixed=Decimal("0.10")))
-    repo.put_payment_method(PaymentMethod(method="cash"))
+    for method in ("cash", "card", "bank", "trade", "cashapp", "zelle", "reimbursed"):
+        repo.put_payment_method(PaymentMethod(method=method))
 
 
-_TAB_IMPORTERS = [  # shows first: everything else matches sales to them
+# Every tab listed here is covered automatically by the per-tab truncation guard
+# (`_empty_tabs`): if it is present but imports zero records the run fails closed.
+# Adding a tab needs no second registry to stay in sync — the guard derives from
+# this table, so a new ledger cannot silently default to unguarded. An importer
+# added here MUST return a summary carrying an ``imported`` count for that to work.
+_TAB_IMPORTERS = [  # shows first: everything else matches sales/costs to them
     ("Vending Net", import_shows),
     ("Cash", import_cash),
     ("Buying Guidelines", import_buying_guidelines),
@@ -456,26 +853,143 @@ _TAB_IMPORTERS = [  # shows first: everything else matches sales to them
     ("Sealed", import_sealed),
     ("Bulk", import_bulk),
     ("Consignments", import_consignments),
+    ("Show Fees", partial(import_expenses, category=ExpenseCategory.SHOW_FEE,
+                          link_show=True)),
+    ("Other COGS", partial(import_expenses, category=ExpenseCategory.OTHER_COGS)),
+    ("Marketing", partial(import_expenses, category=ExpenseCategory.MARKETING)),
+    ("Supplies", partial(import_expenses, category=ExpenseCategory.SUPPLIES)),
+    ("Employee Wages", import_employee_wages),
+    ("Employee Expenses", import_employee_expenses),
+    ("Debts", import_debts),
+    ("Payouts", import_payouts),
+    ("Balance Sheet Beginning",
+     partial(import_balance_sheet, label="beginning", frozen=True)),
+    ("Copy of Balance Sheet Beginning",
+     partial(import_balance_sheet, label="current", frozen=False)),
 ]
 
 
-def run_import(csv_dir, repo) -> dict:
-    """Import every recognized ``<Tab>.csv`` in ``csv_dir``; returns per-tab summaries."""
+def _dedupe_headers(header: list[str]) -> list[str]:
+    """Make a header row unique by suffixing repeats (``Date`` -> ``Date_2``).
+
+    ``csv.DictReader`` silently drops all but the last cell of a duplicated
+    header; some tabs (Debts) reuse names across two side-by-side ledgers, so we
+    build the dict ourselves from a de-duplicated header instead.
+    """
+    seen: dict[str, int] = {}
+    out = []
+    for h in header:
+        seen[h] = seen.get(h, 0) + 1
+        out.append(h if seen[h] == 1 else f"{h}_{seen[h]}")
+    return out
+
+
+def _read_tab_rows(path, csv_module) -> list[dict]:
+    """Read one tab CSV into de-duped-header row dicts. May raise (e.g. a cell
+    over the csv field-size limit) — the caller isolates that per tab."""
+    with path.open(newline="", encoding="utf-8-sig") as f:
+        reader = csv_module.reader(f)
+        try:
+            fieldnames = _dedupe_headers(next(reader))
+        except StopIteration:
+            return []
+        return [dict(zip(fieldnames, r)) for r in reader]
+
+
+def _empty_tabs(summaries: dict, allow_empty) -> list[str]:
+    """Present tabs that imported ZERO records and were not declared empty.
+
+    A tab whose CSV is present but which yields no records is either a TRUNCATED
+    export (the silent-loss case: committing would delete the prior rows it failed
+    to re-create) or a legitimately empty ledger. The two are indistinguishable
+    from the bytes, so the run fails closed and the operator opts in per tab via
+    ``allow_empty``. Checking per TAB — not per entity — is what catches a single
+    truncated tab of a MULTI-tab entity (one of the six expense tabs, one of the
+    four inventory tabs), where the entity total stays non-zero because the
+    sibling tabs imported fine (BLOCKING-2).
+    """
+    return sorted(
+        tab for tab, s in summaries.items()
+        if isinstance(s, dict) and not tab.startswith("_")
+        and "failed" not in s and not s.get("preserved")
+        and s.get("imported") == 0 and tab not in allow_empty
+    )
+
+
+def run_import(csv_dir, repo, *, require_complete: bool = True,
+               allow_empty=frozenset()) -> dict:
+    """Import the workbook's tab CSVs from ``csv_dir`` with SAFE REPLACE semantics.
+
+    Four guarantees protect the live money table:
+
+    * **Single-flight lock**: the run takes a conditional-write import lock and
+      refuses to start (``ImportInProgressError``) while another import is in
+      flight, so two overlapping runs can never race the destructive swap.
+    * **Completeness precondition** (``require_complete``): the run refuses to touch
+      the DB unless ``csv_dir`` exists and every expected tab CSV is present. A
+      wrong directory, a dropped/renamed tab, or an intentional subset export
+      raises *before* any write — it can never silently wipe a ledger and reload
+      nothing. (Tests scope to a subset with ``require_complete=False``.)
+    * **Load-then-swap** (generations): every write is stamped with a fresh
+      generation id — including the natural-key entities, whose sort keys are
+      generation-scoped so they no longer overwrite in place — the whole new
+      dataset is loaded first, and the *previous* generation is deleted only if
+      EVERY tab committed. If any tab fails, this run's generation is rolled back
+      instead and the prior data (including every stable-key row) survives intact.
+    * **Per-tab truncation guard**: a present tab that imports zero records fails
+      the run unless its name is listed in ``allow_empty`` (the operator's explicit
+      "this ledger is genuinely empty" acknowledgement).
+
+    Returns per-tab summaries plus ``_committed`` (bool), ``_removed`` (count) and,
+    when the truncation guard fires, ``_empty_tabs``.
+    """
     import csv
     from pathlib import Path
 
     csv_dir = Path(csv_dir)
-    seed_payment_methods(repo)
-    catalog_index: dict = {}
-    for card in repo.iter_catalog_cards():
-        catalog_index.setdefault((card.name.lower(), card.number), []).append(card)
-    ctx = ImportContext(repo=repo, catalog_index=catalog_index)
-    summaries = {}
-    for tab, importer in _TAB_IMPORTERS:
-        path = csv_dir / f"{tab}.csv"
-        if not path.exists():
-            continue
-        with path.open(newline="", encoding="utf-8-sig") as f:
-            rows = list(csv.DictReader(f))
-        summaries[tab] = importer(rows, ctx)
+    if require_complete:
+        if not csv_dir.is_dir():
+            raise ImportError(f"csv_dir is not a directory: {csv_dir}")
+        missing = [tab for tab, _ in _TAB_IMPORTERS
+                   if not (csv_dir / f"{tab}.csv").exists()]
+        if missing:
+            raise ImportError(
+                f"incomplete export — refusing to import; missing tab CSVs: {missing}")
+
+    gen = new_ulid()
+    repo.acquire_import_lock(gen)  # raises ImportInProgressError if one is running
+    summaries: dict = {}
+    try:
+        repo.set_import_generation(gen)
+        seed_payment_methods(repo)
+        catalog_index: dict = {}
+        for card in repo.iter_catalog_cards():
+            catalog_index.setdefault((card.name.lower(), card.number), []).append(card)
+        ctx = ImportContext(repo=repo, catalog_index=catalog_index)
+        for tab, importer in _TAB_IMPORTERS:
+            path = csv_dir / f"{tab}.csv"
+            if not path.exists():
+                continue
+            try:
+                rows = _read_tab_rows(path, csv)
+                summaries[tab] = importer(rows, ctx)
+            except Exception as exc:  # isolate a whole-tab failure (incl. infra)
+                logger.exception("Tab %r failed", tab)
+                summaries[tab] = {"failed": repr(exc)}
+        committed = not any(
+            isinstance(s, dict) and "failed" in s for s in summaries.values())
+        if committed:
+            empty = _empty_tabs(summaries, allow_empty)
+            if empty:
+                logger.error(
+                    "refusing to commit: present tab(s) imported zero records "
+                    "(truncated export?): %s — re-run with allow_empty={...} if "
+                    "these ledgers are genuinely empty.", empty)
+                summaries["_empty_tabs"] = empty
+                committed = False
+        summaries["_removed"] = repo.finalize_import(gen, committed=committed)
+        summaries["_committed"] = committed
+    finally:
+        repo.set_import_generation(None)
+        repo.release_import_lock(gen)
     return summaries

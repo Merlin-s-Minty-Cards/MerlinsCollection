@@ -23,16 +23,21 @@ beforeEach(() => {
 
 // Fixtures mirror the backend wire format exactly: Decimal fields are STRINGS
 // (pinned by backend test_search_response_serializes_decimals_as_strings).
+// Wire format after the Database-Redesign: each item has its own `item_id`
+// (the stable identity), `card_id` is OPTIONAL (absent for sealed/bulk and for
+// unmatched cards), and `quantity` is GONE (one record = one physical unit).
 export function makeRawItem(overrides: Record<string, unknown> = {}): InventoryItem {
   return {
     kind: 'raw',
+    item_id: '01JRAWCHARIZARDNM0000000001',
     card_id: 'base1-4',
-    quantity: 1,
     listed_price: '250.00',
     current_market_value: '300.00',
     acquired_at: '2026-04-01',
     finish: 'holofoil',
     condition: 'NM',
+    condition_modifier: null,
+    factory_sealed: false,
     card: {
       card_id: 'base1-4',
       name: 'Charizard',
@@ -49,8 +54,8 @@ export function makeRawItem(overrides: Record<string, unknown> = {}): InventoryI
 export function makeGradedItem(overrides: Record<string, unknown> = {}): InventoryItem {
   return {
     kind: 'graded',
+    item_id: '01JGRADEDCHARIZARDPSA000001',
     card_id: 'base1-4',
-    quantity: 1,
     listed_price: '900.00',
     current_market_value: null,
     acquired_at: '2026-04-01',
@@ -66,6 +71,22 @@ export function makeGradedItem(overrides: Record<string, unknown> = {}): Invento
       rarity: 'Rare Holo',
       image_small: 'https://img/charizard.png',
     },
+    ...overrides,
+  } as InventoryItem
+}
+
+// Sealed products are customer-visible (backend `_CUSTOMER_KINDS`) but have NO
+// catalog card, no `card_id`, and no condition — the redesign added this kind.
+export function makeSealedItem(overrides: Record<string, unknown> = {}): InventoryItem {
+  return {
+    kind: 'sealed',
+    item_id: '01JSEALEDBOOSTERBOX00000001',
+    listed_price: '120.00',
+    current_market_value: '140.00',
+    acquired_at: '2026-04-01',
+    product_name: 'Scarlet & Violet Booster Box',
+    product_type: 'booster_box',
+    card: null,
     ...overrides,
   } as InventoryItem
 }
@@ -188,6 +209,16 @@ describe('itemTitle', () => {
   it('falls back to the card_id when the catalog row is missing', () => {
     expect(itemTitle(makeRawItem({ card: null }))).toBe('base1-4')
   })
+
+  it('uses the product_name for a sealed product (no card, no card_id)', () => {
+    expect(itemTitle(makeSealedItem())).toBe('Scarlet & Violet Booster Box')
+  })
+
+  it('falls back to the item_id when neither card nor card_id is present', () => {
+    expect(itemTitle(makeRawItem({ card: null, card_id: undefined }))).toBe(
+      '01JRAWCHARIZARDNM0000000001',
+    )
+  })
 })
 
 describe('conditionLabel', () => {
@@ -195,19 +226,32 @@ describe('conditionLabel', () => {
     expect(conditionLabel(makeRawItem())).toBe('NM')
   })
 
+  it('appends the +/- modifier for raw items that carry one', () => {
+    expect(conditionLabel(makeRawItem({ condition: 'LP', condition_modifier: '+' }))).toBe('LP+')
+    expect(conditionLabel(makeRawItem({ condition: 'NM', condition_modifier: '-' }))).toBe('NM-')
+  })
+
   it('is company + grade for graded items', () => {
     expect(conditionLabel(makeGradedItem())).toBe('PSA 9.5')
+  })
+
+  it('is a human-readable product type for sealed products', () => {
+    expect(conditionLabel(makeSealedItem())).toBe('Booster Box')
+    expect(conditionLabel(makeSealedItem({ product_type: 'etb' }))).toBe('Elite Trainer Box')
   })
 })
 
 describe('itemKey', () => {
-  it('is unique across variants of the same card', () => {
+  it('is the item_id (the stable per-unit identity)', () => {
+    expect(itemKey(makeRawItem())).toBe('01JRAWCHARIZARDNM0000000001')
+  })
+
+  it('is unique across items — even the same card in different physical units', () => {
     const keys = [
-      itemKey(makeRawItem({ condition: 'NM' })),
-      itemKey(makeRawItem({ condition: 'LP' })),
-      itemKey(makeRawItem({ finish: 'reverseHolofoil' })),
-      itemKey(makeGradedItem()),
-      itemKey(makeGradedItem({ cert_number: '99999999' })),
+      itemKey(makeRawItem({ item_id: 'itm-1' })),
+      itemKey(makeRawItem({ item_id: 'itm-2' })),
+      itemKey(makeGradedItem({ item_id: 'itm-3' })),
+      itemKey(makeSealedItem({ item_id: 'itm-4' })),
     ]
     expect(new Set(keys).size).toBe(keys.length)
   })

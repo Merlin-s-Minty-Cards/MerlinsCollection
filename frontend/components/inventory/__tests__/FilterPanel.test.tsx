@@ -24,8 +24,8 @@ beforeEach(() => {
 
 const charizard: InventoryItem = {
   kind: 'raw',
+  item_id: '01JRAWCHARIZARDNM0000000001',
   card_id: 'base1-4',
-  quantity: 1,
   listed_price: '250.42',
   current_market_value: '300.00',
   acquired_at: '2026-04-01',

@@ -58,3 +58,7 @@ docs/learning/
 
 # Agent workflow progress/roadmap scaffolding (not project docs)
 claude-progress.txt
+
+# Business spreadsheet exports (private financial data — never commit)
+data/spreadsheet/
+/.claude/council

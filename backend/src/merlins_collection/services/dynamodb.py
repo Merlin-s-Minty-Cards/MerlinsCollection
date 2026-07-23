@@ -35,10 +35,14 @@ from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
 from merlins_collection.models.business import (
+    BalanceSheetSnapshot,
     BuyingPolicy,
     CashAccount,
     Consignor,
+    Debt,
+    Expense,
     PaymentMethod,
+    Payout,
     Show,
     Transaction,
 )
@@ -60,9 +64,11 @@ def _grade_key(grade) -> str:
     return f"{Decimal(str(grade)).normalize():f}"
 
 
-def _bucket(card_id: str) -> int:
-    # Stable across processes — never use builtin hash() (salted by PYTHONHASHSEED).
-    digest = hashlib.md5(card_id.encode("utf-8")).hexdigest()
+def _bucket(key: str) -> int:
+    # Shard an inventory ``item_id`` (or txn's item_id) across INVENTORY_SHARD_COUNT
+    # partitions via md5 — stable across processes, unlike builtin hash() which is
+    # salted by PYTHONHASHSEED.
+    digest = hashlib.md5(key.encode("utf-8")).hexdigest()
     return int(digest, 16) % INVENTORY_SHARD_COUNT
 
 
@@ -82,6 +88,16 @@ class ItemAlreadySoldError(Exception):
     """The sale's target item is already sold (or doesn't exist)."""
 
 
+class ImportInProgressError(Exception):
+    """Another import already holds the single-flight import lock.
+
+    Raised by ``acquire_import_lock`` when a live (non-expired) lock is held, so a
+    second concurrent run refuses to start rather than racing the first into a
+    mutual-wipe. The lock — not cross-machine ULID wall-clock ordering — is what
+    makes the finalize swap safe under concurrency (BLOCKING-4).
+    """
+
+
 class InventoryRepository:
     """Data-access layer over the single DynamoDB table.
 
@@ -91,6 +107,7 @@ class InventoryRepository:
     """
 
     def __init__(self, table_name, *, endpoint_url=None, region_name="us-east-1"):
+        self._import_gen = None  # set during an import so writes carry a generation
         self._resource = boto3.resource(
             "dynamodb", endpoint_url=endpoint_url, region_name=region_name
         )
@@ -135,6 +152,151 @@ class InventoryRepository:
             ],
         )
         self._table.wait_until_exists()
+
+    # Entities the spreadsheet import OWNS and fully replaces on each run. The
+    # catalog side (catalog_card / price_point / graded_price / item_price_point)
+    # is NOT import-owned and is preserved.
+    _IMPORT_OWNED_ENTITIES = frozenset({
+        "inventory_item", "transaction", "expense", "debt", "payout",
+        "show", "consignor", "cash_account", "buying_policy", "payment_method",
+        "balance_sheet_snapshot",
+    })
+
+    # ---- single-flight import lock (BLOCKING-4) ----
+    # A conditional-write lock item. Only one import may be in flight at a time,
+    # so `finalize_import`'s "delete every generation that is not mine" swap can
+    # never race a concurrent run. This replaces R5's monotonic ULID ordering,
+    # which rested on cross-machine wall-clock agreement (clock skew / a backward
+    # NTP step could invert it and let an older-content run delete a newer
+    # committed generation). The lock item is NOT an import-owned entity, so
+    # `finalize_import` never sweeps it.
+    _LOCK_KEY = {"PK": "IMPORTLOCK", "SK": "LOCK"}
+    _LOCK_TTL_SECONDS = 3600  # >> a full import; only a crashed holder is stolen
+
+    def acquire_import_lock(self, gen, *, ttl_seconds: int | None = None):
+        """Take the single-flight import lock for ``gen``.
+
+        Conditional on the lock being absent or EXPIRED, so a crashed holder's
+        stale lock is reclaimed after ``ttl_seconds`` instead of wedging imports
+        forever. Raises ``ImportInProgressError`` if a live lock is held.
+        """
+        ttl = self._LOCK_TTL_SECONDS if ttl_seconds is None else ttl_seconds
+        now = int(time.time())
+        try:
+            self._table.put_item(
+                Item={**self._LOCK_KEY, "entity": "import_lock", "gen": gen,
+                      "acquired_at": now, "expires_at": now + ttl},
+                ConditionExpression="attribute_not_exists(PK) OR #x < :now",
+                ExpressionAttributeNames={"#x": "expires_at"},
+                ExpressionAttributeValues={":now": now},
+            )
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                raise ImportInProgressError(
+                    "another import is already in flight (import lock held); "
+                    "refusing to start a second run"
+                ) from exc
+            raise
+
+    def release_import_lock(self, gen):
+        """Release the lock if we still hold it (no-op if it was stolen)."""
+        try:
+            self._table.delete_item(
+                Key=self._LOCK_KEY,
+                ConditionExpression="#g = :gen",
+                ExpressionAttributeNames={"#g": "gen"},
+                ExpressionAttributeValues={":gen": gen},
+            )
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                raise
+            logger.warning("import lock was not ours to release (gen=%r)", gen)
+
+    # ---- import generations (load-then-swap replace) ----
+    def set_import_generation(self, gen):
+        """Stamp every subsequent import-owned write with ``gen`` (None to stop).
+        Lets ``finalize_import`` swap generations without destroying old data
+        until the new one is fully written."""
+        self._import_gen = gen
+
+    def _gen(self) -> dict:
+        return {"gen": self._import_gen} if self._import_gen else {}
+
+    def _gen_sk(self, sk: str) -> str:
+        """Suffix a NATURAL/deterministic-key SK with the current import generation.
+
+        Stable-key entities (show, consignor, cash_account, buying_policy,
+        payment_method, the non-frozen balance sheet) would otherwise overwrite
+        their prior copy IN PLACE during the load phase — before commit/rollback is
+        decided — leaving no prior generation for the swap to protect and no
+        survivor for a rollback to restore (BLOCKING-1b). Generation-scoping their
+        sort key makes old and new coexist until `finalize_import` swaps them,
+        exactly like the fresh-ULID ledgers. Within one run the gen is constant, so
+        natural-key de-duplication still works (same key -> overwrite).
+        """
+        return f"{sk}#{self._import_gen}" if self._import_gen else sk
+
+    def finalize_import(self, gen, *, committed: bool) -> int:
+        """End an import stamped with ``gen`` (load-then-swap):
+
+        * ``committed=True`` — delete every import-owned record that is NOT of this
+          generation (the previous generation + orphans). Old data is removed only
+          now, after the whole new dataset landed. Correctness rests on the
+          single-flight import lock, not on generation *values*: because only one
+          import runs at a time, any other generation present is necessarily a
+          PRIOR committed run, so the run that commits LAST wins — independent of
+          wall-clock/ULID ordering (BLOCKING-4).
+        * ``committed=False`` — delete every record OF this generation (roll back
+          this run); every other generation is left untouched. Stable-key entities
+          are generation-scoped (``_gen_sk``), so their prior copies survive a
+          rollback instead of being destroyed by an in-place overwrite
+          (BLOCKING-1b).
+
+        The scan reads strongly-consistently (``ConsistentRead=True``) so a record
+        written into this generation milliseconds earlier is never stale-read as
+        prior and deleted on its own commit (BLOCKING-3).
+
+        A FROZEN balance-sheet snapshot is never deleted on a COMMIT: the baseline
+        is an immutable, non-re-derivable point-in-time record that outlives every
+        generation (BLOCKING-1a). A rollback still removes one that this failed run
+        itself created, so a bad baseline is never locked in permanently.
+
+        The catalog/price entities are never touched. Returns records removed.
+        """
+        this_gen_keys: list[dict] = []
+        other_gen_keys: list[dict] = []
+        kwargs = {
+            "ProjectionExpression": "PK, SK, #e, #g, #f",
+            "ExpressionAttributeNames": {"#e": "entity", "#g": "gen",
+                                         "#f": "frozen"},
+            "ConsistentRead": True,
+        }
+        while True:
+            resp = self._table.scan(**kwargs)
+            for item in resp.get("Items", []):
+                entity = item.get("entity")
+                if entity not in self._IMPORT_OWNED_ENTITIES:
+                    continue
+                key = {"PK": item["PK"], "SK": item["SK"]}
+                if entity == "balance_sheet_snapshot" and item.get("frozen"):
+                    # The immutable baseline is never swept by a commit. Only a
+                    # ROLLBACK removes one, and only if THIS failed run created it.
+                    if not committed and item.get("gen") == gen:
+                        this_gen_keys.append(key)
+                    continue
+                if item.get("gen") == gen:
+                    this_gen_keys.append(key)
+                else:
+                    other_gen_keys.append(key)
+            last = resp.get("LastEvaluatedKey")
+            if not last:
+                break
+            kwargs["ExclusiveStartKey"] = last
+        keys = other_gen_keys if committed else this_gen_keys
+        with self._table.batch_writer() as batch:
+            for key in keys:
+                batch.delete_item(Key=key)
+        return len(keys)
 
     # ---- internal helpers ----
     def _query_all(self, **kwargs):
@@ -244,6 +406,7 @@ class InventoryRepository:
             "PK": f"INV#{_bucket(item.item_id)}",
             "SK": f"ITEM#{item.item_id}",
             "entity": "inventory_item",
+            **self._gen(),
             **body,
         }
         card_id = getattr(item, "card_id", None)
@@ -324,25 +487,34 @@ class InventoryRepository:
     def put_transaction(self, txn: Transaction):
         """Append one ledger record (purchase or sale)."""
         body = _serialize(txn.model_dump(mode="python"))
-        self._table.put_item(Item={**self._txn_keys(txn), "entity": "transaction", **body})
+        self._table.put_item(Item={**self._txn_keys(txn), "entity": "transaction",
+                                    **self._gen(), **body})
 
-    def list_transactions(self, start: date, end: date):
-        """All ledger records with start <= date <= end (month-partition walk).
+    def _query_month_partitions(self, prefix: str, start: date, end: date):
+        """Walk ``<prefix>#<YYYY-MM>`` partitions from ``start`` to ``end`` and
+        return every row whose SK date falls in ``[start, end]``.
 
-        The upper bound gets a ``#~`` suffix: ``~`` sorts after every txn-id
-        character, making the ``between`` inclusive of the end date.
+        The upper bound gets a ``#~`` suffix: ``~`` sorts after every id
+        character, making the ``between`` inclusive of the end date. Shared by
+        the transaction and expense ledgers so the inclusive-bound trick lives in
+        exactly one place.
         """
         results = []
         year, month = start.year, start.month
         while (year, month) <= (end.year, end.month):
             results.extend(self._query_all(
-                KeyConditionExpression=Key("PK").eq(f"TXN#{year:04d}-{month:02d}")
+                KeyConditionExpression=Key("PK").eq(f"{prefix}#{year:04d}-{month:02d}")
                 & Key("SK").between(start.isoformat(), end.isoformat() + "#~"),
             ))
             month += 1
             if month == 13:
                 year, month = year + 1, 1
-        return [Transaction.model_validate(i) for i in results]
+        return results
+
+    def list_transactions(self, start: date, end: date):
+        """All ledger records with start <= date <= end (month-partition walk)."""
+        return [Transaction.model_validate(i)
+                for i in self._query_month_partitions("TXN", start, end)]
 
     def record_sale(self, txn: Transaction):
         """Atomically append the sale txn and flip its item to ``sold``.
@@ -352,7 +524,7 @@ class InventoryRepository:
         client auto-marshals plain Python values (boto3 injects the DynamoDB
         document transform), so values are passed unmarshalled here.
         """
-        txn_item = {**self._txn_keys(txn), "entity": "transaction",
+        txn_item = {**self._txn_keys(txn), "entity": "transaction", **self._gen(),
                     **_serialize(txn.model_dump(mode="python"))}
         try:
             self._resource.meta.client.transact_write_items(TransactItems=[
@@ -378,6 +550,22 @@ class InventoryRepository:
                 raise ItemAlreadySoldError(txn.item_id) from exc
             raise
 
+    # ---- expense ledger (own EXP# month partitions; deliberately off GSI2) ----
+    def put_expense(self, expense: Expense):
+        """Append one expense. Kept out of GSI2 so the show index stays purely
+        transactions; per-show costs are derived by filtering ``list_expenses``."""
+        body = _serialize(expense.model_dump(mode="python"))
+        self._table.put_item(Item={
+            "PK": f"EXP#{expense.date.strftime('%Y-%m')}",
+            "SK": f"{expense.date.isoformat()}#{expense.expense_id}",
+            "entity": "expense", **self._gen(), **body,
+        })
+
+    def list_expenses(self, start: date, end: date):
+        """All expenses with start <= date <= end (month-partition walk)."""
+        return [Expense.model_validate(i)
+                for i in self._query_month_partitions("EXP", start, end)]
+
     def list_transactions_for_show(self, show_id: str):
         items = self._query_all(
             IndexName="GSI2",
@@ -387,12 +575,12 @@ class InventoryRepository:
 
     # ---- shows ----
     def put_show(self, show: Show):
-        """Insert or overwrite one show/event day."""
+        """Insert one show/event day (generation-scoped during an import)."""
         body = _serialize(show.model_dump(mode="python"))
         self._table.put_item(Item={
             "PK": "SHOWLIST",
-            "SK": f"SHOW#{show.date.isoformat()}#{show.show_id}",
-            "entity": "show", **body,
+            "SK": self._gen_sk(f"SHOW#{show.date.isoformat()}#{show.show_id}"),
+            "entity": "show", **self._gen(), **body,
         })
 
     def list_shows(self):
@@ -405,14 +593,77 @@ class InventoryRepository:
         read would need it; the show list is tiny, so filter instead.)"""
         return next((s for s in self.list_shows() if s.show_id == show_id), None)
 
+    # ---- debts (single small partition, both directions) ----
+    def put_debt(self, debt: Debt):
+        body = _serialize(debt.model_dump(mode="python"))
+        self._table.put_item(Item={
+            "PK": "DEBTLIST",
+            "SK": f"DEBT#{debt.direction.value}#{debt.date.isoformat()}#{debt.debt_id}",
+            "entity": "debt", **self._gen(), **body,
+        })
+
+    def list_debts(self):
+        items = self._query_all(KeyConditionExpression=Key("PK").eq("DEBTLIST"))
+        return [Debt.model_validate(i) for i in items]
+
+    # ---- payouts (single small partition) ----
+    def put_payout(self, payout: Payout):
+        body = _serialize(payout.model_dump(mode="python"))
+        self._table.put_item(Item={
+            "PK": "PAYOUTLIST",
+            "SK": f"PAYOUT#{payout.partner}#{payout.payout_id}",
+            "entity": "payout", **self._gen(), **body,
+        })
+
+    def list_payouts(self):
+        items = self._query_all(KeyConditionExpression=Key("PK").eq("PAYOUTLIST"))
+        return [Payout.model_validate(i) for i in items]
+
+    # ---- balance sheet snapshots (BALANCESHEET partition) ----
+    def put_balance_sheet(self, snapshot: BalanceSheetSnapshot):
+        """Store a balance-sheet snapshot.
+
+        A FROZEN snapshot is the immutable, non-re-derivable baseline: it is
+        written at a FIXED key (never generation-scoped) and ``finalize_import``
+        never sweeps it on a commit, so it survives every later generation.
+        Write-once is enforced by the importer, which refuses to re-write an
+        existing baseline. It still carries the generation that CREATED it, so a
+        rollback can undo a baseline captured by a run that later failed — without
+        that, a truncated first export would permanently lock in a bad baseline
+        that write-once forbids correcting.
+
+        The non-frozen ``current`` snapshot is generation-scoped and swapped like
+        every other stable-key entity.
+        """
+        body = _serialize(snapshot.model_dump(mode="python"))
+        sk = f"SNAPSHOT#{snapshot.label}#{snapshot.snapshot_id}"
+        self._table.put_item(Item={
+            "PK": "BALANCESHEET",
+            "SK": sk if snapshot.frozen else self._gen_sk(sk),
+            "entity": "balance_sheet_snapshot", **self._gen(), **body,
+        })
+
+    def get_frozen_balance_sheet(self, label: str):
+        """Return the immutable frozen snapshot for ``label``, or ``None``.
+
+        Used by the importer to enforce write-once: an already-captured baseline is
+        never overwritten by a later (possibly truncated) export.
+        """
+        return next((s for s in self.list_balance_sheets()
+                     if s.frozen and s.label == label), None)
+
+    def list_balance_sheets(self):
+        items = self._query_all(KeyConditionExpression=Key("PK").eq("BALANCESHEET"))
+        return [BalanceSheetSnapshot.model_validate(i) for i in items]
+
     # ---- consignors ----
     def put_consignor(self, consignor: Consignor):
-        """Insert or overwrite one consignor."""
+        """Insert one consignor (generation-scoped during an import)."""
         body = _serialize(consignor.model_dump(mode="python"))
         self._table.put_item(Item={
             "PK": "CONSIGNORLIST",
-            "SK": f"CONSIGNOR#{consignor.consignor_id}",
-            "entity": "consignor", **body,
+            "SK": self._gen_sk(f"CONSIGNOR#{consignor.consignor_id}"),
+            "entity": "consignor", **self._gen(), **body,
         })
 
     def list_consignors(self):
@@ -422,7 +673,8 @@ class InventoryRepository:
     # ---- config entities (CONFIG partition) ----
     def _put_config(self, sk: str, entity: str, model):
         body = _serialize(model.model_dump(mode="python"))
-        self._table.put_item(Item={"PK": "CONFIG", "SK": sk, "entity": entity, **body})
+        self._table.put_item(Item={"PK": "CONFIG", "SK": self._gen_sk(sk),
+                                   "entity": entity, **self._gen(), **body})
 
     def _list_config(self, prefix: str, model_cls):
         items = self._query_all(
@@ -446,10 +698,13 @@ class InventoryRepository:
         self._put_config(f"PAYMETHOD#{method.method}", "payment_method", method)
 
     def get_payment_method(self, method: str):
-        item = self._table.get_item(
-            Key={"PK": "CONFIG", "SK": f"PAYMETHOD#{method}"}
-        ).get("Item")
-        return PaymentMethod.model_validate(item) if item else None
+        """Return one payment method by name, or ``None``.
+
+        Filters the (tiny) list rather than point-reading a fixed SK, because
+        config SKs are generation-scoped during an import (see ``_gen_sk``).
+        """
+        return next((m for m in self.list_payment_methods() if m.method == method),
+                    None)
 
     def list_payment_methods(self):
         return self._list_config("PAYMETHOD#", PaymentMethod)

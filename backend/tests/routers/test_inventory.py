@@ -447,3 +447,24 @@ def test_search_response_does_not_expose_cost_basis(inv_client, mint_token):
     body = resp.json()
     assert body["total"] == 1
     assert "cost_basis" not in body["items"][0]
+
+
+def test_B9_search_response_omits_internal_fields(inv_client, mint_token):
+    """The search projection is an allowlist: no internal per-item field ships."""
+    client, repo = inv_client
+    repo.put_inventory_item(_raw(
+        "sv1-secret", location="glass",
+        market_value_at_purchase=Decimal("40.00"),
+        acquired_show_id="show-1", notes="bought cheap from Dave",
+    ))
+    resp = client.get(
+        "/inventory/search",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    assert resp.status_code == 200
+    item = resp.json()["items"][0]
+    internal = {"location", "market_value_at_purchase", "acquired_show_id",
+                "notes", "cost_basis", "consignment", "needs_review", "tcg_url"}
+    assert internal.isdisjoint(item.keys()), internal & set(item.keys())
+    # customer-facing fields still present
+    assert item["kind"] == "raw" and item["listed_price"] == "10.00"

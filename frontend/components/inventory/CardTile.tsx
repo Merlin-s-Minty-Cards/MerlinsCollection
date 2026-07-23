@@ -47,9 +47,6 @@ export default function CardTile({ item }: { item: InventoryItem }) {
             {conditionLabel(item)}
           </span>
           <span className="flex items-baseline gap-2">
-            {item.quantity > 1 && (
-              <span className="font-mono text-[11px] text-pine-300">×{item.quantity}</span>
-            )}
             <span className="font-mono text-sm font-semibold text-mint">
               {formatPrice(item.listed_price)}
             </span>

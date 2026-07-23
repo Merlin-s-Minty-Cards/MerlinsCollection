@@ -38,11 +38,23 @@ def _price(item) -> Decimal | None:
     return item.listed_price if item.listed_price is not None else item.current_market_value
 
 
+# Allowlist of the ONLY fields a customer may see on a search result (mirrors the
+# frontend contract + the MCP toCard discipline). Everything else — cost_basis,
+# consignment terms, needs_review, location (physical whereabouts),
+# market_value_at_purchase, acquired_show_id, notes, tcg_url — is internal and
+# must never reach the wire. An allowlist (not a denylist) means a field added to
+# the model later defaults to hidden rather than silently leaking.
+_CUSTOMER_ITEM_FIELDS = {
+    "item_id", "kind", "card_id", "listed_price", "current_market_value",
+    "acquired_at", "finish", "condition", "condition_modifier", "factory_sealed",
+    "company", "grade", "cert_number", "product_name", "product_type", "card",
+}
+
+
 @router.get(
     "/search",
     response_model=InventorySearchResult,
-    # cost_basis / consignment terms / review flags are internal — never expose them
-    response_model_exclude={"items": {"__all__": {"cost_basis", "consignment", "needs_review"}}},
+    response_model_include={"total": True, "items": {"__all__": _CUSTOMER_ITEM_FIELDS}},
 )
 def search_inventory(
     name: str | None = Query(None, max_length=200),

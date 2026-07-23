@@ -48,6 +48,35 @@ class Transaction(BaseModel):
     notes: str | None = None
 
 
+class ExpenseCategory(StrEnum):
+    """Which expense tab a cost came from (all six share one ``Expense`` shape)."""
+
+    SHOW_FEE = "show_fee"
+    OTHER_COGS = "other_cogs"
+    MARKETING = "marketing"
+    SUPPLIES = "supplies"
+    EMPLOYEE_WAGE = "employee_wage"
+    EMPLOYEE_EXPENSE = "employee_expense"
+
+
+class Expense(BaseModel):
+    """A business cost. ``amount`` is signed: negative means money came *in*
+    (a refund/credit), matching the sheet's own "neg numbers is money coming in"
+    convention. Kept in its own ``EXP#<month>`` ledger, never on the show GSI2."""
+
+    expense_id: str = Field(default_factory=new_ulid)
+    category: ExpenseCategory
+    date: date_type
+    amount: Decimal
+    payment_method: str = "cash"
+    description: str | None = None
+    reason: str | None = None
+    person: str | None = None  # for wages / per-person employee expenses
+    show_id: str | None = None
+    paid: bool = True
+    notes: str | None = None
+
+
 class Show(BaseModel):
     show_id: str = Field(default_factory=new_ulid)
     name: str
@@ -58,10 +87,69 @@ class Show(BaseModel):
     notes: str | None = None
 
 
+class DebtDirection(StrEnum):
+    OWED_TO_US = "owed_to_us"
+    WE_OWE = "we_owe"
+
+
+class Debt(BaseModel):
+    """A single outstanding (or cleared) debt, in either direction."""
+
+    debt_id: str = Field(default_factory=new_ulid)
+    direction: DebtDirection
+    date: date_type
+    amount: Decimal
+    counterparty: str
+    reason: str | None = None
+    cleared: bool = False
+
+
 class Consignor(BaseModel):
     consignor_id: str = Field(default_factory=new_ulid)
     name: str
     contact: str | None = None
+    notes: str | None = None
+
+
+class Payout(BaseModel):
+    """A profit-split payment to a business partner for one event. Distinct from
+    a consignor payout (which rides on the sale transaction).
+
+    The Payouts tab carries no per-payout date or payment method and no reliable
+    show linkage (its ``Event`` label is free text), so those fields are omitted
+    until a source column and a consumer actually exist (YAGNI)."""
+
+    payout_id: str = Field(default_factory=new_ulid)
+    event: str
+    partner: str
+    amount: Decimal
+    percent: Decimal | None = None
+    notes: str | None = None
+
+
+class BalanceSheetSection(StrEnum):
+    ASSET = "asset"
+    LIABILITY = "liability"
+    EQUITY = "equity"
+
+
+class BalanceSheetLine(BaseModel):
+    section: BalanceSheetSection
+    label: str
+    amount: Decimal
+    note: str | None = None
+
+
+class BalanceSheetSnapshot(BaseModel):
+    """A point-in-time balance sheet, stored whole so a frozen baseline can later
+    be compared against the live "current" one. ``frozen`` marks the immutable
+    baseline; the current snapshot keeps changing until the next freeze."""
+
+    snapshot_id: str = Field(default_factory=new_ulid)
+    label: str
+    date: date_type | None = None
+    frozen: bool = False
+    lines: list[BalanceSheetLine] = Field(default_factory=list)
     notes: str | None = None
 
 

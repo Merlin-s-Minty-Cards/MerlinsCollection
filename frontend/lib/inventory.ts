@@ -7,7 +7,15 @@
 import { apiFetch } from './api'
 
 export type Condition = 'NM' | 'LP' | 'MP' | 'HP' | 'DMG'
+export type ConditionModifier = '+' | '-'
 export type GradingCompany = 'PSA' | 'BGS' | 'CGC' | 'SGC'
+export type SealedProductType =
+  | 'booster_box'
+  | 'etb'
+  | 'bundle'
+  | 'booster_pack'
+  | 'collection_box'
+  | 'other'
 
 /** Catalog data joined onto a search result for display. */
 export interface CardSummary {
@@ -21,10 +29,12 @@ export interface CardSummary {
 }
 
 interface ItemBase {
-  card_id: string
-  quantity: number
-  /** Decimal serialized as a string, e.g. "250.00". */
-  listed_price: string
+  /** Per-unit identity (the stable key). Post Database-Redesign; not card_id. */
+  item_id: string
+  /** Optional now: absent for sealed products and unmatched cards. */
+  card_id?: string | null
+  /** Decimal serialized as a string, e.g. "250.00" (null when unpriced). */
+  listed_price: string | null
   current_market_value: string | null
   acquired_at: string
   card: CardSummary | null
@@ -34,6 +44,9 @@ export interface RawInventoryItem extends ItemBase {
   kind: 'raw'
   finish: string
   condition: Condition
+  /** +/- nuance on the tier (an LP+ is an LP, but nicer). */
+  condition_modifier?: ConditionModifier | null
+  factory_sealed?: boolean
 }
 
 export interface GradedInventoryItem extends ItemBase {
@@ -44,7 +57,17 @@ export interface GradedInventoryItem extends ItemBase {
   cert_number: string
 }
 
-export type InventoryItem = RawInventoryItem | GradedInventoryItem
+/** A sealed product (booster box / ETB / …). No catalog card, no condition. */
+export interface SealedInventoryItem extends ItemBase {
+  kind: 'sealed'
+  product_name: string
+  product_type: SealedProductType
+}
+
+export type InventoryItem =
+  | RawInventoryItem
+  | GradedInventoryItem
+  | SealedInventoryItem
 
 export interface InventorySearchResult {
   items: InventoryItem[]
@@ -131,22 +154,35 @@ export function formatPrice(value: string | null | undefined): string {
   return Number.isNaN(parsed) ? 'Price N/A' : usd.format(parsed)
 }
 
-/** Display name for an item: catalog name, or the card id if not yet synced. */
-export function itemTitle(item: InventoryItem): string {
-  return item.card?.name ?? item.card_id
-}
-
-/** Condition badge text: raw grade ("NM") or slab label ("PSA 9.5"). */
-export function conditionLabel(item: InventoryItem): string {
-  return item.kind === 'raw' ? item.condition : `${item.company} ${item.grade}`
+const PRODUCT_TYPE_LABELS: Record<SealedProductType, string> = {
+  booster_box: 'Booster Box',
+  etb: 'Elite Trainer Box',
+  bundle: 'Bundle',
+  booster_pack: 'Booster Pack',
+  collection_box: 'Collection Box',
+  other: 'Sealed',
 }
 
 /**
- * Stable unique key for a result tile. card_id alone is NOT unique — the same
- * card can appear as multiple raw finishes/conditions and graded slabs.
+ * Display name for a tile: a sealed product's own name, else the catalog name,
+ * falling back to the card id and finally the item id when nothing is synced.
  */
+export function itemTitle(item: InventoryItem): string {
+  if (item.kind === 'sealed') return item.product_name
+  return item.card?.name ?? item.card_id ?? item.item_id
+}
+
+/**
+ * Condition/type badge: raw grade with its +/- modifier ("LP+"), slab label
+ * ("PSA 9.5"), or a human-readable product type for a sealed product.
+ */
+export function conditionLabel(item: InventoryItem): string {
+  if (item.kind === 'raw') return `${item.condition}${item.condition_modifier ?? ''}`
+  if (item.kind === 'graded') return `${item.company} ${item.grade}`
+  return PRODUCT_TYPE_LABELS[item.product_type] ?? 'Sealed'
+}
+
+/** Stable unique key for a result tile — item_id is the per-unit identity. */
 export function itemKey(item: InventoryItem): string {
-  return item.kind === 'raw'
-    ? `${item.card_id}:raw:${item.finish}:${item.condition}`
-    : `${item.card_id}:graded:${item.company}:${item.grade}:${item.cert_number}`
+  return item.item_id
 }

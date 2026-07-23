@@ -338,3 +338,158 @@ def test_grade_key_canonicalizes():
     assert _grade_key(Decimal("9.50")) == "9.5"
     assert _grade_key(Decimal("10")) == "10"
     assert _grade_key(Decimal("10.0")) == "10"
+
+
+# ---- expense ledger (EXP# month partitions; per-show derived by filter) ----
+
+def test_put_and_list_expenses_by_month_range(dynamo_repo):
+    from merlins_collection.models.business import Expense, ExpenseCategory
+    jan = Expense(category=ExpenseCategory.MARKETING, date=_date(2026, 1, 15),
+                  amount=Decimal("23.99"))
+    mar = Expense(category=ExpenseCategory.SUPPLIES, date=_date(2026, 3, 2),
+                  amount=Decimal("56.66"))
+    dynamo_repo.put_expense(jan)
+    dynamo_repo.put_expense(mar)
+
+    jan_only = dynamo_repo.list_expenses(_date(2026, 1, 1), _date(2026, 1, 31))
+    assert [e.expense_id for e in jan_only] == [jan.expense_id]
+
+    both = dynamo_repo.list_expenses(_date(2026, 1, 1), _date(2026, 3, 31))
+    assert {e.expense_id for e in both} == {jan.expense_id, mar.expense_id}
+
+
+def test_expenses_do_not_pollute_the_show_transaction_index(dynamo_repo):
+    """An expense linked to a show must not corrupt the GSI2 Transaction reader."""
+    from merlins_collection.models.business import Expense, ExpenseCategory
+    dynamo_repo.put_expense(Expense(
+        category=ExpenseCategory.SHOW_FEE, date=_date(2026, 1, 10),
+        amount=Decimal("30.00"), show_id="show-1"))
+    # GSI2 is read back as Transactions; expenses stay out of it, so this is empty.
+    assert dynamo_repo.list_transactions_for_show("show-1") == []
+
+
+# ---- debts (single DEBTLIST partition) ----
+
+def test_put_and_list_debts(dynamo_repo):
+    from merlins_collection.models.business import Debt, DebtDirection
+    dynamo_repo.put_debt(Debt(direction=DebtDirection.OWED_TO_US,
+                              date=_date(2026, 1, 10), amount=Decimal("22"),
+                              counterparty="Colin"))
+    dynamo_repo.put_debt(Debt(direction=DebtDirection.WE_OWE,
+                              date=_date(2026, 1, 10), amount=Decimal("30"),
+                              counterparty="Jackson", cleared=True))
+    debts = dynamo_repo.list_debts()
+    assert {(d.direction.value, d.counterparty) for d in debts} == {
+        ("owed_to_us", "Colin"), ("we_owe", "Jackson")}
+
+
+# ---- payouts (single PAYOUTLIST partition) ----
+
+def test_put_and_list_payouts(dynamo_repo):
+    from merlins_collection.models.business import Payout
+    dynamo_repo.put_payout(Payout(event="E1", partner="Casey", amount=Decimal("40")))
+    dynamo_repo.put_payout(Payout(event="E1", partner="Colin", amount=Decimal("60")))
+    payouts = dynamo_repo.list_payouts()
+    assert {(p.partner, p.amount) for p in payouts} == {
+        ("Casey", Decimal("40")), ("Colin", Decimal("60"))}
+
+
+# ---- balance sheet snapshots (BALANCESHEET partition) ----
+
+def test_put_and_list_balance_sheets(dynamo_repo):
+    from merlins_collection.models.business import (
+        BalanceSheetLine, BalanceSheetSnapshot, BalanceSheetSection)
+    for label, frozen in (("beginning", True), ("current", False)):
+        dynamo_repo.put_balance_sheet(BalanceSheetSnapshot(
+            snapshot_id=label, label=label, frozen=frozen,
+            lines=[BalanceSheetLine(section=BalanceSheetSection.ASSET,
+                                    label="Inventory", amount=Decimal("100"))]))
+    snaps = {s.label: s for s in dynamo_repo.list_balance_sheets()}
+    assert snaps["beginning"].frozen is True
+    assert snaps["current"].frozen is False
+    assert snaps["beginning"].lines[0].label == "Inventory"
+
+
+# ================= Council revision-6 fixes (BLOCKING-4 / lock) ================
+# R5's monotonic `record_gen < gen` ordering rested on cross-machine ULID
+# wall-clock agreement (BLOCKING-4). R6 replaces it with a single-flight import
+# LOCK (so no two runs are ever concurrent) plus commit-order-wins deletion
+# (`gen != mine`), which is wall-clock-independent: the run that commits LAST wins
+# regardless of its gen value.
+
+def _debt(who):
+    from merlins_collection.models.business import Debt, DebtDirection
+    return Debt(direction=DebtDirection.OWED_TO_US, date=_date(2026, 1, 1),
+                amount=Decimal("10"), counterparty=who)
+
+
+def test_R6_later_committed_run_wins_regardless_of_gen_value(dynamo_repo):
+    # A run with a LEXICALLY-LARGER gen commits FIRST (older content, e.g. a
+    # clock-skewed laptop). A later run with a SMALLER gen commits SECOND (the
+    # genuinely newest content). Commit order — not ULID value — must decide the
+    # winner, so the second run's data survives and the first's is swept.
+    dynamo_repo.set_import_generation("gen-ZZZZ")  # lexically large
+    dynamo_repo.put_debt(_debt("Stale"))
+    dynamo_repo.finalize_import("gen-ZZZZ", committed=True)
+    dynamo_repo.set_import_generation(None)
+
+    dynamo_repo.set_import_generation("gen-AAAA")  # lexically small, commits later
+    dynamo_repo.put_debt(_debt("Fresh"))
+    dynamo_repo.finalize_import("gen-AAAA", committed=True)
+    dynamo_repo.set_import_generation(None)
+
+    who = {d.counterparty for d in dynamo_repo.list_debts()}
+    assert who == {"Fresh"}  # newest COMMITTED wins; stale larger-gen row swept
+
+
+def test_R6_import_lock_is_single_flight(dynamo_repo):
+    from merlins_collection.services.dynamodb import ImportInProgressError
+    dynamo_repo.acquire_import_lock("gen-A")
+    # A second acquire while the lock is held is refused.
+    try:
+        dynamo_repo.acquire_import_lock("gen-B")
+        raised = False
+    except ImportInProgressError:
+        raised = True
+    assert raised
+    # After release, a new run can acquire.
+    dynamo_repo.release_import_lock("gen-A")
+    dynamo_repo.acquire_import_lock("gen-B")  # no raise
+    dynamo_repo.release_import_lock("gen-B")
+
+
+def test_R6_import_lock_is_not_import_owned(dynamo_repo):
+    # The lock item must never be swept by finalize (it is not import-owned data).
+    dynamo_repo.acquire_import_lock("gen-A")
+    dynamo_repo.set_import_generation("gen-A")
+    dynamo_repo.put_debt(_debt("X"))
+    dynamo_repo.finalize_import("gen-A", committed=True)
+    dynamo_repo.set_import_generation(None)
+    # Lock survived the commit sweep -> a stale second acquire is still refused.
+    from merlins_collection.services.dynamodb import ImportInProgressError
+    try:
+        dynamo_repo.acquire_import_lock("gen-B")
+        held = False
+    except ImportInProgressError:
+        held = True
+    assert held
+    dynamo_repo.release_import_lock("gen-A")
+
+
+def test_R5_finalize_scan_reads_strongly_consistent(dynamo_repo):
+    from merlins_collection.models.business import Debt, DebtDirection
+    scan_consistency = []
+    original_scan = dynamo_repo._table.scan
+
+    def _spy(**kwargs):
+        scan_consistency.append(kwargs.get("ConsistentRead"))
+        return original_scan(**kwargs)
+
+    dynamo_repo._table.scan = _spy
+    dynamo_repo.set_import_generation("gen-x")
+    dynamo_repo.put_debt(Debt(direction=DebtDirection.OWED_TO_US, date=_date(2026, 1, 1),
+                              amount=Decimal("1"), counterparty="X"))
+    dynamo_repo.finalize_import("gen-x", committed=True)
+    dynamo_repo.set_import_generation(None)
+    assert scan_consistency  # the finalize scan ran
+    assert all(c is True for c in scan_consistency)  # every page read strongly-consistent
