@@ -24,8 +24,8 @@ beforeEach(() => {
 
 const charizard: InventoryItem = {
   kind: 'raw',
+  item_id: '01JRAWCHARIZARDNM0000000001',
   card_id: 'base1-4',
-  quantity: 1,
   listed_price: '250.42',
   current_market_value: '300.00',
   acquired_at: '2026-04-01',
@@ -85,6 +85,28 @@ describe('FilterPanel', () => {
     await userEvent.click(screen.getByRole('button', { name: /search/i }))
 
     expect(sentQuery().get('condition')).toBe('NM')
+  })
+
+  it('sends language=JP when Japanese is selected', async () => {
+    mockedApiFetch.mockResolvedValue(response([]))
+    render(<FilterPanel />)
+
+    await userEvent.selectOptions(screen.getByLabelText(/language/i), 'Japanese')
+    await userEvent.click(screen.getByRole('button', { name: /search/i }))
+
+    expect(sentQuery().get('language')).toBe('JP')
+  })
+
+  it('omits the language param when "All languages" is selected', async () => {
+    mockedApiFetch.mockResolvedValue(response([]))
+    render(<FilterPanel />)
+
+    // Select Japanese, then switch back to All languages — must not send it.
+    await userEvent.selectOptions(screen.getByLabelText(/language/i), 'Japanese')
+    await userEvent.selectOptions(screen.getByLabelText(/language/i), 'All languages')
+    await userEvent.click(screen.getByRole('button', { name: /search/i }))
+
+    expect(sentQuery().get('language')).toBeNull()
   })
 
   it('swaps an inverted price range before searching (backend rejects it with 422)', async () => {

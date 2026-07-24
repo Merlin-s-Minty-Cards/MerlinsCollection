@@ -26,7 +26,26 @@ const SHARD_COUNT = 10;
 const BATCH_GET_LIMIT = 100; // DynamoDB BatchGetItem hard limit
 const MAX_BATCH_ATTEMPTS = 8; // bound the UnprocessedKeys retry loop
 
+// The customer-facing projection: only available items of customer-visible
+// kinds. Bulk lots, and anything sold/on-hold/lost/out-for-grading, are
+// internal and must never reach the (unauthenticated) chat tools. This mirrors
+// the backend /inventory/search rules; admin-only tools come later.
+const PUBLIC_KINDS = new Set(["raw", "graded", "sealed"]);
+
+const SEALED_TYPE_LABELS: Record<string, string> = {
+  booster_box: "Booster Box",
+  etb: "Elite Trainer Box",
+  bundle: "Bundle",
+  booster_pack: "Booster Pack",
+  collection_box: "Collection Box",
+  other: "Sealed",
+};
+
 type Row = Record<string, unknown>;
+
+function isPublicInventory(row: Row): boolean {
+  return PUBLIC_KINDS.has(String(row.kind)) && row.status === "available";
+}
 
 /** Canonical grade string, matching the backend's `_grade_key` (10 not 10.0). */
 function gradeKey(grade: unknown): string {
@@ -36,6 +55,11 @@ function gradeKey(grade: unknown): string {
 function asNumber(value: unknown): number {
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
+}
+
+/** Print language off a row; only the JP items store it, everything else is EN. */
+function languageOf(row: Row): "EN" | "JP" {
+  return row.language === "JP" ? "JP" : "EN";
 }
 
 export class DynamoDbInventoryRepository implements InventoryRepository {
@@ -53,16 +77,17 @@ export class DynamoDbInventoryRepository implements InventoryRepository {
         }),
       ),
     );
-    const rows = shardResults.flat();
+    const rows = shardResults.flat().filter(isPublicInventory);
 
-    const metaKeys = [...new Set(rows.map((r) => String(r.card_id)))].map((id) => ({
-      PK: `CARD#${id}`,
-      SK: "META",
-    }));
+    // Only card-linked items (raw/graded) join the catalog; sealed products
+    // have no card_id and are self-describing.
+    const metaKeys = [
+      ...new Set(rows.filter((r) => r.card_id != null).map((r) => String(r.card_id))),
+    ].map((id) => ({ PK: `CARD#${id}`, SK: "META" }));
     // Graded slabs without a synced market value fall back to the manually
     // entered GRADEDPRICE row.
     const gradedKeys = rows
-      .filter((r) => r.kind === "graded" && r.current_market_value == null)
+      .filter((r) => r.kind === "graded" && r.card_id != null && r.current_market_value == null)
       .map((r) => ({
         PK: `CARD#${r.card_id}`,
         SK: `GRADEDPRICE#${r.company}#${gradeKey(r.grade)}`,
@@ -109,17 +134,35 @@ export class DynamoDbInventoryRepository implements InventoryRepository {
   }
 
   private toCard(row: Row, catalog: Map<string, Row>, gradedPrices: Map<string, Row>): Card {
-    const cardId = String(row.card_id);
-    const meta = catalog.get(cardId);
+    // Sealed products carry their own name/type and never touch the catalog.
+    if (row.kind === "sealed") {
+      return {
+        id: String(row.item_id),
+        name: String(row.product_name),
+        set: "Sealed",
+        condition: SEALED_TYPE_LABELS[String(row.product_type)] ?? "Sealed",
+        quantity: 1,
+        value: asNumber(row.listed_price),
+        marketPrice: asNumber(row.current_market_value ?? 0),
+        language: languageOf(row),
+      };
+    }
+    // Raw/graded: card_id is an optional catalog link; fall back to item_id.
+    const cardId = row.card_id != null ? String(row.card_id) : null;
+    const meta = cardId ? catalog.get(cardId) : undefined;
+    const fallback = cardId ?? String(row.item_id);
     return {
-      id: cardId,
-      name: meta ? String(meta.name) : cardId,
-      set: meta ? String(meta.set_id) : cardId.split("-")[0]!,
+      id: fallback,
+      name: meta ? String(meta.name) : fallback,
+      set: meta ? String(meta.set_id) : cardId ? cardId.split("-")[0]! : "Unknown",
       condition:
-        row.kind === "raw" ? String(row.condition) : `${row.company} ${gradeKey(row.grade)}`,
-      quantity: asNumber(row.quantity),
+        row.kind === "raw"
+          ? `${row.condition}${row.condition_modifier ?? ""}`
+          : `${row.company} ${gradeKey(row.grade)}`,
+      quantity: 1, // one inventory record = one physical unit
       value: asNumber(row.listed_price),
       marketPrice: this.marketPrice(row, meta, gradedPrices),
+      language: languageOf(row),
     };
   }
 

@@ -52,4 +52,17 @@ describe("calculateInventoryValue", () => {
     expect(result.valueBySet).toEqual({});
     expect(result.valueByCondition).toEqual({});
   });
+
+  it("values a JP card at its listed/sheet value, not its (0) English market", async () => {
+    // A JP print has no English market price (marketPrice 0), but it still has a
+    // real listed value from the sheet — it must count that, not $0.
+    const repo = new InMemoryInventoryRepository([
+      card({ id: "jp", language: "JP", value: 250, marketPrice: 0, set: "Japanese Base" }),
+    ]);
+
+    const result = await calculateInventoryValue(repo);
+
+    expect(result.totalValue).toBe(250);
+    expect(result.valueBySet["Japanese Base"]).toBe(250);
+  });
 });

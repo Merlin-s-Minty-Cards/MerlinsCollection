@@ -6,11 +6,13 @@ from merlins_collection.models.inventory import (
     GradedInventoryItem,
     GradingCompany,
     RawInventoryItem,
+    SealedInventoryItem,
 )
 from merlins_collection.services.catalog_sync import (
     refresh_inventory_market_values,
     run_daily_sync,
     snapshot_graded_prices,
+    snapshot_sealed_prices,
     sync_catalog,
 )
 
@@ -32,7 +34,7 @@ class FakeClient:
 
 def _raw_item(card_id="swsh1-1"):
     return RawInventoryItem(
-        card_id=card_id, quantity=2, listed_price=Decimal("10"),
+        card_id=card_id, listed_price=Decimal("10"),
         cost_basis=Decimal("4"), acquired_at=date(2026, 1, 1),
         finish="holofoil", condition=Condition.NM,
     )
@@ -40,7 +42,7 @@ def _raw_item(card_id="swsh1-1"):
 
 def _graded_item(card_id="swsh1-1"):
     return GradedInventoryItem(
-        card_id=card_id, quantity=1, listed_price=Decimal("700"),
+        card_id=card_id, listed_price=Decimal("700"),
         cost_basis=Decimal("300"), acquired_at=date(2026, 1, 1),
         company=GradingCompany.PSA, grade=Decimal("10"), cert_number="123",
     )
@@ -48,10 +50,11 @@ def _graded_item(card_id="swsh1-1"):
 
 def test_refresh_sets_current_market_value_from_catalog(dynamo_repo):
     sync_catalog(dynamo_repo, FakeClient([RAW]), date(2026, 6, 22))
-    dynamo_repo.put_inventory_item(_raw_item())
+    item = _raw_item()
+    dynamo_repo.put_inventory_item(item)
     updated = refresh_inventory_market_values(dynamo_repo)
     assert updated == 1
-    assert dynamo_repo.get_inventory_item(_raw_item()).current_market_value == Decimal("9.25")
+    assert dynamo_repo.get_inventory_item(item.item_id).current_market_value == Decimal("9.25")
 
 
 def test_snapshot_graded_prices_writes_history_for_owned_slabs(dynamo_repo):
@@ -66,11 +69,12 @@ def test_snapshot_graded_prices_writes_history_for_owned_slabs(dynamo_repo):
 
 
 def test_run_daily_sync_combines_steps(dynamo_repo):
-    dynamo_repo.put_inventory_item(_raw_item())
+    item = _raw_item()
+    dynamo_repo.put_inventory_item(item)
     summary = run_daily_sync(dynamo_repo, FakeClient([RAW]), date(2026, 6, 22))
     assert summary["cards_synced"] == 1
     assert summary["items_refreshed"] == 1
-    assert dynamo_repo.get_inventory_item(_raw_item()).current_market_value == Decimal("9.25")
+    assert dynamo_repo.get_inventory_item(item.item_id).current_market_value == Decimal("9.25")
 
 
 def test_sync_catalog_upserts_card_and_price_point(dynamo_repo):
@@ -93,16 +97,33 @@ def test_sync_catalog_skips_bad_cards(dynamo_repo):
     assert summary["cards_synced"] == 1
 
 
+def test_sync_skips_unlinked_items_and_snapshots_sealed(dynamo_repo):
+    unlinked = RawInventoryItem(card_id=None, finish="normal", condition="NM",
+                                cost_basis=Decimal("1"), acquired_at=date(2026, 1, 1))
+    sealed = SealedInventoryItem(product_name="Box", product_type="booster_box",
+                                 cost_basis=Decimal("400"),
+                                 current_market_value=Decimal("500"),
+                                 acquired_at=date(2026, 1, 1))
+    dynamo_repo.put_inventory_item(unlinked)
+    dynamo_repo.put_inventory_item(sealed)
+    # must not raise on card_id=None / non-card kinds:
+    assert refresh_inventory_market_values(dynamo_repo) == 0
+    summary = snapshot_sealed_prices(dynamo_repo, date(2026, 3, 1))
+    assert summary == {"sealed_points_written": 1}
+    assert len(dynamo_repo.get_item_price_history(sealed.item_id)) == 1
+
+
 def test_run_daily_sync_includes_graded_snapshot_and_refresh(dynamo_repo):
     # Own a graded slab and set its manual market value.
     dynamo_repo.set_graded_market_value(
         "swsh1-1", GradingCompany.PSA, Decimal("10"), Decimal("500")
     )
-    dynamo_repo.put_inventory_item(_graded_item())
+    item = _graded_item()
+    dynamo_repo.put_inventory_item(item)
 
     summary = run_daily_sync(dynamo_repo, FakeClient([RAW]), date(2026, 6, 22))
 
     # merge completeness: graded snapshot key is present and counted
     assert summary["graded_points_written"] == 1
     # graded refresh write-back path: current_market_value denormalized from the manual graded value
-    assert dynamo_repo.get_inventory_item(_graded_item()).current_market_value == Decimal("500")
+    assert dynamo_repo.get_inventory_item(item.item_id).current_market_value == Decimal("500")

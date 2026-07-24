@@ -4,16 +4,19 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import CardGrid from '@/components/inventory/CardGrid'
 import type { InventoryItem } from '@/lib/inventory'
 
-// Wire-format fixtures: Decimal fields are strings, catalog data under `card`.
+// Wire-format fixtures (post Database-Redesign): each item has an `item_id`,
+// `card_id` is optional, there is NO `quantity`, catalog data lives under `card`.
 const charizardNM: InventoryItem = {
   kind: 'raw',
+  item_id: '01JRAWCHARIZARDNM0000000001',
   card_id: 'base1-4',
-  quantity: 2,
   listed_price: '250.42',
   current_market_value: '300.00',
   acquired_at: '2026-04-01',
   finish: 'holofoil',
   condition: 'NM',
+  condition_modifier: null,
+  factory_sealed: false,
   card: {
     card_id: 'base1-4',
     name: 'Charizard',
@@ -27,8 +30,8 @@ const charizardNM: InventoryItem = {
 
 const charizardPsa9: InventoryItem = {
   kind: 'graded',
+  item_id: '01JGRADEDCHARIZARDPSA000001',
   card_id: 'base1-4',
-  quantity: 1,
   listed_price: '900.00',
   current_market_value: null,
   acquired_at: '2026-04-01',
@@ -48,13 +51,26 @@ const charizardPsa9: InventoryItem = {
 
 const orphan: InventoryItem = {
   kind: 'raw',
+  item_id: '01JRAWORPHAN00000000000001',
   card_id: 'sv1-orphan',
-  quantity: 1,
   listed_price: '5.00',
   current_market_value: null,
   acquired_at: '2026-04-01',
   finish: 'normal',
   condition: 'LP',
+  condition_modifier: null,
+  factory_sealed: false,
+  card: null,
+}
+
+const boosterBox: InventoryItem = {
+  kind: 'sealed',
+  item_id: '01JSEALEDBOOSTERBOX00000001',
+  listed_price: '120.00',
+  current_market_value: '140.00',
+  acquired_at: '2026-04-01',
+  product_name: 'Scarlet & Violet Booster Box',
+  product_type: 'booster_box',
   card: null,
 }
 
@@ -88,13 +104,29 @@ describe('CardGrid', () => {
     expect(screen.getByRole('heading', { name: 'sv1-orphan' })).toBeInTheDocument()
   })
 
-  it('shows the quantity when more than one copy is in stock', () => {
-    render(<CardGrid items={[charizardNM]} />)
-    expect(screen.getByText(/×\s*2/)).toBeInTheDocument()
+  it('renders a sealed product with its product name, type badge and price', () => {
+    render(<CardGrid items={[boosterBox]} />)
+    expect(
+      screen.getByRole('heading', { name: 'Scarlet & Violet Booster Box' }),
+    ).toBeInTheDocument()
+    expect(screen.getByText('Booster Box')).toBeInTheDocument()
+    expect(screen.getByText('$120.00')).toBeInTheDocument()
   })
 
   it('uses the card name for the image (or placeholder) accessible name', () => {
     render(<CardGrid items={[charizardNM]} />)
     expect(screen.getByRole('img', { name: /charizard/i })).toBeInTheDocument()
+  })
+
+  it('marks a Japanese print with a JP indicator so it is distinguishable from its EN twin', () => {
+    const jpCharizard: InventoryItem = { ...charizardNM, item_id: 'jp-1', language: 'JP' }
+    render(<CardGrid items={[jpCharizard]} />)
+    expect(screen.getByText('JP')).toBeInTheDocument()
+  })
+
+  it('does not show a JP indicator on an English (or unstamped) card', () => {
+    // charizardNM carries no language field → treated as EN.
+    render(<CardGrid items={[charizardNM]} />)
+    expect(screen.queryByText('JP')).toBeNull()
   })
 })

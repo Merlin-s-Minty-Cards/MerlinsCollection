@@ -77,14 +77,18 @@ class StubDocClient {
   }
 }
 
+// Post Database-Redesign rows: keyed by item_id, carry status, no quantity
+// (one record = one physical unit). Only available, customer-visible kinds
+// (raw/graded/sealed — never bulk) reach the public tools.
 function rawItem(overrides: Item = {}): Item {
   return {
     PK: "INV#0",
-    SK: "CARD#base1-4#RAW#holofoil#NM",
+    SK: "ITEM#01JRAW000000000000000001",
     entity: "inventory_item",
     kind: "raw",
+    item_id: "01JRAW000000000000000001",
     card_id: "base1-4",
-    quantity: 2,
+    status: "available",
     listed_price: 250,
     cost_basis: 100,
     current_market_value: 300,
@@ -98,11 +102,12 @@ function rawItem(overrides: Item = {}): Item {
 function gradedItem(overrides: Item = {}): Item {
   return {
     PK: "INV#1",
-    SK: "CARD#base1-4#GRADED#PSA#9.5#12345678",
+    SK: "ITEM#01JGRADED0000000000000001",
     entity: "inventory_item",
     kind: "graded",
+    item_id: "01JGRADED0000000000000001",
     card_id: "base1-4",
-    quantity: 1,
+    status: "available",
     listed_price: 900,
     cost_basis: 500,
     current_market_value: null,
@@ -110,6 +115,24 @@ function gradedItem(overrides: Item = {}): Item {
     company: "PSA",
     grade: 9.5,
     cert_number: "12345678",
+    ...overrides,
+  };
+}
+
+function sealedItem(overrides: Item = {}): Item {
+  return {
+    PK: "INV#2",
+    SK: "ITEM#01JSEALED0000000000000001",
+    entity: "inventory_item",
+    kind: "sealed",
+    item_id: "01JSEALED0000000000000001",
+    status: "available",
+    listed_price: 120,
+    cost_basis: 90,
+    current_market_value: 140,
+    acquired_at: "2026-04-01",
+    product_name: "Scarlet & Violet Booster Box",
+    product_type: "booster_box",
     ...overrides,
   };
 }
@@ -153,11 +176,76 @@ describe("listCards", () => {
         name: "Charizard",
         set: "base1",
         condition: "NM",
-        quantity: 2,
+        quantity: 1, // one record = one physical unit; legacy quantity is ignored
         value: 250,
         marketPrice: 300,
+        language: "EN", // no stored language attribute → defaults to EN
       },
     ]);
+  });
+
+  it("defaults language to EN when the row has no language attribute", async () => {
+    // Only the 109 JP items carry a stored language; every EN row omits it.
+    const { repo } = repoWith(
+      { "INV#0": [{ Items: [rawItem()] }] },
+      { "CARD#base1-4|META": meta("base1-4") },
+    );
+
+    const [card] = await repo.listCards();
+    expect(card?.language).toBe("EN");
+  });
+
+  it("reads the stored JP language for a raw item (card_id None by design)", async () => {
+    // A JP print has no English catalog match, so card_id is null; the language
+    // still comes straight off the row.
+    const { repo } = repoWith({
+      "INV#0": [{ Items: [rawItem({ language: "JP", card_id: null })] }],
+    });
+
+    const [card] = await repo.listCards();
+    expect(card?.language).toBe("JP");
+  });
+
+  it("reads the stored JP language for a sealed product", async () => {
+    const { repo } = repoWith({ "INV#2": [{ Items: [sealedItem({ language: "JP" })] }] });
+
+    const [card] = await repo.listCards();
+    expect(card?.language).toBe("JP");
+  });
+
+  it("hides items that are not available (sold / on-hold / lost stay internal)", async () => {
+    const { repo } = repoWith(
+      {
+        "INV#0": [{ Items: [rawItem({ status: "sold" })] }],
+        "INV#1": [{ Items: [gradedItem({ status: "on_hold" })] }],
+      },
+      { "CARD#base1-4|META": meta("base1-4") },
+    );
+    expect(await repo.listCards()).toEqual([]);
+  });
+
+  it("excludes bulk lots from the customer-facing projection", async () => {
+    const { repo } = repoWith({
+      "INV#3": [{
+        Items: [{
+          PK: "INV#3", SK: "ITEM#01JBULK00000000000000001",
+          entity: "inventory_item", kind: "bulk",
+          item_id: "01JBULK00000000000000001", status: "available",
+          listed_price: 5, cost_basis: 0, description: "5k bulk lot",
+        }],
+      }],
+    });
+    expect(await repo.listCards()).toEqual([]);
+  });
+
+  it("includes sealed products (no catalog card) with name, type and market value", async () => {
+    const { repo } = repoWith({ "INV#2": [{ Items: [sealedItem()] }] });
+    const [card] = await repo.listCards();
+    expect(card?.name).toBe("Scarlet & Violet Booster Box");
+    expect(card?.condition).toBe("Booster Box");
+    expect(card?.value).toBe(120);
+    expect(card?.marketPrice).toBe(140);
+    expect(card?.quantity).toBe(1);
   });
 
   it("fans out across all ten inventory shards", async () => {

@@ -79,4 +79,16 @@ describe("flagUnderpricedCards", () => {
 
     expect(ids(result.flaggedCards)).not.toContain("c5");
   });
+
+  it("does not flag a positively-priced JP card whose market resolves to 0", async () => {
+    // A JP print has no English catalog price, so marketPrice is 0. It must
+    // NOT be reported as "99% underpriced" just because market is 0.
+    const repo = new InMemoryInventoryRepository([
+      card({ id: "jp", name: "Japanese Charizard", language: "JP", value: 250, marketPrice: 0 }),
+    ]);
+
+    const result = await flagUnderpricedCards(repo, 80);
+
+    expect(result.flaggedCards).toEqual([]);
+  });
 });

@@ -1,0 +1,198 @@
+"""Tests for the shared card-text module.
+
+This module exists because R7 shipped two divergent implementations of one
+contract (BLOCKER-9): ``build_review.normalize_name`` dropped non-ASCII before
+splitting words while ``apply_review_decisions._norm_text`` split first, so the
+producer and consumer of a single paste-back round trip disagreed on
+``HS—Unleashed``. There is now one implementation and both ends import it.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from merlins_collection.models.inventory import Language
+from merlins_collection.services.card_text import (
+    ITEM_TEXT_FIELD,
+    item_language,
+    language_from_url,
+    normalize_name,
+    normalize_number,
+    parse_language,
+    strip_float_artifact,
+)
+
+
+# --- one normalizer, correct ordering (BLOCKER-9) ------------------------
+
+def test_a_dash_separates_words_whatever_kind_of_dash_it_is():
+    """The em-dash case that made the two R7 normalizers disagree. batch-01
+    line 8 carries `set=HS—Unleashed` with this exact character."""
+    assert normalize_name("HS—Unleashed") == "hs unleashed"
+    assert normalize_name("HS-Unleashed") == "hs unleashed"
+    assert normalize_name("HS—Unleashed") == normalize_name("HS-Unleashed")
+
+
+def test_normalize_name_still_does_what_both_callers_needed():
+    assert normalize_name("Moltres & Zapdos-GX") == "moltres zapdos gx"
+    assert normalize_name("  Team Rocket's  Mewtwo ") == "team rocket s mewtwo"
+    assert normalize_name(None) == ""
+
+
+def test_non_ascii_names_do_not_all_collapse_to_the_same_empty_string():
+    """S3: two fully non-ASCII names must not normalize to '' and compare equal —
+    that is exactly the field a Japanese catalog would populate."""
+    assert normalize_name("ピカチュウ") == ""
+    assert normalize_name("リザードン") == ""
+    # ...so the callers must not treat an empty normalization as a match; the
+    # helper reports it so they can refuse.
+    assert normalize_name("Pikachu") != ""
+
+
+def test_strip_float_artifact_and_number_normalization():
+    assert strip_float_artifact("83.0") == "83"
+    assert strip_float_artifact("1400665984.0") == "1400665984"
+    assert strip_float_artifact("83.5") == "83.5"
+    assert strip_float_artifact("sm210") == "sm210"
+    assert strip_float_artifact(None) == ""
+    assert normalize_number("83.0") == "83"
+    assert normalize_number("SWSH068") == "swsh068"
+    # a collector number's punctuation is load-bearing: callers split on it
+    assert normalize_number("182/167") == "182/167"
+    assert normalize_number("TG12/TG30") == "tg12/tg30"
+
+
+# --- language markers glued to another token (BLOCKER-8) -----------------
+
+@pytest.mark.parametrize("text", [
+    "Pikachu Ex world championship Promo — WCS23JP #1.0",
+    "Pikachu Ex — Pokemon WCS23JP #1.0",
+])
+def test_a_marker_glued_to_a_digit_prefix_is_still_a_marker(text):
+    """Two live production records (01KY8EC1BM7RAY8C77JM8BSJAF,
+    01KY8EC4H4Z4Q11E7KMDF6C9KY) read 'WCS23JP' — Worlds 2023 Japanese. R7's
+    whole-word rule missed both, leaving them eligible for an English card_id."""
+    assert parse_language(text)[0] is Language.JP
+
+
+def test_the_glued_marker_is_removed_leaving_the_set_code():
+    assert parse_language("Pikachu Ex — Pokemon WCS23JP #1.0") == (
+        Language.JP, "Pikachu Ex — Pokemon WCS23 #1.0")
+
+
+@pytest.mark.parametrize("text", [
+    "jpeg", "Jpop", "Japanophile", "1stjp", "jpn2", "xxx_JP88yyy",
+    "Charizard jpeg scan", "Mewtwo Jpop Promo", "Japanophile Deck",
+])
+def test_the_adversarial_set_the_council_verified_stays_english(text):
+    """The Council recorded ZERO false positives across 1266 production records
+    and these probes. Widening recall must not cost that."""
+    assert parse_language(text) == (Language.EN, text)
+
+
+def test_letter_glued_markers_are_still_refused():
+    """Only a DIGIT may precede a marker. A letter still means it is part of a
+    word, which is what keeps 'jpeg'/'1stjp' out."""
+    assert parse_language("sm12ajp")[0] is Language.EN
+    assert parse_language("WCS23JPX")[0] is Language.EN
+
+
+@pytest.mark.parametrize("text,cleaned", [
+    ("Team Rocket's Mewtwo (jp)", "Team Rocket's Mewtwo"),
+    ("Articuno (Jp)", "Articuno"),
+    ("Espeon V (Japanese)", "Espeon V"),
+    ("Lugia jp", "Lugia"),
+    ("JP exxeggutor Promo", "exxeggutor Promo"),
+    ("Wooper (Delta Species) Jp 1st Edition", "Wooper (Delta Species) 1st Edition"),
+    ("Venusaur (jp) 1st holo", "Venusaur 1st holo"),
+])
+def test_every_r7_marker_spelling_still_parses(text, cleaned):
+    assert parse_language(text) == (Language.JP, cleaned)
+
+
+def test_one_pattern_not_a_per_language_dict_decides(monkeypatch):
+    """Architect M3: a single compiled pattern maps each token to its language,
+    so 'insertion order decides' cannot be a weakness."""
+    from merlins_collection.services import card_text
+
+    assert isinstance(card_text.LANGUAGE_MARKER_RE.pattern, str)
+    assert card_text._TOKEN_LANGUAGE["jp"] is Language.JP
+    assert card_text._TOKEN_LANGUAGE["japanese"] is Language.JP
+
+
+# --- the independent, non-circular signal (BLOCKER-8) --------------------
+
+@pytest.mark.parametrize("url", [
+    "https://www.tcgplayer.com/product/572756/pokemon-japan-sm12a-tag-team-gx-tag-all-stars-moltres",
+    "https://www.tcgplayer.com/product/603972/pokemon-japan-xy7-bandit-ring-mega-sceptile-ex-008-081",
+])
+def test_a_tcgplayer_japan_url_is_a_language_signal(url):
+    """Three live rows (Singles.csv:551, :552, :586) carry NO marker in their
+    text and are identifiable only from TCGplayer's own category slug. This is a
+    genuinely independent source — a different column, produced by a different
+    system — which is what makes it usable to verify the text parser."""
+    assert language_from_url(url) is Language.JP
+
+
+def test_an_english_tcgplayer_url_is_not_a_language_signal():
+    assert language_from_url(
+        "https://www.tcgplayer.com/product/1234/pokemon-sword-shield-pikachu") is Language.EN
+    assert language_from_url("") is Language.EN
+    assert language_from_url(None) is Language.EN
+
+
+def test_the_word_japan_in_a_product_name_does_not_trip_the_url_rule():
+    """Only the category segment counts, not any occurrence of the word."""
+    assert language_from_url(
+        "https://www.tcgplayer.com/product/9/pokemon-sm-team-up-japanese-collector") is Language.EN
+
+
+# --- one place decides an item's language (BLOCKER-1a, N4) ---------------
+
+def test_item_text_field_is_the_single_kind_to_field_map():
+    assert ITEM_TEXT_FIELD == {"raw": "notes", "graded": "notes",
+                               "sealed": "product_name", "bulk": "description"}
+
+
+def test_item_language_reads_the_whole_stored_text_not_just_the_name():
+    """BLOCKER-1(a). The live PSA 10 01KY8EC7JYF175WA1NKFYESKZV stores
+    notes='Pikachu — jp 151 #173.0': the marker is in the SET half, which R7's
+    graded branch never language-checked. It banded HIGH for English sv3pt5-173
+    at $93.50, citing its own 'jp 151' marker as supporting evidence."""
+    record = {"kind": "graded", "notes": "Pikachu — jp 151 #173.0"}
+    assert item_language(record) is Language.JP
+
+
+def test_item_language_covers_the_second_live_slab():
+    record = {"kind": "graded", "notes": "Lilie's Determination — Mega 1 jp #184.0"}
+    assert item_language(record) is Language.JP
+
+
+def test_item_language_prefers_the_stored_field_once_it_exists():
+    record = {"kind": "raw", "notes": "Seismitoad #38", "language": "JP"}
+    assert item_language(record) is Language.JP
+
+
+def test_item_language_falls_back_to_the_tcg_url():
+    record = {"kind": "raw", "notes": "M Sceptile Ex #8.0",
+              "tcg_url": "https://www.tcgplayer.com/product/603972/pokemon-japan-xy7-bandit-ring"}
+    assert item_language(record) is Language.JP
+
+
+def test_item_language_defaults_to_english():
+    assert item_language({"kind": "raw", "notes": "Charizard #4.0"}) is Language.EN
+    assert item_language({"kind": "sealed", "product_name": "Booster Box"}) is Language.EN
+    assert item_language({}) is Language.EN
+
+
+def test_item_language_accepts_a_model_instance_not_only_a_dict():
+    """The applier holds a pydantic item, the scripts hold raw records."""
+    from datetime import date
+    from decimal import Decimal
+
+    from merlins_collection.models.inventory import RawInventoryItem
+
+    item = RawInventoryItem(cost_basis=Decimal("1"), acquired_at=date(2026, 1, 1),
+                            finish="normal", condition="NM",
+                            notes="Pikachu — jp 151 #173.0")
+    assert item_language(item) is Language.JP

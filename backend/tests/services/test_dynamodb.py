@@ -3,19 +3,29 @@ from datetime import date as _date
 from datetime import datetime
 from decimal import Decimal
 
+from merlins_collection.models.business import (
+    BuyingPolicy,
+    CashAccount,
+    Consignor,
+    PaymentMethod,
+    Show,
+    Transaction,
+)
 from merlins_collection.models.catalog import CatalogCard, PricePoint
 from merlins_collection.models.inventory import (
+    BulkInventoryItem,
     Condition,
     GradedInventoryItem,
     GradingCompany,
     RawInventoryItem,
+    SealedInventoryItem,
 )
 from merlins_collection.services.dynamodb import INVENTORY_SHARD_COUNT, _bucket, _grade_key
 
 
-def _raw_item(card_id="swsh1-1", finish="holofoil", condition="NM", qty=1):
+def _raw_item(card_id="swsh1-1", finish="holofoil", condition="NM"):
     return RawInventoryItem(
-        card_id=card_id, quantity=qty, listed_price=Decimal("10"),
+        card_id=card_id, listed_price=Decimal("10"),
         cost_basis=Decimal("4"), acquired_at=_date(2026, 1, 1),
         finish=finish, condition=Condition(condition),
     )
@@ -184,21 +194,33 @@ def test_bucket_is_stable_and_in_range():
     assert 0 <= _bucket("swsh1-1") < INVENTORY_SHARD_COUNT
 
 
-def test_put_then_get_inventory_item(dynamo_repo):
+def test_inventory_item_round_trip_by_item_id(dynamo_repo):
     item = _raw_item()
     dynamo_repo.put_inventory_item(item)
-    assert dynamo_repo.get_inventory_item(item) == item
+    assert dynamo_repo.get_inventory_item(item.item_id) == item
+    dynamo_repo.delete_inventory_item(item.item_id)
+    assert dynamo_repo.get_inventory_item(item.item_id) is None
 
 
-def test_delete_inventory_item(dynamo_repo):
-    item = _raw_item()
-    dynamo_repo.put_inventory_item(item)
-    dynamo_repo.delete_inventory_item(item)
-    assert dynamo_repo.get_inventory_item(item) is None
+def test_sealed_and_bulk_items_store_without_card_id(dynamo_repo):
+    sealed = SealedInventoryItem(product_name="ES Booster Box", product_type="booster_box",
+                                 cost_basis=Decimal("400"), acquired_at=_date(2026, 1, 5))
+    bulk = BulkInventoryItem(description="bulk lot", cost_basis=Decimal("20"),
+                             acquired_at=_date(2026, 1, 5))
+    dynamo_repo.put_inventory_item(sealed)
+    dynamo_repo.put_inventory_item(bulk)
+    kinds = {i.kind for i in dynamo_repo.list_inventory()}
+    assert kinds == {"sealed", "bulk"}
+
+
+def test_two_identical_cards_are_distinct_items(dynamo_repo):
+    a, b = _raw_item(), _raw_item()  # same card/finish/condition, different item_id
+    dynamo_repo.put_inventory_item(a)
+    dynamo_repo.put_inventory_item(b)
+    assert len(dynamo_repo.list_inventory()) == 2
 
 
 def test_list_inventory_gathers_across_shards(dynamo_repo):
-    # card_ids chosen so they land in different buckets in a real run; the count is what matters
     items = [_raw_item(card_id=f"card-{i}") for i in range(25)]
     for it in items:
         dynamo_repo.put_inventory_item(it)
@@ -207,10 +229,11 @@ def test_list_inventory_gathers_across_shards(dynamo_repo):
     assert {i.card_id for i in listed} == {f"card-{i}" for i in range(25)}
 
 
-def test_list_inventory_for_card(dynamo_repo):
+def test_list_inventory_for_card_only_returns_card_linked_items(dynamo_repo):
     dynamo_repo.put_inventory_item(_raw_item(condition="NM"))
     dynamo_repo.put_inventory_item(_raw_item(condition="LP"))
     dynamo_repo.put_inventory_item(_raw_item(card_id="other"))
+    dynamo_repo.put_inventory_item(_raw_item(card_id=None))
     rows = dynamo_repo.list_inventory_for_card("swsh1-1")
     assert len(rows) == 2
     assert {r.condition for r in rows} == {Condition.NM, Condition.LP}
@@ -218,12 +241,12 @@ def test_list_inventory_for_card(dynamo_repo):
 
 def test_put_then_get_graded_inventory_item(dynamo_repo):
     item = GradedInventoryItem(
-        card_id="swsh1-1", quantity=1, listed_price=Decimal("600"),
+        card_id="swsh1-1", listed_price=Decimal("600"),
         cost_basis=Decimal("300"), acquired_at=_date(2026, 1, 1),
         company=GradingCompany.PSA, grade=Decimal("10"), cert_number="12345678",
     )
     dynamo_repo.put_inventory_item(item)
-    assert dynamo_repo.get_inventory_item(item) == item
+    assert dynamo_repo.get_inventory_item(item.item_id) == item
 
 
 def test_price_history_start_only(dynamo_repo):
@@ -244,7 +267,306 @@ def test_price_history_end_only(dynamo_repo):
     assert [p.date for p in got] == [_date(2026, 6, 20)]
 
 
+def test_shows_round_trip_chronological(dynamo_repo):
+    later = Show(name="B Show", date=_date(2026, 5, 2))
+    earlier = Show(name="A Show", date=_date(2026, 4, 4))
+    dynamo_repo.put_show(later)
+    dynamo_repo.put_show(earlier)
+    names = [s.name for s in dynamo_repo.list_shows()]
+    assert names == ["A Show", "B Show"]  # SK sorts by date
+    assert dynamo_repo.get_show(later.show_id) == later
+    assert dynamo_repo.get_show("nope") is None
+
+
+def test_consignors_round_trip(dynamo_repo):
+    c = Consignor(name="David", contact="555-1234")
+    dynamo_repo.put_consignor(c)
+    assert dynamo_repo.list_consignors() == [c]
+
+
+def test_config_entities_round_trip(dynamo_repo):
+    dynamo_repo.put_cash_account(CashAccount(account="venmo", balance=Decimal("100")))
+    dynamo_repo.put_buying_policy(BuyingPolicy(product_type="slabs",
+                                               cash_pct_min=Decimal("60")))
+    venmo = PaymentMethod(method="venmo", fee_percent=Decimal("1.9"),
+                          fee_fixed=Decimal("0.10"))
+    dynamo_repo.put_payment_method(venmo)
+    assert dynamo_repo.list_cash_accounts()[0].balance == Decimal("100")
+    assert dynamo_repo.list_buying_policies()[0].product_type == "slabs"
+    assert dynamo_repo.get_payment_method("venmo") == venmo
+    assert dynamo_repo.get_payment_method("zelle") is None
+    assert [m.method for m in dynamo_repo.list_payment_methods()] == ["venmo"]
+
+
+def _txn(**over):
+    kw = dict(type="sale", item_id="i-1", category="raw", date=_date(2026, 3, 10),
+              amount=Decimal("40.00"), payment_method="cash")
+    kw.update(over)
+    return Transaction(**kw)
+
+
+def test_transactions_query_by_date_range_across_months(dynamo_repo):
+    feb = _txn(date=_date(2026, 2, 27))
+    mar = _txn(date=_date(2026, 3, 5))
+    apr = _txn(date=_date(2026, 4, 1))
+    for t in (feb, mar, apr):
+        dynamo_repo.put_transaction(t)
+    found = dynamo_repo.list_transactions(_date(2026, 2, 1), _date(2026, 3, 31))
+    assert sorted(t.txn_id for t in found) == sorted([feb.txn_id, mar.txn_id])
+    # sub-month range bounds within the partition
+    found = dynamo_repo.list_transactions(_date(2026, 3, 1), _date(2026, 3, 4))
+    assert found == []
+
+
+def test_transactions_query_by_show(dynamo_repo):
+    at_show = _txn(show_id="show-1")
+    off_show = _txn()
+    dynamo_repo.put_transaction(at_show)
+    dynamo_repo.put_transaction(off_show)
+    found = dynamo_repo.list_transactions_for_show("show-1")
+    assert [t.txn_id for t in found] == [at_show.txn_id]
+
+
+def test_item_price_points_round_trip_sorted(dynamo_repo):
+    dynamo_repo.append_item_price_point("item-1", _date(2026, 3, 2), Decimal("410"))
+    dynamo_repo.append_item_price_point("item-1", _date(2026, 3, 1), Decimal("400"))
+    history = dynamo_repo.get_item_price_history("item-1")
+    assert [h["market_value"] for h in history] == [Decimal("400"), Decimal("410")]
+
+
 def test_grade_key_canonicalizes():
     assert _grade_key(Decimal("9.50")) == "9.5"
     assert _grade_key(Decimal("10")) == "10"
     assert _grade_key(Decimal("10.0")) == "10"
+
+
+# ---- expense ledger (EXP# month partitions; per-show derived by filter) ----
+
+def test_put_and_list_expenses_by_month_range(dynamo_repo):
+    from merlins_collection.models.business import Expense, ExpenseCategory
+    jan = Expense(category=ExpenseCategory.MARKETING, date=_date(2026, 1, 15),
+                  amount=Decimal("23.99"))
+    mar = Expense(category=ExpenseCategory.SUPPLIES, date=_date(2026, 3, 2),
+                  amount=Decimal("56.66"))
+    dynamo_repo.put_expense(jan)
+    dynamo_repo.put_expense(mar)
+
+    jan_only = dynamo_repo.list_expenses(_date(2026, 1, 1), _date(2026, 1, 31))
+    assert [e.expense_id for e in jan_only] == [jan.expense_id]
+
+    both = dynamo_repo.list_expenses(_date(2026, 1, 1), _date(2026, 3, 31))
+    assert {e.expense_id for e in both} == {jan.expense_id, mar.expense_id}
+
+
+def test_expenses_do_not_pollute_the_show_transaction_index(dynamo_repo):
+    """An expense linked to a show must not corrupt the GSI2 Transaction reader."""
+    from merlins_collection.models.business import Expense, ExpenseCategory
+    dynamo_repo.put_expense(Expense(
+        category=ExpenseCategory.SHOW_FEE, date=_date(2026, 1, 10),
+        amount=Decimal("30.00"), show_id="show-1"))
+    # GSI2 is read back as Transactions; expenses stay out of it, so this is empty.
+    assert dynamo_repo.list_transactions_for_show("show-1") == []
+
+
+# ---- debts (single DEBTLIST partition) ----
+
+def test_put_and_list_debts(dynamo_repo):
+    from merlins_collection.models.business import Debt, DebtDirection
+    dynamo_repo.put_debt(Debt(direction=DebtDirection.OWED_TO_US,
+                              date=_date(2026, 1, 10), amount=Decimal("22"),
+                              counterparty="Colin"))
+    dynamo_repo.put_debt(Debt(direction=DebtDirection.WE_OWE,
+                              date=_date(2026, 1, 10), amount=Decimal("30"),
+                              counterparty="Jackson", cleared=True))
+    debts = dynamo_repo.list_debts()
+    assert {(d.direction.value, d.counterparty) for d in debts} == {
+        ("owed_to_us", "Colin"), ("we_owe", "Jackson")}
+
+
+# ---- payouts (single PAYOUTLIST partition) ----
+
+def test_put_and_list_payouts(dynamo_repo):
+    from merlins_collection.models.business import Payout
+    dynamo_repo.put_payout(Payout(event="E1", partner="Casey", amount=Decimal("40")))
+    dynamo_repo.put_payout(Payout(event="E1", partner="Colin", amount=Decimal("60")))
+    payouts = dynamo_repo.list_payouts()
+    assert {(p.partner, p.amount) for p in payouts} == {
+        ("Casey", Decimal("40")), ("Colin", Decimal("60"))}
+
+
+# ---- balance sheet snapshots (BALANCESHEET partition) ----
+
+def test_put_and_list_balance_sheets(dynamo_repo):
+    from merlins_collection.models.business import (
+        BalanceSheetLine, BalanceSheetSnapshot, BalanceSheetSection)
+    for label, frozen in (("beginning", True), ("current", False)):
+        dynamo_repo.put_balance_sheet(BalanceSheetSnapshot(
+            snapshot_id=label, label=label, frozen=frozen,
+            lines=[BalanceSheetLine(section=BalanceSheetSection.ASSET,
+                                    label="Inventory", amount=Decimal("100"))]))
+    snaps = {s.label: s for s in dynamo_repo.list_balance_sheets()}
+    assert snaps["beginning"].frozen is True
+    assert snaps["current"].frozen is False
+    assert snaps["beginning"].lines[0].label == "Inventory"
+
+
+# ================= Council revision-6 fixes (BLOCKING-4 / lock) ================
+# R5's monotonic `record_gen < gen` ordering rested on cross-machine ULID
+# wall-clock agreement (BLOCKING-4). R6 replaces it with a single-flight import
+# LOCK (so no two runs are ever concurrent) plus commit-order-wins deletion
+# (`gen != mine`), which is wall-clock-independent: the run that commits LAST wins
+# regardless of its gen value.
+
+def _debt(who):
+    from merlins_collection.models.business import Debt, DebtDirection
+    return Debt(direction=DebtDirection.OWED_TO_US, date=_date(2026, 1, 1),
+                amount=Decimal("10"), counterparty=who)
+
+
+def test_R6_later_committed_run_wins_regardless_of_gen_value(dynamo_repo):
+    # A run with a LEXICALLY-LARGER gen commits FIRST (older content, e.g. a
+    # clock-skewed laptop). A later run with a SMALLER gen commits SECOND (the
+    # genuinely newest content). Commit order — not ULID value — must decide the
+    # winner, so the second run's data survives and the first's is swept.
+    dynamo_repo.set_import_generation("gen-ZZZZ")  # lexically large
+    dynamo_repo.put_debt(_debt("Stale"))
+    dynamo_repo.finalize_import("gen-ZZZZ", committed=True)
+    dynamo_repo.set_import_generation(None)
+
+    dynamo_repo.set_import_generation("gen-AAAA")  # lexically small, commits later
+    dynamo_repo.put_debt(_debt("Fresh"))
+    dynamo_repo.finalize_import("gen-AAAA", committed=True)
+    dynamo_repo.set_import_generation(None)
+
+    who = {d.counterparty for d in dynamo_repo.list_debts()}
+    assert who == {"Fresh"}  # newest COMMITTED wins; stale larger-gen row swept
+
+
+def test_R6_import_lock_is_single_flight(dynamo_repo):
+    from merlins_collection.services.dynamodb import ImportInProgressError
+    dynamo_repo.acquire_import_lock("gen-A")
+    # A second acquire while the lock is held is refused.
+    try:
+        dynamo_repo.acquire_import_lock("gen-B")
+        raised = False
+    except ImportInProgressError:
+        raised = True
+    assert raised
+    # After release, a new run can acquire.
+    dynamo_repo.release_import_lock("gen-A")
+    dynamo_repo.acquire_import_lock("gen-B")  # no raise
+    dynamo_repo.release_import_lock("gen-B")
+
+
+def test_R6_import_lock_is_not_import_owned(dynamo_repo):
+    # The lock item must never be swept by finalize (it is not import-owned data).
+    dynamo_repo.acquire_import_lock("gen-A")
+    dynamo_repo.set_import_generation("gen-A")
+    dynamo_repo.put_debt(_debt("X"))
+    dynamo_repo.finalize_import("gen-A", committed=True)
+    dynamo_repo.set_import_generation(None)
+    # Lock survived the commit sweep -> a stale second acquire is still refused.
+    from merlins_collection.services.dynamodb import ImportInProgressError
+    try:
+        dynamo_repo.acquire_import_lock("gen-B")
+        held = False
+    except ImportInProgressError:
+        held = True
+    assert held
+    dynamo_repo.release_import_lock("gen-A")
+
+
+# ---- import-owned data probe (re-import guard) ----
+
+def test_find_import_owned_entity_none_on_empty_table(dynamo_repo):
+    assert dynamo_repo.find_import_owned_entity() is None
+
+
+def test_find_import_owned_entity_ignores_catalog_only_table(dynamo_repo):
+    # The ~53k-row catalog (catalog_card + price_point) is NOT import-owned: a
+    # seeded-but-never-imported table must still read as "no business data".
+    dynamo_repo.batch_upsert_catalog_cards([_card("a-1", "setA"), _card("a-2", "setA")])
+    dynamo_repo.append_price_points([_raw_point("a-1", _date(2026, 6, 20), "10")])
+    dynamo_repo.set_graded_market_value("a-1", GradingCompany.PSA, Decimal("10"),
+                                        Decimal("500"))
+    dynamo_repo.append_item_price_point("i-1", _date(2026, 6, 20), Decimal("3"))
+    assert dynamo_repo.find_import_owned_entity() is None
+
+
+def test_find_import_owned_entity_ignores_the_import_lock(dynamo_repo):
+    dynamo_repo.acquire_import_lock("gen-A")
+    assert dynamo_repo.find_import_owned_entity() is None
+    dynamo_repo.release_import_lock("gen-A")
+
+
+def test_find_import_owned_entity_detects_each_business_partition(dynamo_repo):
+    from merlins_collection.models.business import (
+        BalanceSheetLine,
+        BalanceSheetSection,
+        BalanceSheetSnapshot,
+        Payout,
+    )
+
+    def _snapshot():
+        # non-frozen: a frozen baseline is deliberately never swept by a commit,
+        # so it could not be cleared between probes.
+        return BalanceSheetSnapshot(
+            snapshot_id="current", label="current", frozen=False,
+            lines=[BalanceSheetLine(section=BalanceSheetSection.ASSET,
+                                    label="Inventory", amount=Decimal("100"))])
+
+    writes = {
+        "inventory_item": lambda: dynamo_repo.put_inventory_item(_raw_item()),
+        "show": lambda: dynamo_repo.put_show(
+            Show(show_id="s1", name="Mint City", date=_date(2026, 3, 8))),
+        "debt": lambda: dynamo_repo.put_debt(_debt("Colin")),
+        "payout": lambda: dynamo_repo.put_payout(
+            Payout(event="E1", partner="Casey", amount=Decimal("40"))),
+        "consignor": lambda: dynamo_repo.put_consignor(
+            Consignor(consignor_id="c1", name="Rylan")),
+        "cash_account": lambda: dynamo_repo.put_cash_account(
+            CashAccount(account="venmo", balance=Decimal("10"))),
+        "balance_sheet_snapshot": lambda: dynamo_repo.put_balance_sheet(_snapshot()),
+    }
+    for entity, write in writes.items():
+        assert dynamo_repo.find_import_owned_entity() is None, entity
+        write()
+        assert dynamo_repo.find_import_owned_entity() == entity
+        # Clear it again so the next entity is probed in isolation.
+        dynamo_repo.finalize_import("no-such-gen", committed=True)
+    assert dynamo_repo.find_import_owned_entity() is None
+
+
+def test_find_import_owned_entity_does_not_scan_the_table(dynamo_repo):
+    # The probe must be partition-bounded: a full table scan would read the whole
+    # ~53k-row catalog on every import.
+    dynamo_repo.batch_upsert_catalog_cards([_card()])
+    scans = []
+    original_scan = dynamo_repo._table.scan
+
+    def _spy(**kwargs):
+        scans.append(kwargs)
+        return original_scan(**kwargs)
+
+    dynamo_repo._table.scan = _spy
+    assert dynamo_repo.find_import_owned_entity() is None
+    assert scans == []
+
+
+def test_R5_finalize_scan_reads_strongly_consistent(dynamo_repo):
+    from merlins_collection.models.business import Debt, DebtDirection
+    scan_consistency = []
+    original_scan = dynamo_repo._table.scan
+
+    def _spy(**kwargs):
+        scan_consistency.append(kwargs.get("ConsistentRead"))
+        return original_scan(**kwargs)
+
+    dynamo_repo._table.scan = _spy
+    dynamo_repo.set_import_generation("gen-x")
+    dynamo_repo.put_debt(Debt(direction=DebtDirection.OWED_TO_US, date=_date(2026, 1, 1),
+                              amount=Decimal("1"), counterparty="X"))
+    dynamo_repo.finalize_import("gen-x", committed=True)
+    dynamo_repo.set_import_generation(None)
+    assert scan_consistency  # the finalize scan ran
+    assert all(c is True for c in scan_consistency)  # every page read strongly-consistent

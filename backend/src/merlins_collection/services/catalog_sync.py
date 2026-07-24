@@ -86,7 +86,7 @@ def snapshot_graded_prices(repo, today: date) -> dict:
     seen = set()
     written = 0
     for item in repo.list_inventory():
-        if item.kind != "graded":
+        if item.kind != "graded" or item.card_id is None:
             continue
         key = (item.card_id, item.company, item.grade)
         if key in seen:
@@ -118,6 +118,8 @@ def refresh_inventory_market_values(repo) -> int:
     catalog_cache: dict = {}
     graded_cache: dict = {}
     for item in repo.list_inventory():
+        if item.kind not in ("raw", "graded") or item.card_id is None:
+            continue
         if item.kind == "raw":
             if item.card_id not in catalog_cache:
                 catalog_cache[item.card_id] = repo.get_catalog_card(item.card_id)
@@ -137,9 +139,25 @@ def refresh_inventory_market_values(repo) -> int:
     return updated
 
 
+def snapshot_sealed_prices(repo, today: date) -> dict:
+    """Append a daily history point for each sealed item with a market value.
+
+    Sealed products have no catalog card, so their history hangs off the item
+    itself (``ITEM#<item_id>`` price points).
+    """
+    written = 0
+    for item in repo.list_inventory():
+        if item.kind != "sealed" or item.current_market_value is None:
+            continue
+        repo.append_item_price_point(item.item_id, today, item.current_market_value)
+        written += 1
+    return {"sealed_points_written": written}
+
+
 def run_daily_sync(repo, client, today: date) -> dict:
-    """Run all three sync steps in order and return their merged summary."""
+    """Run all sync steps in order and return their merged summary."""
     summary = sync_catalog(repo, client, today)
     summary.update(snapshot_graded_prices(repo, today))
+    summary.update(snapshot_sealed_prices(repo, today))
     summary["items_refreshed"] = refresh_inventory_market_values(repo)
     return summary

@@ -16,6 +16,12 @@ export type Card = {
   value: number;
   /** External market reference price per unit (used for flagging underpriced cards). */
   marketPrice: number;
+  /**
+   * Print language — part of the card's identity, not a label. A JP print is a
+   * different card at a different price. Rows written before the field existed
+   * (every EN item) default to "EN".
+   */
+  language: "EN" | "JP";
 };
 
 export type PricePoint = {
