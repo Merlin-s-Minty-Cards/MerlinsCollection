@@ -35,6 +35,34 @@ class Condition(StrEnum):
     DMG = "DMG"
 
 
+class Language(StrEnum):
+    """The print language of a physical item — part of its IDENTITY, not a label.
+
+    A Japanese Seismitoad is a DIFFERENT card from the English one and carries a
+    different market value, so this field decides whether the (English-only)
+    catalog may be consulted for an item at all. Adding a member needs no data
+    migration: records written before the field existed simply validate as
+    ``EN``, the default.
+    """
+
+    EN = "EN"
+    JP = "JP"
+
+    @property
+    def label(self) -> str:
+        """Display name for the review tooling ("JP" -> "Japanese")."""
+        return LANGUAGE_LABELS.get(self, self.value)
+
+
+LANGUAGE_LABELS = {Language.EN: "English", Language.JP: "Japanese"}
+
+# The attribute holding the sheet's card-name text, per item kind. One fact, one
+# place: the review page, the applier and the language backfill all read it from
+# here rather than each re-encoding the kind -> field mapping.
+ITEM_TEXT_FIELD = {"raw": "notes", "graded": "notes",
+                   "sealed": "product_name", "bulk": "description"}
+
+
 class ConditionModifier(StrEnum):
     """Finer nuance on a condition tier (an ``LP+`` is an LP, but nicer)."""
 
@@ -86,10 +114,16 @@ class _ItemBase(BaseModel):
     ``cost_basis`` is internal purchase data and must never reach customers.
     ``current_market_value`` is denormalized by the daily sync (card-linked raw
     items) or maintained manually (graded/sealed).
+
+    ``language`` lives here rather than on ``RawInventoryItem`` because every
+    kind can be a non-English printing — Japanese slabs and Japanese sealed
+    product are both ordinary stock — and because it gates catalog matching,
+    which the raw and graded kinds share.
     """
 
     item_id: str = Field(default_factory=new_ulid)
     status: ItemStatus = ItemStatus.AVAILABLE
+    language: Language = Language.EN
     location: str | None = None
     cost_basis: Decimal
     market_value_at_purchase: Decimal | None = None

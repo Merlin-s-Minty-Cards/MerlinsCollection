@@ -117,6 +117,15 @@ describe('buildSearchQuery', () => {
     )
   })
 
+  it('sends the language filter using the backend param name', () => {
+    expect(new URLSearchParams(buildSearchQuery({ language: 'JP' })).get('language')).toBe('JP')
+    expect(new URLSearchParams(buildSearchQuery({ language: 'EN' })).get('language')).toBe('EN')
+  })
+
+  it('omits language when it is empty (the "All languages" choice)', () => {
+    expect(new URLSearchParams(buildSearchQuery({ language: '' })).get('language')).toBeNull()
+  })
+
   it('URL-encodes special characters', () => {
     expect(buildSearchQuery({ name: "Farfetch'd & Mr. Mime" })).toContain(
       'name=Farfetch%27d+%26+Mr.+Mime',

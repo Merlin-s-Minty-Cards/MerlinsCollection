@@ -11,6 +11,12 @@ const seed = () =>
     card({ id: "4", name: "Charizard", set: "Jungle", condition: "Near Mint", value: 150 }),
   ]);
 
+const langSeed = () =>
+  new InMemoryInventoryRepository([
+    card({ id: "en", name: "Charizard", language: "EN" }),
+    card({ id: "jp", name: "Charizard", language: "JP" }),
+  ]);
+
 const ids = (cards: Array<{ id: string }>) => cards.map((c) => c.id);
 
 describe("searchInventory", () => {
@@ -18,10 +24,10 @@ describe("searchInventory", () => {
     const result = await searchInventory(seed(), {});
 
     expect(result).toEqual([
-      { id: "1", name: "Charizard", set: "Base Set", condition: "Near Mint", quantity: 1, currentValue: 500 },
-      { id: "2", name: "Blastoise", set: "Base Set", condition: "Lightly Played", quantity: 1, currentValue: 300 },
-      { id: "3", name: "Pikachu", set: "Jungle", condition: "Near Mint", quantity: 3, currentValue: 20 },
-      { id: "4", name: "Charizard", set: "Jungle", condition: "Near Mint", quantity: 1, currentValue: 150 },
+      { id: "1", name: "Charizard", set: "Base Set", condition: "Near Mint", quantity: 1, currentValue: 500, language: "EN" },
+      { id: "2", name: "Blastoise", set: "Base Set", condition: "Lightly Played", quantity: 1, currentValue: 300, language: "EN" },
+      { id: "3", name: "Pikachu", set: "Jungle", condition: "Near Mint", quantity: 3, currentValue: 20, language: "EN" },
+      { id: "4", name: "Charizard", set: "Jungle", condition: "Near Mint", quantity: 1, currentValue: 150, language: "EN" },
     ]);
   });
 
@@ -75,5 +81,23 @@ describe("searchInventory", () => {
     const result = await searchInventory(seed(), { name: "Mewtwo" });
 
     expect(result).toEqual([]);
+  });
+
+  it("carries the card's language on each result", async () => {
+    const result = await searchInventory(langSeed(), {});
+
+    expect(result.map((r) => r.language).sort()).toEqual(["EN", "JP"]);
+  });
+
+  it("filters by language (case-insensitive)", async () => {
+    expect(ids(await searchInventory(langSeed(), { language: "JP" }))).toEqual(["jp"]);
+    expect(ids(await searchInventory(langSeed(), { language: "en" }))).toEqual(["en"]);
+  });
+
+  it("AND-combines a language filter with the other filters", async () => {
+    // Both Charizards, one EN one JP; name+language must both match.
+    const result = await searchInventory(langSeed(), { name: "char", language: "JP" });
+
+    expect(ids(result)).toEqual(["jp"]);
   });
 });

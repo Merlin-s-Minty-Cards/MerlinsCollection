@@ -45,6 +45,7 @@ _TOOLS: list[dict] = [
                         "condition": {"type": "string", "description": "NM, LP, MP, HP, or DMG"},
                         "min_value": {"type": "number"},
                         "max_value": {"type": "number"},
+                        "language": {"type": "string", "description": "Print language: EN or JP"},
                     },
                 }
             },

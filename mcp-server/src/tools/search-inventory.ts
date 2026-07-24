@@ -15,6 +15,8 @@ export type SearchFilters = {
   minValue?: number;
   /** Inclusive upper bound on per-unit value. */
   maxValue?: number;
+  /** Case-insensitive exact match against the print language (EN/JP). */
+  language?: string;
 };
 
 /** A single card as returned to search callers (the frontend's `currentValue` shape). */
@@ -26,6 +28,8 @@ export type CardResult = {
   quantity: number;
   /** Per-unit listed value (mirrors `Card.value`). */
   currentValue: number;
+  /** Print language (EN/JP) — lets the model distinguish a JP print from its EN twin. */
+  language: "EN" | "JP";
 };
 
 /**
@@ -63,6 +67,12 @@ export async function searchInventory(
     if (filters.maxValue !== undefined && card.value > filters.maxValue) {
       return false;
     }
+    if (
+      filters.language !== undefined &&
+      card.language.toLowerCase() !== filters.language.toLowerCase()
+    ) {
+      return false;
+    }
     return true;
   });
 
@@ -73,5 +83,6 @@ export async function searchInventory(
     condition: card.condition,
     quantity: card.quantity,
     currentValue: card.value,
+    language: card.language,
   }));
 }

@@ -28,6 +28,8 @@ export interface CardSummary {
   image_small: string | null
 }
 
+export type Language = 'EN' | 'JP'
+
 interface ItemBase {
   /** Per-unit identity (the stable key). Post Database-Redesign; not card_id. */
   item_id: string
@@ -37,6 +39,12 @@ interface ItemBase {
   listed_price: string | null
   current_market_value: string | null
   acquired_at: string
+  /**
+   * Print language (EN/JP). Optional on the wire for backward-compatibility —
+   * a missing value means English (a JP print is a different, differently
+   * priced card). Read it via {@link isJapanese}, which defaults absent → EN.
+   */
+  language?: Language
   card: CardSummary | null
 }
 
@@ -82,6 +90,8 @@ export interface InventoryFilters {
   condition?: string
   min_price?: string
   max_price?: string
+  /** 'EN' | 'JP'; omitted (or '') means "all languages" (no filter). */
+  language?: string
 }
 
 export interface ChatMessage {
@@ -105,6 +115,7 @@ const FILTER_KEYS: (keyof InventoryFilters)[] = [
   'condition',
   'min_price',
   'max_price',
+  'language',
 ]
 
 /** Build a flat, URL-encoded query string from filters, omitting empty fields. */
@@ -185,4 +196,9 @@ export function conditionLabel(item: InventoryItem): string {
 /** Stable unique key for a result tile — item_id is the per-unit identity. */
 export function itemKey(item: InventoryItem): string {
   return item.item_id
+}
+
+/** True for a Japanese print. A missing language defaults to English. */
+export function isJapanese(item: InventoryItem): boolean {
+  return item.language === 'JP'
 }

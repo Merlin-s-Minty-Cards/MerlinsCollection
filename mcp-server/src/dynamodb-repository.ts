@@ -57,6 +57,11 @@ function asNumber(value: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+/** Print language off a row; only the JP items store it, everything else is EN. */
+function languageOf(row: Row): "EN" | "JP" {
+  return row.language === "JP" ? "JP" : "EN";
+}
+
 export class DynamoDbInventoryRepository implements InventoryRepository {
   constructor(
     private readonly client: DocumentClientLike,
@@ -139,6 +144,7 @@ export class DynamoDbInventoryRepository implements InventoryRepository {
         quantity: 1,
         value: asNumber(row.listed_price),
         marketPrice: asNumber(row.current_market_value ?? 0),
+        language: languageOf(row),
       };
     }
     // Raw/graded: card_id is an optional catalog link; fall back to item_id.
@@ -156,6 +162,7 @@ export class DynamoDbInventoryRepository implements InventoryRepository {
       quantity: 1, // one inventory record = one physical unit
       value: asNumber(row.listed_price),
       marketPrice: this.marketPrice(row, meta, gradedPrices),
+      language: languageOf(row),
     };
   }
 

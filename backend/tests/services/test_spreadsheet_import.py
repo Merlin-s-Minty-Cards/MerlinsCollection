@@ -4,9 +4,11 @@ from decimal import Decimal
 import pytest
 
 from merlins_collection.models.business import Show
-from merlins_collection.models.inventory import Condition, ConditionModifier
+from merlins_collection.models.inventory import Condition, ConditionModifier, Language
 from merlins_collection.services.spreadsheet_import import (
+    ExistingBusinessDataError,
     ImportContext,
+    _match_card,
     deterministic_id,
     import_bulk,
     import_buying_guidelines,
@@ -21,6 +23,7 @@ from merlins_collection.services.spreadsheet_import import (
     parse_bool,
     parse_condition,
     parse_date,
+    parse_language,
     parse_money,
     run_import,
     seed_payment_methods,
@@ -539,9 +542,12 @@ def test_C1_reimport_after_deleting_a_middle_row_no_orphan_no_double_revenue(
     run_import(tmp_path, dynamo_repo, require_complete=False)
     assert len(dynamo_repo.list_inventory()) == 3
     assert len(dynamo_repo.list_transactions(date(2026, 3, 1), date(2026, 3, 31))) == 1
-    # DELETE the middle (sold) row and re-import — replace semantics, no orphan
+    # DELETE the middle (sold) row and re-import — replace semantics, no orphan.
+    # Every re-import below passes force_replace=True: the table now holds business
+    # data, and the outer re-import guard refuses an accidental second run without
+    # that explicit opt-in (see the re-import guard tests at the end of this file).
     _write_bulk_csv(tmp_path, "lot A,10,,,,,\nlot C,30,,,,,\n")
-    run_import(tmp_path, dynamo_repo, require_complete=False)
+    run_import(tmp_path, dynamo_repo, require_complete=False, force_replace=True)
     assert len(dynamo_repo.list_inventory()) == 2
     assert dynamo_repo.list_transactions(date(2026, 3, 1), date(2026, 3, 31)) == []
 
@@ -551,7 +557,7 @@ def test_C1_reimport_after_sorting_rows_is_idempotent(tmp_path, dynamo_repo):
     run_import(tmp_path, dynamo_repo, require_complete=False)
     assert len(dynamo_repo.list_inventory()) == 2
     _write_bulk_csv(tmp_path, "lot B,20,,,,,\nlot A,10,,,,,\n")  # reordered
-    run_import(tmp_path, dynamo_repo, require_complete=False)
+    run_import(tmp_path, dynamo_repo, require_complete=False, force_replace=True)
     assert len(dynamo_repo.list_inventory()) == 2  # not 4
 
 
@@ -606,7 +612,8 @@ def test_D2_failed_tab_does_not_destroy_previous_generation(tmp_path, dynamo_rep
     (tmp_path / "Buying Guidelines.csv").write_text(
         " Product Type,Cash % Min\n" + ("x" * 200000) + ",0.7\n", encoding="utf-8")
     _write_bulk_csv(tmp_path, "lot A,10,,,,,\nlot B,20,,,,,\nlot C,30,,,,,\n")
-    summaries = run_import(tmp_path, dynamo_repo, require_complete=False)
+    summaries = run_import(tmp_path, dynamo_repo, require_complete=False,
+                           force_replace=True)
     assert summaries["_committed"] is False
     assert len(dynamo_repo.list_inventory()) == 2     # prior data intact, not wiped
 
@@ -754,7 +761,8 @@ def test_R6_partial_truncation_preserves_frozen_baseline(tmp_path, dynamo_repo):
     # write-once/immutable, so it must be left UNCHANGED — not the truncated subset.
     partial = _BS_HEADER + "Assets,,\nInventory,5228.81,cost\n"
     _write(tmp_path, "Balance Sheet Beginning.csv", partial)
-    summaries = run_import(tmp_path, dynamo_repo, require_complete=False)
+    summaries = run_import(tmp_path, dynamo_repo, require_complete=False,
+                           force_replace=True)
     assert summaries["_committed"] is True
 
     after = next(s for s in dynamo_repo.list_balance_sheets() if s.label == "beginning")
@@ -803,7 +811,8 @@ def test_R6_zero_leaf_rollback_preserves_stable_key_entities(tmp_path, dynamo_re
     # the same run must SURVIVE from the prior generation (not wiped by the rollback).
     _write(tmp_path, "Copy of Balance Sheet Beginning.csv",
            "Item,Column 2,Column 3\nAssets,,\nInventory,5228.81,cost\n")
-    summaries = run_import(tmp_path, dynamo_repo, require_complete=False)
+    summaries = run_import(tmp_path, dynamo_repo, require_complete=False,
+                           force_replace=True)
     assert summaries["_committed"] is False
     assert dynamo_repo.list_shows() != []
     assert dynamo_repo.list_cash_accounts() != []
@@ -821,8 +830,9 @@ def test_R6_committed_reimport_leaves_one_copy_of_each_stable_key_entity(
     _write(tmp_path, "Cash.csv", "Type,Amount\nVenmo,$321.50\n")
     _write(tmp_path, "Buying Guidelines.csv", " Product Type,Cash % Min\nSlabs,60%\n")
     _write(tmp_path, "Copy of Balance Sheet Beginning.csv", _BS_VALID)
-    for _ in range(3):
-        summaries = run_import(tmp_path, dynamo_repo, require_complete=False)
+    for run in range(3):
+        summaries = run_import(tmp_path, dynamo_repo, require_complete=False,
+                               force_replace=run > 0)
         assert summaries["_committed"] is True
     assert len(dynamo_repo.list_shows()) == 1
     assert len(dynamo_repo.list_cash_accounts()) == 1
@@ -852,7 +862,8 @@ def test_R6_truncated_expense_tab_preserves_prior_expenses(tmp_path, dynamo_repo
     _write(tmp_path, "Show Fees.csv",
            "Name,Date of Transaction,Platform,"
            "Amount (neg numbers is money coming in),Reason\n")
-    summaries = run_import(tmp_path, dynamo_repo, require_complete=False)
+    summaries = run_import(tmp_path, dynamo_repo, require_complete=False,
+                           force_replace=True)
     assert summaries["_committed"] is False
     assert len(dynamo_repo.list_expenses(date(2026, 1, 1), date(2026, 12, 31))) == before
 
@@ -867,14 +878,15 @@ def test_R6_legit_empty_ledger_needs_override(tmp_path, dynamo_repo):
 
     # A later period legitimately has no payouts. WITHOUT the override -> fail loud.
     _write(tmp_path, "Payouts.csv", "Event,Casey,Colin\n")
-    s1 = run_import(tmp_path, dynamo_repo, require_complete=False)
+    s1 = run_import(tmp_path, dynamo_repo, require_complete=False,
+                    force_replace=True)
     assert s1["_committed"] is False
     assert len(dynamo_repo.list_payouts()) == 2  # prior preserved, not wiped
 
     # WITH the explicit operator override -> the empty ledger imports to zero AND the
     # rest of that period's workbook (the show) still commits.
     s2 = run_import(tmp_path, dynamo_repo, require_complete=False,
-                    allow_empty={"Payouts"})
+                    allow_empty={"Payouts"}, force_replace=True)
     assert s2["_committed"] is True
     assert dynamo_repo.list_payouts() == []
     assert dynamo_repo.list_shows() != []
@@ -914,7 +926,8 @@ def test_R5_present_but_empty_debts_tab_does_not_delete_prior_debts(
     # -> zero new debts while the prior generation was non-empty. The run must fail
     # loud and preserve the prior debts, never silently empty the ledger.
     _write(tmp_path, "Debts.csv", _debts_body(with_rows=False))
-    summaries = run_import(tmp_path, dynamo_repo, require_complete=False)
+    summaries = run_import(tmp_path, dynamo_repo, require_complete=False,
+                           force_replace=True)
     assert summaries["_committed"] is False
     assert len(dynamo_repo.list_debts()) == 2  # prior debts intact
 
@@ -930,7 +943,8 @@ def test_R5_truncated_payouts_tab_does_not_delete_unreplaced_remainder(
     # A truncated (header-only) re-export collapses the entity to zero rows. The
     # un-replaced prior remainder must NOT be silently deleted on a commit.
     _write(tmp_path, "Payouts.csv", "Event,Casey,Colin,Note,Percentage\n")
-    summaries = run_import(tmp_path, dynamo_repo, require_complete=False)
+    summaries = run_import(tmp_path, dynamo_repo, require_complete=False,
+                           force_replace=True)
     assert summaries["_committed"] is False
     assert len(dynamo_repo.list_payouts()) == 2  # remainder preserved
 
@@ -949,6 +963,99 @@ def test_R5_import_debts_aliases_reworded_amount_header(dynamo_repo):
     assert debt.counterparty == "Colin"
 
 
+# ============ re-import guard: the DB is the source of truth ============
+# The spreadsheet was imported ONCE. From then on the database — not the sheet —
+# is authoritative, and a re-import REPLACES every import-owned record with the
+# sheet's contents (including the non-re-derivable frozen baseline's neighbours).
+# So an import into a table that already holds business data is refused outright
+# unless the operator asks for it with force_replace / --force-replace.
+
+def _raw_table_snapshot(repo) -> list:
+    """Every stored item, fully materialized and ordered, for byte-for-byte
+    before/after comparison (a plain list_* read would hide gen/key changes)."""
+    items, kwargs = [], {"ConsistentRead": True}
+    while True:
+        resp = repo._table.scan(**kwargs)
+        items.extend(resp.get("Items", []))
+        last = resp.get("LastEvaluatedKey")
+        if not last:
+            break
+        kwargs["ExclusiveStartKey"] = last
+    return sorted((i["PK"], i["SK"], repr(sorted(i.items()))) for i in items)
+
+
+def _seed_workbook(tmp_path):
+    _write(tmp_path, "Vending Net.csv", "Day,Show,Goal\n3/8/2026,Mint City,$500\n")
+    _write(tmp_path, "Cash.csv", "Type,Amount\nVenmo,$321.50\n")
+    _write(tmp_path, "Copy of Balance Sheet Beginning.csv", _BS_VALID)
+    _write_bulk_csv(tmp_path, "lot A,10,25,3/7/2026,No,,\n")
+
+
+def test_reimport_into_populated_table_is_refused_and_mutates_nothing(
+        tmp_path, dynamo_repo, monkeypatch):
+    _seed_workbook(tmp_path)
+    assert run_import(tmp_path, dynamo_repo, require_complete=False)["_committed"]
+    before = _raw_table_snapshot(dynamo_repo)
+    assert before  # the first import really did land business data
+
+    # Nothing may run past the guard — not the lock, not the generation stamp.
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("mutating call reached past the re-import guard")
+
+    monkeypatch.setattr(dynamo_repo, "acquire_import_lock", _forbidden)
+    monkeypatch.setattr(dynamo_repo, "set_import_generation", _forbidden)
+    monkeypatch.setattr(dynamo_repo, "finalize_import", _forbidden)
+
+    with pytest.raises(ExistingBusinessDataError, match="force-replace"):
+        run_import(tmp_path, dynamo_repo, require_complete=False)
+
+    assert _raw_table_snapshot(dynamo_repo) == before  # byte-for-byte untouched
+    assert dynamo_repo._import_gen is None             # no generation was set
+
+
+def test_reimport_into_populated_table_proceeds_with_force_replace(
+        tmp_path, dynamo_repo):
+    _seed_workbook(tmp_path)
+    assert run_import(tmp_path, dynamo_repo, require_complete=False)["_committed"]
+    assert len(dynamo_repo.list_inventory()) == 1
+
+    _write_bulk_csv(tmp_path, "lot A,10,25,3/7/2026,No,,\nlot B,20,,,,,\n")
+    summaries = run_import(tmp_path, dynamo_repo, require_complete=False,
+                           force_replace=True)
+    assert summaries["_committed"] is True
+    assert len(dynamo_repo.list_inventory()) == 2   # normal replace semantics
+    assert len(dynamo_repo.list_shows()) == 1
+
+
+def test_first_import_into_catalog_only_table_needs_no_flag(tmp_path, dynamo_repo):
+    # The catalog (catalog_card / price_point) is seeded BEFORE the first import
+    # and is not import-owned — it must not be mistaken for business data.
+    from datetime import datetime
+
+    from merlins_collection.models.catalog import CatalogCard, PricePoint
+    dynamo_repo.batch_upsert_catalog_cards([CatalogCard(
+        card_id="swsh1-1", name="Celebi V", set_id="swsh1", set_name="S&S",
+        number="1", images={"small": "s", "large": "l"},
+        prices={"holofoil": {"market": Decimal("12.50")}},
+        last_synced_at=datetime(2026, 6, 22, 12, 0, 0))])
+    dynamo_repo.append_price_points([PricePoint(
+        card_id="swsh1-1", date=date(2026, 6, 20), source="pokemontcg.io",
+        kind="raw", finish="holofoil", market=Decimal("10"))])
+
+    _seed_workbook(tmp_path)
+    summaries = run_import(tmp_path, dynamo_repo, require_complete=False)
+    assert summaries["_committed"] is True
+    assert len(dynamo_repo.list_inventory()) == 1
+    assert dynamo_repo.get_catalog_card("swsh1-1") is not None  # catalog preserved
+
+
+def test_first_import_into_empty_table_needs_no_flag(tmp_path, dynamo_repo):
+    _seed_workbook(tmp_path)
+    summaries = run_import(tmp_path, dynamo_repo, require_complete=False)
+    assert summaries["_committed"] is True
+    assert len(dynamo_repo.list_inventory()) == 1
+
+
 def test_R5_nonzero_row_edit_still_commits_as_normal_replace(tmp_path, dynamo_repo):
     # Guard-rail: the collapse guard only fires on a total collapse to ZERO. A
     # legitimate nonzero row edit (2 -> 1 payouts) is indistinguishable from an
@@ -959,6 +1066,161 @@ def test_R5_nonzero_row_edit_still_commits_as_normal_replace(tmp_path, dynamo_re
     assert len(dynamo_repo.list_payouts()) == 2
     _write(tmp_path, "Payouts.csv",
            "Event,Casey,Colin,Note,Percentage\nShow A,40,,cash,0.05\n")
-    summaries = run_import(tmp_path, dynamo_repo, require_complete=False)
+    summaries = run_import(tmp_path, dynamo_repo, require_complete=False,
+                           force_replace=True)
     assert summaries["_committed"] is True
     assert len(dynamo_repo.list_payouts()) == 1  # replaced, no orphan
+
+
+# ---- print language (a JP card is a DIFFERENT card, not an English one) ----
+
+@pytest.mark.parametrize("text,cleaned", [
+    # every marker spelling/casing seen in the real workbook
+    ("Team Rocket's Mewtwo (jp)", "Team Rocket's Mewtwo"),
+    ("Articuno (Jp)", "Articuno"),
+    ("Milotic (JP)", "Milotic"),
+    ("Reshiram Ex (japanese)", "Reshiram Ex"),
+    ("Espeon V (Japanese)", "Espeon V"),
+    ("COLRESS'S EXPERIMENT - FULL ART (Japanese)", "COLRESS'S EXPERIMENT - FULL ART"),
+    ("Espathra (JP)", "Espathra"),
+    # bare, whitespace-delimited markers — also real rows in the sheet
+    ("Lugia jp", "Lugia"),
+    ("Slakoth JP", "Slakoth"),
+    ("JP exxeggutor Promo", "exxeggutor Promo"),
+    ("Dragonite JP ANA airlines", "Dragonite ANA airlines"),
+    # a marker sitting alongside other parenthesised text must take only its own
+    ("Wooper (Delta Species) Jp 1st Edition", "Wooper (Delta Species) 1st Edition"),
+])
+def test_parse_language_reads_every_marker_spelling(text, cleaned):
+    assert parse_language(text) == (Language.JP, cleaned)
+
+
+def test_parse_language_defaults_to_english_and_leaves_the_text_untouched():
+    for text in ("Charizard", "Mr. Mime", "Team Rocket's Mewtwo", ""):
+        assert parse_language(text) == (Language.EN, text)
+
+
+def test_parse_language_ignores_a_marker_buried_in_an_ordinary_word():
+    """Conservative by construction: only a WHOLE, delimited word counts. A bare
+    ``jp`` substring inside a longer word is never a language marker."""
+    for text in ("Charizard jpeg scan", "Mewtwo Jpop Promo", "Japanophile Deck",
+                 "Snorlax 1stjp", "jpn2 lot"):
+        assert parse_language(text) == (Language.EN, text)
+
+
+def test_parse_language_keeps_the_text_when_stripping_would_empty_it():
+    """A name that is nothing but a marker still yields JP, but we refuse to
+    destroy the only text the row has."""
+    assert parse_language("(jp)") == (Language.JP, "(jp)")
+
+
+def test_parse_language_survives_combined_qualifiers():
+    assert parse_language("Venusaur (jp) 1st holo") == (Language.JP, "Venusaur 1st holo")
+    assert parse_language("Eevee (jp) 1st Ed") == (Language.JP, "Eevee 1st Ed")
+    assert parse_language("Magnezone (jp) first") == (Language.JP, "Magnezone first")
+
+
+# The English catalog, containing exactly the card a JP row would collide with.
+def _english_catalog_index():
+    from datetime import datetime, timezone
+
+    from merlins_collection.models.catalog import CatalogCard
+
+    card = CatalogCard(
+        card_id="swsh6-38", name="Seismitoad", set_id="swsh6", set_name="Chilling Reign",
+        number="38", images={"small": "https://img/s.png", "large": "https://img/l.png"},
+        prices={"normal": {"market": Decimal("400.00")}},
+        last_synced_at=datetime.now(tz=timezone.utc))
+    return {(card.name.lower(), card.number): [card]}
+
+
+def test_english_single_still_matches_the_catalog_exactly_as_before(dynamo_repo):
+    """No regression on the existing matching path: an English row still links."""
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_english_catalog_index())
+    import_singles([_singles_row(Name="Seismitoad", **{"Card #": "38"})], ctx)
+    [item] = dynamo_repo.list_inventory()
+    assert item.card_id == "swsh6-38"
+    assert item.language is Language.EN
+    assert item.needs_review is False
+
+
+def test_japanese_single_is_never_matched_to_an_english_catalog_card(dynamo_repo):
+    """THE central regression test. Name and number match an English catalog card
+    exactly, and the match must still be refused — a Japanese Seismitoad is a
+    different card, and ``card_id is None`` is its CORRECT terminal state."""
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_english_catalog_index())
+    import_singles([_singles_row(Name="Seismitoad (jp)", **{"Card #": "38"})], ctx)
+    [item] = dynamo_repo.list_inventory()
+    assert item.language is Language.JP
+    assert item.card_id is None
+    assert item.notes == "Seismitoad #38"  # marker stripped, identity preserved
+
+
+def test_japanese_single_keeps_the_sheets_own_money_figures(dynamo_repo):
+    """The English card is worth $400; the sheet says $12/$8/$15. The item must
+    carry the SHEET's figures and no catalog-derived market value at all."""
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_english_catalog_index())
+    import_singles([_singles_row(Name="Seismitoad (jp)", **{"Card #": "38"})], ctx)
+    [item] = dynamo_repo.list_inventory()
+    assert item.cost_basis == Decimal("8.00")
+    assert item.market_value_at_purchase == Decimal("12.00")
+    assert item.listed_price == Decimal("15.00")
+    assert item.current_market_value is None
+
+
+def test_japanese_slab_is_never_matched_to_an_english_catalog_card(dynamo_repo):
+    """Graded JP slabs are real (14 of them in the live Slabs tab)."""
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_english_catalog_index())
+    row = {"Date Recieved": "1/5/2026", "Name": "Seismitoad (Japanese)",
+           "Set": "Chilling Reign", "card#": "38", "Grade": "10",
+           "Cert #": "12345678", "Market @ purchase": "$60", "Amount Paid": "$50",
+           "Sold": "", "Date Sold": "", "Venmo?": "", "Sticker": "$75"}
+    import_slabs([row], ctx)
+    [item] = dynamo_repo.list_inventory()
+    assert item.kind == "graded"
+    assert item.language is Language.JP
+    assert item.card_id is None
+    assert item.listed_price == Decimal("75")
+    assert item.current_market_value is None
+    assert item.notes.startswith("Seismitoad —")  # marker stripped from the notes
+
+
+def test_japanese_slab_marked_only_in_the_set_column_is_still_gated(dynamo_repo):
+    """Two live Slabs rows write the marker in Set ("Pikachu" / "jp 151") rather
+    than in the name, so both columns are read before the catalog is consulted."""
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_english_catalog_index())
+    row = {"Date Recieved": "1/5/2026", "Name": "Seismitoad", "Set": "jp 151",
+           "card#": "38", "Grade": "10", "Cert #": "1", "Amount Paid": "$50"}
+    import_slabs([row], ctx)
+    [item] = dynamo_repo.list_inventory()
+    assert item.language is Language.JP
+    assert item.card_id is None
+    assert item.notes == "Seismitoad — 151 #38"  # marker stripped from the set text
+
+
+def test_match_card_itself_refuses_a_non_english_language(dynamo_repo):
+    """The gate lives INSIDE ``_match_card``, the single place a catalog lookup
+    can happen, so any future caller inherits it rather than re-deriving it."""
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_english_catalog_index())
+    assert _match_card(ctx, "Seismitoad", "38") == "swsh6-38"
+    assert _match_card(ctx, "Seismitoad", "38", language=Language.EN) == "swsh6-38"
+    assert _match_card(ctx, "Seismitoad", "38", language=Language.JP) is None
+
+
+def test_daily_sync_never_writes_an_english_price_onto_a_japanese_item(dynamo_repo):
+    """End-to-end money guarantee: the daily market-value sync walks every item,
+    and the JP one (card_id None) must come out with its value fields untouched."""
+    from merlins_collection.services.catalog_sync import refresh_inventory_market_values
+
+    index = _english_catalog_index()
+    [card] = index[("seismitoad", "38")]
+    dynamo_repo.batch_upsert_catalog_cards([card])
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=index)
+    import_singles([_singles_row(Name="Seismitoad (jp)", **{"Card #": "38"}),
+                    _singles_row(Name="Seismitoad", **{"Card #": "38"})], ctx)
+
+    refresh_inventory_market_values(dynamo_repo)
+
+    by_language = {i.language: i for i in dynamo_repo.list_inventory()}
+    assert by_language[Language.JP].current_market_value is None
+    assert by_language[Language.EN].current_market_value == Decimal("400.00")

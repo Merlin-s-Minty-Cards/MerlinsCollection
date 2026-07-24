@@ -11,6 +11,7 @@ from merlins_collection.models.inventory import (
     ConsignmentTerms,
     GradedInventoryItem,
     GradingCompany,
+    Language,
     RawInventoryItem,
     SealedInventoryItem,
 )
@@ -447,6 +448,103 @@ def test_search_response_does_not_expose_cost_basis(inv_client, mint_token):
     body = resp.json()
     assert body["total"] == 1
     assert "cost_basis" not in body["items"][0]
+
+
+# ---- language (EN/JP) support ----
+
+def test_search_response_includes_language_defaulting_to_en(inv_client, mint_token):
+    """Every result carries a ``language`` field; an item with no stored
+    language surfaces as EN (the model default)."""
+    client, repo = inv_client
+    repo.put_inventory_item(_raw("sv1-1"))  # no language set → defaults to EN
+
+    resp = client.get(
+        "/inventory/search",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    assert resp.status_code == 200
+    item = resp.json()["items"][0]
+    assert item["language"] == "EN"
+
+
+def test_search_filters_by_language_jp_returns_only_jp(inv_client, mint_token):
+    """language=JP returns only JP items, even though a JP item has no card_id
+    (card_id is None by design — no English catalog match is possible)."""
+    client, repo = inv_client
+    repo.put_inventory_item(_raw("sv1-en"))  # EN (default)
+    jp = _raw(None, language=Language.JP)     # JP, card_id=None by design
+    repo.put_inventory_item(jp)
+
+    resp = client.get(
+        "/inventory/search?language=JP",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["items"][0]["item_id"] == jp.item_id
+    assert body["items"][0]["language"] == "JP"
+
+
+def test_search_filters_by_language_en_includes_items_without_stored_language(
+    inv_client, mint_token,
+):
+    """language=EN returns EN items — including items with no stored language,
+    which default to EN — and excludes JP items."""
+    client, repo = inv_client
+    repo.put_inventory_item(_raw("sv1-en"))            # no stored language → EN
+    repo.put_inventory_item(_raw(None, language=Language.JP))
+
+    resp = client.get(
+        "/inventory/search?language=EN",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["items"][0]["card_id"] == "sv1-en"
+    assert body["items"][0]["language"] == "EN"
+
+
+def test_search_omitting_language_returns_both_languages(inv_client, mint_token):
+    """An omitted language filter returns items of every language."""
+    client, repo = inv_client
+    repo.put_inventory_item(_raw("sv1-en"))
+    repo.put_inventory_item(_raw(None, language=Language.JP))
+
+    resp = client.get(
+        "/inventory/search",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    body = resp.json()
+    assert body["total"] == 2
+    assert {i["language"] for i in body["items"]} == {"EN", "JP"}
+
+
+def test_search_language_jp_returns_jp_item_despite_other_unmatched_filters(
+    inv_client, mint_token,
+):
+    """A language filter alone still returns JP items even though they have
+    card_id=None and cannot match name/set/rarity filters."""
+    client, repo = inv_client
+    jp = _raw(None, language=Language.JP)
+    repo.put_inventory_item(jp)
+
+    resp = client.get(
+        "/inventory/search?language=JP",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["items"][0]["item_id"] == jp.item_id
+
+
+def test_search_rejects_invalid_language(inv_client, mint_token):
+    """Only the Language enum values (EN/JP) are accepted."""
+    client, _ = inv_client
+    resp = client.get(
+        "/inventory/search?language=fr",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    assert resp.status_code == 422
 
 
 def test_B9_search_response_omits_internal_fields(inv_client, mint_token):

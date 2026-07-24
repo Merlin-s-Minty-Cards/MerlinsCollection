@@ -58,6 +58,14 @@ const CONDITIONS: Array<{ value: string; label: string }> = [
   { value: 'DMG', label: 'DMG — Damaged' },
 ]
 
+// Print language. The empty value ("All languages") sends no param; the backend
+// treats a JP print as a distinct, differently-priced card (Language enum EN/JP).
+const LANGUAGES: Array<{ value: string; label: string }> = [
+  { value: '', label: 'All languages' },
+  { value: 'EN', label: 'English' },
+  { value: 'JP', label: 'Japanese' },
+]
+
 // Guard against an inverted price range reaching the API — swap if min > max
 // (the backend rejects an inverted range with 422).
 function normalizePriceRange(filters: InventoryFilters): InventoryFilters {
@@ -183,6 +191,24 @@ export default function FilterPanel() {
               {CONDITIONS.map((c) => (
                 <option key={c.value} value={c.value}>
                   {c.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label htmlFor="flt-language" className={labelClass}>
+              Language
+            </label>
+            <select
+              id="flt-language"
+              value={filters.language ?? ''}
+              onChange={(e) => update('language', e.target.value)}
+              className={fieldClass}
+            >
+              {LANGUAGES.map((l) => (
+                <option key={l.value} value={l.value}>
+                  {l.label}
                 </option>
               ))}
             </select>

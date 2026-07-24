@@ -3,6 +3,7 @@ import {
   formatPrice,
   itemTitle,
   conditionLabel,
+  isJapanese,
   type InventoryItem,
 } from '@/lib/inventory'
 
@@ -10,10 +11,19 @@ import {
 export default function CardTile({ item }: { item: InventoryItem }) {
   const title = itemTitle(item)
   const image = item.card?.image_small
+  const japanese = isJapanese(item)
 
   return (
     <article className="group overflow-hidden rounded-xl vault-panel transition-colors hover:border-mint/50">
       <div className="relative aspect-[245/342] bg-pine-950">
+        {japanese && (
+          <span
+            className="absolute left-2 top-2 z-10 rounded-full bg-mint px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide text-pine-950"
+            title="Japanese print"
+          >
+            JP
+          </span>
+        )}
         {image ? (
           <Image
             src={image}

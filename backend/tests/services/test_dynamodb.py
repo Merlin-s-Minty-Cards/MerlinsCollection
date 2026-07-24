@@ -476,6 +476,83 @@ def test_R6_import_lock_is_not_import_owned(dynamo_repo):
     dynamo_repo.release_import_lock("gen-A")
 
 
+# ---- import-owned data probe (re-import guard) ----
+
+def test_find_import_owned_entity_none_on_empty_table(dynamo_repo):
+    assert dynamo_repo.find_import_owned_entity() is None
+
+
+def test_find_import_owned_entity_ignores_catalog_only_table(dynamo_repo):
+    # The ~53k-row catalog (catalog_card + price_point) is NOT import-owned: a
+    # seeded-but-never-imported table must still read as "no business data".
+    dynamo_repo.batch_upsert_catalog_cards([_card("a-1", "setA"), _card("a-2", "setA")])
+    dynamo_repo.append_price_points([_raw_point("a-1", _date(2026, 6, 20), "10")])
+    dynamo_repo.set_graded_market_value("a-1", GradingCompany.PSA, Decimal("10"),
+                                        Decimal("500"))
+    dynamo_repo.append_item_price_point("i-1", _date(2026, 6, 20), Decimal("3"))
+    assert dynamo_repo.find_import_owned_entity() is None
+
+
+def test_find_import_owned_entity_ignores_the_import_lock(dynamo_repo):
+    dynamo_repo.acquire_import_lock("gen-A")
+    assert dynamo_repo.find_import_owned_entity() is None
+    dynamo_repo.release_import_lock("gen-A")
+
+
+def test_find_import_owned_entity_detects_each_business_partition(dynamo_repo):
+    from merlins_collection.models.business import (
+        BalanceSheetLine,
+        BalanceSheetSection,
+        BalanceSheetSnapshot,
+        Payout,
+    )
+
+    def _snapshot():
+        # non-frozen: a frozen baseline is deliberately never swept by a commit,
+        # so it could not be cleared between probes.
+        return BalanceSheetSnapshot(
+            snapshot_id="current", label="current", frozen=False,
+            lines=[BalanceSheetLine(section=BalanceSheetSection.ASSET,
+                                    label="Inventory", amount=Decimal("100"))])
+
+    writes = {
+        "inventory_item": lambda: dynamo_repo.put_inventory_item(_raw_item()),
+        "show": lambda: dynamo_repo.put_show(
+            Show(show_id="s1", name="Mint City", date=_date(2026, 3, 8))),
+        "debt": lambda: dynamo_repo.put_debt(_debt("Colin")),
+        "payout": lambda: dynamo_repo.put_payout(
+            Payout(event="E1", partner="Casey", amount=Decimal("40"))),
+        "consignor": lambda: dynamo_repo.put_consignor(
+            Consignor(consignor_id="c1", name="Rylan")),
+        "cash_account": lambda: dynamo_repo.put_cash_account(
+            CashAccount(account="venmo", balance=Decimal("10"))),
+        "balance_sheet_snapshot": lambda: dynamo_repo.put_balance_sheet(_snapshot()),
+    }
+    for entity, write in writes.items():
+        assert dynamo_repo.find_import_owned_entity() is None, entity
+        write()
+        assert dynamo_repo.find_import_owned_entity() == entity
+        # Clear it again so the next entity is probed in isolation.
+        dynamo_repo.finalize_import("no-such-gen", committed=True)
+    assert dynamo_repo.find_import_owned_entity() is None
+
+
+def test_find_import_owned_entity_does_not_scan_the_table(dynamo_repo):
+    # The probe must be partition-bounded: a full table scan would read the whole
+    # ~53k-row catalog on every import.
+    dynamo_repo.batch_upsert_catalog_cards([_card()])
+    scans = []
+    original_scan = dynamo_repo._table.scan
+
+    def _spy(**kwargs):
+        scans.append(kwargs)
+        return original_scan(**kwargs)
+
+    dynamo_repo._table.scan = _spy
+    assert dynamo_repo.find_import_owned_entity() is None
+    assert scans == []
+
+
 def test_R5_finalize_scan_reads_strongly_consistent(dynamo_repo):
     from merlins_collection.models.business import Debt, DebtDirection
     scan_consistency = []

@@ -162,6 +162,54 @@ class InventoryRepository:
         "balance_sheet_snapshot",
     })
 
+    # Every import-owned entity EXCEPT the two month-partitioned ledgers lives in
+    # one of these fixed partitions (plus the ten ``INV#`` inventory shards), which
+    # is what makes "does this table already hold business data?" answerable
+    # without a table scan.
+    _BUSINESS_PARTITIONS = ("SHOWLIST", "DEBTLIST", "PAYOUTLIST", "BALANCESHEET",
+                            "CONSIGNORLIST", "CONFIG")
+
+    def find_import_owned_entity(self) -> str | None:
+        """Name of an import-owned entity already present in this table, else ``None``.
+
+        Cheap by construction: one ``Limit=1``, strongly-consistent Query per KNOWN
+        business partition — the ten ``INV#`` shards plus the six fixed lists above,
+        ~16 single-item reads regardless of table size. It never queries the
+        ``CARD#``/``ITEM#`` partitions where the ~53k-row catalog lives, so the
+        catalog can neither be mistaken for business data nor make the probe
+        expensive. No ``FilterExpression`` is used (a filtered page can come back
+        empty while the partition is not), so a non-empty partition always yields a
+        row; the ``entity`` tag is then checked against ``_IMPORT_OWNED_ENTITIES``,
+        which is what keeps the non-owned ``import_lock`` item from tripping it.
+
+        The month-partitioned ledgers (``TXN#<YYYY-MM>``, ``EXP#<YYYY-MM>``) have
+        unbounded partition names and are deliberately NOT probed: neither can exist
+        in isolation. Every import seeds the ``CONFIG`` payment methods before any
+        tab runs, and a sale writes its ``INV#`` item alongside the txn, so any run
+        that produced a ledger row necessarily left a probed partition non-empty —
+        and a rollback removes both together, since they share one generation.
+        """
+        partitions = [f"INV#{b}" for b in range(INVENTORY_SHARD_COUNT)]
+        partitions.extend(self._BUSINESS_PARTITIONS)
+        for pk in partitions:
+            kwargs = {
+                "KeyConditionExpression": Key("PK").eq(pk),
+                "ProjectionExpression": "PK, SK, #e",
+                "ExpressionAttributeNames": {"#e": "entity"},
+                "ConsistentRead": True,
+                "Limit": 1,
+            }
+            while True:
+                resp = self._table.query(**kwargs)
+                for item in resp.get("Items", []):
+                    if item.get("entity") in self._IMPORT_OWNED_ENTITIES:
+                        return item["entity"]
+                last = resp.get("LastEvaluatedKey")
+                if not last:
+                    break
+                kwargs["ExclusiveStartKey"] = last
+        return None
+
     # ---- single-flight import lock (BLOCKING-4) ----
     # A conditional-write lock item. Only one import may be in flight at a time,
     # so `finalize_import`'s "delete every generation that is not mine" swap can
@@ -416,9 +464,16 @@ class InventoryRepository:
         self._table.put_item(Item=record)
 
     def get_inventory_item(self, item_id: str):
-        """Fetch one item by id, or ``None`` if absent."""
+        """Fetch one item by id, or ``None`` if absent.
+
+        Strongly consistent: the only caller is the decision applier, which reads
+        an item to decide whether to write it. An eventually-consistent read there
+        could validate against a stale copy — and could report "already applied"
+        for a row a previous batch had only just changed.
+        """
         found = self._table.get_item(
-            Key={"PK": f"INV#{_bucket(item_id)}", "SK": f"ITEM#{item_id}"}
+            Key={"PK": f"INV#{_bucket(item_id)}", "SK": f"ITEM#{item_id}"},
+            ConsistentRead=True,
         ).get("Item")
         return InventoryItemAdapter.validate_python(found) if found else None
 

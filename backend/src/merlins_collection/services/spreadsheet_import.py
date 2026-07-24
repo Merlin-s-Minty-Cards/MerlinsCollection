@@ -10,6 +10,11 @@ silently wipe a live ledger. Row-based records get fresh ULIDs; natural-keyed
 entities (shows, consignors) key on their business identity. Ambiguity never
 guesses silently: unmappable rows are skipped-and-counted, uncertain mappings set
 ``needs_review=True``.
+
+Print language is read out of the card-name text (``"Seismitoad (jp)"``) and
+stored as a field, because it is part of a card's identity: the catalog is
+English-only, so a non-English item is never matched against it and keeps the
+sheet's own money figures instead of an English price.
 """
 
 from __future__ import annotations
@@ -48,10 +53,15 @@ from merlins_collection.models.inventory import (
     ConditionModifier,
     ConsignmentTerms,
     GradedInventoryItem,
+    Language,
     RawInventoryItem,
     SealedInventoryItem,
     new_ulid,
 )
+
+# Language detection lives in ``card_text`` so the importer, the review page and
+# the decision applier all share one implementation.
+from merlins_collection.services.card_text import language_from_url, parse_language
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +71,17 @@ logger = logging.getLogger(__name__)
 # import rollback instead of silently dropping a real record.
 _DATA_ERRORS = (ValueError, KeyError, TypeError, ArithmeticError,
                 InvalidOperation, ValidationError)
+
+
+class ExistingBusinessDataError(Exception):
+    """The target table already holds import-owned business data.
+
+    The spreadsheet was imported ONCE; from then on the DATABASE is the source of
+    truth. A second import is not an "update" — it replaces every import-owned
+    record with whatever the sheet currently says, discarding anything written or
+    corrected since. ``run_import`` therefore refuses outright, before any write,
+    unless the operator opts in with ``force_replace=True`` / ``--force-replace``.
+    """
 
 
 def parse_money(text) -> Decimal | None:
@@ -222,8 +243,22 @@ class ImportContext:
     catalog_index: dict = field(default_factory=dict)  # (name_lower, number) -> [CatalogCard]
 
 
-def _match_card(ctx: ImportContext, name: str, number: str):
-    """Exact match on (name, number); a unique hit returns its card_id."""
+def _match_card(ctx: ImportContext, name: str, number: str, *,
+                language: Language = Language.EN):
+    """Exact match on (name, number); a unique hit returns its card_id.
+
+    The catalog holds ENGLISH cards only, so a non-English item is refused
+    outright — before any lookup — no matter how exactly its name and number line
+    up with an English entry. A Japanese Seismitoad #38 is not the English
+    Seismitoad #38: linking them would hang an English price on a card that
+    trades at a different one. ``card_id is None`` is the correct, final answer
+    for such an item, not a failed match to retry later.
+
+    The gate lives here, in the single place a catalog lookup can happen, so
+    every present and future caller inherits it instead of re-deriving it.
+    """
+    if language is not Language.EN:
+        return None
     hits = ctx.catalog_index.get((name.strip().lower(), str(number).strip()), [])
     return hits[0].card_id if len(hits) == 1 else None
 
@@ -262,16 +297,26 @@ def import_singles(rows: list[dict], ctx: ImportContext) -> dict:
                 # A card with no condition: default NM but flag it rather than drop.
                 condition, modifier, blank_condition = Condition.NM, None, True
             loc = map_location(row.get("Location"))
-            card_id = _match_card(ctx, row["Name"], row.get("Card #", ""))
+            # Language is read FIRST: it decides whether the English catalog may
+            # be consulted at all, and the cleaned name is what gets matched and
+            # preserved. Three live rows carry no marker in the name and are
+            # identifiable only from their TCGplayer link, so that is consulted
+            # as a fallback.
+            tcg_url = str(row.get("TCG Link") or "").strip() or None
+            language, name = parse_language(row["Name"])
+            if language is Language.EN:
+                language = language_from_url(tcg_url)
+            card_id = _match_card(ctx, name, row.get("Card #", ""), language=language)
             needs_review = card_id is None or blank_condition
             notes = " — ".join(x for x in (
-                f"{row['Name']} #{row.get('Card #', '')}".strip(" #"),
+                f"{name} #{row.get('Card #', '')}".strip(" #"),
                 str(row.get("Notes") or "").strip() or None,
                 loc["notes_extra"],
             ) if x)
             item = RawInventoryItem(
                 item_id=new_ulid(),
                 card_id=card_id,
+                language=language,
                 finish="normal",
                 condition=condition,
                 condition_modifier=modifier,
@@ -283,7 +328,7 @@ def import_singles(rows: list[dict], ctx: ImportContext) -> dict:
                 listed_price=parse_money(_find(row, "Sticker")),
                 acquired_at=parse_date(row.get("Date")) or date(2026, 1, 1),
                 notes=notes or None,
-                tcg_url=str(row.get("TCG Link") or "").strip() or None,
+                tcg_url=tcg_url,
                 needs_review=needs_review,
             )
             ctx.repo.put_inventory_item(item)
@@ -309,11 +354,18 @@ def import_slabs(rows: list[dict], ctx: ImportContext) -> dict:
     summary = {"imported": 0, "sales": 0, "skipped": 0, "needs_review": 0}
     for row in rows:
         try:
-            name = _find(row, "Name", "Name (pkm + rarity + language )") or ""
-            card_id = _match_card(ctx, name, row.get("card#", ""))
+            language, name = parse_language(
+                _find(row, "Name", "Name (pkm + rarity + language )") or "")
+            # A handful of slab rows put the marker in the Set cell instead
+            # ("Pikachu" / "jp 151"), so both columns are read before deciding.
+            set_language, set_name = parse_language(row.get("Set", ""))
+            if language is Language.EN:
+                language = set_language
+            card_id = _match_card(ctx, name, row.get("card#", ""), language=language)
             item = GradedInventoryItem(
                 item_id=new_ulid(),
                 card_id=card_id,
+                language=language,
                 company="PSA",  # sheet has no company column; flagged for review
                 grade=Decimal(str(row["Grade"]).strip()),
                 cert_number=str(row.get("Cert #") or "").strip() or "unknown",
@@ -322,7 +374,7 @@ def import_slabs(rows: list[dict], ctx: ImportContext) -> dict:
                     _find(row, "Market @ purchase", "Market @ time of purchase")),
                 listed_price=parse_money(_find(row, "Sticker")),
                 acquired_at=parse_date(row.get("Date Recieved")) or date(2026, 1, 1),
-                notes=f"{name} — {row.get('Set', '')} #{row.get('card#', '')}",
+                notes=f"{name} — {set_name} #{row.get('card#', '')}",
                 needs_review=True,
             )
             ctx.repo.put_inventory_item(item)
@@ -359,11 +411,13 @@ def import_sealed(rows: list[dict], ctx: ImportContext) -> dict:
     summary = {"imported": 0, "sales": 0, "skipped": 0, "needs_review": 0}
     for row in rows:
         try:
-            product_type, needs_review = _guess_product_type(row["Name"])
+            language, name = parse_language(row["Name"])
+            product_type, needs_review = _guess_product_type(name)
             item = SealedInventoryItem(
                 item_id=new_ulid(),
-                product_name=str(row["Name"]).strip(),
+                product_name=name.strip(),
                 product_type=product_type,
+                language=language,
                 status="on_hold" if parse_bool(row.get("Hold")) else "available",
                 cost_basis=parse_money(row.get("Amount Paid")) or Decimal("0"),
                 market_value_at_purchase=parse_money(row.get("Market @ time of purchase")),
@@ -393,9 +447,11 @@ def import_bulk(rows: list[dict], ctx: ImportContext) -> dict:
     summary = {"imported": 0, "sales": 0, "skipped": 0, "needs_review": 0}
     for row in rows:
         try:
+            language, description = parse_language(row["Name"])
             item = BulkInventoryItem(
                 item_id=new_ulid(),
-                description=str(row["Name"]).strip(),
+                description=description.strip(),
+                language=language,
                 cost_basis=parse_money(row.get("Amount Paid")) or Decimal("0"),
                 acquired_at=date(2026, 1, 1),  # tab has no acquisition date
             )
@@ -489,14 +545,16 @@ def import_consignments(rows: list[dict], ctx: ImportContext) -> dict:
                 paid_out=parse_bool(row.get("Paid Out?")),
             )
             returned = str(row.get("Sold/Returned") or "").strip().lower() == "returned"
+            language, card_name = parse_language(row["Card Name"])
             common = dict(
                 item_id=new_ulid(),
                 status="returned_to_consignor" if returned else "available",
+                language=language,
                 cost_basis=Decimal("0"),  # not ours; we never paid for it
                 market_value_at_purchase=parse_money(row.get("Market")),
                 acquired_at=parse_date(row.get("Date recieved")) or date(2026, 1, 1),
                 consignment=terms,
-                notes=f"{row['Card Name']} #{row.get('Card #', '')}".strip(" #"),
+                notes=f"{card_name} #{row.get('Card #', '')}".strip(" #"),
             )
             if parse_bool(row.get("Slab")):
                 grade_text = str(row.get("Condition") or "").strip()
@@ -917,11 +975,16 @@ def _empty_tabs(summaries: dict, allow_empty) -> list[str]:
 
 
 def run_import(csv_dir, repo, *, require_complete: bool = True,
-               allow_empty=frozenset()) -> dict:
+               allow_empty=frozenset(), force_replace: bool = False) -> dict:
     """Import the workbook's tab CSVs from ``csv_dir`` with SAFE REPLACE semantics.
 
-    Four guarantees protect the live money table:
+    Five guarantees protect the live money table:
 
+    * **Re-import guard** (``force_replace``): the outermost layer. If the table
+      already holds ANY import-owned business data, the run raises
+      ``ExistingBusinessDataError`` before a single write — the first import made
+      the DB the source of truth, and a second one would replace it wholesale.
+      ``force_replace=True`` is the operator's deliberate "yes, replace it".
     * **Single-flight lock**: the run takes a conditional-write import lock and
       refuses to start (``ImportInProgressError``) while another import is in
       flight, so two overlapping runs can never race the destructive swap.
@@ -955,6 +1018,24 @@ def run_import(csv_dir, repo, *, require_complete: bool = True,
         if missing:
             raise ImportError(
                 f"incomplete export — refusing to import; missing tab CSVs: {missing}")
+
+    # Outermost guard, evaluated before the lock and before any generation is
+    # stamped, so a refused run leaves the table byte-for-byte untouched.
+    if not force_replace:
+        existing = repo.find_import_owned_entity()
+        if existing is not None:
+            raise ExistingBusinessDataError(
+                f"refusing to import: this table already contains business data "
+                f"(found an existing {existing!r} record). The DATABASE, not the "
+                f"spreadsheet, is the source of truth now, and a re-import "
+                f"REPLACES every import-owned record (inventory, transactions, "
+                f"expenses, debts, payouts, shows, consignors, cash accounts, "
+                f"buying policies, payment methods, balance-sheet snapshots) with "
+                f"the sheet's current contents, discarding anything written or "
+                f"corrected since the last import. If that is genuinely what you "
+                f"want, re-run deliberately with --force-replace "
+                f"(run_import(..., force_replace=True))."
+            )
 
     gen = new_ulid()
     repo.acquire_import_lock(gen)  # raises ImportInProgressError if one is running

@@ -117,4 +117,16 @@ describe('CardGrid', () => {
     render(<CardGrid items={[charizardNM]} />)
     expect(screen.getByRole('img', { name: /charizard/i })).toBeInTheDocument()
   })
+
+  it('marks a Japanese print with a JP indicator so it is distinguishable from its EN twin', () => {
+    const jpCharizard: InventoryItem = { ...charizardNM, item_id: 'jp-1', language: 'JP' }
+    render(<CardGrid items={[jpCharizard]} />)
+    expect(screen.getByText('JP')).toBeInTheDocument()
+  })
+
+  it('does not show a JP indicator on an English (or unstamped) card', () => {
+    // charizardNM carries no language field → treated as EN.
+    render(<CardGrid items={[charizardNM]} />)
+    expect(screen.queryByText('JP')).toBeNull()
+  })
 })

@@ -179,8 +179,38 @@ describe("listCards", () => {
         quantity: 1, // one record = one physical unit; legacy quantity is ignored
         value: 250,
         marketPrice: 300,
+        language: "EN", // no stored language attribute → defaults to EN
       },
     ]);
+  });
+
+  it("defaults language to EN when the row has no language attribute", async () => {
+    // Only the 109 JP items carry a stored language; every EN row omits it.
+    const { repo } = repoWith(
+      { "INV#0": [{ Items: [rawItem()] }] },
+      { "CARD#base1-4|META": meta("base1-4") },
+    );
+
+    const [card] = await repo.listCards();
+    expect(card?.language).toBe("EN");
+  });
+
+  it("reads the stored JP language for a raw item (card_id None by design)", async () => {
+    // A JP print has no English catalog match, so card_id is null; the language
+    // still comes straight off the row.
+    const { repo } = repoWith({
+      "INV#0": [{ Items: [rawItem({ language: "JP", card_id: null })] }],
+    });
+
+    const [card] = await repo.listCards();
+    expect(card?.language).toBe("JP");
+  });
+
+  it("reads the stored JP language for a sealed product", async () => {
+    const { repo } = repoWith({ "INV#2": [{ Items: [sealedItem({ language: "JP" })] }] });
+
+    const [card] = await repo.listCards();
+    expect(card?.language).toBe("JP");
   });
 
   it("hides items that are not available (sold / on-hold / lost stay internal)", async () => {

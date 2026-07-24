@@ -13,6 +13,7 @@ from merlins_collection.models.inventory import (
     GradingCompany,
     InventoryItemAdapter,
     ItemStatus,
+    Language,
     RawInventoryItem,
     SealedInventoryItem,
     SealedProductType,
@@ -108,6 +109,51 @@ def test_invalid_condition_modifier_rejected():
     with pytest.raises(ValidationError):
         RawInventoryItem(**_base(finish="normal", condition="NM",
                                  condition_modifier="++"))
+
+
+# ---- print language (part of a card's identity, not a label) ----
+
+def test_language_defaults_to_english():
+    item = RawInventoryItem(**_base(finish="normal", condition="NM"))
+    assert item.language is Language.EN
+
+
+def test_language_is_shared_by_every_item_kind():
+    """A Japanese slab is as real as a Japanese single, so ``language`` lives on
+    the shared base rather than only on raw cards."""
+    kinds = [
+        RawInventoryItem(**_base(finish="normal", condition="NM", language="JP")),
+        GradedInventoryItem(**_base(company="PSA", grade=Decimal("10"),
+                                    cert_number="123", language="JP")),
+        SealedInventoryItem(**_base(product_name="Booster Box",
+                                    product_type="booster_box", language="JP")),
+        BulkInventoryItem(**_base(description="5k lot", language="JP")),
+    ]
+    assert [item.language for item in kinds] == [Language.JP] * 4
+
+
+def test_records_written_before_the_language_field_read_as_english():
+    """The 1489 live records carry no ``language`` attribute; they must validate
+    as English rather than blow up (this is what makes the field migration-free)."""
+    item = InventoryItemAdapter.validate_python(
+        {"kind": "raw", "cost_basis": Decimal("4"), "acquired_at": date(2026, 1, 1),
+         "finish": "normal", "condition": "NM"}
+    )
+    assert item.language is Language.EN
+
+
+def test_language_round_trips_through_the_adapter():
+    item = InventoryItemAdapter.validate_python(
+        {"kind": "raw", "cost_basis": Decimal("4"), "acquired_at": date(2026, 1, 1),
+         "finish": "normal", "condition": "NM", "language": "JP"}
+    )
+    assert item.language is Language.JP
+    assert item.model_dump(mode="python")["language"] is Language.JP
+
+
+def test_unknown_language_is_rejected():
+    with pytest.raises(ValidationError):
+        RawInventoryItem(**_base(finish="normal", condition="NM", language="KLINGON"))
 
 
 def test_adapter_rejects_raw_missing_fields():

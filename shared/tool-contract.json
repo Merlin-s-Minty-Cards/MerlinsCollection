@@ -3,7 +3,7 @@
   "tools": [
     {
       "name": "search_inventory",
-      "properties": ["name", "set_id", "condition", "min_value", "max_value"],
+      "properties": ["name", "set_id", "condition", "min_value", "max_value", "language"],
       "required": []
     },
     {

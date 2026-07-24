@@ -24,6 +24,7 @@ from merlins_collection.models.inventory import (
     InventoryItem,
     InventorySearchResult,
     ItemStatus,
+    Language,
 )
 from merlins_collection.services.dynamodb import InventoryRepository
 
@@ -48,6 +49,10 @@ _CUSTOMER_ITEM_FIELDS = {
     "item_id", "kind", "card_id", "listed_price", "current_market_value",
     "acquired_at", "finish", "condition", "condition_modifier", "factory_sealed",
     "company", "grade", "cert_number", "product_name", "product_type", "card",
+    # language (EN/JP) is a deliberate, owner-approved customer-facing exposure:
+    # a JP print is a different card at a different price, so buyers must be able
+    # to tell an English and a Japanese copy apart.
+    "language",
 }
 
 
@@ -63,6 +68,7 @@ def search_inventory(
     condition: Condition | None = Query(None),
     min_price: Decimal | None = Query(None),
     max_price: Decimal | None = Query(None),
+    language: Language | None = Query(None),
     _user: AuthenticatedUser = Depends(get_current_user),
     repo: InventoryRepository = Depends(get_repo),
 ) -> InventorySearchResult:
@@ -86,6 +92,13 @@ def search_inventory(
     ]
     # Catalog rows fetched along the way are kept for response enrichment.
     catalog: dict[str, CatalogCard | None] = {}
+
+    # language: an in-item field (defaults EN for records written before the
+    # field existed). Applied on its own it must still return JP items, which
+    # carry card_id=None by design and so never survive the name/set/rarity
+    # filters — hence it AND-combines here rather than via the catalog.
+    if language is not None:
+        items = [i for i in items if i.language == language]
 
     # condition: raw items only; graded items are excluded when this filter is set.
     # The tier alone is compared, so LP matches LP+ / LP / LP-.

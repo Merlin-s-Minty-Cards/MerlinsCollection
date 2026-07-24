@@ -48,9 +48,10 @@ export function buildServer(repo: InventoryRepository): McpServer {
         condition: z.string().optional().describe("NM, LP, MP, HP, or DMG"),
         min_value: z.number().optional(),
         max_value: z.number().optional(),
+        language: z.string().optional().describe("Print language: EN or JP"),
       },
     },
-    async ({ name, set_id, condition, min_value, max_value }) =>
+    async ({ name, set_id, condition, min_value, max_value, language }) =>
       asText(
         await searchInventory(repo, {
           name,
@@ -58,6 +59,7 @@ export function buildServer(repo: InventoryRepository): McpServer {
           condition,
           minValue: min_value,
           maxValue: max_value,
+          language,
         }),
       ),
   );
