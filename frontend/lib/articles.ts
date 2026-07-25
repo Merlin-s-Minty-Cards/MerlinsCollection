@@ -1,64 +1,108 @@
-// Article content layer — static sample data for now, structured so it can be
-// swapped to Sanity later without changing the components. Implemented via TDD.
+// Article content layer — backed by the Sanity CMS. The business authors
+// articles at /studio; these functions read what they publish.
 
-export interface Article {
+import type { PortableTextBlock } from '@portabletext/types'
+import { sanityClient, isSanityConfigured } from '@/lib/sanity'
+
+/** An image resolved to something `next/image` can actually render. */
+export interface ArticleImage {
+  url?: string
+  dimensions?: { width: number; height: number }
+  alt?: string
+  caption?: string
+}
+
+/** An inline image an editor placed in the body. */
+export type ArticleImageBlock = ArticleImage & { _type: 'image'; _key: string }
+
+export type ArticleBodyBlock = PortableTextBlock | ArticleImageBlock
+
+export interface ArticleCta {
+  label?: string
+  href?: string
+}
+
+/** What a listing card shows. The listing never fetches the body (see LIST_FIELDS). */
+export interface ArticleSummary {
   slug: string
   title: string
   excerpt: string
+  /** Date-only (`YYYY-MM-DD`), narrowed from Sanity's `publishedAt` datetime. */
   date: string
   readingTime: string
   category: string
-  body: string[]
 }
 
-export const articles: Article[] = [
-  {
-    slug: 'grading-101',
-    title: 'Grading 101: is your card worth slabbing?',
-    excerpt: 'When professional grading pays off — and when it just costs you.',
-    date: '2026-05-12',
-    readingTime: '6 min read',
-    category: 'Guides',
-    body: [
-      'Grading can turn a good card into a great one — or cost you more than the card is worth. The trick is knowing which is which before you mail anything off.',
-      'Start with three questions: Is the card valuable enough that a grade meaningfully changes its price? Is it in good enough condition to grade well? And do you actually plan to sell it?',
-      'If the answer to all three is yes, grading usually pays for itself. If not, a raw card in a sleeve and toploader is often the smarter move.',
-    ],
-  },
-  {
-    slug: 'spotting-fakes',
-    title: 'How to spot a fake Pokémon card',
-    excerpt: 'Quick checks that catch the most common counterfeits before you buy.',
-    date: '2026-04-02',
-    readingTime: '5 min read',
-    category: 'Guides',
-    body: [
-      'Counterfeits have gotten better, but most still fail a few simple tests you can run in seconds.',
-      'Check the texture and the light-blue back coloring, compare the font weight on the energy symbols, and look closely at the bottom-edge of the card stock for the tell-tale black layer.',
-      'When in doubt, compare against a card you know is real from the same set. Side by side, fakes usually give themselves away.',
-    ],
-  },
-  {
-    slug: 'starting-with-kids',
-    title: 'Collecting with your kids without going broke',
-    excerpt: 'A parent-friendly way to make the hobby fun, cheap, and lasting.',
-    date: '2026-03-15',
-    readingTime: '4 min read',
-    category: 'Beginners',
-    body: [
-      'Kids love opening packs, but packs are the most expensive way to collect. Here is how to keep it fun without emptying your wallet.',
-      'Buy singles of their favorite Pokémon, set a small weekly budget they help manage, and use cheap bulk cards to teach sorting and care.',
-      'The goal is the shared time, not the chase. The collection is just the excuse to sit down together.',
-    ],
-  },
-]
-
-export function getAllArticles(): Article[] {
-  return articles
+export interface Article extends ArticleSummary {
+  body: ArticleBodyBlock[]
+  // Nothing below is required in the Studio, so it is all genuinely optional here.
+  seoDescription?: string
+  shareImage?: ArticleImage
+  cta?: ArticleCta
 }
 
-export function getArticleBySlug(slug: string): Article | undefined {
-  return articles.find((a) => a.slug === slug)
+/** A document as the GROQ projections below return it, before `date` is narrowed. */
+type SanityDoc<T extends ArticleSummary> = Omit<T, 'date'> & { publishedAt: string }
+
+/** Narrow Sanity's `publishedAt` datetime to the date-only string the pages render. */
+function narrowDate<T extends ArticleSummary>(doc: SanityDoc<T>): T {
+  const { publishedAt, ...rest } = doc
+  return { ...rest, date: (publishedAt ?? '').slice(0, 10) } as unknown as T
+}
+
+// next/image refuses to render a remote image without intrinsic dimensions, and
+// an image block only holds an asset *reference* — so resolve each one to its URL
+// and size here rather than shipping a reference the renderer can't use.
+const IMAGE_PROJECTION = `"url": asset->url, "dimensions": asset->metadata.dimensions`
+
+/** What the listing cards render — deliberately no body, so no image joins. */
+const LIST_FIELDS = `
+  "slug": slug.current,
+  title,
+  excerpt,
+  publishedAt,
+  readingTime,
+  category
+`
+
+/** Everything the article page needs, including the body and its images. */
+const DETAIL_FIELDS = `
+  ${LIST_FIELDS},
+  seoDescription,
+  shareImage{ ${IMAGE_PROJECTION} },
+  cta{ label, href },
+  body[]{
+    ...,
+    _type == "image" => { ${IMAGE_PROJECTION} }
+  }
+`
+
+// Only articles with a slug are reachable. Drafts are excluded by the client's
+// `published` perspective (see lib/sanity.ts). Newest first, matching the listing.
+const ALL_ARTICLES_QUERY = `*[_type == "article" && defined(slug.current)]
+  | order(publishedAt desc) { ${LIST_FIELDS} }`
+
+// $slug is a query *parameter*, not string interpolation — the slug comes from
+// the URL, and interpolating it straight into GROQ would be an injection hole.
+const ARTICLE_BY_SLUG_QUERY = `*[_type == "article" && slug.current == $slug][0] { ${DETAIL_FIELDS} }`
+
+/**
+ * Sanity stores `publishedAt` as a full datetime, but the pages only ever show a
+ * calendar date. Truncating to `YYYY-MM-DD` here is what keeps `formatArticleDate`
+ * timezone-safe downstream (see its comment).
+ */
+export async function getAllArticles(): Promise<ArticleSummary[]> {
+  // No CMS credentials at build time (see isSanityConfigured) — return nothing so
+  // the build succeeds; the ISR page fetches for real once env is present.
+  if (!isSanityConfigured) return []
+  const results = await sanityClient.fetch<SanityDoc<ArticleSummary>[]>(ALL_ARTICLES_QUERY)
+  return (results ?? []).map(narrowDate)
+}
+
+export async function getArticleBySlug(slug: string): Promise<Article | undefined> {
+  if (!isSanityConfigured) return undefined
+  const result = await sanityClient.fetch<SanityDoc<Article> | null>(ARTICLE_BY_SLUG_QUERY, { slug })
+  return result ? narrowDate(result) : undefined
 }
 
 // One formatter per month style. timeZone: 'UTC' is essential: article dates are
