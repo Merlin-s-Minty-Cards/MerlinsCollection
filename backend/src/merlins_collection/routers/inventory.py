@@ -10,7 +10,7 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from merlins_collection.dependencies import get_current_user, get_repo
+from merlins_collection.dependencies import get_repo
 from merlins_collection.models.auth import AuthenticatedUser
 from merlins_collection.models.catalog import CatalogCard
 from merlins_collection.models.inventory import (
@@ -26,6 +26,7 @@ from merlins_collection.models.inventory import (
     ItemStatus,
     Language,
 )
+from merlins_collection.rate_limit import rate_limit_search
 from merlins_collection.services.dynamodb import InventoryRepository
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
@@ -69,7 +70,7 @@ def search_inventory(
     min_price: Decimal | None = Query(None),
     max_price: Decimal | None = Query(None),
     language: Language | None = Query(None),
-    _user: AuthenticatedUser = Depends(get_current_user),
+    _user: AuthenticatedUser = Depends(rate_limit_search),
     repo: InventoryRepository = Depends(get_repo),
 ) -> InventorySearchResult:
     """Return inventory matching the given filters (all optional, AND-combined).

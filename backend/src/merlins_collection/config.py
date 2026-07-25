@@ -28,6 +28,33 @@ class Settings(BaseSettings):
     # NEVER set in production.
     auth_disabled: bool = False
 
+    # --- App-side rate limiting (DynamoDB-backed & distributed; see rate_limit.py) ---
+    # Master switch. Keep ON in production; an ops kill-switch if a limit ever
+    # locks legitimate traffic out.
+    rate_limit_enabled: bool = True
+    # Dedicated DynamoDB table holding the rate-limit counters. Kept SEPARATE from
+    # the business `merlins-cards` table so ephemeral counter items can never be
+    # mistaken for import-owned business data by the importer's generation sweep.
+    rate_limit_table_name: str = "merlins-rate-limits"
+    # Limits are "<count>/<period>" strings (period: second/minute/hour/day),
+    # keyed per authenticated Cognito `sub` (or client IP when auth is bypassed).
+    # `/chat` hits Bedrock and costs real money per call, so it is the strictest:
+    # a per-minute burst limit plus a per-user per-day ceiling.
+    rate_limit_chat: str = "10/minute"
+    rate_limit_chat_daily: str = "200/day"
+    # GLOBAL account-wide daily ceiling on /chat across ALL users combined —
+    # bounds worst-case daily Bedrock cost even if Cognito self-signup is open and
+    # an attacker mints many accounts. NOTE: this is a FIXED epoch-day window, so a
+    # request stream straddling UTC midnight can spend this cap twice in ~1-2 min
+    # (see rate_limit.rate_limit_chat). The TRUE worst case is therefore 2x this
+    # value — set this to HALF the tolerable daily Bedrock spend. Default 1000/day
+    # → true worst-case ceiling of 2000 Bedrock calls per rolling 24h.
+    rate_limit_chat_global_daily: str = "1000/day"
+    # Filter-mode search and the auth endpoints are cheap DynamoDB/JWT calls, so
+    # they get looser limits — still enough to blunt a scraper or a stuck client.
+    rate_limit_search: str = "60/minute"
+    rate_limit_auth: str = "30/minute"
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]

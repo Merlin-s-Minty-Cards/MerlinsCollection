@@ -12,20 +12,42 @@ from merlins_collection.services.bedrock import (
 
 @pytest.fixture
 def chat_client(cognito_config, jwks):
-    """TestClient with auth overridden; bedrock service is overridden per-test."""
+    """TestClient with auth overridden; bedrock service is overridden per-test.
+
+    /chat now enforces the DynamoDB-backed rate limiter as a dependency, and it
+    FAILS CLOSED (503) if the counter table is unreachable — so the fixture
+    provisions a moto-backed rate-limit table and wires a real limiter in front.
+    Request volumes here are tiny, so the limiter never trips; it just needs to be
+    able to verify usage.
+    """
+    import os
+
+    from moto import mock_aws
+
     from merlins_collection.dependencies import get_verifier
     from merlins_collection.main import app
+    from merlins_collection.rate_limit import DynamoRateLimiter, get_rate_limiter
     from merlins_collection.services.cognito import CognitoJwtVerifier
 
-    verifier = CognitoJwtVerifier(
-        region=cognito_config["region"],
-        user_pool_id=cognito_config["user_pool_id"],
-        client_id=cognito_config["client_id"],
-        jwks=jwks,
-    )
-    app.dependency_overrides[get_verifier] = lambda: verifier
-    yield TestClient(app)
-    app.dependency_overrides.clear()
+    with mock_aws():
+        os.environ["AWS_ACCESS_KEY_ID"] = "testing"
+        os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
+        os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
+
+        verifier = CognitoJwtVerifier(
+            region=cognito_config["region"],
+            user_pool_id=cognito_config["user_pool_id"],
+            client_id=cognito_config["client_id"],
+            jwks=jwks,
+        )
+        app.dependency_overrides[get_verifier] = lambda: verifier
+
+        limiter = DynamoRateLimiter("merlins-rate-limits-test", region_name="us-east-1")
+        limiter.create_table()
+        app.dependency_overrides[get_rate_limiter] = lambda: limiter
+
+        yield TestClient(app)
+        app.dependency_overrides.clear()
 
 
 def _stub_bedrock(reply: str):

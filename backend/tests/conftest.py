@@ -6,6 +6,25 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter():
+    """Drop the cached rate-limiter singleton between tests.
+
+    Counters now live in DynamoDB (not process memory), so isolation comes from
+    each test's fresh moto table; this just clears the lru_cache so a test never
+    reuses a limiter bound to a torn-down moto backend. Guarded so the suite
+    still collects if the module can't import (TDD RED phase).
+    """
+    try:
+        from merlins_collection.rate_limit import get_rate_limiter
+    except Exception:
+        yield
+        return
+    get_rate_limiter.cache_clear()
+    yield
+    get_rate_limiter.cache_clear()
+
+
 @pytest.fixture
 def client():
     from merlins_collection.main import app
