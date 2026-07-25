@@ -6,6 +6,8 @@ import 'next-auth/jwt'
 declare module 'next-auth' {
   interface Session {
     accessToken?: string
+    /** Member of the Cognito admins group; gates the Studio. */
+    isAdmin?: boolean
     error?: string
   }
 }
@@ -13,6 +15,7 @@ declare module 'next-auth' {
 declare module 'next-auth/jwt' {
   interface JWT {
     accessToken?: string
+    isAdmin?: boolean
     refreshToken?: string
     accessTokenExpires?: number
     error?: string

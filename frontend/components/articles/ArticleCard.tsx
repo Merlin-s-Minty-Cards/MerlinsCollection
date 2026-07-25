@@ -1,9 +1,9 @@
 import Link from 'next/link'
 import Badge from '@/components/ui/Badge'
-import { formatArticleDate, type Article } from '@/lib/articles'
+import { formatArticleDate, type ArticleSummary } from '@/lib/articles'
 
 /** Preview card for an article, linking to its full page. */
-export default function ArticleCard({ article }: { article: Article }) {
+export default function ArticleCard({ article }: { article: ArticleSummary }) {
   return (
     <Link
       href={`/articles/${article.slug}`}

@@ -15,6 +15,9 @@ const inter = Inter({
 })
 
 export const metadata: Metadata = {
+  // Resolves relative OG image URLs to absolute ones, which social scrapers
+  // require. Falls back to localhost in dev.
+  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000'),
   title: {
     default: "Merlin's Minty Cards",
     template: "%s | Merlin's Minty Cards",
