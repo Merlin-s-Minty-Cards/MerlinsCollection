@@ -206,12 +206,11 @@ describe("listCards", () => {
     expect(card?.language).toBe("JP");
   });
 
-  it("reads the stored JP language for a sealed product", async () => {
-    const { repo } = repoWith({ "INV#2": [{ Items: [sealedItem({ language: "JP" })] }] });
-
-    const [card] = await repo.listCards();
-    expect(card?.language).toBe("JP");
-  });
+  // NOTE (RFC 0001): the former "reads the stored JP language for a sealed
+  // product" test was removed here. It asserted a sealed item surfaces from
+  // listCards, which directly contradicts the binding owner decision to HIDE
+  // sealed (see the "excludes sealed products …" test below). JP language
+  // reading stays covered by the raw/graded cases above.
 
   it("hides items that are not available (sold / on-hold / lost stay internal)", async () => {
     const { repo } = repoWith(
@@ -238,14 +237,13 @@ describe("listCards", () => {
     expect(await repo.listCards()).toEqual([]);
   });
 
-  it("includes sealed products (no catalog card) with name, type and market value", async () => {
+  // RFC 0001 owner decision (binding, overrides the earlier "keep sealed
+  // visible" recommendation): sealed products (kind=sealed) are hidden from
+  // the customer-facing chat tools entirely — cards-only surface. "sealed"
+  // must be removed from PUBLIC_KINDS (dynamodb-repository.ts:33).
+  it("excludes sealed products from the customer-facing projection (cards-only surface, RFC 0001)", async () => {
     const { repo } = repoWith({ "INV#2": [{ Items: [sealedItem()] }] });
-    const [card] = await repo.listCards();
-    expect(card?.name).toBe("Scarlet & Violet Booster Box");
-    expect(card?.condition).toBe("Booster Box");
-    expect(card?.value).toBe(120);
-    expect(card?.marketPrice).toBe(140);
-    expect(card?.quantity).toBe(1);
+    expect(await repo.listCards()).toEqual([]);
   });
 
   it("fans out across all ten inventory shards", async () => {
@@ -293,6 +291,73 @@ describe("listCards", () => {
     const [card] = await repo.listCards();
     expect(card?.name).toBe("sv9-77");
     expect(card?.set).toBe("sv9");
+  });
+
+  // ---- RFC 0001 MUST-FIX A/C: read the materialized display_name field ----
+  // docs/rfcs/0001-inventory-catalog-relink-and-display-fallback.md, section C.5.
+  // The sanitized name is composed ONCE, at import, from the structured Name +
+  // Card # columns and stored on the row as `display_name` (backend
+  // services/card_text.format_display_name). MCP reads that single stored field
+  // verbatim — it does NOT parse `notes` at all — so the ~90-line notes parser is
+  // gone and backend/MCP parity is structural, not hand-synced. This closes the
+  // "chat shows only the card ID, no name" bug without any free-text path.
+
+  it("uses the stored display_name when the catalog is missing and card_id is null", async () => {
+    const { repo } = repoWith({
+      "INV#0": [{ Items: [rawItem({ card_id: null, display_name: "Dragonair #181" })] }],
+    });
+
+    const [card] = await repo.listCards();
+    expect(card?.name).toBe("Dragonair #181");
+  });
+
+  it("uses the stored display_name for a graded slab too", async () => {
+    const { repo } = repoWith({
+      "INV#1": [{ Items: [gradedItem({ card_id: null, display_name: "Charizard #4" })] }],
+    });
+
+    const [card] = await repo.listCards();
+    expect(card?.name).toBe("Charizard #4");
+  });
+
+  // MCP never reads `notes`: a row carrying internal Notes free-text but NO stored
+  // display_name falls back to the ULID, so cost/consignor/location text can never
+  // reach the model. (Under the old read-time parser a trailing " #<digits>" leaked
+  // — that whole class of bug is gone with the parser.)
+  it("falls back to the item_id when there is no display_name, never parsing notes", async () => {
+    const item = rawItem({
+      card_id: null,
+      display_name: null,
+      notes: "cost 40 sold to David #12",
+    });
+    const { repo } = repoWith({ "INV#0": [{ Items: [item] }] });
+
+    const [card] = await repo.listCards();
+    expect(card?.name).toBe(String(item.item_id)); // ULID fallback, not the note
+    expect(card?.name).not.toContain("David");
+    expect(card?.name).not.toContain("cost 40");
+    expect(card?.name).not.toContain("12");
+  });
+
+  it("ignores notes entirely even when they look like an identity segment", async () => {
+    // A row whose notes read like "<name> #<n>" but which stored no display_name
+    // still falls back to the ULID — the name comes only from the stored field.
+    const item = rawItem({ card_id: null, notes: "Dragonair #181.0 — 30-32" });
+    const { repo } = repoWith({ "INV#0": [{ Items: [item] }] });
+
+    const [card] = await repo.listCards();
+    expect(card?.name).toBe(String(item.item_id));
+    expect(card?.name).not.toContain("30-32");
+  });
+
+  it("prefers the catalog name over a stored display_name for a matched item", async () => {
+    const { repo } = repoWith(
+      { "INV#0": [{ Items: [rawItem({ card_id: "base1-4", display_name: "Stale #99" })] }] },
+      { "CARD#base1-4|META": meta("base1-4") },
+    );
+
+    const [card] = await repo.listCards();
+    expect(card?.name).toBe("Charizard"); // catalog META wins over display_name
   });
 
   it("uses the catalog finish market price when the item has no synced market value", async () => {

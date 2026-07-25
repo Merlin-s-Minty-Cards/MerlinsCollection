@@ -294,6 +294,26 @@ def test_card_accept_applies_fields_and_clears_needs_review(dynamo_repo):
         == [item.item_id]
 
 
+def test_card_accept_materializes_display_name_from_the_decision(dynamo_repo):
+    """Council MUST-FIX A/C, relink path: when the applier sets identity it also
+    writes a structured display_name (from the decision's confirmed name + number),
+    so a relinked/backfilled row carries a name too — a robust fallback if the
+    catalog META is momentarily missing. Derived from the structured decision
+    fields, never from the item's free-text notes."""
+    dynamo_repo.batch_upsert_catalog_cards([make_card()])
+    item = make_raw_item(display_name=None)
+    dynamo_repo.put_inventory_item(item)
+
+    text = (HEADER + f"CARD {item.item_id} ACCEPT card_id=swshp-SWSH068; name=Snorlax; "
+            f"set=SWSH Black Star Promos; number=SWSH068\n")
+    report = run(dynamo_repo, text, apply=True)
+
+    assert actions(report) == {("CARD", item.item_id): ard.UPDATE}
+    stored = dynamo_repo.get_inventory_item(item.item_id)
+    assert stored.card_id == "swshp-SWSH068"
+    assert stored.display_name == "Snorlax #swsh068"
+
+
 def test_card_set_without_value_leaves_market_value_alone(dynamo_repo):
     dynamo_repo.batch_upsert_catalog_cards([
         make_card(card_id="me2pt5-289", name="Steven's Metagross ex",

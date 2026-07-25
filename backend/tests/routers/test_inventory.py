@@ -375,20 +375,25 @@ def test_search_excludes_bulk_and_non_available_items(inv_client, mint_token):
     assert [i["item_id"] for i in body["items"]] == [available.item_id]
 
 
-def test_search_returns_sealed_products_with_null_card(inv_client, mint_token):
+def test_search_excludes_sealed_items_from_customer_results(inv_client, mint_token):
+    """RFC 0001 owner decision (binding, overrides the earlier "keep sealed
+    visible" recommendation): sealed products (kind=sealed, e.g. booster
+    packs) are hidden from the customer-facing search entirely — cards-only
+    surface. "sealed" must be removed from `_CUSTOMER_KINDS`
+    (backend inventory.py:35). (fails now: sealed items are still returned)"""
     client, repo = inv_client
     sealed = SealedInventoryItem(product_name="ES Booster Box", product_type="booster_box",
                                  cost_basis=Decimal("400"), listed_price=Decimal("550"),
                                  acquired_at=date(2026, 1, 1))
     repo.put_inventory_item(sealed)
+    repo.put_inventory_item(_raw("sv1-1"))  # control: a card-kind item still returns
 
     body = client.get(
         "/inventory/search",
         headers={"Authorization": f"Bearer {mint_token()}"},
     ).json()
-    match = next(i for i in body["items"] if i["kind"] == "sealed")
-    assert match["product_name"] == "ES Booster Box"
-    assert match["card"] is None
+    assert body["total"] == 1
+    assert all(i["kind"] != "sealed" for i in body["items"])
 
 
 def test_condition_filter_matches_modifier_variants(inv_client, mint_token):
@@ -566,3 +571,95 @@ def test_B9_search_response_omits_internal_fields(inv_client, mint_token):
     assert internal.isdisjoint(item.keys()), internal & set(item.keys())
     # customer-facing fields still present
     assert item["kind"] == "raw" and item["listed_price"] == "10.00"
+
+
+# ==== RFC 0001: display_name materialized at import, read verbatim (MUST-FIX A/C) ==
+# docs/rfcs/0001-inventory-catalog-relink-and-display-fallback.md, section C.
+# `notes` is internal-only and off the customer wire (cost/price range, a location
+# like "For David"). The sanitized `display_name` is composed ONCE at import from
+# the structured Name + Card # columns and stored on the item; the router reads
+# that stored field verbatim — it does NOT re-parse notes — so an unmatched item
+# reads as a card name instead of the raw item_id ULID, with no free-text path in.
+
+def test_search_result_exposes_materialized_display_name_when_unmatched(
+    inv_client, mint_token,
+):
+    """An available raw item with card_id=None exposes the display_name stored on
+    the item at import time; the router reads the field, it does not parse notes."""
+    client, repo = inv_client
+    repo.put_inventory_item(
+        _raw(None, display_name="Dragonair #181", notes="Dragonair #181.0 — 30-32"))
+
+    resp = client.get(
+        "/inventory/search",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["items"][0]["display_name"] == "Dragonair #181"
+
+
+def test_search_result_does_not_leak_notes_cost_or_location(inv_client, mint_token):
+    """Privacy guard: notes/cost/location/tcg_url are off the allowlist entirely,
+    and the exposed display_name carries only the materialized name+number — never
+    a cost/price range or a storage location."""
+    client, repo = inv_client
+    repo.put_inventory_item(
+        _raw(None, display_name="Dragonair #181",
+             notes="Dragonair #181.0 — 30-32 — For David", location="safe box 3"))
+
+    resp = client.get(
+        "/inventory/search",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    result = resp.json()["items"][0]
+    for leaked in ("notes", "cost_basis", "location", "tcg_url"):
+        assert leaked not in result
+    assert result["display_name"] == "Dragonair #181"
+    blob = " ".join(str(v) for v in result.values())
+    assert "30-32" not in blob
+    assert "For David" not in blob
+    assert "safe box 3" not in blob
+
+
+def test_search_result_display_name_is_none_when_item_stored_none(
+    inv_client, mint_token,
+):
+    """Council MUST-FIX A: a row imported with a blank Name has display_name=None
+    stored (the importer never derives it from Notes). The wire exposes None even
+    though the internal notes carry free-text, so cost/consignor/location text
+    never reaches the customer wire or the LLM context."""
+    client, repo = inv_client
+    repo.put_inventory_item(_raw(None, display_name=None, notes="cost 40, sold to David"))
+    repo.put_inventory_item(_raw(None, display_name=None, notes="For David"))
+
+    resp = client.get(
+        "/inventory/search",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    body = resp.json()
+    assert body["total"] == 2
+    for result in body["items"]:
+        assert result["display_name"] is None
+        assert "notes" not in result
+        # nothing internal leaked into any exposed string value
+        blob = " ".join(str(v) for v in result.values())
+        assert "David" not in blob
+        assert "cost 40" not in blob
+
+
+def test_matched_item_prefers_catalog_name_over_display_name(inv_client, mint_token):
+    """When `card` is present, display_name is present-but-None on the wire even if
+    the item stored one — the catalog name is authoritative for a matched item."""
+    client, repo = inv_client
+    repo.batch_upsert_catalog_cards([_catalog("sv1-1", "Sprigatito")])
+    repo.put_inventory_item(_raw("sv1-1", display_name="Sprigatito #001"))
+
+    resp = client.get(
+        "/inventory/search",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    result = resp.json()["items"][0]
+    assert result["card"]["name"] == "Sprigatito"
+    assert "display_name" in result
+    assert result["display_name"] is None

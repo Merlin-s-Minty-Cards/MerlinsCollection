@@ -31,8 +31,10 @@ from merlins_collection.services.dynamodb import InventoryRepository
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
 
-# Bulk lots are internal-only; everything else shows when it's available.
-_CUSTOMER_KINDS = {"raw", "graded", "sealed"}
+# Cards-only customer surface (RFC 0001 owner decision, binding): bulk lots are
+# internal-only, and sealed products are hidden too — the search surfaces single
+# cards, not booster packs. Only available raw/graded items reach a customer.
+_CUSTOMER_KINDS = {"raw", "graded"}
 
 
 def _price(item) -> Decimal | None:
@@ -54,6 +56,12 @@ _CUSTOMER_ITEM_FIELDS = {
     # a JP print is a different card at a different price, so buyers must be able
     # to tell an English and a Japanese copy apart.
     "language",
+    # display_name is a sanitized name+number fallback for unmatched items (no
+    # catalog card). It is MATERIALIZED at import time from the item's structured
+    # Name + Card # columns (services.card_text.format_display_name), stored on the
+    # row, and read verbatim here — never re-parsed from the free-text notes — so
+    # it carries only name+number and no cost/location/free-text (see _enrich).
+    "display_name",
 }
 
 
@@ -77,7 +85,8 @@ def search_inventory(
 
     ``condition`` selects raw cards only (graded items are excluded when it's
     set). An inverted price range (``min_price > max_price``) is rejected with
-    422. ``cost_basis`` is stripped from the response by ``response_model_exclude``.
+    422. ``cost_basis`` (and every other internal field) is stripped from the
+    response by the ``_CUSTOMER_ITEM_FIELDS`` allowlist via ``response_model_include``.
     """
     if min_price is not None and max_price is not None and min_price > max_price:
         raise HTTPException(
@@ -176,4 +185,12 @@ _ENRICHED = {
 
 def _enrich(item: InventoryItem, card: CatalogCard | None) -> EnrichedInventoryItem:
     summary = CardSummary.from_catalog(card) if card is not None else None
-    return _ENRICHED[item.kind](**item.model_dump(), card=summary)
+    data = item.model_dump()
+    # The catalog name is authoritative when the item is matched; otherwise expose
+    # the sanitized display_name that was materialized on the row at import time
+    # (services.card_text.format_display_name). Reading the stored field rather than
+    # re-parsing notes keeps the customer wire and the LLM context free of internal
+    # free-text (Council MUST-FIX A). Sealed/bulk rows carry no display_name field,
+    # so ``.get`` yields None for them.
+    data["display_name"] = data.get("display_name") if card is None else None
+    return _ENRICHED[item.kind](**data, card=summary)

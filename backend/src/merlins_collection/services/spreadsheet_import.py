@@ -59,9 +59,21 @@ from merlins_collection.models.inventory import (
     new_ulid,
 )
 
-# Language detection lives in ``card_text`` so the importer, the review page and
-# the decision applier all share one implementation.
-from merlins_collection.services.card_text import language_from_url, parse_language
+# Normalization and language detection live in ``card_text`` so the importer, the
+# review page and the decision applier all share one implementation.
+from merlins_collection.services.card_text import (
+    _QUALIFIER_TOKENS,
+    CatalogIndex,
+    build_catalog_index,
+    core_name,
+    format_display_name,
+    language_from_url,
+    normalize_name,
+    normalize_number,
+    number_keys,
+    parse_language,
+    sets_agree,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -240,27 +252,93 @@ def nearest_show_id(day: date, shows: list[Show]) -> str | None:
 class ImportContext:
     repo: object
     shows: list[Show] = field(default_factory=list)
-    catalog_index: dict = field(default_factory=dict)  # (name_lower, number) -> [CatalogCard]
+    # The normalized catalog index ``_match_card`` reads, always built through
+    # ``build_catalog_index`` (production and tests alike, RFC F.1) so there is one
+    # keying path — no un-normalized flat-dict shortcut can re-introduce the outage.
+    catalog_index: CatalogIndex = field(default_factory=CatalogIndex)
+
+
+def _first_hit(table: dict, key_name: str, keys: list[str]) -> list:
+    """The first non-empty hit list across the number forms, most literal first."""
+    for key in keys:
+        hits = table.get((key_name, key))
+        if hits:
+            return hits
+    return []
 
 
 def _match_card(ctx: ImportContext, name: str, number: str, *,
-                language: Language = Language.EN):
-    """Exact match on (name, number); a unique hit returns its card_id.
+                language: Language = Language.EN, set_text: str = ""):
+    """Conservative catalog match on normalized (name, number); a UNIQUE hit
+    returns its card_id, everything ambiguous returns ``None`` for human review.
 
     The catalog holds ENGLISH cards only, so a non-English item is refused
     outright — before any lookup — no matter how exactly its name and number line
     up with an English entry. A Japanese Seismitoad #38 is not the English
     Seismitoad #38: linking them would hang an English price on a card that
     trades at a different one. ``card_id is None`` is the correct, final answer
-    for such an item, not a failed match to retry later.
+    for such an item, not a failed match to retry later. The gate lives here, in
+    the single place a catalog lookup can happen, so every caller inherits it.
 
-    The gate lives here, in the single place a catalog lookup can happen, so
-    every present and future caller inherits it instead of re-deriving it.
+    Both sides are normalized identically (``build_catalog_index`` on the catalog,
+    ``normalize_name``/``number_keys`` on the sheet row) so an Excel float artifact
+    ("181.0"), a slash form ("182/167") or name punctuation no longer defeats a
+    lookup. Matching is exact-then-narrow: full name+number, then variant-stripped
+    name+number, then — only when several sets share that name+number AND set text
+    is available — set narrowing. A tie that set text cannot reduce to one card
+    stays ``None``; there is deliberately no fuzzy auto-linking here (that, and its
+    human confirm, belongs to the review toolchain).
     """
     if language is not Language.EN:
         return None
-    hits = ctx.catalog_index.get((name.strip().lower(), str(number).strip()), [])
-    return hits[0].card_id if len(hits) == 1 else None
+    index = ctx.catalog_index
+    n_full = normalize_name(name)
+    if not n_full:  # a fully non-ASCII name is "no evidence", never a match
+        return None
+    keys = number_keys(normalize_number(number))
+
+    hits = _first_hit(index.by_name_number, n_full, keys)
+    core_tier = False
+    if not hits:
+        hits = _first_hit(index.by_core_number, core_name(name), keys)
+        core_tier = True
+
+    if len(hits) == 1:
+        card = hits[0]
+        # A present Set text that CONTRADICTS the lone hit is not agreement — it is
+        # evidence of the WRONG card (a McDonald's Pikachu #58 is not the Base Set
+        # Pikachu #58). Route it to review rather than hang the wrong set's price.
+        if set_text and not sets_agree(set_text, card.set_name):
+            return None
+        # A core-tier match reached the catalog only by dropping a variant word. A
+        # dropped FINISH word (holo/reverse) costs no confidence, but a dropped
+        # QUALIFIER (alt/art/gold/1st…) means a materially different print at a
+        # different price — never auto-link that; route it to review.
+        if core_tier and _dropped_qualifier(name, card.name):
+            return None
+        return card.card_id
+    if len(hits) > 1 and set_text:
+        narrowed = [c for c in hits if sets_agree(set_text, c.set_name)]
+        if len(narrowed) == 1:
+            card = narrowed[0]
+            # Same guard as the single-hit branch: narrowing to one set does not
+            # restore a qualifier the core tier dropped, so a variant narrowed to
+            # the base card's set is still the wrong print at the wrong price —
+            # route it to review rather than link it (Council MUST-FIX B).
+            if core_tier and _dropped_qualifier(name, card.name):
+                return None
+            return card.card_id
+    return None
+
+
+def _dropped_qualifier(sheet_name: str, card_name: str) -> bool:
+    """True when the sheet name carries a qualifier token (alt/art/gold/1st…) that
+    the matched catalog card's name lacks — mirroring ``build_review``'s "a
+    variant-token-dropped match is never HIGH confidence" guard so the importer
+    auto-links only what the review page would confirm without a human."""
+    sheet_tokens = set(normalize_name(sheet_name).split())
+    card_tokens = set(normalize_name(card_name).split())
+    return bool((sheet_tokens & _QUALIFIER_TOKENS) - card_tokens)
 
 
 def _record_sheet_sale(ctx, item, *, sold, date_sold, venmo, venmo_fees, category,
@@ -313,9 +391,13 @@ def import_singles(rows: list[dict], ctx: ImportContext) -> dict:
                 str(row.get("Notes") or "").strip() or None,
                 loc["notes_extra"],
             ) if x)
+            # Sanitized customer-facing name from the STRUCTURED identity columns
+            # only (never the Notes free-text), materialized once and stored.
+            display = format_display_name(name, row.get("Card #", ""))
             item = RawInventoryItem(
                 item_id=new_ulid(),
                 card_id=card_id,
+                display_name=display,
                 language=language,
                 finish="normal",
                 condition=condition,
@@ -361,10 +443,15 @@ def import_slabs(rows: list[dict], ctx: ImportContext) -> dict:
             set_language, set_name = parse_language(row.get("Set", ""))
             if language is Language.EN:
                 language = set_language
-            card_id = _match_card(ctx, name, row.get("card#", ""), language=language)
+            # A slab has a Set column, so pass it: it narrows a name+number that
+            # hits the same card printed in several sets down to the right one.
+            card_id = _match_card(ctx, name, row.get("card#", ""),
+                                  language=language, set_text=set_name)
+            display = format_display_name(name, row.get("card#", ""))
             item = GradedInventoryItem(
                 item_id=new_ulid(),
                 card_id=card_id,
+                display_name=display,
                 language=language,
                 company="PSA",  # sheet has no company column; flagged for review
                 grade=Decimal(str(row["Grade"]).strip()),
@@ -555,6 +642,8 @@ def import_consignments(rows: list[dict], ctx: ImportContext) -> dict:
                 acquired_at=parse_date(row.get("Date recieved")) or date(2026, 1, 1),
                 consignment=terms,
                 notes=f"{card_name} #{row.get('Card #', '')}".strip(" #"),
+                # Structured-identity display name (raw and graded both carry it).
+                display_name=format_display_name(card_name, row.get("Card #", "")),
             )
             if parse_bool(row.get("Slab")):
                 grade_text = str(row.get("Condition") or "").strip()
@@ -1043,10 +1132,10 @@ def run_import(csv_dir, repo, *, require_complete: bool = True,
     try:
         repo.set_import_generation(gen)
         seed_payment_methods(repo)
-        catalog_index: dict = {}
-        for card in repo.iter_catalog_cards():
-            catalog_index.setdefault((card.name.lower(), card.number), []).append(card)
-        ctx = ImportContext(repo=repo, catalog_index=catalog_index)
+        ctx = ImportContext(
+            repo=repo,
+            catalog_index=build_catalog_index(repo.iter_catalog_cards()),
+        )
         for tab, importer in _TAB_IMPORTERS:
             path = csv_dir / f"{tab}.csv"
             if not path.exists():

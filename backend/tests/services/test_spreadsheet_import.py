@@ -1121,17 +1121,20 @@ def test_parse_language_survives_combined_qualifiers():
 
 
 # The English catalog, containing exactly the card a JP row would collide with.
+# Built through the PRODUCTION index builder (RFC F.1) so no test carries an
+# un-normalized catalog-keying path the real matcher never uses.
 def _english_catalog_index():
     from datetime import datetime, timezone
 
     from merlins_collection.models.catalog import CatalogCard
+    from merlins_collection.services.spreadsheet_import import build_catalog_index
 
     card = CatalogCard(
         card_id="swsh6-38", name="Seismitoad", set_id="swsh6", set_name="Chilling Reign",
         number="38", images={"small": "https://img/s.png", "large": "https://img/l.png"},
         prices={"normal": {"market": Decimal("400.00")}},
         last_synced_at=datetime.now(tz=timezone.utc))
-    return {(card.name.lower(), card.number): [card]}
+    return build_catalog_index([card])
 
 
 def test_english_single_still_matches_the_catalog_exactly_as_before(dynamo_repo):
@@ -1213,7 +1216,7 @@ def test_daily_sync_never_writes_an_english_price_onto_a_japanese_item(dynamo_re
     from merlins_collection.services.catalog_sync import refresh_inventory_market_values
 
     index = _english_catalog_index()
-    [card] = index[("seismitoad", "38")]
+    [card] = index.by_name_number[("seismitoad", "38")]
     dynamo_repo.batch_upsert_catalog_cards([card])
     ctx = ImportContext(repo=dynamo_repo, catalog_index=index)
     import_singles([_singles_row(Name="Seismitoad (jp)", **{"Card #": "38"}),
@@ -1224,3 +1227,262 @@ def test_daily_sync_never_writes_an_english_price_onto_a_japanese_item(dynamo_re
     by_language = {i.language: i for i in dynamo_repo.list_inventory()}
     assert by_language[Language.JP].current_market_value is None
     assert by_language[Language.EN].current_market_value == Decimal("400.00")
+
+
+# ================= RFC 0001: catalog relink matcher normalization (RED) =====
+# docs/rfcs/0001-inventory-catalog-relink-and-display-fallback.md, section B.
+# The importer's matcher and the catalog index it reads compare RAW,
+# un-normalized name/number strings, so an Excel float artifact ("181.0" vs
+# catalog "181"), a slash form ("182/167"), or minor name punctuation defeats
+# every lookup. These tests build the catalog index through the PRODUCTION
+# index builder (`build_catalog_index`, section B.2 — not yet implemented) so
+# a test can never pass by hand-normalizing a key the real matcher doesn't.
+
+def _catalog_card(**over):
+    from datetime import datetime, timezone
+
+    from merlins_collection.models.catalog import CatalogCard
+
+    defaults = dict(
+        card_id="swsh6-38", name="Dragonair", set_id="swsh6",
+        set_name="Chilling Reign", number="181",
+        images={"small": "https://img/s.png", "large": "https://img/l.png"},
+        prices={"normal": {"market": Decimal("5.00")}},
+        last_synced_at=datetime.now(tz=timezone.utc),
+    )
+    defaults.update(over)
+    return CatalogCard(**defaults)
+
+
+def _normalized_index(cards):
+    """Route through the production catalog-index builder instead of
+    hand-rolling a normalized dict in the test — otherwise a test could pass
+    without the real matcher ever normalizing anything (section F.1)."""
+    from merlins_collection.services.spreadsheet_import import build_catalog_index
+    return build_catalog_index(cards)
+
+
+def test_match_card_links_number_with_float_artifact(dynamo_repo):
+    """Catalog stores number "181"; the sheet's Excel export writes "181.0".
+    _match_card must undo the float artifact before comparing. (fails now:
+    "181.0" != "181")"""
+    card = _catalog_card(card_id="swsh6-181", name="Dragonair", number="181")
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_normalized_index([card]))
+    assert _match_card(ctx, "Dragonair", "181.0") == "swsh6-181"
+
+
+def test_match_card_links_slash_form_number(dynamo_repo):
+    """The sheet writes the full collector string ("182/167"); the catalog
+    stores only the number before the slash. (fails now)"""
+    card = _catalog_card(card_id="swsh1-182", name="Mew", number="182")
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_normalized_index([card]))
+    assert _match_card(ctx, "Mew", "182/167") == "swsh1-182"
+
+
+def test_match_card_normalizes_name_punctuation(dynamo_repo):
+    """Name punctuation/spacing drift ("Moltres & Zapdos-GX" vs catalog's
+    "Moltres & Zapdos GX") must not defeat the match. (fails now)"""
+    card = _catalog_card(card_id="swsh1-84", name="Moltres & Zapdos GX", number="84")
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_normalized_index([card]))
+    assert _match_card(ctx, "Moltres & Zapdos-GX", "84") == "swsh1-84"
+
+
+def test_match_card_ambiguous_multiset_stays_unlinked(dynamo_repo):
+    """A genuinely ambiguous single (same normalized name+number in two sets,
+    no Set column) must stay card_id=None — NEVER force-guessed to hits[0].
+    Guards against over-linking to the wrong set's price."""
+    card_a = _catalog_card(card_id="base1-4", name="Charizard",
+                           set_name="Base Set", number="4")
+    card_b = _catalog_card(card_id="base4-4", name="Charizard",
+                           set_name="Base Set 2", number="4")
+    ctx = ImportContext(repo=dynamo_repo,
+                        catalog_index=_normalized_index([card_a, card_b]))
+    assert _match_card(ctx, "Charizard", "4") is None
+
+
+def test_match_card_slab_set_inference_links_unique(dynamo_repo):
+    """A slab's Set column narrows a multi-set name+number hit to one card.
+    (fails now: no set_text param / no narrowing)"""
+    card_a = _catalog_card(card_id="chi6-38", name="Seismitoad",
+                           set_name="Chilling Reign", number="38")
+    card_b = _catalog_card(card_id="base1-38", name="Seismitoad",
+                           set_name="Base Set", number="38")
+    ctx = ImportContext(repo=dynamo_repo,
+                        catalog_index=_normalized_index([card_a, card_b]))
+    assert _match_card(ctx, "Seismitoad", "38", set_text="Chilling Reign") == "chi6-38"
+
+
+def test_import_singles_links_float_artifact_row(dynamo_repo):
+    """Integration: a real Singles row with the Excel float artifact links to
+    its unique catalog card and is NOT flagged for review. (fails now)"""
+    card = _catalog_card(card_id="swsh6-181", name="Dragonair", number="181")
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_normalized_index([card]))
+    row = _singles_row(Name="Dragonair", **{"Card #": "181.0"})
+    import_singles([row], ctx)
+    [item] = dynamo_repo.list_inventory()
+    assert item.card_id == "swsh6-181"
+    assert item.needs_review is False
+
+
+def test_build_catalog_index_keys_are_normalized(dynamo_repo):
+    """The index builder keys on normalize_name + number_keys, so a lookup by
+    ("dragonair", "181") resolves a catalog card whose raw number was "181"
+    and whose raw name was "Dragonair". (new unit — build_catalog_index does
+    not exist yet)"""
+    from merlins_collection.services.spreadsheet_import import build_catalog_index
+
+    card = _catalog_card(card_id="swsh6-181", name="Dragonair", number="181")
+    index = build_catalog_index([card])
+    by_name_number = getattr(index, "by_name_number", None)
+    if by_name_number is None and isinstance(index, dict):
+        by_name_number = index.get("by_name_number", index)
+    hits = by_name_number.get(("dragonair", "181"), [])
+    assert len(hits) == 1
+    assert hits[0].card_id == "swsh6-181"
+
+
+# ===== Council revision-2 MUST-FIX 2 & 3: conservative single-hit auto-link =====
+# The rev-1 matcher auto-linked ANY unique hit before checking set agreement, and
+# auto-linked a variant to the base card when core_name stripped a qualifier. Both
+# silently hang the wrong price on a card; both must route to review instead.
+
+def test_match_card_single_hit_rejected_when_set_text_contradicts(dynamo_repo):
+    """MUST-FIX 2: a graded slab whose Set text contradicts the ONLY catalog hit
+    must NOT auto-link (McDonald's Pikachu #58 is not Base Set Pikachu #58). The
+    set-agreement gate applies to the unique-hit branch, not only to multi-hit."""
+    card = _catalog_card(card_id="base1-58", name="Pikachu",
+                         set_name="Base Set", number="58")
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_normalized_index([card]))
+    assert _match_card(ctx, "Pikachu", "58",
+                       set_text="McDonald's Collection 2016") is None
+
+
+def test_match_card_single_hit_links_when_set_text_agrees(dynamo_repo):
+    """Companion to MUST-FIX 2: a unique hit whose Set text AGREES still links —
+    the gate only fires on a contradiction, never on a match."""
+    card = _catalog_card(card_id="base1-58", name="Pikachu",
+                         set_name="Base Set", number="58")
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_normalized_index([card]))
+    assert _match_card(ctx, "Pikachu", "58", set_text="Base Set") == "base1-58"
+
+
+def test_match_card_variant_qualifier_not_autolinked_to_base(dynamo_repo):
+    """MUST-FIX 3: "Charizard V Alt Art" #154 misses the full-name tier, then
+    core_name drops the 'alt'/'art' qualifiers and hits the BASE "Charizard V"
+    #154. That variant is a different print at a different price — never auto-link
+    a core-tier match that dropped a qualifier; route to review (None)."""
+    card = _catalog_card(card_id="swsh1-154", name="Charizard V", number="154")
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_normalized_index([card]))
+    assert _match_card(ctx, "Charizard V Alt Art", "154") is None
+
+
+def test_match_card_finish_only_normalization_still_links(dynamo_repo):
+    """MUST-FIX 3 guard rail: dropping a FINISH word (holo/reverse) costs no
+    confidence — the catalog never carries it — so a finish-only core-tier match
+    still auto-links. Only qualifier tokens (alt/gold/1st…) route to review."""
+    card = _catalog_card(card_id="base1-4", name="Dragonite", number="4")
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_normalized_index([card]))
+    assert _match_card(ctx, "Dragonite Holo", "4") == "base1-4"
+
+
+# ===== Council revision-3 MUST-FIX B: qualifier guard on BOTH return paths =====
+# rev-2 installed the _dropped_qualifier guard on the len(hits)==1 branch only.
+# The len(hits)>1 -> set-narrowed-to-1 branch returned narrowed[0].card_id with no
+# guard, so a variant still auto-linked to the base card at the base price through
+# the multi-hit door. The guard must run on the narrowed return path too.
+
+def test_match_card_variant_qualifier_not_autolinked_via_narrowed_branch(dynamo_repo):
+    """MUST-FIX B: "Charizard V Alt Art" #154, Set "Brilliant Stars" misses the
+    full-name tier; core_name drops 'alt'/'art' -> base "Charizard V" #154 hits in
+    TWO sets (core_tier); set_text narrows to exactly ONE. That narrowed hit still
+    dropped a qualifier, so it must route to review (None) — the same variant->base
+    defect MUST-FIX 3 forbids, routed through the len(hits)>1 branch."""
+    card_a = _catalog_card(card_id="swsh9-154", name="Charizard V",
+                           set_name="Brilliant Stars", number="154")
+    card_b = _catalog_card(card_id="cel25-154", name="Charizard V",
+                           set_name="Celebrations", number="154")
+    ctx = ImportContext(repo=dynamo_repo,
+                        catalog_index=_normalized_index([card_a, card_b]))
+    assert _match_card(ctx, "Charizard V Alt Art", "154",
+                       set_text="Brilliant Stars") is None
+
+
+def test_match_card_finish_only_narrowed_branch_still_links(dynamo_repo):
+    """MUST-FIX B guard rail: a dropped FINISH word (holo) on the multi-hit
+    set-narrowed path costs no confidence, so it still links to the narrowed card —
+    only a stripped QUALIFIER routes to review."""
+    card_a = _catalog_card(card_id="swsh9-20", name="Dragonite",
+                           set_name="Brilliant Stars", number="20")
+    card_b = _catalog_card(card_id="cel25-20", name="Dragonite",
+                           set_name="Celebrations", number="20")
+    ctx = ImportContext(repo=dynamo_repo,
+                        catalog_index=_normalized_index([card_a, card_b]))
+    assert _match_card(ctx, "Dragonite Holo", "20",
+                       set_text="Brilliant Stars") == "swsh9-20"
+
+
+# ===== Council revision-3 MUST-FIX A/C: display_name materialized at import =====
+# The customer-facing name is composed ONCE, at import, from the sheet's own
+# structured Name + Card # columns and stored on the item row. Both read surfaces
+# (backend _enrich, MCP toCard) then read that one stored field; neither re-parses
+# the free-text `notes` blob, so internal Notes text can never leak into a name.
+
+def test_import_singles_materializes_display_name_from_structured_identity(dynamo_repo):
+    """A normal unmatched single stores "Dragonair #181" (from Name + Card #), so
+    the customer surface shows a card name instead of a ULID — no notes parsing."""
+    ctx = ImportContext(repo=dynamo_repo)
+    import_singles([_singles_row(Name="Dragonair", **{"Card #": "181.0"})], ctx)
+    [item] = dynamo_repo.list_inventory()
+    assert item.card_id is None
+    assert item.display_name == "Dragonair #181"
+
+
+def test_import_singles_stores_no_display_name_when_name_is_blank(dynamo_repo):
+    """Council MUST-FIX A: a blank-Name row whose Notes column carries internal
+    free-text ("cost 40 sold to David #12", "box #3", "PSA cert #12345678") stores
+    display_name=None. The name is NEVER derived from Notes, so none of that text
+    reaches the wire or MCP — even though the trailing " #<digits>" once fooled the
+    read-time parser."""
+    ctx = ImportContext(repo=dynamo_repo)
+    leaky = ["cost 40 sold to David #12", "box #3", "PSA cert #12345678"]
+    import_singles([_singles_row(Name="", Notes=n) for n in leaky], ctx)
+    items = dynamo_repo.list_inventory()
+    assert len(items) == 3
+    for item in items:
+        assert item.display_name is None
+        assert item.card_id is None
+
+
+def test_import_singles_matched_row_still_stores_structured_display_name(dynamo_repo):
+    """Even a matched row stores its structured display_name (a robust fallback if
+    the catalog META is momentarily missing); the read path prefers the catalog
+    name when the card resolves."""
+    card = _catalog_card(card_id="swsh6-181", name="Dragonair", number="181")
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_normalized_index([card]))
+    import_singles([_singles_row(Name="Dragonair", **{"Card #": "181.0"})], ctx)
+    [item] = dynamo_repo.list_inventory()
+    assert item.card_id == "swsh6-181"
+    assert item.display_name == "Dragonair #181"
+
+
+def test_import_slabs_materializes_display_name_from_structured_identity(dynamo_repo):
+    """A slab stores its display_name from the Name + card# columns too."""
+    ctx = ImportContext(repo=dynamo_repo)
+    row = {"Date Recieved": "1/5/2026", "Name": "Charizard", "Set": "Base",
+           "card#": "4", "Grade": "9.5", "Cert #": "12345678", "Amount Paid": "$250"}
+    import_slabs([row], ctx)
+    [item] = dynamo_repo.list_inventory()
+    assert item.display_name == "Charizard #4"
+
+
+def test_import_consignments_materializes_display_name(dynamo_repo):
+    """A consignment raw/graded item (never catalog-matched by the importer) also
+    stores a structured display_name from its Card Name + Card # columns."""
+    ctx = ImportContext(repo=dynamo_repo)
+    row = {"Date recieved": "2/1/2026", "Card Name": "Umbreon VMAX", "Condition": "NM",
+           "Slab": "", "Card #": "215", "Persons Name": "David",
+           "Percentage we get": "20%", "Sold/Returned": "", "Sold": "", "Date Sold": "",
+           "Market": "$110", "Minimum": "", "To payout": "", "Paid Out?": "No"}
+    import_consignments([row], ctx)
+    [item] = dynamo_repo.list_inventory()
+    assert item.display_name == "Umbreon VMAX #215"

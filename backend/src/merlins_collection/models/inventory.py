@@ -137,11 +137,19 @@ class _ItemBase(BaseModel):
     needs_review: bool = False
 
 
+# A sanitized, customer-safe fallback name (e.g. "Dragonair #181") materialized at
+# IMPORT time from the sheet's structured ``Name`` + ``Card #`` columns — never
+# from the free-text ``notes`` — and stored on the row so both customer surfaces
+# read one field instead of re-parsing notes (see
+# ``services.card_text.format_display_name`` / Council MUST-FIX A/C). ``None`` when
+# the row carried no structured identity; the catalog name wins once ``card_id``
+# resolves, so this is only a fallback for unmatched (or momentarily un-joined) rows.
 class RawInventoryItem(_ItemBase):
     """An ungraded single. ``factory_sealed`` = still in plastic wrap (promo premium)."""
 
     kind: Literal["raw"] = "raw"
     card_id: str | None = None
+    display_name: str | None = None
     finish: str
     condition: Condition
     condition_modifier: ConditionModifier | None = None
@@ -153,6 +161,7 @@ class GradedInventoryItem(_ItemBase):
 
     kind: Literal["graded"] = "graded"
     card_id: str | None = None
+    display_name: str | None = None
     company: GradingCompany
     grade: Decimal
     cert_number: str
@@ -207,28 +216,38 @@ class CardSummary(BaseModel):
         )
 
 
+# The customer-facing ``display_name`` on a search result: the fallback name
+# materialized on the item at import time (see the raw/graded model note above and
+# ``services.card_text.format_display_name``), carrying only name+number. ``_enrich``
+# sets it to ``None`` whenever a catalog card is present, since the catalog name is
+# authoritative there. Sealed/bulk have no stored display_name; their enriched
+# variants declare it only so the union projection is uniform.
 class EnrichedRawInventoryItem(RawInventoryItem):
     """A raw item joined with its catalog summary (``None`` if not linked/synced)."""
 
     card: CardSummary | None = None
+    display_name: str | None = None
 
 
 class EnrichedGradedInventoryItem(GradedInventoryItem):
     """A graded item joined with its catalog summary (``None`` if not linked/synced)."""
 
     card: CardSummary | None = None
+    display_name: str | None = None
 
 
 class EnrichedSealedInventoryItem(SealedInventoryItem):
     """A sealed product in a search result (never has a catalog card)."""
 
     card: CardSummary | None = None
+    display_name: str | None = None
 
 
 class EnrichedBulkInventoryItem(BulkInventoryItem):
     """A bulk lot in a search result (never has a catalog card)."""
 
     card: CardSummary | None = None
+    display_name: str | None = None
 
 
 EnrichedInventoryItem = Annotated[

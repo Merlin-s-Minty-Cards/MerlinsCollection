@@ -46,6 +46,13 @@ interface ItemBase {
    */
   language?: Language
   card: CardSummary | null
+  /**
+   * Sanitized name+number fallback the backend derives from an unmatched item's
+   * identity text (e.g. "Dragonair #181"). Present only when there is no catalog
+   * card; carries no internal notes/cost/location. Ranks above the raw ULID in
+   * {@link itemTitle}.
+   */
+  display_name?: string | null
 }
 
 export interface RawInventoryItem extends ItemBase {
@@ -176,11 +183,12 @@ const PRODUCT_TYPE_LABELS: Record<SealedProductType, string> = {
 
 /**
  * Display name for a tile: a sealed product's own name, else the catalog name,
- * falling back to the card id and finally the item id when nothing is synced.
+ * then the backend's sanitized notes-derived name, then the card id, and only
+ * the item id ULID as a last resort when nothing else is present.
  */
 export function itemTitle(item: InventoryItem): string {
   if (item.kind === 'sealed') return item.product_name
-  return item.card?.name ?? item.card_id ?? item.item_id
+  return item.card?.name ?? item.display_name ?? item.card_id ?? item.item_id
 }
 
 /**

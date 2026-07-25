@@ -50,12 +50,23 @@ import boto3
 from merlins_collection.config import settings
 from merlins_collection.models.inventory import LANGUAGE_LABELS, Language
 from merlins_collection.services.card_text import (
+    _QUALIFIER_TOKENS,
     SourceText,
+    core_name,
     normalize_name,
     normalize_number,
+    number_keys,
     parse_source_text,
+    sets_agree,
     strip_float_artifact,
 )
+
+# ``core_name`` / ``number_keys`` / ``sets_agree`` moved into ``card_text`` so the
+# importer's matcher and this review page normalize identically (RFC 0001 B.1).
+# Keep the historical private names as thin aliases so the call sites below — and
+# this page's own tests — read unchanged.
+_number_keys = number_keys
+_sets_agree = sets_agree
 
 # --- tuning knobs --------------------------------------------------------
 
@@ -88,75 +99,11 @@ CONTRADICTION_BAND = "CONTRADICTION"
 CONFIDENCE_RANK = {CONTRADICTION_BAND: 4, "LOW": 3, "MEDIUM": 2, "HIGH": 1,
                    NO_MATCH_BAND: 0}
 
-# Words that describe the *finish* of a printing, not the card. The sheet writes
-# "Dragonite-Holo"; the catalog calls that card "Dragonite". Dropping these to
-# find a match costs no confidence.
-_FINISH_TOKENS = frozenset({
-    "holo", "holofoil", "foil", "reverse", "rev", "nonholo", "non", "unlimited",
-    "cosmos", "sealed", "graded",
-})
-
-# Words that can mean a materially DIFFERENT card (a gold secret rare, a
-# 1st-edition). They are dropped for lookup, because the catalog name never
-# carries them — but a match that needed one dropped can never be HIGH, since the
-# price of the variant is not the price of the base.
-#
-# Language words are deliberately NOT here. Treating "jp" as a droppable noise
-# word is what let a Japanese card match an English catalog entry and inherit an
-# English price; language is now read out of the text into a field and gates the
-# lookup entirely (see ``predict_card``), so it never reaches this list.
-_QUALIFIER_TOKENS = frozenset({
-    "1st", "first", "ed", "edition", "shadowless", "promo", "staff",
-    "full", "art", "fullart", "alt", "alternate", "rainbow", "gold", "secret",
-    "eng", "english",
-})
-
-_VARIANT_TOKENS = _FINISH_TOKENS | _QUALIFIER_TOKENS
-
-
 # --- identifier + name normalization ------------------------------------
-# ``strip_float_artifact`` / ``normalize_name`` / ``normalize_number`` are
-# imported from ``services.card_text`` so this page and the decision applier —
-# the two ends of one paste-back round trip — compare text identically.
-
-def core_name(text) -> str:
-    """``normalize_name`` with printing/finish words removed (``dragonite holo``
-    -> ``dragonite``). Falls back to the full name if everything got stripped."""
-    tokens = [t for t in normalize_name(text).split() if t not in _VARIANT_TOKENS]
-    return " ".join(tokens) or normalize_name(text)
-
-
-def _number_keys(number: str) -> list[str]:
-    """Every form of a card number worth matching on, most literal first.
-
-    The sheet writes collector numbers as ``"182/167"`` and pads with zeros; no
-    catalog number contains a slash, so the part before it is the real number.
-    """
-    if not number:
-        return []
-    keys: list[str] = []
-    for form in (number, number.split("/", 1)[0].strip()):
-        for key in (form, form.lstrip("0")):
-            if key and key not in keys:
-                keys.append(key)
-    return keys
-
-
-def _set_tokens(text) -> frozenset[str]:
-    return frozenset(normalize_name(text).split())
-
-
-def _sets_agree(source_set: str, catalog_set: str) -> bool:
-    """True when one set label is contained in the other, token-wise.
-
-    The sheet writes things like "XY single pack Blister" for a card the catalog
-    files under "XY", so equality is too strict; substring is too loose ("XY"
-    would swallow "XY Evolutions"). Token containment threads the needle.
-    """
-    src, cat = _set_tokens(source_set), _set_tokens(catalog_set)
-    if not src or not cat:
-        return False
-    return src <= cat or cat <= src
+# ``strip_float_artifact`` / ``normalize_name`` / ``normalize_number`` /
+# ``core_name`` / ``number_keys`` / ``sets_agree`` are imported from
+# ``services.card_text`` so this page, the importer's matcher and the decision
+# applier — every end of one paste-back round trip — compare text identically.
 
 
 # --- recovering the importer's source text -------------------------------

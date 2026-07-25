@@ -14,6 +14,7 @@ import pytest
 from merlins_collection.models.inventory import Language
 from merlins_collection.services.card_text import (
     ITEM_TEXT_FIELD,
+    format_display_name,
     item_language,
     language_from_url,
     normalize_name,
@@ -196,3 +197,48 @@ def test_item_language_accepts_a_model_instance_not_only_a_dict():
                             finish="normal", condition="NM",
                             notes="Pikachu — jp 151 #173.0")
     assert item_language(item) is Language.JP
+
+
+# --- display_name is materialized from STRUCTURED identity (Council MUST-FIX A/C) --
+# The name is composed at IMPORT time from the sheet's own ``Name`` and ``Card #``
+# columns — the structured identity — never re-parsed from the free-text ``notes``
+# blob at read time. That is what keeps the importer's Notes column
+# ("cost 40, sold to David"), a storage location, or a cert number off the
+# customer wire and out of the Bedrock prompt: there is no free-text path into
+# this function at all, only the two structured columns.
+
+def test_format_display_name_composes_name_and_number():
+    """The legitimate path: a real name + card number yields ``<name> #<number>``,
+    with the Excel float artifact undone."""
+    assert format_display_name("Dragonair", "181") == "Dragonair #181"
+    assert format_display_name("Dragonair", "181.0") == "Dragonair #181"
+
+
+def test_format_display_name_returns_none_without_a_structured_name():
+    """A blank ``Name`` column -> no fabricated identity (None), so a row that
+    carries only internal Notes text can never get a name derived from it."""
+    assert format_display_name("", "12") is None
+    assert format_display_name(None, "181") is None
+    assert format_display_name("   ", "181") is None
+
+
+def test_format_display_name_keeps_the_name_when_the_number_is_absent_or_junk():
+    """A present name with no usable card number still names the card (the number
+    is simply dropped) — but a ``#``-prefixed prose value never appears because
+    only the structured ``Card #`` column feeds this, and a non-card-number value
+    is discarded rather than appended."""
+    assert format_display_name("Dragonair", "") == "Dragonair"
+    assert format_display_name("Dragonair", None) == "Dragonair"
+    # a value with no digit is not a card number -> dropped, name only
+    assert format_display_name("Dragonair", "abc") == "Dragonair"
+
+
+def test_format_display_name_bounds_the_composed_length():
+    """A pathological cell cannot emit a multi-line or unbounded token onto a
+    tile or into the prompt: whitespace collapses and the whole result is capped
+    (the number component is bounded here too, not only the name)."""
+    long_name = "A" * 200
+    assert len(format_display_name(long_name, "1")) <= 80
+    long_number = "1" * 300
+    assert len(format_display_name("Charizard", long_number)) <= 80
+    assert format_display_name("Line1\nLine2", "1") == "Line1 Line2 #1"

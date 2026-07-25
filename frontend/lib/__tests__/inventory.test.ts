@@ -223,10 +223,39 @@ describe('itemTitle', () => {
     expect(itemTitle(makeSealedItem())).toBe('Scarlet & Violet Booster Box')
   })
 
-  it('falls back to the item_id when neither card nor card_id is present', () => {
+  it('falls back to the item_id when neither card, card_id, nor display_name is present', () => {
     expect(itemTitle(makeRawItem({ card: null, card_id: undefined }))).toBe(
       '01JRAWCHARIZARDNM0000000001',
     )
+  })
+
+  // ---- RFC 0001: notes-derived display_name fallback (RED) ----
+  // docs/rfcs/0001-inventory-catalog-relink-and-display-fallback.md, section C.4.
+  // New precedence: card?.name ?? display_name ?? card_id ?? item_id. display_name
+  // ranks above the card_id and, critically, above the item_id ULID — the bug the
+  // owner reported ("chat/filter results show a ULID instead of a card name").
+
+  it('falls back to display_name when card and card_id are null', () => {
+    expect(
+      itemTitle(
+        makeRawItem({ card: null, card_id: null, display_name: 'Dragonair #181' }),
+      ),
+    ).toBe('Dragonair #181')
+  })
+
+  it('prefers display_name over the item_id ULID', () => {
+    const title = itemTitle(
+      makeRawItem({ card: null, card_id: null, display_name: 'Dragonair #181' }),
+    )
+    expect(title).not.toBe('01JRAWCHARIZARDNM0000000001')
+  })
+
+  it('still prefers the catalog name over a present display_name', () => {
+    // A matched item's catalog name is authoritative even if display_name was
+    // also set (mirrors the backend/MCP precedence tests for the same rule).
+    expect(
+      itemTitle(makeRawItem({ display_name: 'Stale #99' })),
+    ).toBe('Charizard')
   })
 })
 

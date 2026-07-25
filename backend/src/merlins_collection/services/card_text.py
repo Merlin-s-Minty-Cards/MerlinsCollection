@@ -18,14 +18,16 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, field
 
 from merlins_collection.models.inventory import ITEM_TEXT_FIELD, Language
 
 __all__ = [
-    "ITEM_TEXT_FIELD", "LANGUAGE_MARKER_RE", "SourceText", "item_language",
-    "language_from_url", "normalize_name", "normalize_number", "parse_language",
-    "parse_source_text", "strip_float_artifact",
+    "ITEM_TEXT_FIELD", "LANGUAGE_MARKER_RE", "CatalogIndex", "SourceText",
+    "build_catalog_index", "core_name", "format_display_name", "item_language",
+    "language_from_url", "normalize_name", "normalize_number", "number_keys",
+    "parse_language", "parse_source_text", "sets_agree", "strip_float_artifact",
 ]
 
 
@@ -70,6 +72,104 @@ def normalize_number(text) -> str:
     slash into a space here would leave them nothing to split on.
     """
     return strip_float_artifact(text).strip().lower()
+
+
+# Words that describe the *finish* of a printing, not the card. The sheet writes
+# "Dragonite-Holo"; the catalog calls that card "Dragonite". Dropping these to
+# find a match costs no confidence.
+_FINISH_TOKENS = frozenset({
+    "holo", "holofoil", "foil", "reverse", "rev", "nonholo", "non", "unlimited",
+    "cosmos", "sealed", "graded",
+})
+
+# Words that can mean a materially DIFFERENT card (a gold secret rare, a
+# 1st-edition). They are dropped for lookup, because the catalog name never
+# carries them — but a match that needed one dropped is a different print at a
+# different price. Language words are deliberately NOT here: language gates the
+# lookup entirely (see the importer / review page) rather than being dropped.
+_QUALIFIER_TOKENS = frozenset({
+    "1st", "first", "ed", "edition", "shadowless", "promo", "staff",
+    "full", "art", "fullart", "alt", "alternate", "rainbow", "gold", "secret",
+    "eng", "english",
+})
+
+_VARIANT_TOKENS = _FINISH_TOKENS | _QUALIFIER_TOKENS
+
+
+def core_name(text) -> str:
+    """``normalize_name`` with printing/finish words removed (``dragonite holo``
+    -> ``dragonite``). Falls back to the full name if everything got stripped."""
+    tokens = [t for t in normalize_name(text).split() if t not in _VARIANT_TOKENS]
+    return " ".join(tokens) or normalize_name(text)
+
+
+def number_keys(number: str) -> list[str]:
+    """Every form of a card number worth matching on, most literal first.
+
+    The sheet writes collector numbers as ``"182/167"`` and pads with zeros; no
+    catalog number contains a slash, so the part before it is the real number.
+    """
+    if not number:
+        return []
+    keys: list[str] = []
+    for form in (number, number.split("/", 1)[0].strip()):
+        for key in (form, form.lstrip("0")):
+            if key and key not in keys:
+                keys.append(key)
+    return keys
+
+
+def _set_tokens(text) -> frozenset[str]:
+    return frozenset(normalize_name(text).split())
+
+
+def sets_agree(source_set: str, catalog_set: str) -> bool:
+    """True when one set label is contained in the other, token-wise.
+
+    The sheet writes things like "XY single pack Blister" for a card the catalog
+    files under "XY", so equality is too strict; substring is too loose ("XY"
+    would swallow "XY Evolutions"). Token containment threads the needle.
+    """
+    src, cat = _set_tokens(source_set), _set_tokens(catalog_set)
+    if not src or not cat:
+        return False
+    return src <= cat or cat <= src
+
+
+# --- catalog index (shared producer for the importer's matcher) ----------
+
+@dataclass(frozen=True)
+class CatalogIndex:
+    """Normalized lookup structures over catalog cards, keyed identically to the
+    review page's index so the importer and the review page normalize the same.
+
+    ``by_name_number[(normalize_name, num_key)] -> [card]`` and
+    ``by_core_number[(core_name, num_key)] -> [card]`` for each ``number_keys``
+    form. Both maps are plain dicts, so ``.get(key, [])`` is a safe miss.
+    """
+
+    by_name_number: dict = field(default_factory=dict)
+    by_core_number: dict = field(default_factory=dict)
+
+
+def build_catalog_index(cards) -> CatalogIndex:
+    """Build the normalized catalog index the importer's ``_match_card`` reads.
+
+    Single source of truth: keying every catalog card through ``normalize_name``,
+    ``core_name`` and ``number_keys`` here is what lets an Excel float artifact
+    (``"181.0"``), a slash form (``"182/167"``) or name-punctuation drift resolve
+    to the catalog's stored ``"181"`` / ``"Dragonair"`` at lookup time.
+    """
+    by_name_number: dict = defaultdict(list)
+    by_core_number: dict = defaultdict(list)
+    for card in cards:
+        name = normalize_name(_field(card, "name"))
+        core = core_name(_field(card, "name"))
+        number = normalize_number(_field(card, "number"))
+        for key in number_keys(number):
+            by_name_number[(name, key)].append(card)
+            by_core_number[(core, key)].append(card)
+    return CatalogIndex(dict(by_name_number), dict(by_core_number))
 
 
 # --- print language ------------------------------------------------------
@@ -252,3 +352,44 @@ def parse_source_text(item) -> SourceText:
     name, number = _split_name_number(segments[0])
     return SourceText(name=name, number=number, extra=" | ".join(segments[1:]),
                       language=language.value)
+
+
+# A card number as it survives ``normalize_number``: alphanumerics, optionally a
+# single slash form ("182/167"), and it MUST contain a digit. A ``Card #`` cell
+# that does not look like a card number is dropped from the composed name rather
+# than appended verbatim.
+_CARD_NUMBER_RE = re.compile(r"[a-z0-9]+(?:/[a-z0-9]+)?")
+
+# Bound the composed name before it reaches a customer tile or the Bedrock prompt:
+# collapse internal whitespace and cap the whole "<name> #<number>" length so a
+# pathological ``Name`` / ``Card #`` cell cannot emit a multi-line or unbounded
+# token (the number component is bounded here too, not only the name).
+_DISPLAY_NAME_MAX = 80
+
+
+def format_display_name(name, number) -> str | None:
+    """A sanitized customer-facing name from a card's STRUCTURED identity fields.
+
+    Composes ``"<name> #<number>"`` from the sheet's own ``Name`` and ``Card #``
+    columns (or a review decision's confirmed name/number) — the structured
+    identity the importer already holds — and NEVER from the free-text ``Notes``
+    column. It is materialized once, at import time, and stored on the item;
+    both customer surfaces (backend ``_enrich``, MCP ``toCard``) then read that
+    one stored field rather than re-parsing ``notes`` at read time (where a
+    dropped-empty identity segment could otherwise promote cost/consignor/location
+    free-text onto the wire — Council MUST-FIX A/C).
+
+    Returns ``None`` when there is no real name, so an item with no structured
+    identity gets no fabricated one (→ the caller falls back to card_id / ULID).
+    The number is appended only when it is a well-formed card number; the result
+    is whitespace-collapsed and length-bounded.
+    """
+    clean_name = " ".join(str(name or "").split())
+    if not clean_name:
+        return None
+    num = normalize_number(number)
+    if num and _CARD_NUMBER_RE.fullmatch(num) and any(c.isdigit() for c in num):
+        composed = f"{clean_name} #{num}"
+    else:
+        composed = clean_name
+    return composed[:_DISPLAY_NAME_MAX].strip()

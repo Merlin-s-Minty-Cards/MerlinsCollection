@@ -3,14 +3,19 @@
  *
  * Key formats mirror backend/src/merlins_collection/services/dynamodb.py — that
  * module is the authority on the schema (and on INVENTORY_SHARD_COUNT):
- *   inventory   PK=INV#<shard 0-9>   SK=CARD#<id>#RAW#... | CARD#<id>#GRADED#...
+ *   inventory   PK=INV#<shard 0-9>   SK=ITEM#<item_id>
  *   catalog     PK=CARD#<id>         SK=META
  *   graded $    PK=CARD#<id>         SK=GRADEDPRICE#<company>#<grade>
  *   history     PK=CARD#<id>         SK=PRICE#RAW#<finish>#<date> | PRICE#GRADED#...
+ * Card-linked inventory rows also carry a sparse GSI1 (GSI1PK=CARD#<card_id>,
+ * GSI1SK=ITEM#<item_id>); sealed/bulk rows have no card_id and stay out of GSI1.
  *
  * Inventory rows are joined with catalog metadata to produce the tools' flat
- * `Card` shape; when a catalog row is missing the card_id doubles as the name
- * and its prefix (e.g. "base1" from "base1-4") as the set.
+ * `Card` shape. When a catalog row is missing, `toCard` falls back to the
+ * item's `display_name` — a sanitized name+number string the backend
+ * materializes on the row at IMPORT time from the structured Name/Card #
+ * columns (services/card_text.format_display_name) — and only then to the
+ * card_id or item_id itself.
  */
 import { BatchGetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import type { Card, InventoryRepository, PricePoint } from "./repository.js";
@@ -26,11 +31,12 @@ const SHARD_COUNT = 10;
 const BATCH_GET_LIMIT = 100; // DynamoDB BatchGetItem hard limit
 const MAX_BATCH_ATTEMPTS = 8; // bound the UnprocessedKeys retry loop
 
-// The customer-facing projection: only available items of customer-visible
-// kinds. Bulk lots, and anything sold/on-hold/lost/out-for-grading, are
-// internal and must never reach the (unauthenticated) chat tools. This mirrors
-// the backend /inventory/search rules; admin-only tools come later.
-const PUBLIC_KINDS = new Set(["raw", "graded", "sealed"]);
+// The customer-facing projection: only available single cards (raw/graded).
+// Bulk lots and sealed products are hidden — a cards-only surface (RFC 0001
+// owner decision) — and anything sold/on-hold/lost/out-for-grading is internal
+// and must never reach the (unauthenticated) chat tools. Mirrors the backend
+// /inventory/search rules; admin-only tools come later.
+const PUBLIC_KINDS = new Set(["raw", "graded"]);
 
 const SEALED_TYPE_LABELS: Record<string, string> = {
   booster_box: "Booster Box",
@@ -151,9 +157,18 @@ export class DynamoDbInventoryRepository implements InventoryRepository {
     const cardId = row.card_id != null ? String(row.card_id) : null;
     const meta = cardId ? catalog.get(cardId) : undefined;
     const fallback = cardId ?? String(row.item_id);
+    // Without a catalog match, use the sanitized display_name the backend
+    // materialized on the row at IMPORT time from the structured Name + Card #
+    // columns (services/card_text.format_display_name) so the model reads
+    // "Dragonair #181", not a raw ULID. Both customer surfaces read this one
+    // stored field — MCP never parses `notes` — so parity is structural, and no
+    // internal free-text can reach the model (Council MUST-FIX A/C). The card_id,
+    // then the ULID, remains the last resort when the row stored no display_name.
+    const nameFallback =
+      (typeof row.display_name === "string" && row.display_name) || fallback;
     return {
       id: fallback,
-      name: meta ? String(meta.name) : fallback,
+      name: meta ? String(meta.name) : nameFallback,
       set: meta ? String(meta.set_id) : cardId ? cardId.split("-")[0]! : "Unknown",
       condition:
         row.kind === "raw"
