@@ -1,0 +1,16 @@
+{
+  "image": "560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-backend:latest",
+  "containerPort": 8000,
+  "awsLogsConfiguration": {
+    "logGroup": "/ecs/merlins-backend",
+    "logStreamPrefix": "ecs"
+  },
+  "environment": [
+    { "name": "AWS_REGION", "value": "us-east-1" },
+    { "name": "DYNAMODB_TABLE_NAME", "value": "merlins-cards" },
+    { "name": "RATE_LIMIT_TABLE_NAME", "value": "merlins-rate-limits" },
+    { "name": "COGNITO_USER_POOL_ID", "value": "us-east-1_Ab945I9ir" },
+    { "name": "COGNITO_CLIENT_ID", "value": "3vmg0a9lffhc85a2lrskh27b3f" },
+    { "name": "CORS_ORIGINS", "value": "https://me-736e73de34b349da8d2027e56db0eb8a.ecs.us-east-1.on.aws,http://localhost:3000" }
+  ]
+}
