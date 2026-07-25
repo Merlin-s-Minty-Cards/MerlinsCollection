@@ -66,3 +66,6 @@ data/spreadsheet/
 # Review-triage artifacts (contain cost bases / internal notes — never commit)
 review*.html
 backend/review*.html
+
+# Redeploy payloads contain ECS env incl. secrets — never commit
+deploy/.redeploy/

@@ -15,9 +15,10 @@ describe('Shows page', () => {
     expect(screen.getByRole('heading', { name: /past shows/i })).toBeInTheDocument()
   })
 
-  it('lists a sample upcoming show', () => {
+  it('lists a real upcoming show from the show records', () => {
     render(<ShowsPage />)
-    expect(screen.getByText('Twin Oaks Portland')).toBeInTheDocument()
+    expect(screen.getByText('Seattle Trading Card Con')).toBeInTheDocument()
+    expect(screen.getByText('Aug 14–16, 2026')).toBeInTheDocument()
   })
 
   it('links to the contact section for bookings', () => {

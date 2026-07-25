@@ -3,6 +3,11 @@ import SectionHeading from '@/components/ui/SectionHeading'
 import Button from '@/components/ui/Button'
 import Reveal from '@/components/ui/Reveal'
 
+// Next upcoming show, sourced from the business's own show data (DynamoDB
+// SHOWLIST / the vending-tracker spreadsheet). The spreadsheet records only a
+// show's name and date — no venue, time, or street address — so we surface only
+// what the data actually contains rather than inventing details. Keep this in
+// sync with the /shows page (the source of truth for the full schedule).
 export default function ShowsPreview() {
   return (
     <section className="bg-paper py-[clamp(44px,7vw,74px)]">
@@ -17,24 +22,19 @@ export default function ShowsPreview() {
         <Reveal delay={80}>
           <div className="flex flex-wrap gap-5 items-center bg-cream border border-line rounded-2xl px-6 py-5 hover-lift">
             <div className="flex flex-col items-center justify-center w-[74px] h-[74px] rounded-[14px] bg-forest text-white shrink-0">
-              <b className="font-serif text-[23px] leading-none">JUN</b>
-              <span className="text-[12px] uppercase tracking-[0.08em]">27</span>
+              <b className="font-serif text-[23px] leading-none">AUG</b>
+              <span className="text-[12px] uppercase tracking-[0.08em]">14</span>
             </div>
             <div className="flex-1 min-w-[160px]">
               <h3 className="font-serif font-semibold text-forest-deep text-[20px] mb-1">
-                Twin Oaks Portland
+                Seattle Trading Card Con
               </h3>
-              <div className="text-muted text-[15px]">Lloyd Center · 10am–4pm · Address here</div>
+              <div className="text-muted text-[15px]">Seattle, WA · Aug 14–16, 2026</div>
             </div>
             <Button href="/shows" variant="ghost">
               All shows
             </Button>
           </div>
-        </Reveal>
-        <Reveal delay={140}>
-          <p className="text-[11px] text-[#9a8f7d] italic mt-3.5">
-            Sample listing for now — we keep real dates on the Shows page.
-          </p>
         </Reveal>
       </Container>
     </section>

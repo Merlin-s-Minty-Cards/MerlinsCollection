@@ -5,7 +5,8 @@
 # ---- MCP server: compile TypeScript (dev deps included) ----
 FROM node:20-slim AS mcp-build
 WORKDIR /build
-COPY package.json package-lock.json ./
+# .npmrc adds fetch-retry resilience for flaky-network builds (repo-root .npmrc).
+COPY package.json package-lock.json .npmrc ./
 COPY mcp-server/package.json mcp-server/package.json
 COPY frontend/package.json frontend/package.json
 RUN npm ci --workspace=mcp-server
@@ -21,7 +22,7 @@ CMD ["npm", "test", "--workspace=mcp-server"]
 # ---- MCP server: production node_modules only ----
 FROM node:20-slim AS mcp-deps
 WORKDIR /build
-COPY package.json package-lock.json ./
+COPY package.json package-lock.json .npmrc ./
 COPY mcp-server/package.json mcp-server/package.json
 COPY frontend/package.json frontend/package.json
 RUN npm ci --workspace=mcp-server --omit=dev

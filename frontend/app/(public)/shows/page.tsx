@@ -6,24 +6,30 @@ import Reveal from '@/components/ui/Reveal'
 
 export const metadata: Metadata = { title: 'Shows' }
 
+// Shows are sourced from the business's own records (DynamoDB SHOWLIST, imported
+// from the vending-tracker spreadsheet). Those records carry only a show's name
+// and date — there is no venue, time, or street address in the data — so we show
+// exactly that and no invented details. Dates spanning multiple days use the
+// first day for the calendar badge.
 type Show = {
   month: string
   day: string
   title: string
-  venue: string
-  time: string
   city: string
+  dates: string
 }
 
 const upcoming: Show[] = [
-  { month: 'JUL', day: '12', title: 'Twin Oaks Portland', venue: 'Lloyd Center', time: '10am – 4pm', city: 'Portland, OR' },
-  { month: 'AUG', day: '09', title: 'Rose City Collect-a-Con', venue: 'Oregon Convention Center', time: '9am – 5pm', city: 'Portland, OR' },
-  { month: 'SEP', day: '20', title: 'Beaverton Card Show', venue: 'Beaverton Community Center', time: '10am – 3pm', city: 'Beaverton, OR' },
+  { month: 'JUL', day: '25', title: 'Lloyd Center, Portland', city: 'Portland, OR', dates: 'Jul 25, 2026' },
+  { month: 'AUG', day: '14', title: 'Seattle Trading Card Con', city: 'Seattle, WA', dates: 'Aug 14–16, 2026' },
 ]
 
 const past: Show[] = [
-  { month: 'MAY', day: '17', title: 'Salem Spring Card Show', venue: 'Salem Armory', time: '10am – 4pm', city: 'Salem, OR' },
-  { month: 'APR', day: '05', title: 'Vancouver Collectibles Fair', venue: 'Clark County Event Center', time: '9am – 4pm', city: 'Vancouver, WA' },
+  { month: 'JUL', day: '18', title: 'Lloyd Center, Portland', city: 'Portland, OR', dates: 'Jul 18, 2026' },
+  { month: 'JUL', day: '04', title: 'Lloyd Center, Portland', city: 'Portland, OR', dates: 'Jul 4, 2026' },
+  { month: 'JUN', day: '13', title: 'Front Row Portland', city: 'Portland, OR', dates: 'Jun 13–14, 2026' },
+  { month: 'JUN', day: '06', title: 'Lloyd Center, Portland', city: 'Portland, OR', dates: 'Jun 6, 2026' },
+  { month: 'MAY', day: '29', title: 'TCG Con Portland', city: 'Portland, OR', dates: 'May 29–31, 2026' },
 ]
 
 function DateBadge({ month, day, past }: { month: string; day: string; past?: boolean }) {
@@ -49,12 +55,10 @@ function ShowRow({ show, past }: { show: Show; past?: boolean }) {
       <DateBadge month={show.month} day={show.day} past={past} />
       <div className="min-w-[180px] flex-1">
         <h3 className="font-serif text-[20px] font-semibold text-forest-deep">{show.title}</h3>
-        <div className="mt-0.5 text-[15px] text-muted">
-          {show.venue} · {show.city}
-        </div>
+        <div className="mt-0.5 text-[15px] text-muted">{show.city}</div>
       </div>
       <div className="font-sans text-[14px] font-semibold uppercase tracking-[0.06em] text-forest">
-        {show.time}
+        {show.dates}
       </div>
     </div>
   )
@@ -87,7 +91,7 @@ export default function ShowsPage() {
           </Reveal>
           <div className="space-y-4">
             {upcoming.map((show, i) => (
-              <Reveal key={show.title} delay={i * 80}>
+              <Reveal key={`${show.month}-${show.day}-${show.title}`} delay={i * 80}>
                 <ShowRow show={show} />
               </Reveal>
             ))}
@@ -102,7 +106,7 @@ export default function ShowsPage() {
           </Reveal>
           <div className="space-y-4">
             {past.map((show, i) => (
-              <Reveal key={show.title} delay={i * 80}>
+              <Reveal key={`${show.month}-${show.day}-${show.title}`} delay={i * 80}>
                 <ShowRow show={show} past />
               </Reveal>
             ))}
