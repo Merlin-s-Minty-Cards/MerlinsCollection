@@ -438,6 +438,140 @@ def test_a_japanese_item_without_a_card_id_is_not_a_contradiction():
     assert br.build_card_rows([item], br.CatalogIndex.build(LIVE_JP_CATALOG), {}) == []
 
 
+# --- finish-aware pricing: reverse/holo cards must price from their own band -
+
+def mr_mime_two_finishes():
+    """One catalog card the sheet carries in two finishes at very different
+    prices — exactly the shape that makes a wrong-band price look like a flag."""
+    return {
+        "entity": "catalog_card", "card_id": "sm-mm", "name": "Mr. Mime",
+        "set_id": "sm", "set_name": "Team Up", "number": "11", "rarity": "Rare",
+        "types": ["Psychic"],
+        "images": {"small": "https://img/mm.png", "large": "https://img/mm_l.png"},
+        "prices": {"normal": {"market": Decimal("2.00")},
+                   "reverseHolofoil": {"market": Decimal("18.00")}},
+        "last_synced_at": "2026-07-01T00:00:00+00:00",
+    }
+
+
+def test_finish_from_source_maps_name_words_to_price_bands():
+    assert br.finish_from_source("Mr Mime Reverse", "normal") == "reverseHolofoil"
+    assert br.finish_from_source("Dragonite Holo", "normal") == "holofoil"
+    assert br.finish_from_source("Charizard", "normal") == "normal"
+
+
+def test_finish_from_source_does_not_upgrade_a_non_holo():
+    """"Non-holo" is the normal print — a "holo" token inside it must not win."""
+    assert br.finish_from_source("Charizard Non Holo", "normal") == "normal"
+
+
+def test_finish_from_source_trusts_an_explicitly_stored_finish():
+    """A real finish, once a finish column exists, outranks a guess from the name."""
+    assert br.finish_from_source("Pikachu", "reverseHolofoil") == "reverseHolofoil"
+
+
+def test_predict_value_prices_a_reverse_holo_from_the_reverse_band():
+    card = mr_mime_two_finishes()
+    item = raw_item("I1", "Mr Mime Reverse #11")   # importer stored finish="normal"
+    got = br.predict_value(item, card, [],
+                           finish=br.finish_from_source("Mr Mime Reverse", "normal"))
+    assert got.value == Decimal("18.00")
+
+
+def test_build_card_rows_prices_a_reverse_holo_from_its_own_band():
+    """The whole point: 'Mr Mime Reverse' listed at the reverse price must NOT be
+    flagged for a divergence that only exists because it was priced as normal."""
+    index = br.CatalogIndex.build([mr_mime_two_finishes()])
+    item = raw_item("I1", "Mr Mime Reverse #11", listed_price=Decimal("18"))
+    row = br.build_card_rows([item], index, {})[0]
+    assert row["prediction"]["card_id"] == "sm-mm"
+    assert row["prediction"]["value"] == "18.00"
+    assert not (row["divergence"] and row["divergence"]["flagged"])
+
+
+def test_build_card_rows_still_flags_a_genuinely_wrong_normal_price():
+    """No masking: a plain normal card listed at 9x its price is still flagged."""
+    index = br.CatalogIndex.build([mr_mime_two_finishes()])
+    item = raw_item("I1", "Mr Mime #11", listed_price=Decimal("18"))
+    row = br.build_card_rows([item], index, {})[0]
+    assert row["prediction"]["value"] == "2.00"
+    assert row["divergence"]["flagged"] is True
+
+
+# --- curated tail: granular bands, split words, real typos ---------------
+# Every case here is a real name pulled from the 1266-card production corpus.
+
+def test_finish_from_source_selects_the_1st_edition_and_unlimited_bands():
+    """"1st Edition" and "Unlimited" are DISTINCT tcgplayer price bands — a plain
+    holo/reverse map would flatten them onto the wrong price."""
+    assert br.finish_from_source("Charizard 1st Edition Holo", "normal") == "1stEditionHolofoil"
+    assert br.finish_from_source("Electabuzz 1st Ed Shadowless", "normal") == "1stEditionNormal"
+    assert br.finish_from_source("Charizard Base Holo Unlimited", "normal") == "unlimitedHolofoil"
+
+
+def test_finish_from_source_recovers_a_split_unlimited():
+    """Real card: 'Typhlosion un limited Holo' — 'unlimited' typed as two words."""
+    assert br.finish_from_source("Typhlosion un limited Holo", "normal") == "unlimitedHolofoil"
+
+
+def test_finish_from_source_corrects_a_reverse_typo():
+    """Real token in the corpus: 'reversese' — a misspelling of 'reverse'."""
+    assert br.finish_from_source("Electrike reversese", "normal") == "reverseHolofoil"
+
+
+def test_predict_value_reports_the_band_it_actually_priced_from():
+    """The value carries the band it used, so a caller can tell a verified band
+    apart from a fallback substitution."""
+    got = br.predict_value(raw_item("I1", "Mr Mime Reverse #11"),
+                           mr_mime_two_finishes(), [], finish="reverseHolofoil")
+    assert got.value == Decimal("18.00")
+    assert got.finish == "reverseHolofoil"
+
+
+def test_predict_value_falls_back_and_reports_the_substitute_band():
+    """Catalog card has only a normal price; a reverse request substitutes it and
+    says so, rather than pretending the reverse band existed."""
+    card = catalog_card("xy-83", "Dragonite", "XY", "83", market="12.50")  # normal only
+    got = br.predict_value(raw_item("I1", "Dragonite Reverse #83"), card, [],
+                           finish="reverseHolofoil")
+    assert got.value == Decimal("12.50")
+    assert got.finish == "normal"
+
+
+def test_build_card_rows_does_not_caveat_a_verified_reverse_band():
+    """When the matched card actually carries the reverse price, the band is
+    verified — no caveat, and the false divergence is gone."""
+    index = br.CatalogIndex.build([mr_mime_two_finishes()])
+    row = br.build_card_rows(
+        [raw_item("I1", "Mr Mime Reverse #11", listed_price=Decimal("18"))], index, {})[0]
+    assert "finish" not in row["reason"].lower()
+    assert not (row["divergence"] and row["divergence"]["flagged"])
+
+
+def test_build_card_rows_does_not_infer_a_finish_for_a_graded_slab():
+    """A graded 'Dragonite-Holo' is priced by grade, not finish — the name's
+    'holo' must not trigger a band caveat or repricing."""
+    index = br.CatalogIndex.build(CATALOG)
+    points = {"xy-83": [{"card_id": "xy-83", "kind": "graded", "company": "PSA",
+                         "grade": Decimal("10"), "date": "2026-07-01",
+                         "market": Decimal("250.00")}]}
+    item = graded_item("I2", "Dragonite-Holo — XY #83.0", listed_price=Decimal("250"))
+    row = br.build_card_rows([item], index, points)[0]
+    assert "finish" not in row["reason"].lower()
+    assert row["prediction"]["value"] == "250.00"
+
+
+def test_build_card_rows_caveats_a_finish_it_could_not_verify():
+    """The card says 'Reverse' but the matched catalog card has no reverse price,
+    so the band can't be confirmed — flag it for a human instead of silently
+    repricing off the wrong band."""
+    index = br.CatalogIndex.build([catalog_card("xy-83", "Dragonite", "XY", "83",
+                                                 market="12.50")])  # normal only
+    row = br.build_card_rows(
+        [raw_item("I1", "Dragonite Reverse #83", listed_price=Decimal("40"))], index, {})[0]
+    assert "finish" in row["reason"].lower()
+
+
 # --- value prediction ----------------------------------------------------
 
 def test_predict_value_prefers_a_dated_price_point():
@@ -594,6 +728,15 @@ def test_paste_back_binds_the_block_to_its_table_and_snapshot():
                           generated_at="2026-07-23T16:22:48")
     assert '"# table: " + DATA.meta.table' in html
     assert '"# snapshot: " + DATA.meta.generated_at' in html
+
+
+def test_render_html_has_bulk_approve_and_reject_controls():
+    """Approve/Reject-all-shown act on every row the current filters leave
+    visible — e.g. filter to HIGH, then approve them all in one click."""
+    html = br.render_html([], table_name="t", generated_at="now")
+    assert 'id="bulk-accept"' in html
+    assert 'id="bulk-reject"' in html
+    assert "bulkDecide" in html
 
 
 def test_render_html_survives_data_that_could_break_out_of_the_script_tag():

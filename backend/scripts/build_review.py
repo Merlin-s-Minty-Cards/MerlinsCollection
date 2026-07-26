@@ -362,6 +362,71 @@ def _from_name_only(name, core, number, index: CatalogIndex, stripped: bool):
     return "LOW", f"no catalog candidate found for this name{hint}", []
 
 
+# --- finish -> price band -------------------------------------------------
+# The importer files every raw single as finish="normal" (the singles tab has no
+# finish column), so the print a seller wrote into the NAME — "Mr Mime Reverse",
+# "Charizard Base Holo Unlimited" — never reached the price band, and the item was
+# priced from the normal band and then flagged for a divergence that is really
+# only the wrong band. We read the band back out of the name here.
+#
+# EXACT-TOKEN matching only, never substring: the live 1266-card table is full of
+# Pokemon whose names merely CONTAIN a finish word — Slowpoke, Cosmog, Cosmoem,
+# Revavroom, Rhyperior, Altaria, Ralts, Maushold, Exalted — and a substring test
+# would mis-band every one of them.
+
+# Real misspellings / split forms observed in the live table, each mapped to the
+# token we reason about. Curated by hand from the audit — not guessed at runtime.
+_FINISH_ALIASES = {
+    "reversese": "reverse",   # live typo in the corpus
+    "reverese": "reverse",
+    "revese": "reverse",
+    "rev": "reverse",
+    "holos": "holo",
+    "limited": "unlimited",   # "un limited" (split) -> tokens {un, limited}
+}
+
+_HOLO_WORDS = frozenset({"holo", "holofoil", "foil", "cosmos"})
+
+
+def _finish_tokens(name: str) -> set[str]:
+    """Normalized name tokens with the curated typo/split corrections applied."""
+    return {_FINISH_ALIASES.get(t, t) for t in normalize_name(name).split()}
+
+
+def finish_from_source(source_name: str, stored_finish=None) -> str:
+    """The tcgplayer price-band key implied by a card's name text.
+
+    Returns one of ``normal`` / ``holofoil`` / ``reverseHolofoil`` /
+    ``1stEditionHolofoil`` / ``1stEditionNormal`` / ``unlimitedHolofoil``.
+
+    An explicitly recorded non-normal ``stored_finish`` is authoritative and is
+    returned untouched — the name is consulted only to correct the ``normal``
+    default the importer stamps on every raw single. "Non holo" resolves to the
+    NORMAL print, not a foil, so the negation must be checked before the holo cue.
+    """
+    stored = str(stored_finish or "normal")
+    if stored != "normal":
+        return stored
+    tokens = _finish_tokens(source_name)
+    holo = bool(tokens & _HOLO_WORDS)
+    reverse = "reverse" in tokens
+    non = "non" in tokens or "nonholo" in tokens
+    first = "1st" in tokens or "first" in tokens
+    unlimited = "unlimited" in tokens
+
+    if non and not reverse:
+        return "normal"                       # "non holo" is the normal print
+    if reverse:
+        return "reverseHolofoil"
+    if first:
+        return "1stEditionHolofoil" if holo else "1stEditionNormal"
+    if unlimited:
+        return "unlimitedHolofoil" if holo else "normal"
+    if holo:
+        return "holofoil"
+    return "normal"
+
+
 # --- value prediction ----------------------------------------------------
 
 @dataclass
@@ -369,6 +434,9 @@ class ValuePrediction:
     value: Decimal | None
     basis: str
     note: str = ""
+    # The band the value was actually priced from — lets a caller tell a verified
+    # finish (band == the one asked for) apart from a fallback substitution.
+    finish: str = ""
 
 
 def _as_decimal(value) -> Decimal | None:
@@ -397,8 +465,15 @@ def _catalog_price(card, finish) -> tuple[Decimal | None, str]:
     return None, ""
 
 
-def predict_value(item, card, price_points) -> ValuePrediction:
-    """Predicted market value for one item from its matched card's price data."""
+def predict_value(item, card, price_points, *, finish=None) -> ValuePrediction:
+    """Predicted market value for one item from its matched card's price data.
+
+    ``finish`` overrides the price band to compare against — the caller passes the
+    band read from the card's name (``finish_from_source``) so a "Reverse"/"Holo"
+    single is priced from its own band instead of the ``normal`` default the
+    importer stamps on every raw single. When omitted, the item's stored finish is
+    used, exactly as before.
+    """
     if not card:
         return ValuePrediction(None, "none", "no matched catalog card, so no value to predict")
 
@@ -413,33 +488,36 @@ def predict_value(item, card, price_points) -> ValuePrediction:
         if newest:
             return ValuePrediction(_as_decimal(newest["market"]), "price_point_graded",
                                    f"{company} {grade} price point dated {newest.get('date')}")
-        raw_value, finish = _catalog_price(card, "normal")
+        raw_value, used = _catalog_price(card, "normal")
         raw_point = _latest([p for p in price_points if p.get("kind") == "raw"])
         if raw_point:
-            raw_value, finish = _as_decimal(raw_point["market"]), raw_point.get("finish")
+            raw_value, used = _as_decimal(raw_point["market"]), raw_point.get("finish")
         if raw_value is None:
             return ValuePrediction(None, "none", "no price data at all for this card")
         return ValuePrediction(raw_value, "raw_only", (
-            f"RAW ungraded {finish} price — the catalog carries no {company} {grade} "
-            f"figure, so this is NOT a slab value and is usually far too low"))
+            f"RAW ungraded {used} price — the catalog carries no {company} {grade} "
+            f"figure, so this is NOT a slab value and is usually far too low"),
+            finish=str(used or ""))
 
-    finish = str(item.get("finish") or "normal")
+    finish = finish if finish is not None else str(item.get("finish") or "normal")
     same_finish = [p for p in price_points
                    if p.get("kind") == "raw" and str(p.get("finish") or "") == finish]
     newest = _latest(same_finish)
     if newest:
         return ValuePrediction(_as_decimal(newest["market"]), "price_point",
-                               f"{finish} price point dated {newest.get('date')}")
+                               f"{finish} price point dated {newest.get('date')}",
+                               finish=finish)
     newest = _latest([p for p in price_points if p.get("kind") == "raw"])
     if newest:
+        used = str(newest.get("finish") or "")
         return ValuePrediction(_as_decimal(newest["market"]), "price_point", (
             f"no {finish} price; using the {newest.get('finish')} price point dated "
-            f"{newest.get('date')}"))
+            f"{newest.get('date')}"), finish=used)
     value, used = _catalog_price(card, finish)
     if value is None:
         return ValuePrediction(None, "none", "the matched card carries no price at all")
     note = f"catalog {used} price" + ("" if used == finish else f" (item finish is {finish})")
-    return ValuePrediction(value, "catalog_price", note)
+    return ValuePrediction(value, "catalog_price", note, finish=str(used or ""))
 
 
 def value_divergence(predicted: Decimal | None, item) -> dict | None:
@@ -475,7 +553,7 @@ def _money(value) -> str | None:
     return None if dec is None else f"{dec:f}"
 
 
-def _card_view(card, item=None, points=None) -> dict:
+def _card_view(card, item=None, points=None, *, finish=None) -> dict:
     view = {
         "card_id": card.get("card_id"),
         "name": card.get("name"),
@@ -485,7 +563,7 @@ def _card_view(card, item=None, points=None) -> dict:
         "image": (card.get("images") or {}).get("small"),
     }
     if item is not None:
-        prediction = predict_value(item, card, points or [])
+        prediction = predict_value(item, card, points or [], finish=finish)
         view["value"] = _money(prediction.value)
         view["value_basis"] = prediction.basis
         view["value_note"] = prediction.note
@@ -493,7 +571,7 @@ def _card_view(card, item=None, points=None) -> dict:
 
 
 def _order_by_price_fit(prediction: CardPrediction, item, price_points_by_card,
-                        *, keep: int = 6) -> CardPrediction:
+                        *, keep: int = 6, finish=None) -> CardPrediction:
     """Reorder identity-tied candidates by which one costs what the sheet says.
 
     Only applies when the match is ``undetermined`` — every candidate is an
@@ -513,7 +591,8 @@ def _order_by_price_fit(prediction: CardPrediction, item, price_points_by_card,
                               prediction.reason, prediction.undetermined)
 
     def distance(card):
-        value = predict_value(item, card, price_points_by_card.get(card["card_id"], []))
+        value = predict_value(item, card, price_points_by_card.get(card["card_id"], []),
+                              finish=finish)
         return (value.value is None, abs(value.value - basis) if value.value else 0)
 
     ordered = sorted(prediction.candidates, key=distance)
@@ -543,6 +622,29 @@ def _contradiction(source: SourceText, item) -> CardPrediction | None:
         f"it (REJECT) and take the value from your sheet"))
 
 
+def _finish_caveat(reason: str, finish: str, item, best, value: ValuePrediction) -> str:
+    """Append a 'verify the band' note when a finish READ FROM THE NAME could not
+    be confirmed against the matched card's own prices.
+
+    This is the hybrid seam: the clean cases (the card carries the band the name
+    asks for) are repriced silently and the note stays out of the way; the cases a
+    script cannot safely resolve — the matched card has no such band, or no price
+    at all — are surfaced for a human instead of being quietly repriced off some
+    other band. A verified band adds nothing to the reason.
+    """
+    if finish is None:                       # non-raw item — finish was not inferred
+        return reason
+    inferred = finish != str(item.get("finish") or "normal")
+    if not inferred or best is None or value.finish == finish:
+        return reason
+    if value.value is None:
+        return (f"{reason} — the name reads as a '{finish}' print, but the matched "
+                f"card has no price at all to confirm that band; verify the finish")
+    return (f"{reason} — the name reads as a '{finish}' print, but the matched card "
+            f"has no {finish} price; priced from its {value.finish or 'normal'} band "
+            f"instead — verify the finish/band before trusting this value")
+
+
 def build_card_rows(items, index: CatalogIndex, price_points_by_card) -> list[dict]:
     """One review row per flagged inventory item, worst-looking rows first.
 
@@ -557,14 +659,22 @@ def build_card_rows(items, index: CatalogIndex, price_points_by_card) -> list[di
         if not item.get("needs_review") and contradiction is None:
             continue
         kind = str(item.get("kind") or "raw")
+        # The band read from the card's own name — "Mr Mime Reverse" -> the reverse
+        # band — so the value is compared against the right print, not the "normal"
+        # the importer stamps on every single. Only raw singles have a finish band;
+        # a graded slab is priced by grade and a sealed product has no finish, so
+        # they keep the stored finish (None -> predict_value reads item.finish).
+        finish = finish_from_source(source.name, item.get("finish")) if kind == "raw" else None
         if contradiction is not None:
             prediction = contradiction
         else:
             prediction = predict_card(source, index, kind=kind, max_candidates=8)
-            prediction = _order_by_price_fit(prediction, item, price_points_by_card)
+            prediction = _order_by_price_fit(prediction, item, price_points_by_card,
+                                             finish=finish)
         best = prediction.best
         points = price_points_by_card.get(best["card_id"], []) if best else []
-        value = predict_value(item, best, points)
+        value = predict_value(item, best, points, finish=finish)
+        reason = _finish_caveat(prediction.reason, finish, item, best, value)
         divergence = value_divergence(value.value, item)
         rows.append({
             "item_id": item.get("item_id"),
@@ -589,13 +699,14 @@ def build_card_rows(items, index: CatalogIndex, price_points_by_card) -> list[di
                 "card_id": item.get("card_id"),
                 "language": source.language,
             },
-            "prediction": (_card_view(best, item, points) | {
+            "prediction": (_card_view(best, item, points, finish=finish) | {
                 "value": _money(value.value), "value_basis": value.basis,
                 "value_note": value.note}) if best else None,
-            "runners": [_card_view(card, item, price_points_by_card.get(card["card_id"], []))
+            "runners": [_card_view(card, item, price_points_by_card.get(card["card_id"], []),
+                                   finish=finish)
                         for card in prediction.candidates[1:]],
             "confidence": prediction.confidence,
-            "reason": prediction.reason,
+            "reason": reason,
             "divergence": {**divergence, "basis": _money(divergence["basis"]),
                            "delta": _money(divergence["delta"])} if divergence else None,
         })
@@ -723,6 +834,12 @@ border-radius:6px;padding:6px;font:12px/1.4 ui-monospace,Consolas,monospace;resi
 color:var(--ink);border:1px solid var(--line);border-radius:6px;cursor:pointer;font:inherit}
 .conf-filter{color:var(--dim);display:flex;gap:8px;align-items:center}
 .conf-filter label{gap:3px}
+.bulk{display:flex;gap:6px;align-items:center}
+.bulk button{border:1px solid var(--line);background:var(--panel2);color:var(--ink);
+border-radius:5px;padding:4px 10px;cursor:pointer;font:inherit;font-size:11px}
+.bulk button:hover{border-color:var(--accent)}
+#bulk-accept:hover{border-color:var(--accent);color:var(--accent)}
+#bulk-reject:hover{border-color:var(--low);color:var(--low)}
 .hidden{display:none}
 </style>
 </head>
@@ -752,6 +869,13 @@ color:var(--ink);border:1px solid var(--line);border-radius:6px;cursor:pointer;f
       <option value="name">name A-Z</option>
     </select></label>
     <label>search <input type="search" id="f-q" placeholder="name, id, set"></label>
+    <span class="bulk">
+      <button id="bulk-accept"
+        title="Accept the prediction on every row the filters show (e.g. filter HIGH, approve all)"
+        >Approve all shown</button>
+      <button id="bulk-reject"
+        title="Reject every row the current filters show">Reject all shown</button>
+    </span>
   </div>
   <div class="meta" id="count"></div>
 </header>
@@ -849,6 +973,39 @@ function decide(id, verb, fields){
   var cur = decisions[id];
   if(cur && cur.verb===verb && verb!=="SET"){ delete decisions[id]; }
   else { decisions[id] = {verb: verb, fields: fields||{}}; }
+  save(); draw();
+}
+
+function acceptFields(r){
+  return r.prediction ? {card_id:r.prediction.card_id, name:clean(r.prediction.name),
+    set:clean(r.prediction.set_name), number:clean(r.prediction.number),
+    value:r.prediction.value||""} : {};
+}
+
+// Apply one verb to EVERY row the current filters leave visible — not just the
+// first `limit` rendered — so "filter to HIGH, approve all" does what it says.
+// ACCEPT needs a prediction to take, so rows without one (no candidate / NA /
+// CONTRADICTION) are skipped; REJECT applies to all. Both confirm with a count,
+// because this overwrites any per-row decisions already made on those rows.
+function bulkDecide(verb){
+  var rows = visibleCards();
+  var targets = verb==="ACCEPT" ? rows.filter(function(r){ return !!r.prediction; }) : rows;
+  if(!targets.length){
+    alert(verb==="ACCEPT"
+      ? "None of the shown rows has a prediction to accept."
+      : "No rows are shown to reject."); return;
+  }
+  var skipped = rows.length - targets.length;
+  var msg = (verb==="ACCEPT"?"Approve":"Reject") + " " + targets.length +
+    " shown card" + (targets.length===1?"":"s") + "?" +
+    (verb==="ACCEPT" && skipped ? "\n(" + skipped + " with no prediction will be skipped.)" : "") +
+    "\nThis overwrites any existing decision on those rows.";
+  if(!confirm(msg)) return;
+  targets.forEach(function(r){
+    decisions["CARD:"+r.item_id] = verb==="ACCEPT"
+      ? {verb:"ACCEPT", fields: acceptFields(r)}
+      : {verb:"REJECT", fields:{}};
+  });
   save(); draw();
 }
 
@@ -965,10 +1122,7 @@ function drawCards(){
     var c6 = el("td");
     c6.appendChild(actions("CARD:"+r.item_id, {
       verbs: [
-        {verb:"ACCEPT", label:"Accept", fields:function(){
-          return r.prediction ? {card_id:r.prediction.card_id,
-            name:clean(r.prediction.name), set:clean(r.prediction.set_name),
-            number:clean(r.prediction.number), value:r.prediction.value||""} : {}; }},
+        {verb:"ACCEPT", label:"Accept", fields:function(){ return acceptFields(r); }},
         {verb:"REJECT", label:"Reject", fields:function(){ return {}; }}
       ],
       inputs: [{name:"card_id", placeholder:"corrected card_id"},
@@ -1032,6 +1186,8 @@ document.getElementById("fold").onclick = function(){
   this.textContent = hidden ? "Hide" : "Show";
 };
 document.getElementById("f-q").oninput = function(){ limit=250; draw(); };
+document.getElementById("bulk-accept").onclick = function(){ bulkDecide("ACCEPT"); };
+document.getElementById("bulk-reject").onclick = function(){ bulkDecide("REJECT"); };
 document.getElementById("more-cards").onclick = function(){ limit+=250; draw(); };
 document.getElementById("copy").onclick = function(){
   var ta = document.getElementById("pb");
