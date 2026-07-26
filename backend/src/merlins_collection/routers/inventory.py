@@ -9,6 +9,7 @@ filters that require a catalog lookup (set, name, rarity).
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 
 from merlins_collection.dependencies import get_repo
 from merlins_collection.models.auth import AuthenticatedUser
@@ -35,6 +36,22 @@ router = APIRouter(prefix="/inventory", tags=["inventory"])
 # internal-only, and sealed products are hidden too — the search surfaces single
 # cards, not booster packs. Only available raw/graded items reach a customer.
 _CUSTOMER_KINDS = {"raw", "graded"}
+
+
+def customer_visible_items(repo: InventoryRepository) -> list[InventoryItem]:
+    """The ONE cohort every customer surface is allowed to show: available items
+    of a customer-visible kind.
+
+    This is a security boundary (leaking sold/held or bulk/sealed stock is the
+    failure mode), so the predicate lives in exactly one place. Search, the authed
+    dashboard summary, and the ANONYMOUS public featured endpoint all call this —
+    a future exclusion (a ``needs_review`` gate, a new ``RESERVED`` status) is then
+    made once here and can never drift on the public endpoint.
+    """
+    return [
+        i for i in repo.list_inventory()
+        if i.kind in _CUSTOMER_KINDS and i.status == ItemStatus.AVAILABLE
+    ]
 
 
 def _price(item) -> Decimal | None:
@@ -94,12 +111,8 @@ def search_inventory(
             detail="min_price must be <= max_price",
         )
 
-    items = repo.list_inventory()
     # Customers only ever see available items of customer-visible kinds.
-    items = [
-        i for i in items
-        if i.kind in _CUSTOMER_KINDS and i.status == ItemStatus.AVAILABLE
-    ]
+    items = customer_visible_items(repo)
     # Catalog rows fetched along the way are kept for response enrichment.
     catalog: dict[str, CatalogCard | None] = {}
 
@@ -152,6 +165,54 @@ def search_inventory(
         _enrich(item, catalog.get(getattr(item, "card_id", None))) for item in items
     ]
     return InventorySearchResult(items=enriched, total=len(enriched))
+
+
+class InventorySummary(BaseModel):
+    """Dashboard header stats over the customer-visible cohort. ``est_value`` is a
+    ``Decimal`` serialized on the wire as a string (existing contract)."""
+
+    cards_in_vault: int
+    est_value: Decimal
+    sets_tracked: int
+
+
+@router.get("/summary", response_model=InventorySummary)
+def inventory_summary(
+    _user: AuthenticatedUser = Depends(rate_limit_search),
+    repo: InventoryRepository = Depends(get_repo),
+) -> InventorySummary:
+    """Header stats for the authenticated dashboard, over the SAME cohort as
+    ``/inventory/search`` (available raw/graded items).
+
+    ``est_value`` sums ``current_market_value ?? listed_price`` — **market-first**,
+    the intentional OPPOSITE of the search ``_price`` helper (listed-first); do not
+    reuse ``_price`` here. Items with both prices ``None`` are skipped.
+    ``sets_tracked`` counts the distinct catalog ``set_id`` among items whose
+    ``card_id`` resolves in the catalog (NULL-``card_id`` items contribute none).
+
+    This read is exactly as heavy as ``/inventory/search`` (a full sharded
+    ``list_inventory`` fan-out + a catalog batch-get), so it reuses the SAME
+    ``rate_limit_search`` cap — an ``InventoryStats`` remount storm can't drive
+    unbounded scans. ``rate_limit_search`` still requires a valid token first
+    (unauth → 401) and fails OPEN if the limiter itself is unreachable.
+    """
+    items = customer_visible_items(repo)
+
+    est_value = Decimal(0)
+    for i in items:
+        value = i.current_market_value if i.current_market_value is not None else i.listed_price
+        if value is not None:
+            est_value += value
+
+    card_ids = {i.card_id for i in items if getattr(i, "card_id", None)}
+    catalog = repo.batch_get_catalog_cards(card_ids) if card_ids else {}
+    sets_tracked = len({card.set_id for card in catalog.values()})
+
+    return InventorySummary(
+        cards_in_vault=len(items),
+        est_value=est_value,
+        sets_tracked=sets_tracked,
+    )
 
 
 def _load_catalog(

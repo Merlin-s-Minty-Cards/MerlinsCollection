@@ -11,6 +11,7 @@ from merlins_collection.models.inventory import (
     ConsignmentTerms,
     GradedInventoryItem,
     GradingCompany,
+    ItemStatus,
     Language,
     RawInventoryItem,
     SealedInventoryItem,
@@ -357,6 +358,162 @@ def test_search_response_serializes_decimals_as_strings(inv_client, mint_token):
     assert by_id["sv1-1"]["listed_price"] == "10.00"
     assert by_id["sv1-1"]["current_market_value"] == "12.50"
     assert by_id["sv1-2"]["grade"] == "9.5"
+
+
+# ---- GET /inventory/summary (authenticated dashboard stats) ----
+
+def test_summary_requires_authentication(inv_client):
+    client, _ = inv_client
+    resp = client.get("/inventory/summary")
+    assert resp.status_code == 401
+
+
+def test_summary_empty_inventory_returns_zeroes(inv_client, mint_token):
+    client, _ = inv_client
+    resp = client.get(
+        "/inventory/summary",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"cards_in_vault": 0, "est_value": "0", "sets_tracked": 0}
+
+
+def test_summary_counts_only_available_customer_items(inv_client, mint_token):
+    client, repo = inv_client
+    repo.put_inventory_item(_raw("sv1-1"))                                   # available raw
+    repo.put_inventory_item(_graded("sv1-2"))                               # available graded
+    sold = _raw("sv1-3")
+    sold.status = ItemStatus.SOLD
+    repo.put_inventory_item(sold)                                            # sold — excluded
+    held = _raw("sv1-4")
+    held.status = ItemStatus.ON_HOLD
+    repo.put_inventory_item(held)                                            # on_hold — excluded
+    repo.put_inventory_item(SealedInventoryItem(
+        product_name="Booster Box", product_type="booster_box",
+        cost_basis=Decimal("50.00"), acquired_at=date.today(),
+    ))                                                                       # sealed — excluded
+    repo.put_inventory_item(BulkInventoryItem(
+        description="Bulk lot", cost_basis=Decimal("5.00"), acquired_at=date.today(),
+    ))                                                                       # bulk — excluded
+
+    resp = client.get(
+        "/inventory/summary",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    assert resp.json()["cards_in_vault"] == 2
+
+
+def test_summary_est_value_prefers_market_over_listed(inv_client, mint_token):
+    client, repo = inv_client
+    # both prices set -> uses current_market_value (market-first, opposite of _price)
+    both = _raw("sv1-1", price="10.00")
+    both.current_market_value = Decimal("12.50")
+    repo.put_inventory_item(both)
+    # only listed_price -> uses listed_price
+    repo.put_inventory_item(_raw("sv1-2", price="20.00"))
+    # neither price -> skipped from the sum
+    neither = RawInventoryItem(
+        card_id="sv1-3", listed_price=None, current_market_value=None,
+        cost_basis=Decimal("5.00"), acquired_at=date.today(),
+        finish="holofoil", condition=Condition.NM,
+    )
+    repo.put_inventory_item(neither)
+
+    resp = client.get(
+        "/inventory/summary",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    body = resp.json()
+    assert body["cards_in_vault"] == 3
+    assert body["est_value"] == "32.50"  # 12.50 (market) + 20.00 (listed) + 0 (skipped)
+
+
+def test_summary_sets_tracked_counts_distinct_catalog_sets(inv_client, mint_token):
+    client, repo = inv_client
+    repo.batch_upsert_catalog_cards([
+        _catalog("sv1-1", "Sprigatito", set_id="sv1"),
+        _catalog("sv1-2", "Floragato", set_id="sv1"),   # same set
+        _catalog("sv2-1", "Fuecoco", set_id="sv2"),     # different set
+    ])
+    repo.put_inventory_item(_raw("sv1-1"))
+    repo.put_inventory_item(_raw("sv1-2"))
+    repo.put_inventory_item(_raw("sv2-1"))
+    # A NULL-card_id item contributes no set.
+    orphan = RawInventoryItem(
+        card_id=None, listed_price=Decimal("5.00"),
+        cost_basis=Decimal("2.00"), acquired_at=date.today(),
+        finish="holofoil", condition=Condition.NM,
+    )
+    repo.put_inventory_item(orphan)
+
+    resp = client.get(
+        "/inventory/summary",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    body = resp.json()
+    assert body["cards_in_vault"] == 4
+    assert body["sets_tracked"] == 2
+
+
+def test_summary_serializes_est_value_as_string(inv_client, mint_token):
+    """Pins the wire contract: est_value is a Decimal serialized as a string."""
+    client, repo = inv_client
+    item = _raw("sv1-1", price="10.00")
+    item.current_market_value = Decimal("100.00")
+    repo.put_inventory_item(item)
+
+    resp = client.get(
+        "/inventory/summary",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    assert resp.json()["est_value"] == "100.00"
+
+
+def test_summary_carries_a_rate_cap(inv_client, mint_token):
+    """The summary is as heavy as search, so it must be throttled too (Council item 5)."""
+    from merlins_collection.main import app
+    from merlins_collection.rate_limit import RateLimitResult, get_rate_limiter
+
+    class _AlwaysLimited:
+        def check(self, tiers, *, now=None):
+            return RateLimitResult(limited=True, retry_after=30)
+
+    client, _ = inv_client
+    app.dependency_overrides[get_rate_limiter] = lambda: _AlwaysLimited()
+    try:
+        resp = client.get(
+            "/inventory/summary",
+            headers={"Authorization": f"Bearer {mint_token()}"},
+        )
+        assert resp.status_code == 429
+    finally:
+        app.dependency_overrides.pop(get_rate_limiter, None)
+
+
+# ---- customer_visible_items shared cohort helper (Council item 6) ----
+
+def test_customer_visible_items_filters_to_available_raw_and_graded(dynamo_repo):
+    """One shared predicate for the security boundary used by search, summary, and
+    the public featured endpoint."""
+    from merlins_collection.routers.inventory import customer_visible_items
+
+    dynamo_repo.put_inventory_item(_raw("sv1-1"))                       # available raw ✓
+    dynamo_repo.put_inventory_item(_graded("sv1-2"))                    # available graded ✓
+    sold = _raw("sv1-3")
+    sold.status = ItemStatus.SOLD
+    dynamo_repo.put_inventory_item(sold)                               # sold ✗
+    dynamo_repo.put_inventory_item(SealedInventoryItem(
+        product_name="Booster Box", product_type="booster_box",
+        cost_basis=Decimal("50.00"), acquired_at=date.today(),
+    ))                                                                 # sealed ✗
+    dynamo_repo.put_inventory_item(BulkInventoryItem(
+        description="Bulk", cost_basis=Decimal("5.00"), acquired_at=date.today(),
+    ))                                                                 # bulk ✗
+
+    items = customer_visible_items(dynamo_repo)
+
+    assert len(items) == 2
+    assert all(i.kind in {"raw", "graded"} and i.status is ItemStatus.AVAILABLE for i in items)
 
 
 def test_search_excludes_bulk_and_non_available_items(inv_client, mint_token):

@@ -50,6 +50,28 @@ def test_show_consignor_config_models_construct():
     assert policy.trade_pct_max == Decimal("85")
 
 
+def test_show_defaults_venue_and_city_to_none():
+    show = Show(name="Mint City Show", date=date(2026, 4, 12))
+    assert show.venue is None
+    assert show.city is None
+
+
+def test_show_accepts_venue_and_city():
+    show = Show(name="Seattle Trading Card Con", date=date(2026, 8, 14),
+                venue="Convention Center", city="Seattle, WA")
+    assert show.venue == "Convention Center"
+    assert show.city == "Seattle, WA"
+
+
+def test_show_validates_legacy_row_without_venue_city():
+    # A row stored before venue/city existed lacks both attributes; the model
+    # must still validate, defaulting them to None (backward-compat guard).
+    legacy = {"show_id": "s1", "name": "Old Show", "date": "2026-01-10"}
+    show = Show.model_validate(legacy)
+    assert show.venue is None
+    assert show.city is None
+
+
 # ---- Expense (unifies the 6 expense tabs) ----
 
 def test_expense_round_trip_and_defaults():

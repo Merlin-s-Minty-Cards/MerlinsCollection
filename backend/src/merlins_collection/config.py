@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     # they get looser limits — still enough to blunt a scraper or a stuck client.
     rate_limit_search: str = "60/minute"
     rate_limit_auth: str = "30/minute"
+    # The unauthenticated /public/* endpoints each do a full inventory fan-out, so
+    # they are the anonymous abuse surface. Keyed per client IP (no Cognito sub),
+    # fail-open (cheap read). Blunts a burst that would slip past the 300s cache in
+    # a cold/just-expired window.
+    rate_limit_public: str = "60/minute"
 
     @property
     def cors_origin_list(self) -> list[str]:

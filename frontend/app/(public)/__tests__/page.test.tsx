@@ -1,4 +1,18 @@
 import { render, screen } from '@testing-library/react'
+import { vi } from 'vitest'
+
+// FeaturedFinds is an async server component (it server-fetches featured cards);
+// the client test renderer can't render it inline inside the sync HomePage, so
+// stub it with a sync equivalent that keeps the heading + inventory link this
+// composition test asserts on. FeaturedFinds' own behavior has dedicated tests.
+vi.mock('@/components/home/FeaturedFinds', () => ({
+  default: () => (
+    <section>
+      <h2>A peek at the collection.</h2>
+      <a href="/inventory">Explore the inventory →</a>
+    </section>
+  ),
+}))
 
 import HomePage from '@/app/(public)/page'
 

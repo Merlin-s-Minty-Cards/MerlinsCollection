@@ -125,6 +125,7 @@ _LIMIT_SETTINGS = (
     "rate_limit_chat_global_daily",
     "rate_limit_search",
     "rate_limit_auth",
+    "rate_limit_public",
 )
 
 
@@ -380,3 +381,23 @@ def rate_limit_auth(
     tiers = [(f"{key}#auth", *parse_limit(settings.rate_limit_auth))]
     _apply(limiter, tiers, fail_closed=False, label="auth")
     return user
+
+
+def rate_limit_public(
+    request: Request,
+    limiter: DynamoRateLimiter = Depends(get_rate_limiter),
+) -> None:
+    """Per-IP cost cap for the UNAUTHENTICATED ``/public/*`` endpoints.
+
+    These carry no Cognito ``sub``, so the bucket is the socket-peer IP
+    (``request.client.host`` — never a spoofable ``X-Forwarded-For``). Fails OPEN:
+    the reads are cheap and the 300s cache absorbs the steady state, so this is a
+    burst blunter, not a correctness gate. Runs before the endpoint body, so an
+    over-limit anonymous burst 429s without launching a ``list_inventory`` scan.
+    """
+    if not settings.rate_limit_enabled:
+        return
+    host = request.client.host if request.client else "unknown"
+    key = f"ip:{host}"
+    tiers = [(f"{key}#public", *parse_limit(settings.rate_limit_public))]
+    _apply(limiter, tiers, fail_closed=False, label="public")

@@ -183,6 +183,12 @@ def _find(row: dict, *names: str):
     return None
 
 
+def _text(value) -> str | None:
+    """Trim a free-text cell to a value, or ``None`` when it is blank/absent."""
+    text = str(value or "").strip()
+    return text or None
+
+
 def parse_condition(text: str) -> tuple[Condition, ConditionModifier | None]:
     cleaned = str(text).strip().upper().replace(" ", "")
     modifier = None
@@ -609,6 +615,11 @@ def import_shows(rows: list[dict], ctx: ImportContext) -> dict:
                 show_id=deterministic_id("Show", {"Day": row.get("Day"), "Show": name}),
                 name=name,
                 date=day,
+                # Populated only when the source carries structured columns; the
+                # historical free-text ledger has none, so old shows stay None
+                # (no venue/city is ever invented — RFC 0002).
+                venue=_text(_find(row, "Venue")),
+                city=_text(_find(row, "City", "Location")),
                 sales_goal=parse_money(row.get("Goal")),
                 cash_at_start=parse_money(_find(
                     row, "Cash at Beginning of Every Show Day", "Cash at Beginning of Show")),

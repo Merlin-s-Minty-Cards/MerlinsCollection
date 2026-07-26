@@ -2,7 +2,11 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi } from 'vitest'
 
-vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }))
+// InventoryStats fetches /inventory/summary on mount via apiFetch; resolve it so
+// the effect doesn't reject. Its real behavior has dedicated tests.
+vi.mock('@/lib/api', () => ({
+  apiFetch: vi.fn().mockResolvedValue({ cards_in_vault: 0, est_value: '0', sets_tracked: 0 }),
+}))
 
 // The panels read the NextAuth session; the layout's SessionProvider isn't in
 // this render tree, so stub the hook.

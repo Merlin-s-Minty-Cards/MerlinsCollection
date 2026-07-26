@@ -81,6 +81,11 @@ class Show(BaseModel):
     show_id: str = Field(default_factory=new_ulid)
     name: str
     date: date_type
+    # Optional structured location. Both default to None and are populated only
+    # when the import source carries dedicated columns — rows stored before these
+    # fields existed validate to None (backward-compatible; no data migration).
+    venue: str | None = None   # physical venue name, e.g. "Lloyd Center"
+    city: str | None = None    # "Portland, OR"
     sales_goal: Decimal | None = None
     cash_at_start: Decimal | None = None
     inventory_value_at_start: Decimal | None = None

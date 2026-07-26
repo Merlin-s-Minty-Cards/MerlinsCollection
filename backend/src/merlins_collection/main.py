@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from merlins_collection.config import settings
 from merlins_collection.rate_limit import validate_rate_limit_settings
-from merlins_collection.routers import auth, chat, health, inventory
+from merlins_collection.routers import auth, chat, health, inventory, public
 
 logger = logging.getLogger(__name__)
 
@@ -61,3 +61,4 @@ app.include_router(auth.router)
 app.include_router(inventory.router)
 app.include_router(chat.router)
 app.include_router(health.router)
+app.include_router(public.router)  # prefix="/public" — unauthenticated read surface

@@ -104,6 +104,14 @@ export interface InventoryFilters {
   language?: string
 }
 
+/** Dashboard header stats over the customer-visible cohort. `est_value` is a
+ *  backend Decimal serialized as a string (format it with {@link formatPrice}). */
+export interface InventorySummary {
+  cards_in_vault: number
+  est_value: string
+  sets_tracked: number
+}
+
 export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
@@ -148,6 +156,13 @@ export async function searchInventory(
   const query = buildSearchQuery(filters)
   const path = query ? `/inventory/search?${query}` : '/inventory/search'
   return apiFetch<InventorySearchResult>(path, { token: opts.token })
+}
+
+/** Fetch the authenticated dashboard summary (same cohort as the search). */
+export async function getInventorySummary(
+  opts: RequestOptions = {},
+): Promise<InventorySummary> {
+  return apiFetch<InventorySummary>('/inventory/summary', { token: opts.token })
 }
 
 /** Send a chat message (with prior turns) to the Bedrock-backed endpoint. */
