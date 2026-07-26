@@ -46,6 +46,7 @@ export function makeRawItem(overrides: Record<string, unknown> = {}): InventoryI
       number: '4',
       rarity: 'Rare Holo',
       image_small: 'https://img/charizard.png',
+      market_price: null,
     },
     ...overrides,
   } as InventoryItem
@@ -70,6 +71,7 @@ export function makeGradedItem(overrides: Record<string, unknown> = {}): Invento
       number: '4',
       rarity: 'Rare Holo',
       image_small: 'https://img/charizard.png',
+      market_price: null,
     },
     ...overrides,
   } as InventoryItem

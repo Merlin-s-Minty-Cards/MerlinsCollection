@@ -26,6 +26,9 @@ export interface CardSummary {
   number: string
   rarity: string | null
   image_small: string | null
+  // Live pokemontcg.io market price for a matched card; null when the catalog
+  // has none, in which case the tile falls back to the sheet's listed price.
+  market_price: string | null
 }
 
 export type Language = 'EN' | 'JP'

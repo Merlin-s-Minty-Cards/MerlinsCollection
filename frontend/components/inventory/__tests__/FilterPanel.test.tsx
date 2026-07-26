@@ -39,6 +39,7 @@ const charizard: InventoryItem = {
     number: '4',
     rarity: 'Rare Holo',
     image_small: 'https://img/charizard.png',
+      market_price: null,
   },
 }
 

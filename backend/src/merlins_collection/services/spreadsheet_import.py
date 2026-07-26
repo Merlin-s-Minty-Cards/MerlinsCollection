@@ -72,6 +72,7 @@ from merlins_collection.services.card_text import (
     normalize_number,
     number_keys,
     parse_language,
+    set_hint_from_url,
     sets_agree,
 )
 
@@ -384,7 +385,13 @@ def import_singles(rows: list[dict], ctx: ImportContext) -> dict:
             language, name = parse_language(row["Name"])
             if language is Language.EN:
                 language = language_from_url(tcg_url)
-            card_id = _match_card(ctx, name, row.get("Card #", ""), language=language)
+            # The Singles tab has no Set column, so a name+number shared across
+            # several sets can't be resolved from the row alone. The TCGplayer
+            # link does carry the set in its slug, so derive a set hint from it
+            # to narrow those ties (``_match_card`` already narrows a multi-hit by
+            # set text; singles simply never had any to pass).
+            card_id = _match_card(ctx, name, row.get("Card #", ""), language=language,
+                                  set_text=set_hint_from_url(tcg_url))
             needs_review = card_id is None or blank_condition
             notes = " — ".join(x for x in (
                 f"{name} #{row.get('Card #', '')}".strip(" #"),
@@ -448,25 +455,31 @@ def import_slabs(rows: list[dict], ctx: ImportContext) -> dict:
             card_id = _match_card(ctx, name, row.get("card#", ""),
                                   language=language, set_text=set_name)
             display = format_display_name(name, row.get("card#", ""))
+            cert_number = str(row.get("Cert #") or "").strip() or "unknown"
+            # A slab needs a human only when we could not identify the card or its
+            # cert number is missing. Company defaults to PSA — the sheet has no
+            # company column and PSA is the house grader — but that assumption is
+            # no longer, by itself, a reason to flag EVERY slab for review.
+            needs_review = card_id is None or cert_number == "unknown"
             item = GradedInventoryItem(
                 item_id=new_ulid(),
                 card_id=card_id,
                 display_name=display,
                 language=language,
-                company="PSA",  # sheet has no company column; flagged for review
+                company="PSA",  # sheet has no company column; PSA is the default grader
                 grade=Decimal(str(row["Grade"]).strip()),
-                cert_number=str(row.get("Cert #") or "").strip() or "unknown",
+                cert_number=cert_number,
                 cost_basis=parse_money(row.get("Amount Paid")) or Decimal("0"),
                 market_value_at_purchase=parse_money(
                     _find(row, "Market @ purchase", "Market @ time of purchase")),
                 listed_price=parse_money(_find(row, "Sticker")),
                 acquired_at=parse_date(row.get("Date Recieved")) or date(2026, 1, 1),
                 notes=f"{name} — {set_name} #{row.get('card#', '')}",
-                needs_review=True,
+                needs_review=needs_review,
             )
             ctx.repo.put_inventory_item(item)
             summary["imported"] += 1
-            summary["needs_review"] += 1
+            summary["needs_review"] += int(needs_review)
             sold = parse_money(row.get("Sold"))
             date_sold = parse_date(row.get("Date Sold"))
             if sold is not None and date_sold is not None:

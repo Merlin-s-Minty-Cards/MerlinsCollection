@@ -12,6 +12,11 @@ export default function CardTile({ item }: { item: InventoryItem }) {
   const title = itemTitle(item)
   const image = item.card?.image_small
   const japanese = isJapanese(item)
+  // Market price (pokemontcg.io) is an UNGRADED figure, so only a raw single
+  // shows it; a graded slab keeps its own listed price. Falls back to the sheet
+  // price when the card isn't matched to the catalog.
+  const marketPrice = item.kind === 'raw' ? item.card?.market_price : null
+  const price = marketPrice ?? item.listed_price
 
   return (
     <article className="group overflow-hidden rounded-xl vault-panel transition-colors hover:border-mint/50">
@@ -58,7 +63,7 @@ export default function CardTile({ item }: { item: InventoryItem }) {
           </span>
           <span className="flex items-baseline gap-2">
             <span className="font-mono text-sm font-semibold text-mint">
-              {formatPrice(item.listed_price)}
+              {formatPrice(price)}
             </span>
           </span>
         </div>

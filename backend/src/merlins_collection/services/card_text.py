@@ -27,7 +27,8 @@ __all__ = [
     "ITEM_TEXT_FIELD", "LANGUAGE_MARKER_RE", "CatalogIndex", "SourceText",
     "build_catalog_index", "core_name", "format_display_name", "item_language",
     "language_from_url", "normalize_name", "normalize_number", "number_keys",
-    "parse_language", "parse_source_text", "sets_agree", "strip_float_artifact",
+    "parse_language", "parse_source_text", "set_hint_from_url", "sets_agree",
+    "strip_float_artifact",
 ]
 
 
@@ -134,6 +135,31 @@ def sets_agree(source_set: str, catalog_set: str) -> bool:
     if not src or not cat:
         return False
     return src <= cat or cat <= src
+
+
+# A tcgplayer product URL: ``/product/<id>/<slug>`` where the slug leads with the
+# set. We keep only the slug (dropping the ``pokemon`` prefix) so ``sets_agree``
+# can token-contain a catalog set name inside it. The slug also carries the card
+# name and number, but those are harmless extra tokens for containment.
+_TCG_PRODUCT_RE = re.compile(r"/product/\d+/([a-z0-9-]+)", re.IGNORECASE)
+
+
+def set_hint_from_url(url) -> str:
+    """A set-ish hint pulled from a tcgplayer product URL, for tie-breaking.
+
+    The Singles tab has no Set column, so a name+number that several sets share
+    can't be resolved — but the row's TCGplayer link does carry the set in its
+    path slug: ``/product/517020/pokemon-sv-scarlet-and-violet-151-dragonair-181-165``
+    -> ``"sv scarlet and violet 151 dragonair 181 165"``, inside which the catalog
+    set name "Scarlet & Violet 151" is token-contained. Returns ``""`` for a URL
+    that isn't a recognizable tcgplayer product link, so callers treat it as "no
+    set text" (no gating) exactly as before.
+    """
+    match = _TCG_PRODUCT_RE.search(str(url or ""))
+    if not match:
+        return ""
+    slug = re.sub(r"^pokemon-", "", match.group(1).lower())
+    return " ".join(slug.replace("-", " ").split())
 
 
 # --- catalog index (shared producer for the importer's matcher) ----------

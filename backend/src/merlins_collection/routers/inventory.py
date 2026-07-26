@@ -184,7 +184,10 @@ _ENRICHED = {
 
 
 def _enrich(item: InventoryItem, card: CatalogCard | None) -> EnrichedInventoryItem:
-    summary = CardSummary.from_catalog(card) if card is not None else None
+    summary = (
+        CardSummary.from_catalog(card, finish=getattr(item, "finish", None))
+        if card is not None else None
+    )
     data = item.model_dump()
     # The catalog name is authoritative when the item is matched; otherwise expose
     # the sanitized display_name that was materialized on the row at import time

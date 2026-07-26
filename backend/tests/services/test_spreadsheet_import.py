@@ -112,6 +112,28 @@ def test_import_singles_unsold_row(dynamo_repo):
     assert item.notes == "Pikachu #25"  # sheet identity preserved for review
 
 
+def test_import_singles_disambiguates_ambiguous_match_via_tcg_url(dynamo_repo):
+    """(D) The Singles tab has no Set column, so "Dragonair #181" — printed in two
+    sets — used to go to review. Its TCGplayer link names the set, so the import
+    now narrows to the one card: the item links (and gets an image) instead of
+    being flagged for a human."""
+    card_a = _catalog_card(card_id="sv3pt5-181", name="Dragonair",
+                           set_name="Scarlet & Violet 151", number="181")
+    card_b = _catalog_card(card_id="base1-181", name="Dragonair",
+                           set_name="Base Set", number="181")
+    ctx = ImportContext(repo=dynamo_repo,
+                        catalog_index=_normalized_index([card_a, card_b]))
+    row = _singles_row(Name="Dragonair", **{
+        "Card #": "181/165",
+        "TCG Link": ("https://www.tcgplayer.com/product/517020/"
+                     "pokemon-sv-scarlet-and-violet-151-dragonair-181-165?Condition=Near+Mint"),
+    })
+    import_singles([row], ctx)
+    [item] = dynamo_repo.list_inventory()
+    assert item.card_id == "sv3pt5-181"
+    assert item.needs_review is False
+
+
 def test_import_singles_sold_row_writes_sale_txn(dynamo_repo):
     show = Show(show_id="s1", name="Show", date=date(2026, 3, 8))
     ctx = ImportContext(repo=dynamo_repo, shows=[show])
@@ -149,8 +171,11 @@ def test_import_singles_skips_malformed_row(dynamo_repo):
 
 # ---- Slabs / Sealed / Bulk tabs ----
 
-def test_import_slabs_defaults_psa_needs_review(dynamo_repo):
-    ctx = ImportContext(repo=dynamo_repo)
+def test_import_slabs_defaults_psa_and_flags_when_unmatched(dynamo_repo):
+    """Company still defaults to PSA. With no catalog to match against, the card
+    is unidentified, so the slab is flagged — but now because it is UNMATCHED (C),
+    not merely because it is a slab."""
+    ctx = ImportContext(repo=dynamo_repo)  # empty catalog -> no match
     row = {"Date Recieved": "1/5/2026", "Name": "Charizard", "Set": "Base",
            "card#": "4", "Grade": "9.5", "Cert #": "12345678",
            "Market @ purchase": "$300", "Amount Paid": "$250", "Percentage": "",
@@ -163,7 +188,35 @@ def test_import_slabs_defaults_psa_needs_review(dynamo_repo):
     assert item.company.value == "PSA"
     assert item.grade == Decimal("9.5")
     assert item.cert_number == "12345678"
-    assert item.needs_review is True
+    assert item.card_id is None and item.needs_review is True  # unmatched -> flagged
+
+
+def test_import_slabs_matched_slab_with_cert_is_not_flagged(dynamo_repo):
+    """(C) A slab whose card the catalog resolves and that carries a cert number
+    no longer needs a human — the blanket 'every slab is review' rule is gone."""
+    card = _catalog_card(card_id="base1-4", name="Charizard",
+                         set_name="Base Set", number="4")
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_normalized_index([card]))
+    row = {"Date Recieved": "1/5/2026", "Name": "Charizard", "Set": "Base Set",
+           "card#": "4", "Grade": "9.5", "Cert #": "12345678", "Amount Paid": "$250"}
+    summary = import_slabs([row], ctx)
+    [item] = dynamo_repo.list_inventory()
+    assert item.card_id == "base1-4"
+    assert item.needs_review is False
+    assert summary["needs_review"] == 0
+
+
+def test_import_slabs_matched_slab_without_cert_is_flagged(dynamo_repo):
+    """(C) The card resolved, but a missing cert number is still worth a look."""
+    card = _catalog_card(card_id="base1-4", name="Charizard",
+                         set_name="Base Set", number="4")
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_normalized_index([card]))
+    row = {"Date Recieved": "1/5/2026", "Name": "Charizard", "Set": "Base Set",
+           "card#": "4", "Grade": "9.5", "Cert #": "", "Amount Paid": "$250"}
+    import_slabs([row], ctx)
+    [item] = dynamo_repo.list_inventory()
+    assert item.card_id == "base1-4"
+    assert item.cert_number == "unknown" and item.needs_review is True
 
 
 def test_import_sealed_maps_product_type_and_hold(dynamo_repo):

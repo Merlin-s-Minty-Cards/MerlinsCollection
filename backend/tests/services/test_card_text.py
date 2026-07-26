@@ -242,3 +242,26 @@ def test_format_display_name_bounds_the_composed_length():
     long_number = "1" * 300
     assert len(format_display_name("Charizard", long_number)) <= 80
     assert format_display_name("Line1\nLine2", "1") == "Line1 Line2 #1"
+
+
+# --- set_hint_from_url (D: disambiguate singles via the TCGplayer link) -------
+
+from merlins_collection.services.card_text import set_hint_from_url  # noqa: E402
+
+
+def test_set_hint_from_url_extracts_set_tokens_from_product_slug():
+    url = ("https://www.tcgplayer.com/product/517020/"
+           "pokemon-sv-scarlet-and-violet-151-dragonair-181-165?Condition=Near+Mint")
+    hint = set_hint_from_url(url)
+    # The catalog set name's tokens are all present -> sets_agree can token-contain it.
+    assert "scarlet" in hint and "violet" in hint and "151" in hint
+    assert "pokemon" not in hint  # the leading marketplace prefix is dropped
+
+
+def test_set_hint_from_url_handles_base_set_and_returns_empty_for_non_product():
+    assert set_hint_from_url(
+        "https://www.tcgplayer.com/product/42382/pokemon-base-set-charizard"
+    ) == "base set charizard"
+    # A non-tcgplayer / non-product URL yields no hint, so callers gate nothing.
+    assert set_hint_from_url("http://example.com/25") == ""
+    assert set_hint_from_url(None) == ""

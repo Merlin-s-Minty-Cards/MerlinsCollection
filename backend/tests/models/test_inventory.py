@@ -163,3 +163,43 @@ def test_adapter_rejects_raw_missing_fields():
              "listed_price": Decimal("1"), "cost_basis": Decimal("1"),
              "acquired_at": "2026-01-01"}
         )
+
+
+# --- A: market price surfaced on the tile via CardSummary ----------------------
+
+def _catalog_with_prices(prices):
+    from datetime import datetime, timezone
+    from merlins_collection.models.catalog import CardImages, CatalogCard, FinishPrice
+    return CatalogCard(
+        card_id="sv1-1", name="Sprigatito", set_id="sv1", set_name="Scarlet & Violet",
+        number="1", images=CardImages(small="s", large="l"),
+        prices={k: FinishPrice(market=Decimal(v)) for k, v in prices.items()},
+        last_synced_at=datetime.now(timezone.utc),
+    )
+
+
+def test_card_summary_market_price_prefers_the_items_finish():
+    from merlins_collection.models.inventory import CardSummary
+    card = _catalog_with_prices({"normal": "3.50", "holofoil": "40.00"})
+    assert CardSummary.from_catalog(card, finish="holofoil").market_price == Decimal("40.00")
+    assert CardSummary.from_catalog(card, finish="normal").market_price == Decimal("3.50")
+
+
+def test_card_summary_market_price_falls_back_when_the_finish_has_no_price():
+    from merlins_collection.models.inventory import CardSummary
+    # Holo-only card: the item's finish is "normal" but only a holo price exists.
+    card = _catalog_with_prices({"holofoil": "40.00"})
+    assert CardSummary.from_catalog(card, finish="normal").market_price == Decimal("40.00")
+
+
+def test_card_summary_market_price_is_none_when_catalog_has_no_prices():
+    from merlins_collection.models.inventory import CardSummary
+    assert CardSummary.from_catalog(_catalog_with_prices({}), finish="normal").market_price is None
+
+
+def test_card_summary_market_price_absent_without_a_finish_is_none_for_graded():
+    """The catalog price is an UNGRADED figure, so a graded slab (no finish)
+    gets no market price and the caller keeps the slab's own value (A)."""
+    from merlins_collection.models.inventory import CardSummary
+    card = _catalog_with_prices({"normal": "3.50"})
+    assert CardSummary.from_catalog(card, finish=None).market_price is None
