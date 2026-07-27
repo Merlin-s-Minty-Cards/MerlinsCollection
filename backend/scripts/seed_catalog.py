@@ -98,7 +98,7 @@ def _set_metadata(client, language):
 def seed_language(repo, client, language: Language, *, batch_size: int = BATCH_SIZE,
                   execute: bool = False, max_failure_ratio: float = MAX_FAILURE_RATIO,
                   min_expected_ratio: float = MIN_EXPECTED_RATIO,
-                  allow_unverified: bool = False) -> dict:
+                  allow_unverified: bool = False, id_sink: set | None = None) -> dict:
     """Upsert every card of one language as a brief catalog row.
 
     Returns a summary counting what was mapped (``cards_seeded``), actually
@@ -108,6 +108,12 @@ def seed_language(repo, client, language: Language, *, batch_size: int = BATCH_S
     A run that cannot corroborate its own size against ``list_sets`` raises
     unless ``allow_unverified`` is set: an unverifiable run is not a passing
     run. See the ``SeedAborted`` at the bottom of this function.
+
+    ``id_sink``, when given, collects every card id this run mapped. The wipe's
+    DRY RUN needs it to predict honestly: a dry run writes nothing, so without
+    the ids it would report the whole catalog as "would be deleted" instead of
+    just the rows the reseed does not replace. It is deliberately NOT returned in
+    the summary, which gets printed.
     """
     set_names, expected = _set_metadata(client, language)
 
@@ -121,31 +127,36 @@ def seed_language(repo, client, language: Language, *, batch_size: int = BATCH_S
     def flush():
         """Write the buffer, preserving any row a depth pass has already priced.
 
-        KNOWN, DELIBERATELY DEFERRED (Council rev-2 verdict, Chaos S2 — ruled a
-        **Phase 2 precondition**, not a Phase 1 gate): the read → decide → write
-        below is check-then-act with no ``ConditionExpression`` and no lock, so
-        a depth pass interleaving between the ``batch_get`` and the
-        ``batch_upsert`` can have its ``detail="full"`` row overwritten by the
-        unconditional ``put_item``. Phase 1 ships no depth pass, so nothing can
-        construct the interleaving today. **Phase 2 must add the
-        ``ConditionExpression`` (or take ``acquire_import_lock``) before the
-        depth pass and the live wipe ship** — do not let this drop between
-        phases.
+        CLOSED IN PHASE 2.0a (was Council rev-2 / Chaos S2). This used to
+        ``batch_get`` the ids, filter out the ``detail="full"`` rows and then
+        ``batch_upsert`` the rest — check-then-act, with a window between the
+        read and the write in which a depth pass could land a priced row and
+        have it silently overwritten by a ``brief`` one. The decision now lives
+        in a ``ConditionExpression`` inside ``batch_upsert_catalog_cards``, so
+        DynamoDB evaluates it in the same operation as the write and no
+        interleaving exists to lose. There is deliberately no pre-read here.
         """
         nonlocal cards, written, preserved
         if not cards:
             return
-        existing = repo.batch_get_catalog_cards([c.card_id for c in cards])
-        keep = [
-            c for c in cards
-            if getattr(existing.get(c.card_id), "detail", None) != "full"
-        ]
-        preserved += len(cards) - len(keep)
-        if execute and keep:
-            repo.batch_upsert_catalog_cards(keep)
-            written += len(keep)
+        if id_sink is not None:
+            id_sink.update(c.card_id for c in cards)
+        if execute:
+            skipped = repo.batch_upsert_catalog_cards(cards, preserve_priced=True)
+            preserved += skipped
+            written += len(cards) - skipped
             if WRITE_PACING_SECONDS:
                 time.sleep(WRITE_PACING_SECONDS)
+        else:
+            # A dry run has to predict `cards_preserved` too, or it reports 0 for
+            # a run that would in fact skip thousands of priced rows. This read is
+            # safe precisely because it writes nothing — the race the condition
+            # closes needs a write to be a race.
+            existing = repo.batch_get_catalog_cards([c.card_id for c in cards])
+            preserved += sum(
+                getattr(existing.get(c.card_id), "detail", None) == "full"
+                for c in cards
+            )
         cards = []
         print(f"  mapped {seeded}, written {written}, preserved {preserved}")
 

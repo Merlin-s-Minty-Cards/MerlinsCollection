@@ -115,6 +115,25 @@ def test_the_seed_refuses_to_overwrite_a_priced_row(seed, dynamo_repo):
     assert kept.prices["holofoil"].market == 800
 
 
+def test_the_seed_decides_at_write_time_not_by_pre_reading(seed, dynamo_repo):
+    """Phase 2.0a: flush must not read-then-decide-then-write.
+
+    A pre-read is a window. Once a depth pass exists, anything landing between
+    the ``batch_get`` and the ``batch_upsert`` gets overwritten by a ``brief``
+    row and its prices are gone. The refusal has to be a ``ConditionExpression``
+    evaluated inside the write itself, which means the pre-read is not merely
+    redundant — it must be absent.
+    """
+    reads = []
+    dynamo_repo.batch_get_catalog_cards = lambda ids: reads.append(list(ids)) or {}
+
+    seed.seed_language(dynamo_repo, FakeClient(_briefs("cards_en_brief")),
+                       Language.EN, execute=True, allow_unverified=True)
+
+    assert reads == []
+    assert dynamo_repo.get_catalog_card("en:base1-4") is not None
+
+
 def test_an_aborted_run_still_flushes_and_reports_what_it_managed(seed, dynamo_repo):
     """FRAIL-3: an exception from the generator in the ``for`` header used to
     discard up to 499 mapped cards and print no summary, so the operator could

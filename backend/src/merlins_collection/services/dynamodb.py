@@ -108,6 +108,7 @@ class InventoryRepository:
 
     def __init__(self, table_name, *, endpoint_url=None, region_name="us-east-1"):
         self._import_gen = None  # set during an import so writes carry a generation
+        self._catalog_gen = None  # set during a catalog reseed (see purge_card_data)
         self._resource = boto3.resource(
             "dynamodb", endpoint_url=endpoint_url, region_name=region_name
         )
@@ -346,6 +347,148 @@ class InventoryRepository:
                 batch.delete_item(Key=key)
         return len(keys)
 
+    # ---- catalog generations (load-then-swap replace for CARD data) ----
+    # The import generation above belongs to the SPREADSHEET pipeline and sweeps
+    # `_IMPORT_OWNED_ENTITIES`, which includes shows and consignors. The catalog is
+    # written by a different pipeline (TCGdex) and is deliberately not
+    # import-owned, so a catalog reseed cannot reuse `finalize_import` without
+    # destroying the very business master data D4 says to preserve. It gets its own
+    # stamp instead, and `purge_card_data` is the swap half.
+    #
+    # Only these entities are EVER deleted by that swap. It is an allowlist, not a
+    # preserve-list, so an entity nobody thought about (auth tokens, rate-limit
+    # counters, anything added later) survives by default rather than by vigilance.
+    #
+    # This is exactly D4's delete list and nothing more. Two entities that were
+    # once here have been deliberately REMOVED, because they are hand-curated and
+    # not reseedable:
+    #
+    # * `graded_price` — slab values entered by hand. TCGdex has no graded prices
+    #   at all, so nothing can rebuild them.
+    # * `item_price_point` — the only price history sealed/bulk items have; they
+    #   have no card to re-derive it from.
+    #
+    # Stamping them with a catalog generation at their write sites was the other
+    # candidate fix and would NOT have worked: the reseed writes only
+    # `catalog_card` rows, so such a stamp could only ever record a PAST
+    # generation and the next wipe would delete them anyway. They are master data;
+    # the wipe simply has no business touching them.
+    _CARD_DATA_ENTITIES = frozenset({
+        "catalog_card", "price_point", "inventory_item", "transaction",
+    })
+
+    # Card-keyed rows: once the catalog is replaced these are orphans by
+    # construction, so they are kept only if they carry the incoming generation.
+    _CATALOG_GEN_ENTITIES = frozenset({"catalog_card", "price_point"})
+
+    def set_catalog_generation(self, gen):
+        """Stamp every subsequent catalog/price write with ``gen`` (None to stop).
+
+        Lets a reseed load a whole new catalog alongside the old one and hand the
+        generation to ``purge_card_data``, so the table is never half-empty while
+        the site is serving ``/inventory``.
+        """
+        self._catalog_gen = gen
+
+    def _cat_gen(self) -> dict:
+        return {"cat_gen": self._catalog_gen} if self._catalog_gen else {}
+
+    @staticmethod
+    def _card_language(pk: str):
+        """The language code embedded in a ``CARD#`` partition key, or ``None``.
+
+        ``card_id`` is the composite ``"{lang}:{tcgdex_id}"``, so the language is
+        readable straight off the key the scan already projects. ``None`` means
+        the row predates that scheme — i.e. it is a dead pokemontcg.io-era row
+        ("xy7-54"), which is precisely what the wipe exists to remove, so it must
+        never be rescued by language scoping.
+        """
+        card_id = pk[len("CARD#"):] if pk.startswith("CARD#") else pk
+        return card_id.split(":", 1)[0] if ":" in card_id else None
+
+    def purge_card_data(self, *, keep_catalog_gen, languages=None,
+                        keep_card_ids=None, dry_run: bool = True) -> dict:
+        """Delete card data that is not part of catalog generation ``keep_catalog_gen``.
+
+        This is the SWAP half of the catalog load-then-swap: run it only after the
+        new catalog has fully landed. Returns ``{entity: rows}`` counts; with
+        ``dry_run`` (the default) it counts without deleting, which is what the
+        wipe entrypoint reports before ``--execute`` is given.
+
+        What goes:
+
+        * ``catalog_card`` / ``price_point`` not stamped with ``keep_catalog_gen``;
+        * every ``inventory_item`` — D4 rebuilds all holdings from the sheet;
+        * ``transaction`` rows carrying an import ``gen``, i.e. derived from a
+          spreadsheet import. A sale the live app recorded through ``record_sale``
+          carries no generation and is NOT sheet-derived, so it survives — that
+          stamp is the only durable evidence of which writer produced a row.
+
+        What stays: everything else, by allowlist (``_CARD_DATA_ENTITIES``).
+        Shows, consignors, config, auth and rate-limit rows are never candidates,
+        and neither are hand-curated ``graded_price`` / ``item_price_point`` rows.
+
+        ``languages`` scopes the sweep to the language codes the reseed actually
+        loaded. Without it, ``--language en`` would mint one generation, stamp
+        only English rows with it, and then delete the entire Japanese catalog as
+        "not of this generation" — while exiting 0. Retrying one language after an
+        abort is a normal operator move, so this is a likely invocation, not a
+        contrived one. ``None`` means every language is in scope.
+
+        ``keep_card_ids`` lets a DRY RUN predict honestly. A dry run writes
+        nothing, so nothing carries the new generation and the naive count is
+        "the entire catalog" — not a prediction, and an operator who sees an
+        absurd number learns to ignore the last check standing between them and
+        an irreversible wipe. Passing the ids the reseed *would* write makes the
+        reported figure the real one.
+
+        ``keep_catalog_gen`` is mandatory. Without one this is not a swap, it is
+        "delete the catalog", and a typo would empty the customer-facing table.
+        """
+        if not keep_catalog_gen:
+            raise ValueError(
+                "purge_card_data requires keep_catalog_gen: the generation of the "
+                "catalog that was just loaded. Without it this would delete every "
+                "card row and leave nothing behind."
+            )
+        counts = dict.fromkeys(self._CARD_DATA_ENTITIES, 0)
+        keys: list[dict] = []
+        kwargs = {
+            "ProjectionExpression": "PK, SK, #e, #g, #c",
+            "ExpressionAttributeNames": {"#e": "entity", "#g": "gen",
+                                         "#c": "cat_gen"},
+            "ConsistentRead": True,
+        }
+        while True:
+            resp = self._table.scan(**kwargs)
+            for item in resp.get("Items", []):
+                entity = item.get("entity")
+                if entity not in self._CARD_DATA_ENTITIES:
+                    continue
+                if entity in self._CATALOG_GEN_ENTITIES:
+                    if item.get("cat_gen") == keep_catalog_gen:
+                        continue
+                    language = self._card_language(item["PK"])
+                    if languages is not None and language is not None \
+                            and language not in languages:
+                        continue  # another language's catalog; not this run's
+                    if keep_card_ids is not None and \
+                            item["PK"][len("CARD#"):] in keep_card_ids:
+                        continue  # the reseed would replace this row, not orphan it
+                elif entity == "transaction" and not item.get("gen"):
+                    continue
+                counts[entity] += 1
+                keys.append({"PK": item["PK"], "SK": item["SK"]})
+            last = resp.get("LastEvaluatedKey")
+            if not last:
+                break
+            kwargs["ExclusiveStartKey"] = last
+        if not dry_run:
+            with self._table.batch_writer() as batch:
+                for key in keys:
+                    batch.delete_item(Key=key)
+        return counts
+
     # ---- internal helpers ----
     def _query_all(self, **kwargs):
         """Run a query, following ``LastEvaluatedKey`` until all pages are read."""
@@ -366,6 +509,7 @@ class InventoryRepository:
             "GSI1PK": f"SET#{card.set_id}",
             "GSI1SK": f"CARD#{card.card_id}",
             "entity": "catalog_card",
+            **self._cat_gen(),
             **body,
         }
 
@@ -375,20 +519,66 @@ class InventoryRepository:
         item = self._table.get_item(Key={"PK": f"CARD#{card_id}", "SK": "META"}).get("Item")
         return CatalogCard.model_validate(item) if item else None
 
-    def batch_upsert_catalog_cards(self, cards):
-        """Insert/overwrite catalog cards in bulk.
+    def batch_upsert_catalog_cards(self, cards, *, preserve_priced: bool = False) -> int:
+        """Insert/overwrite catalog cards in bulk; returns rows left untouched.
 
-        ``overwrite_by_pkeys`` is load-bearing, not tidiness: boto3 does NOT
-        deduplicate a batch, so two rows carrying the same id in one page raise
-        ``ValidationException: Provided list of item keys contains duplicates``
-        and fail the entire 25-item batch — killing the run over rows that were
-        merely redundant, not wrong. With it, the last write of a key wins.
+        ``preserve_priced`` is for the BREADTH seed, which carries identity only:
+        it refuses to replace a row a depth pass has already filled in
+        (``detail="full"``), because a whole-item ``put_item`` does not merge and
+        would revert every price it landed on.
+
+        That refusal is a ``ConditionExpression``, not a read-then-decide, and the
+        difference is the whole point (Phase 2.0a): the condition is evaluated by
+        DynamoDB inside the same operation as the write, so a depth pass landing
+        between the caller's decision and its put cannot be clobbered. The
+        previous check-then-act shape was safe only while no depth pass existed.
+        The cost is one request per card instead of a 25-item batch — the same
+        write capacity, more round trips, and it drops the ``batch_get`` the old
+        shape needed, so the seed's read cost goes to zero.
+
+        The default (unconditional) path stays for the depth pass, which is
+        *supposed* to replace rows. There, ``overwrite_by_pkeys`` is load-bearing
+        rather than tidiness: boto3 does NOT deduplicate a batch, so two rows
+        carrying the same id in one page raise ``ValidationException: Provided
+        list of item keys contains duplicates`` and fail the entire 25-item batch
+        — killing the run over rows that were merely redundant, not wrong.
         """
+        if preserve_priced:
+            return self._upsert_catalog_cards_preserving_priced(cards)
         with self._table.batch_writer(  # auto-chunks to 25 + retries unprocessed
             overwrite_by_pkeys=["PK", "SK"]
         ) as batch:
             for card in cards:
                 batch.put_item(Item=self._catalog_item(card))
+        return 0
+
+    def _upsert_catalog_cards_preserving_priced(self, cards) -> int:
+        preserved = 0
+        for card in cards:
+            item = self._catalog_item(card)
+            try:
+                self._table.put_item(
+                    Item=item,
+                    ConditionExpression="attribute_not_exists(PK) OR #d <> :full",
+                    ExpressionAttributeNames={"#d": "detail"},
+                    ExpressionAttributeValues={":full": "full"},
+                )
+            except ClientError as exc:
+                if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                    raise
+                preserved += 1
+                if self._catalog_gen:
+                    # Re-stamp the survivor, or "preserve" and "swap" cancel out
+                    # into data loss: the row keeps its OLD generation, so the
+                    # purge that follows the reseed deletes it and the card ends
+                    # up neither replaced nor kept.
+                    self._table.update_item(
+                        Key={"PK": item["PK"], "SK": item["SK"]},
+                        UpdateExpression="SET #c = :gen",
+                        ExpressionAttributeNames={"#c": "cat_gen"},
+                        ExpressionAttributeValues={":gen": self._catalog_gen},
+                    )
+        return preserved
 
     def batch_get_catalog_cards(self, card_ids):
         """Point-read many catalog cards at once; missing ids are simply absent.
@@ -800,7 +990,8 @@ class InventoryRepository:
                 raise ValueError("graded price points require 'company' and 'grade'")
             sk = f"PRICE#GRADED#{p.company}#{_grade_key(p.grade)}#{p.date.isoformat()}"
         body = _serialize(p.model_dump(mode="python"))
-        return {"PK": f"CARD#{p.card_id}", "SK": sk, "entity": "price_point", **body}
+        return {"PK": f"CARD#{p.card_id}", "SK": sk, "entity": "price_point",
+                **self._cat_gen(), **body}
 
     def append_price_points(self, points):
         """Bulk-append daily price-history points (one item per point)."""
