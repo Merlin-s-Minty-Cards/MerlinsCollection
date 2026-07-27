@@ -6,6 +6,7 @@ import { apiFetch } from '@/lib/api'
 import {
   buildSearchQuery,
   searchInventory,
+  getInventorySummary,
   sendChat,
   formatPrice,
   itemTitle,
@@ -13,6 +14,7 @@ import {
   conditionLabel,
   type InventoryItem,
   type InventorySearchResult,
+  type InventorySummary,
 } from '@/lib/inventory'
 
 const mockedApiFetch = vi.mocked(apiFetch)
@@ -161,6 +163,25 @@ describe('searchInventory', () => {
     await searchInventory({}, { token: 'jwt-123' })
     expect(mockedApiFetch).toHaveBeenCalledWith(
       '/inventory/search',
+      expect.objectContaining({ token: 'jwt-123' }),
+    )
+  })
+})
+
+describe('getInventorySummary', () => {
+  const summary: InventorySummary = { cards_in_vault: 312, est_value: '48231.50', sets_tracked: 27 }
+
+  it('calls GET /inventory/summary and returns the parsed body', async () => {
+    mockedApiFetch.mockResolvedValue(summary)
+    await expect(getInventorySummary()).resolves.toEqual(summary)
+    expect(mockedApiFetch.mock.calls[0][0]).toBe('/inventory/summary')
+  })
+
+  it('forwards a bearer token to apiFetch when given', async () => {
+    mockedApiFetch.mockResolvedValue(summary)
+    await getInventorySummary({ token: 'jwt-123' })
+    expect(mockedApiFetch).toHaveBeenCalledWith(
+      '/inventory/summary',
       expect.objectContaining({ token: 'jwt-123' }),
     )
   })

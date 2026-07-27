@@ -60,4 +60,30 @@ USER appuser
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
-CMD ["uvicorn", "merlins_collection.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# TRUST BOUNDARY — read before changing.
+# Behind the ALB the socket peer is the ALB, so without proxy-header handling
+# every anonymous caller collapses into ONE per-IP rate-limit bucket (rate_limit
+# .rate_limit_public keys on request.client.host). `--proxy-headers` installs
+# uvicorn's ProxyHeadersMiddleware, which rewrites scope["client"] to the real
+# client IP from X-Forwarded-For — so rate_limit.py keeps reading
+# request.client.host and needs no spoof-prone hand-parsing of its own.
+#
+# Turning that on means the app now TRUSTS X-Forwarded-For, which is safe ONLY
+# because the trust set below is SCOPED. Two things bound the spoofing risk:
+#   1. FORWARDED_ALLOW_IPS is never "*". XFF is honoured only when the socket
+#      peer is inside these ranges; a direct/public caller's forged header is
+#      ignored outright.
+#   2. uvicorn walks the XFF chain RIGHT-to-LEFT and stops at the first
+#      untrusted hop. The ALB *appends* the true peer, so a client that prepends
+#      forged entries still keys to its own real IP.
+#
+# RESIDUAL RISK (accepted): anything able to originate a request from INSIDE
+# these ranges can forge the key, because trusted hops are skipped by the walk.
+# The task's security group admitting only the ALB is what actually bounds this
+# — the app cannot. Default is RFC1918 because the ALB's container-facing IP is
+# not statically known; NARROW this to the real VPC/subnet CIDR at deploy time.
+# uvicorn reads this env var natively when --forwarded-allow-ips is absent, so
+# the ECS task definition can override it WITHOUT rebuilding the image. (It must
+# stay an ENV, not a CMD arg: exec-form CMD gets no shell variable expansion.)
+ENV FORWARDED_ALLOW_IPS=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+CMD ["uvicorn", "merlins_collection.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]

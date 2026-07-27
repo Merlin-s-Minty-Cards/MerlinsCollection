@@ -1,15 +1,9 @@
 import type { Metadata } from 'next'
 import Container from '@/components/ui/Container'
 import InventoryWorkspace from '@/components/inventory/InventoryWorkspace'
+import InventoryStats from '@/components/inventory/InventoryStats'
 
 export const metadata: Metadata = { title: 'Inventory Search' }
-
-// Sample summary — wired to get_inventory_summary on the backend later.
-const stats = [
-  { label: 'Cards in vault', value: '4,820' },
-  { label: 'Est. value', value: '$612k' },
-  { label: 'Sets tracked', value: '148' },
-]
 
 export default function InventoryPage() {
   return (
@@ -28,19 +22,7 @@ export default function InventoryPage() {
               plain English. Live pricing from the market.
             </p>
 
-            <dl className="mt-7 grid max-w-md grid-cols-3 gap-4">
-              {stats.map((s) => (
-                <div
-                  key={s.label}
-                  className="rounded-xl border border-pine-700 bg-pine-950/60 px-3 py-3"
-                >
-                  <dt className="font-mono text-[10px] uppercase tracking-[0.1em] text-pine-300">
-                    {s.label}
-                  </dt>
-                  <dd className="mt-1 font-mono text-lg font-semibold text-pine-100">{s.value}</dd>
-                </div>
-              ))}
-            </dl>
+            <InventoryStats />
           </div>
         </header>
 

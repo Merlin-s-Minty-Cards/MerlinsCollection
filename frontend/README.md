@@ -94,9 +94,17 @@ backend contract in one typed place:
   FastAPI backend (prefixes `NEXT_PUBLIC_API_URL`, throws on non-2xx).
 - **`inventory.ts`** — types + helpers for the inventory tool, modeled on the
   [pokemontcg.io v2](https://docs.pokemontcg.io/) card schema. Includes
-  `searchInventory` (filter mode → `GET /inventory/search`), `sendChat` (chat
-  mode → `POST /chat`), and pure helpers (`pickMarketPrice`, `formatPrice`,
+  `searchInventory` (filter mode → `GET /inventory/search`), `getInventorySummary`
+  (authenticated dashboard header stats → `GET /inventory/summary`), `sendChat`
+  (chat mode → `POST /chat`), and pure helpers (`pickMarketPrice`, `formatPrice`,
   `buildSearchQuery`).
+- **`public.ts`** — typed client for the backend's unauthenticated `/public/*`
+  endpoints: `getPublicShows` (`GET /public/shows`, upcoming/past) and
+  `getFeaturedCards` (`GET /public/featured-cards`, homepage cards). Both
+  fetches opt into a 300s Next.js `revalidate` window matching the backend's
+  own TTL cache, plus `isSafeImageUrl` — a client-side mirror of the backend's
+  image-host allowlist so a bad catalog URL is dropped before it ever reaches
+  `next/image`.
 - **`articles.ts`** — article content. Currently static sample data shaped so it
   can be swapped to Sanity without touching components.
 - **`collectionFocus.ts`** — pure math (`focusScale`) for the mobile

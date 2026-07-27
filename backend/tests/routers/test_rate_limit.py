@@ -422,3 +422,164 @@ def test_limited_detail_distinguishes_minute_from_daily(rl_client, mint_token, m
     assert "shortly" in short.lower()
     assert "shortly" not in long.lower()
     assert short != long
+
+
+# --------------------------------------------------------------------------
+# Item — trust the REAL client IP behind the ALB (proxy-header trust boundary)
+#
+# Behind the ECS/ALB the socket peer is the ALB, so without proxy-header trust
+# every anonymous caller collapses into one per-IP bucket. Enabling uvicorn's
+# --proxy-headers with a SCOPED FORWARDED_ALLOW_IPS makes request.client.host the
+# proxy-validated real client IP. The security nuance: the trust set must be the
+# upstream only (never "*"), or the rate-limit key becomes attacker-spoofable.
+# --------------------------------------------------------------------------
+
+def _read_backend_dockerfile() -> str:
+    from pathlib import Path
+
+    return (Path(__file__).resolve().parents[2] / "Dockerfile").read_text(encoding="utf-8")
+
+
+def _dockerfile_forwarded_allow_ips() -> str:
+    import re
+
+    match = re.search(
+        r"^ENV\s+FORWARDED_ALLOW_IPS=(.+)$", _read_backend_dockerfile(), re.MULTILINE
+    )
+    assert match, "Dockerfile must set FORWARDED_ALLOW_IPS so the trusted-proxy scope is explicit"
+    return match.group(1).strip().strip('"').strip("'")
+
+
+def _derive_client_host(trusted_hosts: str, *, peer: str, xff: str | list[str] | None) -> str:
+    """Run uvicorn's ProxyHeadersMiddleware (exactly what --proxy-headers installs)
+    over one request and return the client host the app would then read from
+    ``request.client.host``."""
+    import asyncio
+
+    from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+    seen: dict = {}
+
+    async def inner(scope, receive, send):
+        seen["client"] = scope.get("client")
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    middleware = ProxyHeadersMiddleware(inner, trusted_hosts=trusted_hosts)
+    headers = []
+    # A list models a request carrying REPEATED X-Forwarded-For headers.
+    for value in [xff] if isinstance(xff, str) else (xff or []):
+        headers.append((b"x-forwarded-for", value.encode("latin1")))
+    scope = {"type": "http", "client": (peer, 40000), "headers": headers, "scheme": "http"}
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(_message):
+        return None
+
+    asyncio.run(middleware(scope, receive, send))
+    return seen["client"][0]
+
+
+def test_dockerfile_enables_proxy_headers_scoped_not_wildcard():
+    """The container must run uvicorn with --proxy-headers and a SCOPED trust set
+    (private upstream ranges), never '*' — a wildcard would make X-Forwarded-For
+    attacker-spoofable, which is worse than collapsing to one bucket."""
+    import ipaddress
+
+    text = _read_backend_dockerfile()
+    assert "--proxy-headers" in text, "uvicorn must run with --proxy-headers behind the ALB"
+
+    trusted = _dockerfile_forwarded_allow_ips()
+    assert trusted != "*", "trusting X-Forwarded-For from '*' is spoofable — must be scoped"
+    for entry in trusted.split(","):
+        entry = entry.strip()
+        network = ipaddress.ip_network(entry, strict=False)
+        assert network.is_private, f"{entry!r} must be a private upstream range, not public/world"
+
+
+def test_proxy_headers_derive_real_client_ip_into_separate_buckets():
+    """With the configured trust scope, two different forwarded client IPs (behind
+    the trusted ALB) resolve to two different client hosts — hence SEPARATE
+    per-IP rate-limit buckets instead of one collapsed ALB bucket."""
+    trusted = _dockerfile_forwarded_allow_ips()
+
+    host_a = _derive_client_host(trusted, peer="10.0.0.5", xff="203.0.113.7")
+    host_b = _derive_client_host(trusted, peer="10.0.0.5", xff="203.0.113.9")
+
+    assert host_a == "203.0.113.7"
+    assert host_b == "203.0.113.9"
+    # rate_limit_public keys on f"ip:{request.client.host}" — distinct real clients
+    # get distinct buckets.
+    assert f"ip:{host_a}" != f"ip:{host_b}"
+
+
+def test_untrusted_peer_cannot_spoof_forwarded_for_key():
+    """A caller connecting DIRECTLY (not via the trusted upstream) cannot spoof the
+    key: its X-Forwarded-For is ignored and the bucket stays the real socket peer."""
+    trusted = _dockerfile_forwarded_allow_ips()
+
+    host = _derive_client_host(trusted, peer="203.0.113.200", xff="10.0.0.9")
+
+    assert host == "203.0.113.200", "an untrusted peer's forged X-Forwarded-For must be ignored"
+
+
+def test_prepended_forwarded_for_cannot_escape_the_rate_limit_bucket():
+    """THE production spoof attempt: the ALB *appends* the real peer to whatever
+    X-Forwarded-For the client already sent, so an attacker who prepends forged
+    entries produces ``<forged...>, <real client>``. The trust walk must read the
+    chain RIGHT-to-LEFT and stop at the first untrusted hop, so every forged
+    request still keys to the attacker's real IP and cannot rotate buckets."""
+    trusted = _dockerfile_forwarded_allow_ips()
+
+    attacker = "203.0.113.50"
+    # Attacker rotates the forged prefix on each request trying to mint new buckets.
+    for forged in ("1.2.3.4", "8.8.8.8", "203.0.113.99", "10.0.0.9, 172.16.0.4"):
+        host = _derive_client_host(
+            trusted, peer="10.0.0.5", xff=f"{forged}, {attacker}"
+        )
+        assert host == attacker, (
+            f"forged X-Forwarded-For prefix {forged!r} must not change the bucket key"
+        )
+
+
+def test_multiple_forwarded_for_headers_cannot_escape_the_bucket():
+    """Same attack via *repeated* X-Forwarded-For headers rather than one CSV
+    header — uvicorn joins them in order, so the real appended peer stays
+    rightmost and still wins."""
+    trusted = _dockerfile_forwarded_allow_ips()
+
+    host = _derive_client_host(
+        trusted, peer="10.0.0.5", xff=["1.2.3.4", "8.8.8.8", "203.0.113.50"]
+    )
+
+    assert host == "203.0.113.50"
+
+
+def test_forwarded_for_with_port_is_normalised_to_a_bare_ip_key():
+    """Some proxies append ``ip:port``. The bucket must key on the IP alone, or a
+    rotating source port would mint an unbounded number of rate-limit buckets."""
+    trusted = _dockerfile_forwarded_allow_ips()
+
+    host = _derive_client_host(trusted, peer="10.0.0.5", xff="203.0.113.7:51234")
+
+    assert host == "203.0.113.7", "a source port must not become part of the bucket key"
+
+
+def test_documented_residual_risk_caller_inside_trusted_range_can_spoof():
+    """EXECUTABLE DOCUMENTATION of the accepted residual risk (see backend/Dockerfile).
+
+    Trusting a private CIDR means anything that can originate a request from
+    *inside* that range can forge the key, because the right-to-left walk skips
+    trusted hops. This is acceptable only because the task's security group admits
+    the ALB alone; it is the reason the trust set must never widen to '*'."""
+    trusted = _dockerfile_forwarded_allow_ips()
+
+    # A workload inside the trusted range forges a public IP and it IS honoured.
+    host = _derive_client_host(trusted, peer="10.0.0.5", xff="203.0.113.7, 10.0.0.9")
+
+    assert host == "203.0.113.7", (
+        "in-range callers can spoof by construction — the security group, not the "
+        "app, is what bounds this. Narrow FORWARDED_ALLOW_IPS to the real VPC CIDR."
+    )

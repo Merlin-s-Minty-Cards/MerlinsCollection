@@ -1,12 +1,20 @@
 import { render, screen } from '@testing-library/react'
+import { vi } from 'vitest'
 import FeaturedFinds from '@/components/home/FeaturedFinds'
 import ShowsPreview from '@/components/home/ShowsPreview'
 import LearnHub from '@/components/home/LearnHub'
 import FinalCTA from '@/components/home/FinalCTA'
 
+// FeaturedFinds is now an async server component that fetches featured cards.
+// Return zero cards so it renders its static fallback (the 5-tile set these
+// tests assert on); its data/fallback branches have dedicated tests.
+vi.mock('@/lib/public', () => ({
+  getFeaturedCards: vi.fn().mockResolvedValue({ cards: [] }),
+}))
+
 describe('bottom Home sections', () => {
-  it('FeaturedFinds links to the inventory', () => {
-    render(<FeaturedFinds />)
+  it('FeaturedFinds links to the inventory', async () => {
+    render(await FeaturedFinds())
     expect(
       screen.getByRole('heading', { level: 2, name: 'A peek at the collection.' }),
     ).toBeInTheDocument()
@@ -46,8 +54,8 @@ describe('bottom Home sections', () => {
 })
 
 describe('FeaturedFinds collection cards', () => {
-  it('wires every card with the smooth hover-grow treatment', () => {
-    const { container } = render(<FeaturedFinds />)
+  it('wires every card with the smooth hover-grow treatment', async () => {
+    const { container } = render(await FeaturedFinds())
     const cards = container.querySelectorAll('.collection-card')
     expect(cards).toHaveLength(5)
     // the treatment lives on the wrapper that holds each card image
@@ -56,8 +64,8 @@ describe('FeaturedFinds collection cards', () => {
     })
   })
 
-  it('row container carries collection-row class so CSS :has() can shrink siblings on hover, and wraps content for scroll-reveal', () => {
-    const { container } = render(<FeaturedFinds />)
+  it('row container carries collection-row class so CSS :has() can shrink siblings on hover, and wraps content for scroll-reveal', async () => {
+    const { container } = render(await FeaturedFinds())
     // The CSS rule `.collection-row:has(.collection-card:hover) .collection-card:not(:hover)`
     // anchors on this class — if it is missing the sibling-shrink effect silently disappears.
     expect(container.querySelector('.collection-row')).toBeInTheDocument()

@@ -262,6 +262,27 @@ def test_import_shows_builds_context(dynamo_repo):
     assert ctx.shows == [show]
 
 
+def test_import_populates_show_venue_city_when_columns_present(dynamo_repo):
+    ctx = ImportContext(repo=dynamo_repo)
+    rows = [{"Day": "8/14/2026", "Show": "Seattle Trading Card Con",
+             "Venue": "Convention Center", "City": "Seattle, WA"}]
+    import_shows(rows, ctx)
+    [show] = dynamo_repo.list_shows()
+    assert show.venue == "Convention Center"
+    assert show.city == "Seattle, WA"
+
+
+def test_import_leaves_show_venue_city_none_when_absent(dynamo_repo):
+    # The historical "Show Fees" ledger has no structured venue/city columns, so
+    # nothing is invented — the fields stay None (no free-text parsing).
+    ctx = ImportContext(repo=dynamo_repo)
+    rows = [{"Day": "3/8/2026", "Show": "Mint City", "Goal": "$500"}]
+    import_shows(rows, ctx)
+    [show] = dynamo_repo.list_shows()
+    assert show.venue is None
+    assert show.city is None
+
+
 def test_import_consignments_creates_consignor_terms_and_payout(dynamo_repo):
     ctx = ImportContext(repo=dynamo_repo)
     row = {"Date recieved": "2/1/2026", "Card Name": "Umbreon VMAX", "Condition": "NM",

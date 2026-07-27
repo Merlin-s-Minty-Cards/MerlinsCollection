@@ -18,8 +18,10 @@ src/merlins_collection/
     chat.py          #   ChatRequest / ChatResponse
   routers/           # HTTP layer — thin, delegates to services
     auth.py          #   GET /auth/me
-    inventory.py     #   GET /inventory/search
+    inventory.py     #   GET /inventory/search, GET /inventory/summary
     chat.py          #   POST /chat/
+    public.py        #   GET /public/shows, GET /public/featured-cards (unauthenticated)
+    health.py        #   GET /health
   services/          # Business logic / integrations (no FastAPI imports)
     cognito.py       #   Cognito JWT verification
     dynamodb.py      #   Single-table DynamoDB repository
@@ -89,10 +91,57 @@ The status codes are deliberate and distinguish *whose* problem it is:
 |---------------|------|---------|
 | `GET /auth/me` | Bearer | Identity + role of the caller |
 | `GET /inventory/search` | Bearer | Filter inventory by name/set/rarity/condition/price |
+| `GET /inventory/summary` | Bearer | Dashboard header stats (`cards_in_vault`, `est_value`, `sets_tracked`) |
 | `POST /chat/` | Bearer | Natural-language inventory chat via Bedrock |
+| `GET /public/shows` | **None** | All shows split into `upcoming`/`past` by the business's Pacific "today" |
+| `GET /public/featured-cards` | **None** | Up to 5 homepage cards (`name` + `image_url` only) |
 
 `/inventory/search` loads inventory and filters in-process; `cost_basis`
 (our purchase price) is stripped from the response and never reaches customers.
+
+### The customer-visible cohort
+
+`/inventory/search`, `/inventory/summary`, and the anonymous `/public/featured-cards`
+all read the exact same set of items: **available** (not sold/held) items of a
+**customer-visible kind** (`raw` or `graded` — bulk lots and sealed product are
+internal-only per RFC 0001). This predicate lives in exactly one place,
+`customer_visible_items()` in `routers/inventory.py`, and is imported by
+`routers/public.py` rather than re-implemented — a future exclusion (e.g. a
+`needs_review` gate) is then added once and can never drift between the
+authenticated and anonymous surfaces. `/inventory/summary` reuses the same
+`rate_limit_search` cap as `/inventory/search` since it does an equally heavy
+full inventory scan + catalog batch-get.
+
+### `/public/*` — the unauthenticated read surface
+
+`GET /public/shows` and `GET /public/featured-cards` (`routers/public.py`) are
+the two routes a signed-out visitor's browser calls (home page, `/shows`).
+Both:
+
+- Expose **purpose-built response models** (`PublicShow`, `FeaturedCard`) that
+  contain only safe fields by construction — internal `Show`/inventory fields
+  are never on the model at all, so a field added upstream later can't leak
+  through it.
+- Are capped per client IP by `rate_limit_public` (fails open — these are
+  cheap reads; the cap blunts a burst, not a correctness gate).
+- Share an in-process, single-flight, 300-second TTL cache (`_TTLCache`) that
+  coalesces a *concurrent* burst in a cold/just-expired window to one DynamoDB
+  scan and serves the last-known-good value if a recompute fails. This
+  suppresses a thundering herd, not a sustained brownout: after a failed
+  recompute the next request retries immediately (serialized behind the lock,
+  never concurrently, but with no backoff) until a scan succeeds.
+
+`/public/shows` splits shows into `upcoming`/`past` using the business's
+**Pacific** "today" (`America/Los_Angeles`, via the `tzdata` package — needed
+because production runs on UTC and a same-day show would otherwise misfile as
+"past" for the last several hours of every show day). A show dated today
+counts as upcoming. `venue`/`city` are optional on `Show` and may be `null`.
+
+`/public/featured-cards` ranks the customer-visible cohort by
+`current_market_value ?? listed_price ?? 0` (market-value-first, the opposite
+of search's listed-price-first ordering), keeps only items whose catalog image
+is an `https://images.pokemontcg.io/...` URL, de-duplicates by `card_id`, and
+returns the top 5.
 
 ## DynamoDB single-table design
 
