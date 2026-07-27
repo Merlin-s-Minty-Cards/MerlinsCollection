@@ -11,10 +11,11 @@ entities (shows, consignors) key on their business identity. Ambiguity never
 guesses silently: unmappable rows are skipped-and-counted, uncertain mappings set
 ``needs_review=True``.
 
-Print language is read out of the card-name text (``"Seismitoad (jp)"``) and
-stored as a field, because it is part of a card's identity: the catalog is
-English-only, so a non-English item is never matched against it and keeps the
-sheet's own money figures instead of an English price.
+Print language is read out of the card-name text (``"Seismitoad (jp)"``), the TCG
+link (its ``pokemon-japan`` slug or ``Language=`` filter) and, failing both, the
+set itself, and is stored as a field — because it is part of a card's identity.
+The catalog is multilingual, so a Japanese row resolves to the JAPANESE catalog
+printing (a separate row at its own price), never to its English twin.
 """
 
 from __future__ import annotations
@@ -65,8 +66,10 @@ from merlins_collection.services.card_text import (
     _QUALIFIER_TOKENS,
     CatalogIndex,
     build_catalog_index,
+    coerce_language,
     core_name,
     format_display_name,
+    language_from_set,
     language_from_url,
     normalize_name,
     normalize_number,
@@ -121,10 +124,20 @@ def parse_money(text) -> Decimal | None:
 
 
 def parse_date(text) -> date | None:
+    """A sheet date cell as a ``date``, or ``None`` when it is blank/unparseable.
+
+    The midnight-suffixed forms are not decoration: the real workbook's own CSV
+    export writes EVERY date as ``"2026-04-18 00:00:00"``. Without them 44 of the
+    137 Bulk rows parsed their ``Date Sold`` as ``None`` and so could never be
+    classified SOLD however plainly the ``Sold`` cell said otherwise — the item
+    stayed AVAILABLE and its sale was never recorded. A dropped time component is
+    correct here: these are calendar dates, and the time is always midnight.
+    """
     if not text or not str(text).strip():
         return None
     cleaned = str(text).strip()
-    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m/%d/%y"):
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m/%d/%y",
+                "%Y-%m-%d %H:%M:%S", "%m/%d/%Y %H:%M:%S"):
         try:
             return datetime.strptime(cleaned, fmt).date()
         except ValueError:
@@ -265,10 +278,15 @@ class ImportContext:
     catalog_index: CatalogIndex = field(default_factory=CatalogIndex)
 
 
-def _first_hit(table: dict, key_name: str, keys: list[str]) -> list:
-    """The first non-empty hit list across the number forms, most literal first."""
+def _first_hit(table: dict, key_name: str, keys: list[str],
+               language: Language) -> list:
+    """The first non-empty hit list across the number forms, most literal first.
+
+    ``language`` is part of the key (see ``build_catalog_index``), so a lookup can
+    only ever see printings in the language asked for.
+    """
     for key in keys:
-        hits = table.get((key_name, key))
+        hits = table.get((key_name, key, language))
         if hits:
             return hits
     return []
@@ -276,16 +294,17 @@ def _first_hit(table: dict, key_name: str, keys: list[str]) -> list:
 
 def _match_card(ctx: ImportContext, name: str, number: str, *,
                 language: Language = Language.EN, set_text: str = ""):
-    """Conservative catalog match on normalized (name, number); a UNIQUE hit
-    returns its card_id, everything ambiguous returns ``None`` for human review.
+    """Conservative catalog match on normalized (name, number, language); a UNIQUE
+    hit returns its card_id, everything ambiguous returns ``None`` for human review.
 
-    The catalog holds ENGLISH cards only, so a non-English item is refused
-    outright — before any lookup — no matter how exactly its name and number line
-    up with an English entry. A Japanese Seismitoad #38 is not the English
-    Seismitoad #38: linking them would hang an English price on a card that
-    trades at a different one. ``card_id is None`` is the correct, final answer
-    for such an item, not a failed match to retry later. The gate lives here, in
-    the single place a catalog lookup can happen, so every caller inherits it.
+    The catalog is multilingual, so ``language`` is part of the LOOKUP KEY rather
+    than a gate that refuses non-English rows outright: a Japanese Seismitoad #38
+    resolves to the Japanese catalog printing and never to the English one, which
+    trades at a different price. A language with no catalog printing of that card
+    simply misses and returns ``None`` — the same conservative answer as before,
+    reached by finding nothing rather than by refusing to look. Scoping by key
+    (not by filtering hits afterwards) is what keeps the ENGLISH lookup unaffected
+    when a same-name-and-number JP twin is seeded beside it.
 
     Both sides are normalized identically (``build_catalog_index`` on the catalog,
     ``normalize_name``/``number_keys`` on the sheet row) so an Excel float artifact
@@ -296,18 +315,17 @@ def _match_card(ctx: ImportContext, name: str, number: str, *,
     stays ``None``; there is deliberately no fuzzy auto-linking here (that, and its
     human confirm, belongs to the review toolchain).
     """
-    if language is not Language.EN:
-        return None
     index = ctx.catalog_index
     n_full = normalize_name(name)
     if not n_full:  # a fully non-ASCII name is "no evidence", never a match
         return None
     keys = number_keys(normalize_number(number))
+    language = coerce_language(language)
 
-    hits = _first_hit(index.by_name_number, n_full, keys)
+    hits = _first_hit(index.by_name_number, n_full, keys, language)
     core_tier = False
     if not hits:
-        hits = _first_hit(index.by_core_number, core_name(name), keys)
+        hits = _first_hit(index.by_core_number, core_name(name), keys, language)
         core_tier = True
 
     if len(hits) == 1:
@@ -456,6 +474,11 @@ def import_slabs(rows: list[dict], ctx: ImportContext) -> dict:
             set_language, set_name = parse_language(row.get("Set", ""))
             if language is Language.EN:
                 language = set_language
+            # Two real rows (Seismitoad / SV11B, Bubble Mew EX / Shiny Treasure
+            # EX) carry no marker in EITHER column and are Japanese only by which
+            # set they are from, so the set itself is the last language signal.
+            if language is Language.EN:
+                language = language_from_set(set_name)
             # A slab has a Set column, so pass it: it narrows a name+number that
             # hits the same card printed in several sets down to the right one.
             card_id = _match_card(ctx, name, row.get("card#", ""),
@@ -1082,13 +1105,25 @@ def _empty_tabs(summaries: dict, allow_empty) -> list[str]:
     return sorted(
         tab for tab, s in summaries.items()
         if isinstance(s, dict) and not tab.startswith("_")
-        and "failed" not in s and not s.get("preserved")
+        and "failed" not in s and not s.get("preserved") and not s.get("deferred")
         and s.get("imported") == 0 and tab not in allow_empty
     )
 
 
+# Tabs that are present in the export but deliberately NOT imported yet. Slabs is
+# on hold until PSA cert scanning exists (owner directive): a slab's identity IS
+# its cert number, and importing 17 rows now would only manufacture rows a human
+# has to re-verify later. Schema support for graded items stays; the IMPORT is
+# off. This is a separate knob from ``allow_empty`` on purpose — ``allow_empty``
+# forgives a tab that imported zero rows, it does not stop a populated tab from
+# running, and stretching it to mean both would make "this ledger is genuinely
+# empty" and "do not read this tab" indistinguishable.
+DEFERRED_TABS = frozenset({"Slabs"})
+
+
 def run_import(csv_dir, repo, *, require_complete: bool = True,
-               allow_empty=frozenset(), force_replace: bool = False) -> dict:
+               allow_empty=frozenset(), force_replace: bool = False,
+               skip_tabs=DEFERRED_TABS) -> dict:
     """Import the workbook's tab CSVs from ``csv_dir`` with SAFE REPLACE semantics.
 
     Five guarantees protect the live money table:
@@ -1115,6 +1150,11 @@ def run_import(csv_dir, repo, *, require_complete: bool = True,
     * **Per-tab truncation guard**: a present tab that imports zero records fails
       the run unless its name is listed in ``allow_empty`` (the operator's explicit
       "this ledger is genuinely empty" acknowledgement).
+
+    ``skip_tabs`` (default ``DEFERRED_TABS``) names tabs that are NOT read at all,
+    even when their CSV is present and full — currently Slabs, pending PSA cert
+    scanning. A skipped tab reports ``deferred`` and is exempt from the truncation
+    guard, since its zero count is intended rather than evidence of a bad export.
 
     Returns per-tab summaries plus ``_committed`` (bool), ``_removed`` (count) and,
     when the truncation guard fires, ``_empty_tabs``.
@@ -1163,6 +1203,12 @@ def run_import(csv_dir, repo, *, require_complete: bool = True,
         for tab, importer in _TAB_IMPORTERS:
             path = csv_dir / f"{tab}.csv"
             if not path.exists():
+                continue
+            if tab in skip_tabs:
+                logger.info("Tab %r is deferred — present but deliberately not "
+                            "imported this run.", tab)
+                summaries[tab] = {"imported": 0, "sales": 0, "skipped": 0,
+                                  "needs_review": 0, "deferred": True}
                 continue
             try:
                 rows = _read_tab_rows(path, csv)

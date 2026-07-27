@@ -265,3 +265,88 @@ def test_set_hint_from_url_handles_base_set_and_returns_empty_for_non_product():
     # A non-tcgplayer / non-product URL yields no hint, so callers gate nothing.
     assert set_hint_from_url("http://example.com/25") == ""
     assert set_hint_from_url(None) == ""
+
+
+# =============================================================================
+# PHASE 3.1 (claude-progress.txt Section 3 / Q4): language beyond the name
+# marker — the TCG Link's `Language=` query param, and a SET-based JP fallback
+# for rows that carry no marker anywhere (two real 7-25 Slabs rows: Bubble Mew
+# EX / Shiny Treasure EX, Seismitoad / SV11B).
+# =============================================================================
+
+# ---- language_from_url: the `Language=` query param -----------------------
+
+def test_language_from_url_reads_an_explicit_japanese_query_param():
+    """A case the path-slug rule alone cannot cover: a bare numeric product id
+    with no set/name slug at all, but an explicit Japanese query param."""
+    assert language_from_url(
+        "https://www.tcgplayer.com/product/999999?Language=Japanese") is Language.JP
+
+
+def test_language_from_url_english_query_param_stays_english():
+    assert language_from_url(
+        "https://www.tcgplayer.com/product/124113/pokemon-xy-evolutions-"
+        "m-venusaur-ex-full-art?Language=English&page=1") is Language.EN
+
+
+def test_language_from_url_bare_all_query_param_alone_is_not_a_japanese_signal():
+    """Real production counter-example (Singles.csv, "Giovanni's Exile"): a bare
+    product id with ``Language=all`` and NO set/language-bearing slug is an
+    ENGLISH card. "all" means "TCGplayer lists every language of this product
+    under one id", not "this one is Japanese" — it must never, by itself,
+    promote a card to JP the way the ``pokemon-japan`` slug legitimately does."""
+    assert language_from_url(
+        "https://www.tcgplayer.com/product/197730?page=1&Language=all"
+        "&Condition=Near+Mint") is Language.EN
+
+
+def test_language_from_url_still_reads_the_slug_when_the_query_param_is_ambiguous():
+    """The real "Slowking Lv.36 (jp)" row: `Language=all` AND the `pokemon-japan`
+    slug are both present. The slug signal must still carry the day."""
+    assert language_from_url(
+        "https://www.tcgplayer.com/product/607955/pokemon-japan-southern-island"
+        "-slowking?page=1&Language=all&Condition=Near+Mint") is Language.JP
+
+
+# ---- SET-based JP fallback (no marker anywhere; two real Slabs rows) ------
+
+def test_language_from_set_recognizes_a_known_japanese_only_set_code():
+    """Real Slabs.csv row 18: Name "Seismitoad", Set "SV11B" — no marker in
+    either column."""
+    from merlins_collection.services.card_text import language_from_set
+    assert language_from_set("SV11B") is Language.JP
+
+
+def test_language_from_set_recognizes_a_known_japanese_only_set_name():
+    """Real Slabs.csv row 5: Name "Bubble Mew EX", Set "Shiny Treasure EX"."""
+    from merlins_collection.services.card_text import language_from_set
+    assert language_from_set("Shiny Treasure EX") is Language.JP
+
+
+def test_language_from_set_defaults_to_english_for_an_ordinary_set():
+    from merlins_collection.services.card_text import language_from_set
+    assert language_from_set("Base Set") is Language.EN
+    assert language_from_set("Brilliant Stars") is Language.EN
+    assert language_from_set("") is Language.EN
+    assert language_from_set(None) is Language.EN
+
+
+def test_item_language_falls_back_to_the_set_when_nothing_else_marks_it_japanese():
+    """The importer stores a slab's set inside ``notes`` ("<name> — <set>
+    #<number>"), so the set-code fallback must also work from the WHOLE stored
+    text, exactly like the existing URL and marker fallbacks already do."""
+    record = {"kind": "graded", "notes": "Seismitoad — SV11B #109.0"}
+    assert item_language(record) is Language.JP
+
+
+def test_item_language_set_fallback_does_not_trip_on_an_ordinary_english_set():
+    record = {"kind": "graded", "notes": "Charizard — Brilliant Stars #4.0"}
+    assert item_language(record) is Language.EN
+
+
+def test_the_name_marker_still_outranks_the_set_fallback():
+    """A marker in the text is the most explicit signal and must not be
+    second-guessed by the set-code heuristic, even where they'd agree anyway."""
+    record = {"kind": "graded",
+              "notes": "Arceus V (jp) — Pokemon Legends Arceus Preorder #267.0"}
+    assert item_language(record) is Language.JP
