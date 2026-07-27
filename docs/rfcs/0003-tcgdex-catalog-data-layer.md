@@ -194,16 +194,30 @@ future namespace collision would silently *merge* two printings into one
 DynamoDB row — a JP card overwriting its EN twin's prices — which is exactly the
 failure D1 forbids, would be near-undetectable, and has no cheap remediation
 after the fact. The composite key makes the invariant structural. It also means a
-stored `card_id` alone is sufficient to build its detail URL; a bare id would
-force every Tier 2 call to read `language` out of the row body first.
+stored `card_id` alone is sufficient to build its detail URL.
 
-**Cost of the composite:** none worth counting. Every stored `pokemontcg.io` id
+> **Amended (revision-1 Council verdict, Dispute 2).** This paragraph previously
+> also argued that "a bare id would force every Tier 2 call to read `language`
+> out of the row body first." **That argument was false and is struck:**
+> `models/inventory.py:129` already carries `language` on `_ItemBase`, so every
+> inventory item carries it under either scheme. The decision stands on the
+> collision argument above, which is sufficient on its own.
+
+**Cost of the composite:** small, but not zero. Every stored `pokemontcg.io` id
 is dead after the D4 wipe, so there is no migration. `card_id` is never a URL
 path segment in our own API — it appears only as a JSON body field
 (`routers/inventory.py`, `frontend/lib/inventory.ts`,
 `frontend/components/inventory/CardGrid.tsx`) — so `:` introduces no routing
 hazard. `:` is legal in DynamoDB keys and does not collide with the `#` SK
 delimiter.
+
+> **Amended (revision-1 Council verdict, Dispute 2).** This section previously
+> read "**Cost of the composite:** none worth counting." **That was false and is
+> struck.** There is a real cost, disclosed during implementation:
+> `frontend/components/inventory/FilterPanel.tsx` hardcodes bare `set_id` values
+> which match nothing after the reseed and must be updated to the `en:`/`ja:`
+> form. The cost is worth paying, but it must be carried here rather than
+> discovered by whoever reseeds.
 
 **`set_id` takes the same composite form** — `en:base1`, `ja:M5` — so that
 `card_id == f"{set_id}-{local_id}"` continues to hold structurally, the
@@ -306,7 +320,36 @@ keeps `models/inventory.py::_market_price` and
    `source="tcgplayer"`, `source_currency="USD"`, `value_note=None`.
    `unit` is asserted to be `"USD"`; a non-USD unit is a mapping failure (counted,
    card skipped) rather than a silent mis-priced card.
-2. **Cardmarket (EUR).** Only when TCGplayer is absent/null for that finish.
+2. **Cardmarket (EUR).** Only when TCGplayer produced **no market figure for the
+   card at all** — the preference is applied at CARD level, not per finish.
+
+   > **Amended (revision-1 Council verdict, Dispute 1 / LOG-4).** This clause
+   > previously read "only when TCGplayer is absent/null **for that finish**,"
+   > which contradicted this section's own worked example. Per-finish merging is
+   > wrong: Cardmarket publishes one flat block whose unsuffixed fields are
+   > *print-agnostic*, so merging them per finish manufactures a `normal` band
+   > for a card that has no normal printing. Because `normal` is first in both
+   > `_MARKET_FINISH_FALLBACK` and `FINISH_PREFERENCE`, that phantom band wins
+   > every fallback and then *silences* `build_review._finish_caveat` by
+   > satisfying it — invented data suppressing the warning built to catch
+   > invented data. The worked example was correct; the prose is now aligned to
+   > it.
+   >
+   > The card-level rule alone is **not sufficient**, and the revision-1
+   > implementation was incomplete for assuming it was: it only suppressed
+   > Cardmarket when TCGplayer had already priced the card, leaving the phantom
+   > band free on the entire Japanese path, where `pricing.tcgplayer` is null and
+   > the invented band is therefore the *only* band. So a second, unconditional
+   > rule applies: **a Cardmarket band is emitted for a finish only when the
+   > card's own `variants` block confirms that printing exists** (`variants.normal`
+   > for the unsuffixed fields, `variants.holo` for the `-holo` fields). `variants`
+   > travels in the same payload and was previously read by nothing. When it is
+   > absent the printing is unconfirmed and no band is emitted.
+   >
+   > `variants` is consulted at the mapping boundary but is **not** stored on
+   > `CatalogCard` (§6 is unchanged) — it is corroboration for a decision made
+   > here, not reference data any consumer needs.
+
    Converted with a **config FX constant**:
    - config key **`EUR_USD_RATE`** (`settings.eur_usd_rate: Decimal`), **default
      `Decimal("1.08")`**.
@@ -754,10 +797,10 @@ LANGUAGE_API_CODE: dict[Language, str]          # {EN: "en", JP: "ja"}
 TCGDEX_FINISH_MAP: dict[str, str]
 
 def build_card_id(language: Language, tcgdex_id: str) -> str: ...
-def parse_card_id(card_id: str) -> tuple[Language, str]: ...
-def encode_card_id(tcgdex_id: str) -> str: ...            # the ONLY path-builder
-def map_finish(tcgdex_finish: str) -> str: ...            # raises on '#'
-def convert_eur_to_usd(amount: Decimal, rate: Decimal) -> Decimal: ...
+
+# `_encode_card_id`, `_map_finish` and `_convert_eur_to_usd` are module-private
+# helpers, not provided interfaces — call them only from within this module.
+# `parse_card_id` was speculative and has been deleted; nothing needed it.
 
 def to_catalog_card_brief(raw: dict, language: Language, *,
                           set_names: dict[str, str] | None = None,
@@ -771,8 +814,10 @@ class TcgdexError(RuntimeError):
 
 class TcgdexClient:
     BASE_URL = "https://api.tcgdex.net/v2"
-    def __init__(self, *, client=None, max_retries=3, backoff_base=0.5,
-                 request_delay_seconds=0.1): ...
+    def __init__(self, *, client=None, page_size=100_000, max_retries=3,
+                 backoff_base=0.5, request_delay_seconds=0.1, max_pages=1_000,
+                 max_response_bytes=64 * 1024 * 1024,
+                 total_deadline_seconds=300.0): ...
     def iter_brief_cards(self, language: Language) -> Iterator[dict]: ...
     def list_sets(self, language: Language) -> list[dict]: ...
     def get_card(self, language: Language, tcgdex_id: str) -> dict | None: ...   # None on 404

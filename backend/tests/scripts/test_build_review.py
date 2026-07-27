@@ -762,7 +762,7 @@ def test_scan_and_collect_round_trip(dynamo_repo):
         prices={"normal": {"market": Decimal("12.50")}},
         last_synced_at=datetime.now(tz=timezone.utc))])
     dynamo_repo.append_price_points([PricePoint(
-        card_id="xy-83", date=date(2026, 7, 1), source="pokemontcg.io", kind="raw",
+        card_id="xy-83", date=date(2026, 7, 1), source="tcgplayer", kind="raw",
         finish="normal", market=Decimal("14.25"))])
     dynamo_repo.put_inventory_item(RawInventoryItem(
         item_id="ITEM1", finish="normal", condition="NM", cost_basis=Decimal("4"),

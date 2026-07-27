@@ -1092,7 +1092,7 @@ def test_first_import_into_catalog_only_table_needs_no_flag(tmp_path, dynamo_rep
         prices={"holofoil": {"market": Decimal("12.50")}},
         last_synced_at=datetime(2026, 6, 22, 12, 0, 0))])
     dynamo_repo.append_price_points([PricePoint(
-        card_id="swsh1-1", date=date(2026, 6, 20), source="pokemontcg.io",
+        card_id="swsh1-1", date=date(2026, 6, 20), source="tcgplayer",
         kind="raw", finish="holofoil", market=Decimal("10"))])
 
     _seed_workbook(tmp_path)

@@ -1,0 +1,25 @@
+{
+  "category": "Pokemon",
+  "id": "ex12-100",
+  "illustrator": "Hikaru Koike",
+  "image": "https://assets.tcgdex.net/en/ex/ex12/100",
+  "localId": "100",
+  "name": "Charizard ex",
+  "rarity": "Ultra Rare",
+  "set": {
+    "id": "ex12",
+    "name": "Legend Maker",
+    "cardCount": { "official": 92, "total": 93 }
+  },
+  "variants": {
+    "firstEdition": false,
+    "holo": true,
+    "normal": false,
+    "reverse": false,
+    "wPromo": false
+  },
+  "hp": 150,
+  "types": ["Fire"],
+  "stage": "Stage2",
+  "updated": "2026-07-11T09:49:03+01:00"
+}

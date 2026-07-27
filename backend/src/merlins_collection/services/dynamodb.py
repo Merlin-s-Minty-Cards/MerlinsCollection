@@ -376,8 +376,17 @@ class InventoryRepository:
         return CatalogCard.model_validate(item) if item else None
 
     def batch_upsert_catalog_cards(self, cards):
-        """Insert/overwrite catalog cards in bulk (used by the daily sync)."""
-        with self._table.batch_writer() as batch:  # auto-chunks to 25 + retries unprocessed
+        """Insert/overwrite catalog cards in bulk.
+
+        ``overwrite_by_pkeys`` is load-bearing, not tidiness: boto3 does NOT
+        deduplicate a batch, so two rows carrying the same id in one page raise
+        ``ValidationException: Provided list of item keys contains duplicates``
+        and fail the entire 25-item batch — killing the run over rows that were
+        merely redundant, not wrong. With it, the last write of a key wins.
+        """
+        with self._table.batch_writer(  # auto-chunks to 25 + retries unprocessed
+            overwrite_by_pkeys=["PK", "SK"]
+        ) as batch:
             for card in cards:
                 batch.put_item(Item=self._catalog_item(card))
 

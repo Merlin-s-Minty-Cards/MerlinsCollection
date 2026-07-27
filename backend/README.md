@@ -14,7 +14,7 @@ src/merlins_collection/
   models/            # Pydantic DTOs (request/response + domain shapes)
     auth.py          #   AuthenticatedUser
     inventory.py     #   Raw/Graded inventory items (discriminated union)
-    catalog.py       #   CatalogCard + PricePoint (pokemontcg.io-derived)
+    catalog.py       #   CatalogCard + PricePoint (TCGdex-derived, USD)
     chat.py          #   ChatRequest / ChatResponse
   routers/           # HTTP layer — thin, delegates to services
     auth.py          #   GET /auth/me
@@ -23,7 +23,7 @@ src/merlins_collection/
   services/          # Business logic / integrations (no FastAPI imports)
     cognito.py       #   Cognito JWT verification
     dynamodb.py      #   Single-table DynamoDB repository
-    pokemontcg.py    #   pokemontcg.io v2 HTTP client + mapping
+    tcgdex.py        #   TCGdex v2 HTTP client + mapping
     catalog_sync.py  #   Daily catalog/price sync orchestration
     bedrock.py       #   Bedrock Converse chat loop with MCP tools
 tests/               # Pytest suite mirroring the src/ tree
@@ -63,7 +63,7 @@ credentials are normally supplied by the ambient credential chain (IAM role,
 | DynamoDB table | `DYNAMODB_TABLE_NAME` | `merlins-cards` |
 | Bedrock model id | `BEDROCK_MODEL_ID` | Claude 3.5 Sonnet |
 | MCP server path | `MCP_SERVER_PATH` | `../mcp-server/dist/index.js` |
-| pokemontcg.io key | `POKEMONTCG_API_KEY` | `""` |
+| EUR->USD rate | `EUR_USD_RATE` | `1.08` |
 
 ## Authentication
 
@@ -130,9 +130,13 @@ stable regardless of how a grade was spelled, `_grade_key` normalizes them
 
 ## External integrations
 
-- **pokemontcg.io** (`pokemontcg.py`) — read-only HTTP client for card metadata
-  and TCGplayer prices. Retries 429/5xx with exponential backoff; treats other
-  4xx as hard failures and maps 404 to `None`.
+- **TCGdex** (`tcgdex.py`) — read-only, unauthenticated HTTP client for
+  multilingual card metadata and prices (TCGplayer USD + Cardmarket EUR).
+  Retries 429/5xx with exponential backoff; treats other 4xx as hard failures
+  and maps 404 to `None`. Card ids are language-qualified (`en:base1-4`,
+  `ja:M5-001`) so a Japanese card and its English twin are distinct rows, and
+  every stored price is USD — Cardmarket figures are converted at `EUR_USD_RATE`
+  with the conversion recorded in `value_note`.
 - **Bedrock** (`bedrock.py`) — chat mode runs a bounded Converse tool-use loop
   (max 5 tool turns) with the MCP inventory tools. Errors map to typed
   exceptions (`BedrockThrottledError`, `BedrockLoopError`, …) that the chat
@@ -143,11 +147,23 @@ stable regardless of how a grade was spelled, `_grade_key` normalizes them
 
 ## Daily sync
 
-`catalog_sync.run_daily_sync` is the batch job (intended to run on a schedule):
+`catalog_sync.run_daily_sync` is the batch job, run on a schedule via
+**`python scripts/daily_sync.py`**:
 
-1. `sync_catalog` — pull every card from pokemontcg.io, upsert catalog rows, and
-   append one raw price point per finish for the day.
-2. `snapshot_graded_prices` — record a daily history point for each owned graded
+1. `snapshot_graded_prices` — record a daily history point for each owned graded
    slab that has a manual market value.
+2. `snapshot_sealed_prices` — the same for sealed products, whose history hangs
+   off the item rather than a catalog card.
 3. `refresh_inventory_market_values` — denormalize the latest market value onto
    each inventory item so search/list reads don't need a second lookup.
+
+It touches no upstream API; every step works off data already in DynamoDB.
+
+Catalog data arrives through two separate passes, because TCGdex serves pricing
+**only** from its per-card detail endpoint:
+
+- **Tier 1, breadth** — `scripts/seed_catalog.py`, one cheap request per
+  language for the whole catalog, identity only, no prices. Dry run by default;
+  see `docs/aws-setup.md` for the `--execute` / `--confirm-table` rails.
+- **Tier 2, depth** — `refresh_held_prices`, one request per *held* card, which
+  is where prices come from. Phase 2 (RFC 0003 §7).

@@ -1,17 +1,24 @@
-"""Daily batch sync of catalog data, prices, and inventory market values.
+"""Daily batch job: price snapshots and inventory market-value denormalization.
 
-Orchestrates the scheduled job that keeps DynamoDB current. ``run_daily_sync``
-is the entry point; the individual steps are exposed for testing and re-use:
+``run_daily_sync`` is the entry point, driven by ``scripts/daily_sync.py``; the
+individual steps are exposed for testing:
 
-- ``sync_catalog`` — pull every card from pokemontcg.io, upsert catalog rows,
-  and record one raw price-history point per finish for ``today``.
 - ``snapshot_graded_prices`` — append a daily history point for each owned
   graded slab that has a manual market value.
+- ``snapshot_sealed_prices`` — the same for sealed products, whose history hangs
+  off the item rather than a catalog card.
 - ``refresh_inventory_market_values`` — denormalize the latest market value onto
   each inventory item so list/search reads don't need a second lookup.
 
 Each function takes ``repo`` (an ``InventoryRepository``) and returns a small
 summary dict so the job can log what it did.
+
+**No catalog fetching happens here.** The Tier 1 breadth seed is
+``scripts/seed_catalog.py``; the Tier 2 depth pass that fetches prices for held
+cards is ``refresh_held_prices``, which RFC 0003 §7 specifies with per-card
+failure counting, a ``max_consecutive_failures`` abort and a lock-held
+``{"skipped": ...}`` return — none of which the old ``sync_catalog`` had. It is
+written from scratch in Phase 2 rather than adapted from a seam kept warm for it.
 """
 
 from __future__ import annotations
@@ -19,62 +26,6 @@ from __future__ import annotations
 from datetime import date
 
 from merlins_collection.models.catalog import PricePoint
-from merlins_collection.services.pokemontcg import to_catalog_card
-
-
-def sync_catalog(repo, client, today: date, *, batch_size: int = 500) -> dict:
-    """Upsert catalog cards + raw price points, flushing in ``batch_size`` chunks.
-
-    Cards that fail to map are skipped and counted under ``failures`` so one bad
-    record never aborts the whole run.
-    """
-    cards: list = []
-    points: list = []
-    cards_synced = 0
-    points_written = 0
-    failures = 0
-
-    def flush_cards():
-        nonlocal cards
-        if cards:
-            repo.batch_upsert_catalog_cards(cards)
-            cards = []
-
-    def flush_points():
-        nonlocal points, points_written
-        if points:
-            repo.append_price_points(points)
-            points_written += len(points)
-            points = []
-
-    for raw in client.iter_all_cards():
-        try:
-            card = to_catalog_card(raw)
-        except Exception:
-            failures += 1
-            continue
-        cards.append(card)
-        cards_synced += 1
-        for finish, fp in card.prices.items():
-            points.append(
-                PricePoint(
-                    card_id=card.card_id, date=today, source="pokemontcg.io",
-                    kind="raw", finish=finish,
-                    market=fp.market, low=fp.low, mid=fp.mid, high=fp.high,
-                )
-            )
-        if len(cards) >= batch_size:
-            flush_cards()
-        if len(points) >= batch_size:
-            flush_points()
-
-    flush_cards()
-    flush_points()
-    return {
-        "cards_synced": cards_synced,
-        "price_points_written": points_written,
-        "failures": failures,
-    }
 
 
 def snapshot_graded_prices(repo, today: date) -> dict:
@@ -154,10 +105,9 @@ def snapshot_sealed_prices(repo, today: date) -> dict:
     return {"sealed_points_written": written}
 
 
-def run_daily_sync(repo, client, today: date) -> dict:
+def run_daily_sync(repo, today: date) -> dict:
     """Run all sync steps in order and return their merged summary."""
-    summary = sync_catalog(repo, client, today)
-    summary.update(snapshot_graded_prices(repo, today))
+    summary = dict(snapshot_graded_prices(repo, today))
     summary.update(snapshot_sealed_prices(repo, today))
     summary["items_refreshed"] = refresh_inventory_market_values(repo)
     return summary

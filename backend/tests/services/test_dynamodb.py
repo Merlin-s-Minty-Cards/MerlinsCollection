@@ -66,6 +66,16 @@ def test_batch_upsert_handles_more_than_25(dynamo_repo):
     assert len(dynamo_repo.list_cards_by_set("setBig")) == 30
 
 
+def test_batch_upsert_deduplicates_repeated_ids_within_one_call(dynamo_repo):
+    """boto3's ``batch_writer`` does not deduplicate: two rows with the same key
+    in one request raise ``ValidationException`` and fail the whole 25-item
+    batch — killing the run over rows that were redundant, not wrong."""
+    dynamo_repo.batch_upsert_catalog_cards(
+        [_card("dupe-1", market="1.00"), _card("dupe-1", market="2.00")]
+    )
+    assert dynamo_repo.get_catalog_card("dupe-1").prices["holofoil"].market == Decimal("2.00")
+
+
 def test_batch_get_catalog_cards_returns_found_and_skips_missing(dynamo_repo):
     dynamo_repo.batch_upsert_catalog_cards([_card("a-1"), _card("a-2")])
 
@@ -146,7 +156,7 @@ def test_catalog_upsert_does_not_clobber_graded_price(dynamo_repo):
 
 
 def _raw_point(card_id, d, market):
-    return PricePoint(card_id=card_id, date=d, source="pokemontcg.io",
+    return PricePoint(card_id=card_id, date=d, source="tcgplayer",
                       kind="raw", finish="holofoil", market=Decimal(market))
 
 

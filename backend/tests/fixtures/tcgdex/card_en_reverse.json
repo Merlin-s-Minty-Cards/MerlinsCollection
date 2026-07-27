@@ -1,0 +1,47 @@
+{
+  "category": "Pokemon",
+  "id": "sv01-13",
+  "illustrator": "kirisAki",
+  "image": "https://assets.tcgdex.net/en/sv/sv01/13",
+  "localId": "13",
+  "name": "Sprigatito",
+  "rarity": "Common",
+  "set": {
+    "id": "sv01",
+    "name": "Scarlet & Violet",
+    "cardCount": { "official": 198, "total": 258 }
+  },
+  "variants": {
+    "firstEdition": false,
+    "holo": false,
+    "normal": true,
+    "reverse": true,
+    "wPromo": false
+  },
+  "hp": 70,
+  "types": ["Grass"],
+  "stage": "Basic",
+  "updated": "2026-07-11T09:49:03+01:00",
+  "pricing": {
+    "tcgplayer": {
+      "unit": "USD",
+      "updated": "2026-07-26T08:02:22.370Z",
+      "normal": {
+        "productId": 123456,
+        "lowPrice": 0.05,
+        "midPrice": 0.15,
+        "highPrice": 2.5,
+        "marketPrice": 0.12,
+        "directLowPrice": 0.1
+      },
+      "reverse-holofoil": {
+        "productId": 123457,
+        "lowPrice": 0.1,
+        "midPrice": 0.3,
+        "highPrice": 4.0,
+        "marketPrice": 0.28,
+        "directLowPrice": 0.25
+      }
+    }
+  }
+}

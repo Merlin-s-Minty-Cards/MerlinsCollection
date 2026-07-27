@@ -27,8 +27,8 @@ def _catalog(card_id, name, *, set_id="sv1", set_name="Scarlet & Violet", rarity
         number="001",
         rarity=rarity,
         images=CardImages(
-            small="https://images.pokemontcg.io/sv1/1_hires.png",
-            large="https://images.pokemontcg.io/sv1/1_hires.png",
+            small="https://assets.tcgdex.net/en/sv/sv01/1/high.webp",
+            large="https://assets.tcgdex.net/en/sv/sv01/1/high.webp",
         ),
         last_synced_at=datetime.now(tz=timezone.utc),
     )
@@ -309,7 +309,7 @@ def test_search_items_include_card_catalog_summary(inv_client, mint_token):
     assert card["set_name"] == "Scarlet & Violet"
     assert card["number"] == "001"
     assert card["rarity"] == "Common"
-    assert card["image_small"] == "https://images.pokemontcg.io/sv1/1_hires.png"
+    assert card["image_small"] == "https://assets.tcgdex.net/en/sv/sv01/1/high.webp"
 
 
 def test_search_item_card_is_null_when_catalog_missing(inv_client, mint_token):

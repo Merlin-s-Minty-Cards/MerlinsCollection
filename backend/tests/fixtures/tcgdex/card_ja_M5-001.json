@@ -1,0 +1,40 @@
+{
+  "category": "Pokemon",
+  "id": "M5-001",
+  "illustrator": "Akino Fukuji",
+  "localId": "001",
+  "name": "トロピウス",
+  "rarity": "Common",
+  "set": {
+    "id": "M5",
+    "name": "アビスアイ",
+    "cardCount": { "official": 81, "total": 118 }
+  },
+  "variants": {
+    "firstEdition": false,
+    "holo": false,
+    "normal": true,
+    "reverse": false,
+    "wPromo": false
+  },
+  "dexId": [357],
+  "hp": 110,
+  "types": ["Grass"],
+  "stage": "Basic",
+  "regulationMark": "J",
+  "updated": "2026-07-18T07:44:00.190Z",
+  "pricing": {
+    "cardmarket": {
+      "updated": "2026-07-26T08:02:24.858Z",
+      "unit": "EUR",
+      "idProduct": 888185,
+      "avg": 0.02,
+      "low": 0.02,
+      "trend": 0.03,
+      "avg1": 0.08,
+      "avg7": 0.04,
+      "avg30": 0.03
+    },
+    "tcgplayer": null
+  }
+}

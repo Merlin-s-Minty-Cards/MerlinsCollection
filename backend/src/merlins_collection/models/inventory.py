@@ -39,10 +39,13 @@ class Language(StrEnum):
     """The print language of a physical item — part of its IDENTITY, not a label.
 
     A Japanese Seismitoad is a DIFFERENT card from the English one and carries a
-    different market value, so this field decides whether the (English-only)
-    catalog may be consulted for an item at all. Adding a member needs no data
-    migration: records written before the field existed simply validate as
-    ``EN``, the default.
+    different market value, so this field is part of the catalog lookup key: a
+    JP item resolves to a JP catalog row, never to its English twin. Records
+    written before the field existed simply validate as ``EN``, the default.
+
+    ``EN`` and ``JP`` are the only members and that is deliberate — the source
+    spreadsheet contains no other language, and every added member is another
+    axis of matcher ambiguity for data that does not exist (RFC 0003 §4).
     """
 
     EN = "EN"
@@ -200,13 +203,15 @@ _MARKET_FINISH_FALLBACK = (
 
 
 def _market_price(card, finish: str | None) -> Decimal | None:
-    """The pokemontcg.io market price for a card, preferring the item's finish.
+    """The catalog market price (USD) for a card, preferring the item's finish.
 
     ``card.prices`` is keyed by finish (``normal``/``holofoil``/…); the item's own
     finish is tried first, then a sensible fallback order, then any finish that
     carries a market figure. ``None`` when the card has no market price at all.
+    Every band is USD regardless of which provider supplied it, so no currency
+    check is needed here (see ``models.catalog.FinishPrice``).
 
-    Requires a ``finish``: the TCGplayer figures are UNGRADED prices, so they are
+    Requires a ``finish``: the catalog figures are UNGRADED prices, so they are
     surfaced only for raw items (which always carry a finish). A graded slab has
     no finish and commands a grade premium the catalog does not know, so it gets
     no market price here and the caller keeps the slab's own figure.
@@ -238,7 +243,7 @@ class CardSummary(BaseModel):
     number: str
     rarity: str | None = None
     image_small: str | None = None
-    # Live pokemontcg.io market price (per finish) — the customer-facing price for
+    # Live catalog market price in USD (per finish) — the customer-facing price for
     # a matched card. ``None`` when the catalog has no market figure; the caller
     # then falls back to the sheet's listed price.
     market_price: Decimal | None = None
