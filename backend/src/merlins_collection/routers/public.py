@@ -15,10 +15,11 @@ burst in a cold/just-expired window to ONE DynamoDB scan, serving the
 last-known-good value to a request whose recompute fails. In the happy path
 the cache is per-process and clears on restart — worst case is one scan per
 instance per TTL window, and data is at most ``_CACHE_TTL_SECONDS`` stale.
-That guarantee does NOT extend to a sustained DB brownout: a failed recompute
-leaves the cache's timestamp unset, so the next request (and every request
-after it, one at a time behind the lock — never a concurrent storm) retries
-the scan immediately, with no backoff, until one succeeds.
+Under a sustained DB brownout a failed recompute serves last-known-good and
+opens a short error-backoff window (``_CACHE_ERROR_BACKOFF_SECONDS``), so the
+failing scan is retried at most once per window — not once per request — and
+recovery is automatic once a scan succeeds. The lock is acquired with a bounded
+timeout so a hung scan can never wedge callers indefinitely.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from typing import Callable, TypeVar
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from merlins_collection.dependencies import get_repo
@@ -47,6 +48,23 @@ from merlins_collection.services.dynamodb import InventoryRepository
 router = APIRouter(prefix="/public", tags=["public"])
 
 _CACHE_TTL_SECONDS = 300.0
+
+# On a compute (DynamoDB scan) FAILURE while a last-known-good value exists, keep
+# serving that stale value for this long before re-attempting a scan. This turns a
+# sustained brownout into ONE failed scan per backoff window instead of one per
+# request. It is short relative to the TTL, so recovery lags the DB healing by at
+# most this window, and the data is already allowed to be _CACHE_TTL_SECONDS stale.
+_CACHE_ERROR_BACKOFF_SECONDS = 30.0
+
+# Max time to wait for the single-flight lock before giving up. A scan that hangs
+# while holding the lock must not wedge every other caller of this endpoint
+# indefinitely: past this bound we serve last-known-good (or fail 503) instead of
+# blocking. Comfortably longer than a healthy scan, shorter than "forever".
+_CACHE_LOCK_TIMEOUT_SECONDS = 10.0
+
+# Fixed back-off hint on the 503 we raise when the lock can't be acquired and no
+# cached value exists, so a client backs off instead of hammering a wedged path.
+_CACHE_UNAVAILABLE_RETRY_AFTER = 5
 
 # The business (and its customers) are in US/Pacific. Production runs on UTC, so
 # "today" MUST be computed in the business timezone or a same-day show misfiles as
@@ -67,43 +85,83 @@ class _TTLCache:
 
     ``compute`` runs UNDER the lock, so a concurrent burst in a cold/just-expired
     window coalesces to exactly one call (the rest wait, then read the fresh
-    value) — this is thundering-herd suppression, not brownout protection. If
-    ``compute`` raises and a previous value exists, that last-known-good value is
-    served for THIS call, but the cached timestamp is left unset, so the very
-    next call (and every one after it, still one at a time behind the lock) will
-    retry ``compute`` immediately. There is no backoff: a sustained upstream
-    failure is re-scanned on every request until it recovers, just serialized
-    rather than concurrent.
+    value) — thundering-herd suppression.
+
+    SERVE-STALE WITH BACKOFF: if ``compute`` raises and a previous value exists,
+    that last-known-good value is served AND an error-backoff window is opened
+    (``error_backoff`` seconds). While that window is open, subsequent calls keep
+    serving the stale value WITHOUT re-running ``compute`` — so a sustained
+    DynamoDB brownout costs one failed scan per window, not one per request. Once
+    the window elapses a call retries ``compute``; a success refreshes the value
+    and clears the backoff (automatic recovery). A first-call failure with NO
+    prior value still propagates — a value that never existed is never served.
+
+    BOUNDED LOCKING: the single-flight lock is acquired with a ``lock_timeout``.
+    If a scan hangs while holding the lock, a new caller does not block forever —
+    past the timeout it serves last-known-good if present, else raises a 503. The
+    fallback reads ``self._value`` without the lock, which is safe under CPython's
+    GIL because the reference is only ever REPLACED, never mutated in place.
     """
 
-    def __init__(self, ttl: float) -> None:
+    def __init__(
+        self,
+        ttl: float,
+        *,
+        error_backoff: float = _CACHE_ERROR_BACKOFF_SECONDS,
+        lock_timeout: float = _CACHE_LOCK_TIMEOUT_SECONDS,
+    ) -> None:
         self._ttl = ttl
+        self._error_backoff = error_backoff
+        self._lock_timeout = lock_timeout
         self._lock = Lock()
         self._at: float | None = None
         self._value: object | None = None
-        self._has_value = False
+        # Monotonic instant before which a failed recompute keeps serving stale
+        # (the error-backoff window); ``None`` when not in backoff.
+        self._retry_at: float | None = None
 
     def get_or_compute(self, compute: Callable[[], T]) -> T:
-        with self._lock:
+        if not self._lock.acquire(timeout=self._lock_timeout):
+            # A prior scan is wedged holding the lock. Serve last-known-good rather
+            # than block this (and every other) caller indefinitely; if we have
+            # nothing cached, fail cleanly with a 503 instead of hanging.
+            cached = self._value
+            if cached is not None:
+                return cached  # type: ignore[return-value]
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="This resource is temporarily unavailable; please retry shortly.",
+                headers={"Retry-After": str(_CACHE_UNAVAILABLE_RETRY_AFTER)},
+            )
+        try:
             now = time.monotonic()
-            if self._has_value and self._at is not None and now - self._at < self._ttl:
+            # Fresh value within the TTL: serve it.
+            if self._value is not None and self._at is not None and now - self._at < self._ttl:
+                return self._value  # type: ignore[return-value]
+            # Inside an error-backoff window: serve stale without re-scanning.
+            if self._value is not None and self._retry_at is not None and now < self._retry_at:
                 return self._value  # type: ignore[return-value]
             try:
                 value = compute()
             except Exception:
-                if self._has_value:
+                if self._value is not None:
+                    # Open/renew the backoff window so the next request serves stale
+                    # instead of re-running the failing scan immediately.
+                    self._retry_at = time.monotonic() + self._error_backoff
                     return self._value  # type: ignore[return-value]
                 raise
             self._at = time.monotonic()
             self._value = value
-            self._has_value = True
+            self._retry_at = None  # a good recompute clears any backoff
             return value
+        finally:
+            self._lock.release()
 
     def clear(self) -> None:
         with self._lock:
             self._at = None
             self._value = None
-            self._has_value = False
+            self._retry_at = None
 
 
 _shows_cache = _TTLCache(_CACHE_TTL_SECONDS)

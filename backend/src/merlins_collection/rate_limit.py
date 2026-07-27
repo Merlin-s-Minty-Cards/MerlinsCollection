@@ -25,8 +25,18 @@ TWO-TIER CAP on ``/chat``:
 
 KEYING: per authenticated Cognito ``sub`` so two customers never share a bucket.
 Under the ``AUTH_DISABLED`` dev bypass every request carries the same synthetic
-``dev-user`` sub, so we key by client IP instead — read straight off
-``request.client.host`` (the socket peer), NEVER a proxy-trusting XFF helper.
+``dev-user`` sub, so we key by client IP instead.
+
+IP KEYS AND THE PROXY TRUST BOUNDARY: every IP key here reads
+``request.client.host`` and nothing else — this module never parses
+``X-Forwarded-For`` itself, because hand-parsing it unconditionally is exactly
+how a spoofable key gets introduced. In production ``request.client.host`` is
+already the REAL client IP: the container runs uvicorn with ``--proxy-headers``
+and a SCOPED ``FORWARDED_ALLOW_IPS`` (never ``*``), so uvicorn's
+ProxyHeadersMiddleware validates the hop and rewrites ``scope["client"]`` before
+any of this runs. Without that, everything behind the ALB would share one
+bucket. The trust set is defined and justified in ``backend/Dockerfile`` — if it
+is ever widened to ``*``, these IP keys become attacker-forgeable.
 
 FAIL MODE when the limiter itself can't verify (table unreachable / throttled):
   * ``/chat`` FAILS CLOSED — returns 503 rather than proceeding to Bedrock
@@ -282,8 +292,8 @@ def caller_key(request: Request, user: AuthenticatedUser) -> str:
     Keys by Cognito ``sub`` for real users; keys by client IP under the
     ``AUTH_DISABLED`` dev bypass (where every request shares the ``dev-user``
     sentinel sub and would otherwise collapse into one global bucket). The IP is
-    read from ``request.client.host`` (the socket peer) directly — never from a
-    spoofable ``X-Forwarded-For`` helper.
+    read from ``request.client.host`` only — proxy-header trust is resolved
+    upstream by uvicorn, never by hand here (see the module docstring).
     """
     if settings.auth_disabled or not user.sub or user.sub == "dev-user":
         host = request.client.host if request.client else "unknown"
@@ -389,8 +399,11 @@ def rate_limit_public(
 ) -> None:
     """Per-IP cost cap for the UNAUTHENTICATED ``/public/*`` endpoints.
 
-    These carry no Cognito ``sub``, so the bucket is the socket-peer IP
-    (``request.client.host`` — never a spoofable ``X-Forwarded-For``). Fails OPEN:
+    These carry no Cognito ``sub``, so the bucket is the client IP from
+    ``request.client.host``. Behind the ALB that is the REAL client IP rather
+    than the ALB's — uvicorn's ``--proxy-headers`` with a scoped
+    ``FORWARDED_ALLOW_IPS`` resolves it before this dependency runs, so anonymous
+    callers get separate buckets instead of collapsing into one. Fails OPEN:
     the reads are cheap and the 300s cache absorbs the steady state, so this is a
     burst blunter, not a correctness gate. Runs before the endpoint body, so an
     over-limit anonymous burst 429s without launching a ``list_inventory`` scan.

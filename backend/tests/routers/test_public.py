@@ -295,6 +295,100 @@ def test_ttl_cache_serves_last_known_good_on_compute_error():
     assert cache.get_or_compute(boom) == "good"
 
 
+# ---- Item 1: error-backoff suppresses the brown-out re-scan storm ----
+
+def test_ttl_cache_error_backoff_suppresses_rescan_storm():
+    """During a sustained upstream failure the cache must NOT re-run the failing
+    scan on every request — it serves last-known-good behind a backoff window."""
+    from merlins_collection.routers.public import _TTLCache
+
+    cache = _TTLCache(0, error_backoff=30)  # ttl=0 => never "fresh" by ttl alone
+    calls = {"n": 0}
+
+    def good():
+        calls["n"] += 1
+        return "good"
+
+    def boom():
+        calls["n"] += 1
+        raise RuntimeError("DynamoDB brown-out")
+
+    assert cache.get_or_compute(good) == "good"   # n == 1 (seed a good value)
+    assert cache.get_or_compute(boom) == "good"   # n == 2 (failing scan opens backoff)
+    # Every subsequent request inside the backoff window serves stale WITHOUT
+    # re-running the failing scan.
+    for _ in range(20):
+        assert cache.get_or_compute(boom) == "good"
+    assert calls["n"] == 2, (
+        "compute must be bounded during the error-backoff window, not run per request"
+    )
+
+
+def test_ttl_cache_recovers_after_error_backoff_elapses():
+    """Once the backoff window elapses and a scan succeeds, the fresh value serves."""
+    from merlins_collection.routers.public import _TTLCache
+
+    cache = _TTLCache(0, error_backoff=0.05)
+
+    def boom():
+        raise RuntimeError("DynamoDB brown-out")
+
+    assert cache.get_or_compute(lambda: "old") == "old"
+    assert cache.get_or_compute(boom) == "old"      # enters backoff, serves stale
+    time.sleep(0.06)                                 # let the backoff window elapse
+    assert cache.get_or_compute(lambda: "new") == "new"  # recompute runs and recovers
+
+
+def test_ttl_cache_first_call_error_propagates_with_no_value():
+    """A first-call error with NO prior value must still raise — never serve a
+    value that does not exist."""
+    from merlins_collection.routers.public import _TTLCache
+
+    cache = _TTLCache(300)
+
+    def boom():
+        raise RuntimeError("DynamoDB brown-out")
+
+    with pytest.raises(RuntimeError):
+        cache.get_or_compute(boom)
+
+
+# ---- Item 3: bounded lock acquisition (a hung scan can't wedge callers forever) ----
+
+def test_ttl_cache_acquire_timeout_serves_last_known_good():
+    """If a prior scan is wedged holding the lock, a new caller must not block
+    indefinitely — it serves last-known-good after the acquire timeout."""
+    from merlins_collection.routers.public import _TTLCache
+
+    cache = _TTLCache(300, lock_timeout=0.05)
+    assert cache.get_or_compute(lambda: "good") == "good"
+
+    # Simulate a hung scan by holding the lock from this thread; the next call's
+    # acquire must time out and fall back to the cached value.
+    assert cache._lock.acquire()
+    try:
+        assert cache.get_or_compute(lambda: "never-runs") == "good"
+    finally:
+        cache._lock.release()
+
+
+def test_ttl_cache_acquire_timeout_without_value_raises_503():
+    """A wedged lock with NO cached value fails cleanly (503-style) rather than
+    blocking forever."""
+    from fastapi import HTTPException
+
+    from merlins_collection.routers.public import _TTLCache
+
+    cache = _TTLCache(300, lock_timeout=0.05)
+    assert cache._lock.acquire()
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            cache.get_or_compute(lambda: "never-runs")
+        assert exc_info.value.status_code == 503
+    finally:
+        cache._lock.release()
+
+
 # ---- per-IP rate limiting on the public surface (item 2c) ----
 
 class _AlwaysLimited:
@@ -313,6 +407,28 @@ def test_public_endpoints_carry_a_rate_cap(pub_client):
     try:
         assert client.get("/public/shows").status_code == 429
         assert client.get("/public/featured-cards").status_code == 429
+    finally:
+        app.dependency_overrides.pop(get_rate_limiter, None)
+
+
+class _BrokenLimiter:
+    def check(self, tiers, *, now=None):
+        from merlins_collection.rate_limit import RateLimiterUnavailable
+
+        raise RateLimiterUnavailable("simulated DynamoDB failure")
+
+
+def test_public_endpoints_fail_open_when_limiter_unavailable(pub_client):
+    """The public reads are cheap, so a broken limiter must not take them down —
+    they fail OPEN (serve) rather than 503."""
+    from merlins_collection.main import app
+    from merlins_collection.rate_limit import get_rate_limiter
+
+    client, _ = pub_client
+    app.dependency_overrides[get_rate_limiter] = lambda: _BrokenLimiter()
+    try:
+        assert client.get("/public/shows").status_code == 200
+        assert client.get("/public/featured-cards").status_code == 200
     finally:
         app.dependency_overrides.pop(get_rate_limiter, None)
 
