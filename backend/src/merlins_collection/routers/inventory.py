@@ -37,20 +37,37 @@ router = APIRouter(prefix="/inventory", tags=["inventory"])
 # cards, not booster packs. Only available raw/graded items reach a customer.
 _CUSTOMER_KINDS = {"raw", "graded"}
 
+# Phase 5 (D3, display scoping): only items physically stored in a
+# customer-facing location (the glass display case or a toploader binder page)
+# are shown. ``factory_sealed`` items (still in original plastic wrap — a
+# condition premium, not a physical location) are also visible regardless of
+# location. Items in storage, binders, or with no recorded location stay hidden.
+_CUSTOMER_VISIBLE_LOCATIONS = frozenset({"glass", "toploader"})
+
 
 def customer_visible_items(repo: InventoryRepository) -> list[InventoryItem]:
     """The ONE cohort every customer surface is allowed to show: available items
-    of a customer-visible kind.
+    of a customer-visible kind stored in a customer-visible location.
 
     This is a security boundary (leaking sold/held or bulk/sealed stock is the
     failure mode), so the predicate lives in exactly one place. Search, the authed
     dashboard summary, and the ANONYMOUS public featured endpoint all call this —
     a future exclusion (a ``needs_review`` gate, a new ``RESERVED`` status) is then
     made once here and can never drift on the public endpoint.
+
+    The location gate (Phase 5, D3) ensures that only items in a display-ready
+    location (glass case, toploader) or marked ``factory_sealed`` are surfaced.
+    ``getattr`` is used because ``factory_sealed`` exists only on
+    ``RawInventoryItem``; graded slabs must have a visible location.
     """
     return [
         i for i in repo.list_inventory()
-        if i.kind in _CUSTOMER_KINDS and i.status == ItemStatus.AVAILABLE
+        if i.kind in _CUSTOMER_KINDS
+        and i.status == ItemStatus.AVAILABLE
+        and (
+            getattr(i, "location", None) in _CUSTOMER_VISIBLE_LOCATIONS
+            or getattr(i, "factory_sealed", False)
+        )
     ]
 
 

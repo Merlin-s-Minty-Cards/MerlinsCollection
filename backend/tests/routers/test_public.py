@@ -51,6 +51,7 @@ def _raw(card_id, *, market=None, listed="10.00", status=ItemStatus.AVAILABLE):
         acquired_at=date.today(),
         finish="holofoil",
         condition=Condition.NM,
+        location="glass",
     )
 
 
@@ -64,6 +65,7 @@ def _graded(card_id, *, market=None, listed="50.00"):
         company=GradingCompany.PSA,
         grade=Decimal("9"),
         cert_number="12345678",
+        location="glass",
     )
 
 

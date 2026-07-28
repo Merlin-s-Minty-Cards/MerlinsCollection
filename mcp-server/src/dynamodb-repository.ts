@@ -38,6 +38,12 @@ const MAX_BATCH_ATTEMPTS = 8; // bound the UnprocessedKeys retry loop
 // /inventory/search rules; admin-only tools come later.
 const PUBLIC_KINDS = new Set(["raw", "graded"]);
 
+// Phase 5 (D3, display scoping): only items stored in a customer-facing
+// location are shown. factory_sealed items are also visible regardless of
+// location (a condition premium, not a physical place). Mirrors the backend
+// _CUSTOMER_VISIBLE_LOCATIONS frozenset in routers/inventory.py.
+const PUBLIC_LOCATIONS = new Set(["glass", "toploader"]);
+
 const SEALED_TYPE_LABELS: Record<string, string> = {
   booster_box: "Booster Box",
   etb: "Elite Trainer Box",
@@ -50,7 +56,11 @@ const SEALED_TYPE_LABELS: Record<string, string> = {
 type Row = Record<string, unknown>;
 
 function isPublicInventory(row: Row): boolean {
-  return PUBLIC_KINDS.has(String(row.kind)) && row.status === "available";
+  return (
+    PUBLIC_KINDS.has(String(row.kind)) &&
+    row.status === "available" &&
+    (PUBLIC_LOCATIONS.has(String(row.location)) || row.factory_sealed === true)
+  );
 }
 
 /** Canonical grade string, matching the backend's `_grade_key` (10 not 10.0). */

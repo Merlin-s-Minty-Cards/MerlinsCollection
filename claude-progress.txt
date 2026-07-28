@@ -10,8 +10,16 @@ STATUS: **PHASE 1 COMPLETE (a61f0c6). PHASE 2 CODE COMPLETE (d2b3de4, pushed).
         PHASE 3 COMPLETE (39afd35, pushed) — general architecture.
         PHASE 3.1 STAGE B COMPLETE — import_singles enriched-CSV rewrite
         (committed this session, pushed). Council PASS (2 seats, 0 gating).
-        THE LIVE WIPE HAS STILL NOT BEEN RUN — it is now UNBLOCKED and waiting
-        only on the owner to fire it. PHASE 5 IS NEXT.
+        THE LIVE WIPE HAS STILL NOT BEEN RUN — owner approved firing it live
+        this session, but 3 dry-run attempts all aborted identically because
+        TCGdex's Japanese card data is genuinely ~50% incomplete (confirmed
+        via live investigation — NOT transient, will NOT self-resolve by
+        retrying; see LOG 2026-07-28 "LIVE WIPE ATTEMPT — BLOCKED BY TCGDEX"
+        + its "FOLLOW-UP" entry). Nothing touched in DynamoDB. BLOCKED ON A
+        NEW OWNER DECISION (how the seed's JA magnitude-check threshold
+        should treat this), not on TCGdex recovering.
+        PHASE 5 COMPLETE — display scoping location gate. Council PASS
+        (Security + Contrarian, 0 gating findings). PHASE 6 IS NEXT.
         *** PHASE 4 IS PAUSED / ON HOLD, NOT "next" or "deferred-then-resumed
         soon" — it does not become the active phase after 3/5/6/7 without an
         explicit owner go-ahead. See owner clarifications, LOG 2026-07-27
@@ -770,12 +778,21 @@ PHASE 4 — Graded slab pipeline (the special path)
   honest needs_review when unverifiable). No slab is priced from a raw finish.
 
 PHASE 5 — Display scoping (only unsold shown)
+  [*** DONE — committed this session (2026-07-28). Council PASS (Security +
+  Contrarian, 0 gating findings; Contrarian FATAL overruled on deployment-
+  context grounds — see verdict.md). ***]
   5.1 Confirm routers/inventory.py (search + summary) and routers/public.py filter
-      status=AVAILABLE, not merely kind. MCP toCard path shows real names.
+      status=AVAILABLE AND location in {glass, toploader} OR factory_sealed,
+      not merely kind. MCP isPublicInventory() mirrors the same predicate.
+      DONE: _CUSTOMER_VISIBLE_LOCATIONS frozenset + factory_sealed gate added
+      to customer_visible_items() (inventory.py) and PUBLIC_LOCATIONS +
+      factory_sealed gate added to isPublicInventory() (dynamodb-repository.ts).
   5.2 Sold items must be reachable for internal analytics/P&L but never in the
-      customer search/chat surfaces.
-  ACCEPTANCE: customer search/chat/public endpoints return only AVAILABLE items;
-  a sold item is present in the DB but absent from those responses.
+      customer search/chat surfaces. DONE: status=AVAILABLE gate (pre-existing)
+      + location gate (new) ensure sold/held/locationless items are hidden.
+  ACCEPTANCE: customer search/chat/public endpoints return only AVAILABLE items
+  at a visible location; a sold item is present in the DB but absent from
+  those responses. VERIFIED: 779 backend tests passed, 73 MCP tests passed.
 
 PHASE 6 — Review tooling + docs
   6.1 build_review.py / apply_review_decisions.py: update for TCGdex ids +
@@ -1655,6 +1672,130 @@ Q5. RESOLVED/MOOT — the sheet is NOT mostly sold; see Section 2's Data block. 
   updated), CLAUDE.md (Third-Party APIs section from prior session's owner
   clarifications, committed alongside).
 
+2026-07-28  PHASE 5 — DISPLAY SCOPING (LOCATION GATE). DONE. Council PASS.
+  Added location gate to customer_visible_items() (backend, inventory.py) and
+  isPublicInventory() (MCP, dynamodb-repository.ts). Items must now satisfy:
+  kind in {raw,graded} AND status=AVAILABLE AND (location in {glass,toploader}
+  OR factory_sealed=True). The factory_sealed special case handles the
+  importer's map_location("sealed") → factory_sealed=True, location=None
+  transformation (a condition premium, not a physical place).
+  NO changes to routers/public.py — it imports customer_visible_items from
+  inventory.py, so the location gate applies automatically.
+  COUNCIL (2 seats per budget rule — Security + Contrarian):
+    Security: NO EXPLOITABLE FINDINGS. 1 MEDIUM carried: scope factory_sealed
+      to kind==="raw" in TS predicate for structural parity with Python's
+      pydantic guarantee. Not exploitable today (no write path produces a
+      graded row with factory_sealed=true). Follow-up for Phase 4 resumption.
+    Contrarian: OBJECTION, 1 FATAL — "every graded slab becomes permanently
+      invisible" because import_slabs never sets location. OVERRULED by Judge:
+      import_slabs is in DEFERRED_TABS, Phase 4 is PAUSED, the wipe will
+      delete all existing graded items, Singles-only reseed creates zero
+      GradedInventoryItem rows, and the Slabs.csv CSV import will NEVER be
+      built (owner decision). Finding recorded as follow-up for when Phase 4
+      resumes and a new slab-intake mechanism is built.
+  6 minor items carried (see .claude/council/verdict.md appendix):
+    1. TS factory_sealed not scoped to kind=raw (Security MEDIUM)
+    2. Case/whitespace sensitivity on location strings (Security LOW)
+    3. factory_sealed + location not mutually exclusive at type level (MINOR)
+    4. No test for location="" empty string (MINOR)
+    5. Case sensitivity relies on map_location lowercasing (MINOR)
+    6. Future slab-intake must set location (carried from overruled FATAL)
+  Suite: 779 passed, 6 skipped, 0 failed. MCP: 73 passed. Ruff clean.
+  Files touched: routers/inventory.py, dynamodb-repository.ts (implementation);
+  test_inventory.py, test_public.py, dynamodb-repository.test.ts (tests/
+  fixtures).
+
+2026-07-28  LIVE WIPE ATTEMPT — BLOCKED BY TCGDEX, NOT RUN. Owner explicitly
+  approved firing the live wipe+reseed+Singles-import this session (the
+  "customer-visible empty window" tradeoff is moot — no real customers yet).
+  Orchestrator/main-thread ran this directly (no agent fits "execute an
+  approved ops runbook against live infra"; confirmed against the
+  .claude/agents/ roster first).
+  PRE-FLIGHT (all clean): branch confirmed Database-Redesign-Second-Round,
+  working tree matched expected state (only the OTHER model's untouched
+  frontend/next.config.ts modified). Worktree-shadowing trap CONFIRMED LIVE:
+  a bare `python -c "import merlins_collection"` from backend/ resolved to
+  the SIBLING repo (C:\Users\ethar\.cursor\projects\MerlinsCollection\
+  backend\src\...), NOT this worktree — the global editable install is
+  currently shadowing. Forced correct resolution with explicit
+  `PYTHONPATH="$(pwd)/src"` and re-verified it resolved to THIS worktree's
+  backend/src before running anything. (See MEMORY.md "Worktree editable-
+  install shadowing" note — plain `python -m` from backend/ was NOT
+  sufficient here; the explicit PYTHONPATH prefix was required.) AWS
+  identity confirmed (account 560151615792, IAM user Merlin-Dev) and target
+  table confirmed (`merlins-cards`, ACTIVE, 55,210 items) — matches the
+  VERIFIED BASELINE block exactly.
+  STEP 1 (dry run) — `python -m scripts.wipe_catalog --confirm-table
+  merlins-cards`, run 3 times (2 unprompted retries of a non-destructive
+  dry run, 1 more at the owner's explicit go-ahead after reporting): ALL
+  THREE aborted identically, exit code 1, BEFORE computing any "would
+  delete" counts:
+    "tcgdex: /en/cards page 2 came back empty; confirming before ending the
+    walk" / same for /ja/cards. "ABORTED before the swap; nothing was
+    deleted: catalog came back short: seeded 8159 of the 16192 cards the
+    set list advertises" (JP), EN: seeded 23444 of 23746 expected.
+  Byte-identical across all 3 runs — rules out ordinary network flakiness;
+  this is a reproducible TCGdex pagination gap right now, not a wrong-
+  table/wrong-data problem, and not (apparently) a bug in our wipe/seed
+  code (Phase 1/2 already Council-reviewed and tested against this same
+  TCGdex client). The script's own truncation guard did exactly its job:
+  aborted before the swap, wrote nothing, deleted nothing.
+  NOTHING WAS TOUCHED IN DYNAMODB. merlins-cards still holds its pre-attempt
+  55,210 items, untouched. Steps 2-4 (--execute, seed_catalog, singles
+  import) were NOT attempted.
+  Owner's decision when reported: STOP for now, wait for TCGdex, retry
+  later (either the owner or a future session) rather than force past the
+  guard or debug TCGdex integration code in this conversation (out of
+  scope for this session per the owner's original instruction).
+
+  FOLLOW-UP, SAME SESSION — owner asked to continue investigating TCGdex.
+  Dispatched to web-browser agent (research only, no code touched). VERDICT,
+  with live evidence: *** THIS IS NOT TRANSIENT. Waiting will NOT fix it. ***
+  Re-fetched /en/cards, /ja/cards, /en/sets, /ja/sets live via raw curl —
+  exact same counts reproduced (EN 23444/23746, JA 8159/16192). Root cause
+  PINNED DOWN: grouped the JA bulk listing by set-id prefix and diffed
+  against /ja/sets — of 177 JA sets, 108 (61%) return ZERO cards in the bulk
+  listing. Spot-checked several of those sets at the PER-SET endpoint too
+  (e.g. GET /v2/ja/sets/S4a "Shiny Star V", S10b "Pokémon GO", XY2, ADV1,
+  SV6a) — cardCount.official reports the correct expected number in every
+  case, but `cards: []` is empty even at the single-set endpoint. The
+  card-level data genuinely does not exist yet in TCGdex's community-
+  maintained backing database for these JA sets — not a pagination bug, not
+  an outage, not anything on our end. These are not obscure sets either
+  (span 2003-2024, include major mainline releases). EN by contrast is only
+  missing 25 of 218 sets, all genuinely niche (Trainer Kits/Jumbo/Sample
+  promos) — a normal long-tail gap, which is why EN clears the 90% rail and
+  JA doesn't. TCGdex's own status page (tcgdex.dev/status) frames per-
+  language completeness as an ongoing, varying, ACCEPTED steady state, not
+  a tracked defect with a fix ETA. No GitHub issue exists specifically
+  tracking "JA card data incomplete" as a bug to fix.
+  IMPLICATION FOR THIS REBUILD: re-running the dry run later will almost
+  certainly reproduce the SAME abort — this is not a "wait it out" situation.
+  The pre-Phase-2 design (D1, Section 1) already accepted "some cards have
+  no price data" as a tradeoff; it did NOT anticipate "~50% of an entire
+  language's card-level data is simply absent from the source." This is a
+  NEW open question the owner needs to decide, not something to silently
+  route around: options include (a) lower/split the seed's
+  MIN_EXPECTED_RATIO per-language (JA tuned to ~45-50%, not 90%) so a
+  genuinely-that-incomplete JA catalog is treated as an accepted normal
+  state instead of an abort trigger, (b) compute "expected" from sets that
+  actually have cards.length > 0 at the per-set endpoint rather than the
+  raw /sets total (so the sanity check reflects "did the crawl get
+  everything that CURRENTLY EXISTS" not "everything set metadata implies
+  should eventually exist"), (c) accept EN-only for now and revisit JA
+  later, or (d) something else the owner prefers. NONE of these were
+  implemented this session — investigation only, no code changed, per the
+  owner's explicit scope limit on this conversation.
+  NEXT ACTION FOR A NEW/RESUMING CONVERSATION: do NOT just retry the dry run
+  expecting it to clear on its own — re-read this entry first. The live
+  wipe is still owner-APPROVED in principle, but the JA completeness
+  question above needs an explicit owner decision on how the seed's
+  magnitude rail should treat JA before attempting --execute again (or
+  before deciding to proceed EN-only). Surface this to the owner rather
+  than picking an option unilaterally.
+  Files touched this pass: claude-progress.txt only (this entry + Section 7
+  HANDOFF "NEXT ACTION" line). No application code touched.
+
 ========================================================================
 7 — HANDOFF (rewritten 2026-07-27 after Phase 3, for a fresh conversation)
 ========================================================================
@@ -1665,11 +1806,10 @@ WHERE THINGS STAND
   skip it, and do not treat it as "next" after 5/6/7 either; it resumes only
   on an explicit owner go-ahead (see owner clarifications, LOG 2026-07-27
   post-Phase-3). Phases 5, 6, 7 NOT STARTED.
-  NEXT ACTION FOR A NEW CONVERSATION: **PHASE 5 — display scoping** (only
-  unsold items with customer-visible locations shown). Phase 3.1 Stage B is
-  DONE (committed and pushed this session — see LOG 2026-07-28). The
-  import_singles rewrite against Singles_enriched_v3.csv is complete and
-  Council-approved. Phase 5 is the next roadmap item.
+  NEXT ACTION FOR A NEW CONVERSATION: **PHASE 6 — review tooling + docs**.
+  Phase 5 (display scoping) is DONE (committed and pushed this session —
+  see LOG 2026-07-28). Phase 3.1 Stage B is also DONE. Phase 6 is the
+  next roadmap item.
   *** CAVEAT ON "PHASE 3 DONE" — NOW RESOLVED: the original caveat warned that
   39afd35 was the general architecture only, and two items were NOT YET
   IMPLEMENTED IN CODE: (1) strip listed_price/"Sticker" handling, and (2)
@@ -1696,18 +1836,41 @@ WHERE THINGS STAND
   `Singles_enriched_v3.csv`, under TDD (RED tests first, per CLAUDE.md),
   implementing the confidence-tier rule and the listed_price removal
   together, then clear the Council Loop. ***
-  Suite: 774 passed, 6 skipped, 0 failed (was 763 before Phase 3.1 Stage B).
+  Suite: 779 passed, 6 skipped, 0 failed (was 774 before Phase 5).
+  MCP: 73 passed, 0 failed.
   `python -m ruff check backend/src` clean. NOTE: `ruff` is not on PATH in
   this environment — run `python -m ruff`.
   Working tree at handoff: ONLY frontend/next.config.ts modified-unstaged, and
   it belongs to the OTHER model (RFC 0002). Leave it alone; never commit it.
 
-*** THE LIVE WIPE IS NOW UNBLOCKED AND WAITING ON THE OWNER TO FIRE IT ***
-  The blocker is GONE: the Phase 3 importer now exists, so the wipe can be
-  paired with an immediate reseed+import and the customer-visible empty window
-  is minutes, not days. The wipe has still NOT been run, deliberately — there
-  is NO BACKUP (the owner explicitly declined one), so this is the owner's
-  trigger to pull, not something a model should do unattended.
+*** THE LIVE WIPE IS OWNER-APPROVED BUT BLOCKED ON A NEW OWNER DECISION, NOT RUN ***
+  The design/code blocker is GONE (Phase 3 importer exists, wipe pairs with an
+  immediate reseed+import). The OWNER'S GO-AHEAD IS ALSO IN (see LOG
+  2026-07-28 "LIVE WIPE ATTEMPT" entry — owner explicitly approved firing it
+  live this session; the empty-window tradeoff is moot, no real customers
+  yet). The wipe has still NOT been run. *** CORRECTED — do NOT read this as
+  "waiting for TCGdex to recover," an earlier draft of this section did and
+  that framing was WRONG: a follow-up investigation (same LOG entry,
+  "FOLLOW-UP, SAME SESSION") confirmed live against the API that JA's
+  8159/16192 shortfall is TCGdex's persistent, structural data-completeness
+  state (108 of 177 JA sets have zero card-level data, even at the per-set
+  endpoint) — not an outage, not transient, WILL NOT self-resolve by
+  retrying later. EN's 23444/23746 is a normal, acceptable long-tail gap
+  and is not the blocker. *** Re-running the dry run unmodified will almost
+  certainly reproduce the same abort. THE REAL BLOCKER NOW: an explicit
+  owner decision on how the seed's magnitude rail (MIN_EXPECTED_RATIO,
+  scripts/seed_catalog.py) should treat JA's genuine ~50% completeness —
+  see the LOG entry's four sketched options (per-language threshold /
+  compute "expected" only from sets with real card data / EN-only for now /
+  other). Get that decision, implement it if it requires a code change
+  (Council Loop applies — it changes import/abort behavior), THEN re-run
+  the dry run (Section 7 "HOW TO RUN THE WIPE WHEN THE TIME COMES", remember
+  the PYTHONPATH="$(pwd)/src" prefix — the worktree-shadowing trap was
+  confirmed LIVE this session, plain `python -m` was not sufficient) and
+  proceed through steps 2-4 once it comes back clean. Nothing has been
+  touched in DynamoDB so far. There is still NO BACKUP (the owner explicitly
+  declined one) — treat the destructive step
+  with the same care as before.
   *** SCOPE NARROWED (owner, this session — see LOG "SCOPE NARROWED TO
   SINGLES ONLY"): the "customer-visible empty window is minutes, not days"
   claim above needs a correction. It's still true for SINGLES. It is NO

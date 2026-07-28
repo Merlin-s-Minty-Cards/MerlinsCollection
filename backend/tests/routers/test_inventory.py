@@ -35,7 +35,7 @@ def _catalog(card_id, name, *, set_id="sv1", set_name="Scarlet & Violet", rarity
     )
 
 
-def _raw(card_id, *, condition=Condition.NM, price="10.00", finish="holofoil", **extra):
+def _raw(card_id, *, condition=Condition.NM, price="10.00", finish="holofoil", location="glass", **extra):
     return RawInventoryItem(
         card_id=card_id,
         listed_price=Decimal(price),
@@ -43,11 +43,12 @@ def _raw(card_id, *, condition=Condition.NM, price="10.00", finish="holofoil", *
         acquired_at=date.today(),
         finish=finish,
         condition=condition,
+        location=location,
         **extra,
     )
 
 
-def _graded(card_id, *, grade="9", price="50.00"):
+def _graded(card_id, *, grade="9", price="50.00", location="glass"):
     return GradedInventoryItem(
         card_id=card_id,
         listed_price=Decimal(price),
@@ -56,6 +57,7 @@ def _graded(card_id, *, grade="9", price="50.00"):
         company=GradingCompany.PSA,
         grade=Decimal(grade),
         cert_number="12345678",
+        location=location,
     )
 
 
@@ -415,7 +417,7 @@ def test_summary_est_value_prefers_market_over_listed(inv_client, mint_token):
     neither = RawInventoryItem(
         card_id="sv1-3", listed_price=None, current_market_value=None,
         cost_basis=Decimal("5.00"), acquired_at=date.today(),
-        finish="holofoil", condition=Condition.NM,
+        finish="holofoil", condition=Condition.NM, location="glass",
     )
     repo.put_inventory_item(neither)
 
@@ -442,7 +444,7 @@ def test_summary_sets_tracked_counts_distinct_catalog_sets(inv_client, mint_toke
     orphan = RawInventoryItem(
         card_id=None, listed_price=Decimal("5.00"),
         cost_basis=Decimal("2.00"), acquired_at=date.today(),
-        finish="holofoil", condition=Condition.NM,
+        finish="holofoil", condition=Condition.NM, location="glass",
     )
     repo.put_inventory_item(orphan)
 
@@ -514,6 +516,107 @@ def test_customer_visible_items_filters_to_available_raw_and_graded(dynamo_repo)
 
     assert len(items) == 2
     assert all(i.kind in {"raw", "graded"} and i.status is ItemStatus.AVAILABLE for i in items)
+
+
+def test_customer_visible_items_excludes_items_without_visible_location(dynamo_repo):
+    """Phase 5 (D3, display scoping): an available raw item with no visible
+    location (location=None, factory_sealed=False) must NOT be customer-visible,
+    even though it passes the kind+status gate. An item stored with a
+    customer-visible location ("glass") still appears."""
+    from merlins_collection.routers.inventory import customer_visible_items
+
+    no_location = _raw("sv1-none")
+    no_location.location = None
+    no_location.factory_sealed = False
+    dynamo_repo.put_inventory_item(no_location)                        # ✗ no visible location
+
+    in_glass = _raw("sv1-glass")
+    in_glass.location = "glass"
+    dynamo_repo.put_inventory_item(in_glass)                           # ✓ visible location
+
+    items = customer_visible_items(dynamo_repo)
+
+    assert [i.card_id for i in items] == ["sv1-glass"]
+
+
+def test_customer_visible_items_includes_all_visible_locations(dynamo_repo):
+    """glass, toploader, and factory_sealed=True (location=None) are all
+    visible; a non-visible location string (e.g. "storage") is excluded."""
+    from merlins_collection.routers.inventory import customer_visible_items
+
+    glass = _raw("sv1-glass")
+    glass.location = "glass"
+    dynamo_repo.put_inventory_item(glass)                               # ✓
+
+    toploader = _raw("sv1-toploader")
+    toploader.location = "toploader"
+    dynamo_repo.put_inventory_item(toploader)                           # ✓
+
+    sealed = _raw("sv1-sealed")
+    sealed.location = None
+    sealed.factory_sealed = True
+    dynamo_repo.put_inventory_item(sealed)                              # ✓
+
+    storage = _raw("sv1-storage")
+    storage.location = "storage"
+    dynamo_repo.put_inventory_item(storage)                             # ✗ not a visible location
+
+    items = customer_visible_items(dynamo_repo)
+
+    assert {i.card_id for i in items} == {"sv1-glass", "sv1-toploader", "sv1-sealed"}
+
+
+def test_customer_visible_items_factory_sealed_is_visible(dynamo_repo):
+    """The Sealed special case (D3): the importer stores factory_sealed=True with
+    location=None for sheet rows whose location was "Sealed" — it's a condition
+    premium, not a physical place — and such items must still be visible."""
+    from merlins_collection.routers.inventory import customer_visible_items
+
+    item = _raw("sv1-1")
+    item.location = None
+    item.factory_sealed = True
+    dynamo_repo.put_inventory_item(item)
+
+    items = customer_visible_items(dynamo_repo)
+
+    assert [i.card_id for i in items] == ["sv1-1"]
+
+
+def test_search_excludes_items_without_visible_location(inv_client, mint_token):
+    """End-to-end: /inventory/search returns 0 results for an AVAILABLE raw item
+    with no visible location and no factory_sealed flag."""
+    client, repo = inv_client
+    item = _raw("sv1-1")
+    item.location = None
+    item.factory_sealed = False
+    repo.put_inventory_item(item)
+
+    resp = client.get(
+        "/inventory/search",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["total"] == 0
+
+
+def test_summary_counts_only_location_visible_items(inv_client, mint_token):
+    """/inventory/summary's cards_in_vault reflects the location gate too: an
+    available raw item with no visible location does not count."""
+    client, repo = inv_client
+    visible = _raw("sv1-glass")
+    visible.location = "glass"
+    repo.put_inventory_item(visible)
+
+    hidden = _raw("sv1-hidden")
+    hidden.location = None
+    hidden.factory_sealed = False
+    repo.put_inventory_item(hidden)
+
+    resp = client.get(
+        "/inventory/summary",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    assert resp.json()["cards_in_vault"] == 1
 
 
 def test_search_excludes_bulk_and_non_available_items(inv_client, mint_token):
@@ -763,7 +866,7 @@ def test_search_result_does_not_leak_notes_cost_or_location(inv_client, mint_tok
     client, repo = inv_client
     repo.put_inventory_item(
         _raw(None, display_name="Dragonair #181",
-             notes="Dragonair #181.0 — 30-32 — For David", location="safe box 3"))
+             notes="Dragonair #181.0 — 30-32 — For David", location="glass"))
 
     resp = client.get(
         "/inventory/search",
@@ -776,7 +879,7 @@ def test_search_result_does_not_leak_notes_cost_or_location(inv_client, mint_tok
     blob = " ".join(str(v) for v in result.values())
     assert "30-32" not in blob
     assert "For David" not in blob
-    assert "safe box 3" not in blob
+    assert "glass" not in blob
 
 
 def test_search_result_display_name_is_none_when_item_stored_none(

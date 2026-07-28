@@ -95,6 +95,7 @@ function rawItem(overrides: Item = {}): Item {
     acquired_at: "2026-04-01",
     finish: "holofoil",
     condition: "NM",
+    location: "glass",
     ...overrides,
   };
 }
@@ -115,6 +116,7 @@ function gradedItem(overrides: Item = {}): Item {
     company: "PSA",
     grade: 9.5,
     cert_number: "12345678",
+    location: "glass",
     ...overrides,
   };
 }
@@ -244,6 +246,27 @@ describe("listCards", () => {
   it("excludes sealed products from the customer-facing projection (cards-only surface, RFC 0001)", async () => {
     const { repo } = repoWith({ "INV#2": [{ Items: [sealedItem()] }] });
     expect(await repo.listCards()).toEqual([]);
+  });
+
+  // Phase 5 (D3, display scoping): the backend's customer_visible_items() now
+  // adds a location gate (location in {glass, toploader} OR factory_sealed) on
+  // top of kind+status. isPublicInventory() must mirror it so a raw item with
+  // no visible location (e.g. still in a binder/storage) never reaches the
+  // chat tools even though it's an available raw/graded item.
+  it("excludes an available raw item with no customer-visible location", async () => {
+    const { repo } = repoWith({
+      "INV#0": [{ Items: [rawItem({ location: null, factory_sealed: false })] }],
+    });
+    expect(await repo.listCards()).toEqual([]);
+  });
+
+  it("includes an available raw item stored in glass", async () => {
+    const { repo } = repoWith(
+      { "INV#0": [{ Items: [rawItem({ location: "glass" })] }] },
+      { "CARD#base1-4|META": meta("base1-4") },
+    );
+    const cards = await repo.listCards();
+    expect(cards).toHaveLength(1);
   });
 
   it("fans out across all ten inventory shards", async () => {
