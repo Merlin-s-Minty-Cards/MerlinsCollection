@@ -1801,15 +1801,14 @@ Q5. RESOLVED/MOOT — the sheet is NOT mostly sold; see Section 2's Data block. 
 ========================================================================
 WHERE THINGS STAND
   Phase 1 DONE (a61f0c6). Phase 2 CODE DONE (d2b3de4). Phase 3 DONE (39afd35,
-  pushed) FOR THE GENERAL ARCHITECTURE ONLY — see the CAVEAT immediately below,
-  which supersedes the plain "DONE" reading. Phase 4 PAUSED/ON HOLD BY OWNER —
-  skip it, and do not treat it as "next" after 5/6/7 either; it resumes only
-  on an explicit owner go-ahead (see owner clarifications, LOG 2026-07-27
-  post-Phase-3). Phases 5, 6, 7 NOT STARTED.
+  pushed) — general architecture + Phase 3.1 Stage B (3a69d2a, pushed).
+  Phase 4 PAUSED/ON HOLD BY OWNER — skip it, do not treat it as "next" after
+  5/6/7 either; it resumes only on an explicit owner go-ahead.
+  Phase 5 DONE (52ee96a, pushed) — display scoping location gate. Council
+  PASS (Security + Contrarian, 0 gating findings).
+  Phases 6, 7 NOT STARTED.
   NEXT ACTION FOR A NEW CONVERSATION: **PHASE 6 — review tooling + docs**.
-  Phase 5 (display scoping) is DONE (committed and pushed this session —
-  see LOG 2026-07-28). Phase 3.1 Stage B is also DONE. Phase 6 is the
-  next roadmap item.
+  Phase 6 is the next roadmap item.
   *** CAVEAT ON "PHASE 3 DONE" — NOW RESOLVED: the original caveat warned that
   39afd35 was the general architecture only, and two items were NOT YET
   IMPLEMENTED IN CODE: (1) strip listed_price/"Sticker" handling, and (2)
