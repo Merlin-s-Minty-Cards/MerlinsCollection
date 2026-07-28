@@ -1,0 +1,1807 @@
+========================================================================
+CLAUDE PROGRESS — CATALOG + INVENTORY REBUILD (multilingual + graded)
+Branch: Database-Redesign-Second-Round
+  (CORRECTION: an earlier draft of this brief said "Polishing-For-Deployment" —
+  that was wrong. This worktree's actual current branch, confirmed via `git
+  status`, is Database-Redesign-Second-Round. Do not re-check-out branches
+  based on the old text.)
+Author of this brief: orchestrator/main-thread session (2026-07-26, updated 2026-07-27)
+STATUS: **PHASE 1 COMPLETE (a61f0c6). PHASE 2 CODE COMPLETE (d2b3de4, pushed).
+        PHASE 3 COMPLETE (39afd35, pushed) — general architecture.
+        PHASE 3.1 STAGE B COMPLETE — import_singles enriched-CSV rewrite
+        (committed this session, pushed). Council PASS (2 seats, 0 gating).
+        THE LIVE WIPE HAS STILL NOT BEEN RUN — it is now UNBLOCKED and waiting
+        only on the owner to fire it. PHASE 5 IS NEXT.
+        *** PHASE 4 IS PAUSED / ON HOLD, NOT "next" or "deferred-then-resumed
+        soon" — it does not become the active phase after 3/5/6/7 without an
+        explicit owner go-ahead. See owner clarifications, LOG 2026-07-27
+        (post-Phase-3). ***
+This file is the full instruction set for the next model to execute this
+rebuild. Read it top to bottom before touching code. Everything in here
+supersedes the previous roadmap (deployment + the card_id-matching bug) —
+that work is done/obsolete for this task.
+
+>>> START HERE IF YOU ARE A NEW CONVERSATION <<<
+  1. Read Section 7 (HANDOFF) at the bottom FIRST — it has current state, the
+     live-wipe sequencing decision that is waiting on the owner, and the
+     Council budget rule the owner set.
+  2. Then read Sections 1-5 for the locked design.
+  3. Section 6 is the running log.
+  NO LONGER BLOCKED: the owner's merge of `Polishing-For-Deployment` landed as
+  b6fa7a5 and the suite was verified green after it. Both Phase-2 preconditions
+  (2.0a interleaved-write race, 2.0b destructive-entrypoint rail) are CLOSED.
+========================================================================
+
+## VERIFIED BASELINE (measured 2026-07-26, orchestrator session)
+These facts were empirically re-measured this session and CORRECT several
+numbers/claims stated further down in this file (originally drawn from a stale
+export). Where this block disagrees with prose later in the file, THIS BLOCK
+WINS — the later prose has been patched to match, but if you spot a stray
+leftover number, trust this block and the Phase/Section notes marked
+"CORRECTED" over anything else.
+  - Worktree guardrail: this checkout is a git worktree; its sibling checkout
+    lives at C:\Users\ethar\.cursor\projects\MerlinsCollection (branch
+    Polishing-For-Deployment). A machine-global editable pip install of the
+    backend can make `import merlins_collection` resolve to the SIBLING's
+    backend/src instead of this worktree's, if you run a script directly.
+    backend/pyproject.toml sets `pythonpath=["src"]`, so `pytest` is safe —
+    but any ad-hoc `python backend/scripts/foo.py` run is NOT guaranteed safe.
+    Prefer running scripts as `python -m` from backend/ or otherwise confirm
+    which tree resolved before trusting output.
+  - Baseline test run, measured this session: `python -m pytest backend/tests -q`
+    -> 558 passed, 7 skipped, 0 failed. (See Phase 7 correction below — an
+    earlier draft of this file wrongly claimed 6 pre-existing failures.)
+  - AWS is live and reachable: account 560151615792, IAM user Merlin-Dev,
+    DynamoDB table `merlins-cards` in us-east-1 is ACTIVE with 55,210 items.
+  - The authoritative spreadsheet is data/spreadsheet/7-25-2026 Inventory.xlsx
+    (header "Sticker updated 7/24"), now present in this worktree. Its first
+    five tabs (Sealed, Slabs, Singles, Bulk, Consignments) were re-split to
+    data/spreadsheet/csv/ this session; the finance tabs are out of scope.
+    See Section 2 below for the real row counts — they differ sharply from an
+    earlier draft of this file, which had measured a STALE export instead.
+
+## OWNER DECISIONS (this session — recorded, in effect)
+  - Phase 2's wipe + reseed is APPROVED TO RUN LIVE against the real
+    merlins-cards table. The owner was asked and explicitly declined a backup
+    step. Treat Phase 2 as destructive-authorized; do not add a backup gate
+    that wasn't asked for, but do keep using the generation
+    load-then-swap mechanism in dynamodb.py so the site is never half-empty.
+  - The owner confirmed running all 7 phases unattended this session:
+    implement, commit, and push to Database-Redesign-Second-Round as each
+    phase lands. Do NOT open a PR. Leave a PR body ready (via the
+    pull-request agent) for the owner to copy in manually later.
+  - The owner supplied the xlsx and confirmed only the first five tabs
+    (Sealed, Slabs, Singles, Bulk, Consignments) are in scope; finance tabs
+    are out of scope and must not be imported.
+
+## COORDINATION NOTE
+Another model may be working in this same branch on an UNRELATED task (RFC 0002:
+shows / featured-finds / dashboard real-data wiring — files: routers/public.py,
+models/business.py, routers/inventory.py, services/spreadsheet_import.py, and
+much of frontend/). Do not assume you own the whole tree. Before large
+deletes/renames, `git status`. Touch ONLY the files THIS plan names, and expect
+spreadsheet_import.py / routers/inventory.py to also carry RFC 0002 edits —
+integrate around them, do not revert them.
+
+## AUTONOMY — RUN WITHOUT WAITING ON THE OWNER
+The owner wants you to proceed end-to-end with NO manual input from them for now.
+So:
+  - USD display currency is CONFIRMED (Open-Q1 resolved). Prefer TCGplayer USD;
+    else Cardmarket EUR converted via a config FX constant (note the conversion).
+  - PSA API token and PriceCharting key are NOT yet provided and will come AFTER
+    you have written code. Do NOT block on them. Build each behind a clean,
+    swappable interface (e.g. a CertLookup / GradedPriceSource protocol) with a
+    deterministic STUB/FIXTURE implementation selected when no key is configured.
+    Everything must be testable and the site must run fully on the stubs; wiring
+    the real credential is then a one-line config swap for the owner later.
+  - Where a real price/identity is unavailable (stub, or a card the source does
+    not cover), fall back to the sheet value and set needs_review — never invent
+    a figure, never halt the pipeline.
+Only the still-open items in section 4 (Q2/Q3/Q4/Q5) may need the owner, and each
+has a working default so you can ship without them.
+
+========================================================================
+0 — THE GOAL (why we are doing this)
+========================================================================
+The owner has a NEW spreadsheet that reflects ONLY current-conversation reality:
+    data/spreadsheet/7-25-2026 Inventory.xlsx
+    (CSV exports in data/spreadsheet/csv/: Singles.csv, Slabs.csv, Sealed.csv,
+     Bulk.csv, Consignments.csv, plus finance tabs we ignore.)
+
+We are rebuilding the card data layer so that:
+  1. The database contains ONLY the inventory in THIS sheet — nothing else.
+  2. Non-English cards (Japanese etc.) are fully supported — identified, matched,
+     and priced. The current design bands them "NA" because pokemontcg.io is
+     English-only. That premise is being removed.
+  3. Graded slabs are handled by a slab-appropriate pipeline (cert lookup +
+     graded pricing), not the raw-card matcher.
+  4. EVERY row of the IN-SCOPE tab(s) is STORED (sold + unsold, with location,
+     cost, sold price, dates). Only UNSOLD items are ever SHOWN to customers.
+
+*** SCOPE NARROWED (owner, this session — see LOG 2026-07-27 "SCOPE NARROWED TO
+SINGLES ONLY" entry): for THIS rebuild, the "in-scope tab" in point 4 above is
+Singles.csv ONLY. Sealed, Bulk, Consignments, and Slabs are explicitly PUSHED
+TO A FUTURE CHANGE — not part of Phase 3, not part of this rebuild's scope at
+all right now. Owner's reasoning: those tabs are small relative to Singles
+(Sealed 3 rows, Bulk 137, Consignments 5, Slabs 17, vs. Singles' 265) and it's
+safe to defer building/reviewing/fixing them rather than doing it now. This
+narrows point 1 above too, in practice: after this rebuild's Phase 2 wipe +
+Phase 3 Singles-only import, the database contains Singles inventory from this
+sheet plus whatever business master data Phase 2 preserved — NOT the sealed/
+bulk/consignment/slab rows from this sheet, even though they exist in it. See
+the "DEFERRED — OTHER TABS" callout after Phase 3 (Section 3) for the specific
+already-written code this affects, and Section 7 HANDOFF for the operational
+consequence on the live table after the wipe. ***
+
+A full wipe of the CARD data is acceptable and expected (see Phase 2 scope).
+
+========================================================================
+1 — DECISIONS (LOCKED — do not relitigate; owner approved these)
+========================================================================
+D1. CATALOG SOURCE = TCGdex ONLY (https://tcgdex.dev, REST + GraphQL, free).
+    - Replaces pokemontcg.io entirely. TCGdex covers 14 languages incl. Japanese
+      and ships pricing embedded per card: TCGplayer (USD, hourly) + Cardmarket
+      (EUR, daily) with 1/7/30-day trend fields.
+    - Tradeoff accepted: some older EX/Full-Art, very recent, and regional cards
+      have no market price on TCGplayer/Cardmarket → those fall back to the
+      sheet's own value. (pokemontcg.io had the SAME gaps, so nothing is lost.)
+    - Because prices are cached in our own DynamoDB via the daily sync, a TCGdex
+      outage delays a refresh; it never takes the site down.
+
+D2. SLABS = PSA cert lookup (identity/verification) + a graded-price source
+    (market value), with the sheet's Sticker/Current Market as fallback.
+    *** PHASE 4 (all of D2) IS PAUSED — see owner clarification, LOG 2026-07-27
+    (post-Phase-3). Nothing below is being built right now. ***
+    - PSA cert API: cert number -> verified name/set/year/card#/grade/grade
+      label/population/official images. The cert number IS the identity — no
+      fuzzy matching for slabs. (Scan/paste the cert -> auto-fill. Photo-OCR via
+      AWS Rekognition/"scan a slab in" is a FUTURE enhancement, not this task.)
+    - PSA API covers PSA only. RESOLVED (was open Q3, see Section 4): CGC/BGS/SGC
+      slabs do NOT get an automated cert-lookup integration — they arrive too
+      rarely to justify building one. Instead, a FUTURE admin-only manual-entry
+      flow (staff keys in the slab's info directly, including selecting a
+      grading company other than PSA) is planned; also out of scope/paused with
+      the rest of Phase 4. GradingCompany StrEnum (PSA/BGS/CGC/SGC) already on
+      GradedInventoryItem.company in models/inventory.py — CONFIRMED this still
+      fits the manual-entry plan as-is, no model change needed for this decision.
+    - Graded market value source: PriceCharting (per-grade values) is the target;
+      if no key/budget, fall back to the sheet's Sticker/Current Market column and
+      flag the slab for manual review. Store graded prices as PricePoint(kind=
+      "graded", company, grade).
+    - RESOLVED (owner, this session): Slabs.csv will NEVER get an automated
+      CSV/spreadsheet import script — not "deferred," WILL NOT BE BUILT. The
+      only future slab-intake path is the "scan a slab in" feature (PSA cert
+      scan -> auto-fill), itself future/out of scope now. Whoever eventually
+      resumes Phase 4 must not write an import_slabs-driven-by-Slabs.csv
+      automation as the deliverable — import_slabs()/schema support may stay
+      (already built, Phase 3), but wiring it into run_import as a real ongoing
+      CSV import path is explicitly not the plan.
+
+D3. CURRENT INVENTORY = STORE EVERYTHING, SHOW ONLY UNSOLD **AND** ON A
+    CUSTOMER-VISIBLE LOCATION.
+    - NARROWED (owner, this session — see LOG "SCOPE NARROWED TO SINGLES ONLY"
+      entry): "everything" here means every row of Singles.csv, NOT every row
+      of every tab. Sealed, Bulk, Consignments, and Slabs are OUT OF SCOPE for
+      this rebuild (deferred to a future change; see the "DEFERRED — OTHER
+      TABS" callout in Section 3 and Section 0's scope note above). The
+      mechanic itself (store sold + unsold, show only unsold) is UNCHANGED —
+      it just currently has one tab to apply to instead of five.
+    - Import ALL Singles.csv rows (sold and unsold). Store status, location,
+      cost_basis, market_value_at_purchase, sold price, acquired/sold dates.
+    - REVERSED (owner, this session — see LOG 2026-07-27 "LISTED_PRICE DROPPED"
+      entry, supersedes the "listed/sticker" line that used to sit here):
+      `listed_price` / "sticker price" is DROPPED FROM SCOPE ENTIRELY. The owner
+      does not want a sticker/listed-price concept carried anywhere in the
+      pipeline. The ONE AND ONLY customer-facing price is `current_market_value`
+      (already on `_ItemBase`), refreshed by the periodic TCGdex/graded-price
+      sync — exactly what that field's existing docstring already implies. The
+      importer must NOT populate `listed_price` with anything meaningful going
+      forward. See Section 2 and Section 5 for the detail and the Section 6 LOG
+      entry for the full reversal.
+    - A row is SOLD when it has a Sold amount AND a Date Sold; otherwise AVAILABLE
+      (see ItemStatus). Customer/search/MCP surfaces show ONLY status=AVAILABLE
+      (already the intent of _CUSTOMER_KINDS / list_inventory — verify it filters
+      status, not just kind).
+    - RESOLVED (owner, this session — SECOND, real filter, not previously in this
+      file): status=AVAILABLE alone is NOT sufficient. A row must ALSO have
+      `location` in {Glass, Toploader, Sealed} to ever be shown to a customer.
+      Any other location value means the card is physically in inventory but NOT
+      customer-visible, regardless of status. VERIFIED this session — location is
+      NOT used for filtering ANYWHERE today:
+        * models/inventory.py:130 `_ItemBase.location: str | None = None` — a
+          bare free string, no enum, no allowed-values constraint.
+        * routers/inventory.py: `_CUSTOMER_KINDS = {"raw","graded"}` (line 38) and
+          the AVAILABLE filter (line 53) check `kind` and `status` only; grepping
+          the whole file for "location" (case-insensitive) hits only two
+          docstring/comment mentions (lines 64, 80) — zero functional use.
+        * routers/public.py: grepping for "AVAILABLE"/"_CUSTOMER_KINDS"/"location"
+          hits nothing relevant (only an unrelated `HTTP_503...` and a Show's
+          address-style "location" field) — public.py does not filter inventory
+          by location either.
+      OPEN IMPLEMENTATION SUBTLETY for whoever writes Phase 3/5: services/
+      spreadsheet_import.py's `map_location()` (line ~219) already special-cases
+      the literal text "sealed" on a Singles row — it does NOT store
+      `location="sealed"`; it sets `factory_sealed=True` and leaves `location=None`
+      (a factory-wrapped single is a condition premium, not a place). So a raw
+      single sitting in a location literally named "Sealed" on the sheet will NOT
+      get `location="sealed"` under the current importer — decide whether the
+      customer-visibility filter needs a distinct source of truth for "physically
+      in a Sealed product" vs. this existing factory_sealed condition flag before
+      wiring the location gate; don't conflate them.
+      Also open: whether `location` should become a StrEnum (e.g.
+      {GLASS, TOPLOADER, SEALED, ...other non-visible values}) rather than a free
+      string, now that a real business rule depends on its exact value. Recorded
+      here as an OPEN DECISION for Phase 3/5 — NOT implemented, not decided which
+      way, just flagged so it isn't silently skipped.
+    - Nothing that is NOT in this sheet may remain in the card data (Phase 2 wipe).
+
+D4. WIPE SCOPE = CARDS ONLY.
+    - DELETE all catalog_card, inventory_item, price_point records, AND the
+      sale/transaction records derived from the sheet (re-import recreates them).
+    - PRESERVE non-card business master data that is not rebuilt from this sheet:
+      shows (SHOWLIST), consignor master records, auth/rate-limit tables. If in
+      doubt whether an entity is "card data", ASK before deleting.
+
+========================================================================
+2 — CURRENT CODE MAP (what exists today; what changes)
+========================================================================
+Models (backend/src/merlins_collection/models/)
+  - catalog.py     : CatalogCard, FinishPrice, PricePoint, CardImages.
+                     CHANGE: drop the "English-only" assumption; add language +
+                     price currency (see Phase 3). Header docstring cites
+                     pokemontcg.io — update.
+  - inventory.py   : _ItemBase (has language, status, location, cost_basis...),
+                     RawInventoryItem/GradedInventoryItem/Sealed/Bulk union,
+                     Language StrEnum (currently EN, JP ONLY — CORRECTED: this
+                     already suffices per Q4/Phase 1.2, no expansion needed),
+                     GradingCompany (PSA/BGS/CGC/SGC already present),
+                     ItemStatus (AVAILABLE/ON_HOLD/SOLD/... already present),
+                     _market_price() fallback + CardSummary.
+  - business.py    : shows/consignors (PRESERVE).
+
+Services (backend/src/merlins_collection/services/)
+  - pokemontcg.py  : REMOVE / REPLACE with tcgdex.py (new client + to_catalog_card).
+  - catalog_sync.py: rewire to TCGdex; still writes CatalogCard + daily PricePoints.
+                     (Known pre-existing `_gen()` gap — fix as part of this.)
+  - card_text.py   : normalize_name/number, core_name, SourceText, parse_language,
+                     item_language, CatalogIndex, finish helpers. The English-only
+                     language gate lives conceptually here + in build_review — REMOVE
+                     the "no catalog for non-EN" behavior; keep the normalizers.
+  - spreadsheet_import.py : import_singles/import_slabs/import_sealed/import_bulk/
+                     import_consignments + _match_card. MAJOR rewrite (Phase 3/4).
+  - dynamodb.py    : repo incl. acquire_import_lock / finalize_import (load-then-swap
+                     GENERATION replace) — USE THIS for the wipe+reseed, don't hand-roll.
+  - sales.py       : sheet Sold columns -> sale records. Keep; ensure sold items are
+                     STORED (D3), not dropped.
+
+Scripts (backend/scripts/)
+  - seed_catalog.py       : reseed catalog — repoint at TCGdex.
+  - import_spreadsheet.py / import_held_singles.py : the CLI import entrypoints.
+  - build_review.py + apply_review_decisions.py : the human-in-the-loop triage
+    round-trip. KEEP. IMPORTANT: this session just added finish-band inference
+    (finish_from_source + _finish_caveat + finish-aware predict_value) and the
+    bulk Approve/Reject buttons to build_review.py, with tests in
+    tests/scripts/test_build_review.py. That work is CORRECT and must be PRESERVED
+    / ported forward — do not regress it.
+  - backfill_language.py / build_singles_review.py : language backfill + singles view.
+
+Data: data/spreadsheet/7-25-2026 Inventory.xlsx (+ csv/). REAL row counts, verified
+against the sheet's raw XML this session: Singles 291, Slabs 17, Sealed 3, Bulk 137,
+Consignments 5.
+  STALE-EXPORT TRAP: an earlier draft of this file stated Singles 1203 / Slabs 142 /
+  Sealed 15. Those are not a bad measurement of this sheet — they are EXACT matches
+  for the OLD 7-22 CSVs sitting in the SIBLING checkout's
+  C:\Users\ethar\.cursor\projects\MerlinsCollection\data\spreadsheet\csv\. If a
+  script or a re-check lands back on 1203/142/15, it is reading the wrong
+  file/tree — stop and confirm which csv/ is in play. The authoritative workbook
+  header reads "Sticker updated 7/24"; the stale one reads "Sticker updated 7/16" —
+  that string is a fast tripwire if it turns up while inspecting a header.
+  Sheet shapes (of the REAL 7-25 tabs):
+  - *** Singles.csv UPDATED BY THE OWNER, verified this session (2026-07-27,
+    post-Phase-3) — the row/column facts below SUPERSEDE the "291 rows" /
+    column list immediately following this note; that was the PRE-edit shape.
+    The file is gitignored (data/spreadsheet/ — see .gitignore), so there is no
+    git diff to inspect; verified by reading the live file directly instead. ***
+    Current actual header: `Date,Location,Name,Card #,Condition,
+    Market @ purchase,Amount Paid,Sold,Date Sold,Venmo?` — 265 data rows (was
+    291; the owner also filled in some previously-blank cells and trimmed rows).
+    COLUMNS REMOVED vs. the pre-edit shape: "Sticker updated 7/24", "Notes",
+    "TCG Link". COLUMN ADDED: "Venmo?" (this one WAS already read by
+    import_singles pre-edit via `row.get("Venmo?")` at the sale-recording step,
+    so no risk there).
+    VERIFICATION AGAINST import_singles (services/spreadsheet_import.py:391-459)
+    AS IT STOOD AT INITIAL VERIFICATION — since UPDATED by two owner reversals
+    (LOG 2026-07-27 "LISTED_PRICE DROPPED" + "LLM ENRICHMENT PASS" entries);
+    read those before treating anything below as still-open risk:
+      * "Sticker" (fuzzy-matched via `_find(row, "Sticker")` at line 441, which
+        matches "Sticker updated 7/24" by prefix) fed `listed_price`.
+        SUPERSEDED/MOOT (owner, this session): `listed_price` is being DROPPED
+        FROM SCOPE ENTIRELY (see D3, Section 1) — the owner does not want a
+        sticker/listed-price concept anywhere in the pipeline; `current_market_
+        value` (from the periodic sync) is the only customer-facing price
+        going forward. The Sticker column's removal is therefore CORRECT, not
+        a risk — that column should never have fed anything. No action needed
+        against it; `_find(row, "Sticker")`/the `listed_price=` line in
+        import_singles should simply be deleted in the Phase 3.1 rewrite
+        rather than "fixed" to read a column that no longer exists.
+      * "TCG Link" WAS flagged as load-bearing (fed `language_from_url` as the
+        JP-detection fallback, `set_hint_from_url` as singles' only set-
+        disambiguation signal, and the stored `tcg_url` field). SUPERSEDED
+        (owner, this session, see LOG "LLM ENRICHMENT PASS" entry and the
+        rewritten Phase 3.2 below): URL-param language detection and live
+        fuzzy-match set-disambiguation are being REPLACED WHOLESALE by a
+        one-time LLM enrichment pass that reads Name + Card # (the title text
+        itself) and resolves language + card_id + confidence directly — it
+        never needed TCG Link to begin with under the new design. TCG Link's
+        removal is therefore ALSO moot under the new architecture, not a gap
+        to patch. (It remains true, historically, that TCG Link's loss would
+        have been a real regression under the OLD url-param-based design —
+        that old design is what's being replaced, precisely because it
+        depended on a fragile signal like this.)
+      * "Notes" (line 422, `row.get("Notes")`) — still LOW RISK, unaffected by
+        either reversal. `.get()` on a missing key returns `None` cleanly (no
+        crash); the composed `notes` field just loses that one free-text
+        component. Cosmetic, not structural.
+    BOTTOM LINE (UPDATED): neither remaining removed column is a real problem
+    anymore. "Sticker" was never going to be read again regardless of the CSV
+    edit (listed_price is out of scope). "TCG Link" would have been a real gap
+    under the old URL-param design, but the design itself changed out from
+    under it (see Phase 3.2 rewrite) — the LLM enrichment pass reads Name +
+    Card # directly and does not need a TCGplayer URL. "Notes" was always
+    harmless. Phase 3.1's importer rewrite should simply stop reading all
+    three of "Sticker"/"TCG Link"/"Notes"-for-language-purposes against
+    columns that no longer exist, rather than trying to recover them.
+  - Singles.csv (PRE-edit shape, 291 rows, superseded above): Date, Location,
+    Name, Card #, Condition, Market @ purchase, Amount Paid, Sold, Date Sold,
+    Sticker updated 7/24, Notes, TCG Link (a tcgplayer URL carrying a
+    `Language=` param + set/product slug). Kept here only as history — the
+    live file no longer has this shape.
+  - Slabs.csv (17 rows): Date Recieved, "Name (pkm + rarity + language )", Set,
+    card#, Grade, Cert #, Market @ time of purchase, Amount Paid, Sold, Date Sold,
+    Sticker, Current Market. NO product URL, NO grading-company column. Language is
+    embedded in the name cell for some rows; others are JP identifiable only by SET
+    (see Phase 4 corrections).
+  - Sealed.csv (3 rows): Column 1(date), Name, ... , Hold, TCG Link.
+  - Bulk.csv (137 rows) and Consignments.csv (5 rows): untouched by the sold-row
+    prune below — these ARE sale-event rows, not current holdings. Do not treat
+    them as unsold inventory.
+  NOT "mostly sold": the owner PRUNED sold rows out of Singles/Slabs/Sealed before
+  saving this workbook. Rows with BOTH a Sold amount AND a Date Sold = 0 of 291 in
+  Singles this session (Slabs/Sealed likewise ~0). This does NOT change D3 — store
+  everything, show only unsold is still the correct, required mechanic — it just
+  means importing today's sheet yields ~0 sold singles/slabs/sealed right now.
+  Don't treat that as a bug, don't try to "restore" missing sold history, and don't
+  pull rows from the stale 7-22 CSVs to compensate (see Q5, RESOLVED, Section 4).
+  Excel float artifact ("83.0", cert "121250194.0") is everywhere — strip_float_artifact
+  in card_text handles it; reuse it.
+
+Environment facts still true (needed to run): DynamoDB table `merlins-cards`,
+region us-east-1. Local runs can use AUTH_DISABLED=true and/or an endpoint-url
+override; build_review.py is Scan-only/read-only.
+
+========================================================================
+3 — WORK PLAN (phased; OUTSIDE-IN TDD per CLAUDE.md on every behavioral change:
+    RED failing test first -> confirm it fails -> GREEN minimal -> refactor.
+    Every code-writer submission clears the review Council before "done".)
+========================================================================
+
+PHASE 1 — TCGdex catalog client + multilingual model   [*** DONE — a61f0c6 ***]
+  Delivered: services/tcgdex.py (client + pure mappers), catalog/inventory model
+  changes (language, currency), config eur_usd_rate, seed_catalog.py repointed,
+  scripts/daily_sync.py added, pokemontcg.py + its tests deleted, RFC 0003
+  reconciled. Cleared two full Council rounds (16 findings -> 2 -> fixed).
+  Suite at close: 664 passed, 6 skipped, 0 failed. Details in Section 6 LOG.
+  Kept as tracked debt, deliberately NOT fixed in Phase 1 (see Section 7):
+  the interleaved-write race, and two Contrarian MINORs.
+  --- original spec, for reference ---
+  1.1 New services/tcgdex.py: HTTP client (REST is simplest; GraphQL optional),
+      paging over all cards, get_card(id), and to_catalog_card(raw) mapping into
+      CatalogCard. Mirror the retry/backoff shape pokemontcg.py had.
+  1.2 Model changes (models/catalog.py + inventory.py):
+      - CORRECTED (was "expand to EN/JP + FR/DE/IT/ES/PT if present"): resolved
+        empirically this session (see Q4, Section 4) — the sheet uses ONLY English
+        and Japanese. Language StrEnum already has EN/JP; just VERIFY it suffices
+        (it does) and update LANGUAGE_LABELS only if a gap turns up. Do NOT add
+        FR/DE/IT/ES/PT. Do add set-based JP inference: some Slabs rows are
+        Japanese by SET (e.g. SV11B, Shiny Treasure EX) with no `(jp)` marker and
+        no language tag in the name cell — language detection must fall back to a
+        set name/code lookup, not rely solely on the name marker or the Singles
+        TCG Link `Language=` param (see Phase 4 corrections).
+      - CatalogCard: add `language` (which printing) and make price currency
+        explicit. PricePoint: add `currency` ("USD"/"EUR") + keep `source`
+        ("tcgplayer"/"cardmarket"). Card identity key must include language so a
+        JP card and its EN twin are distinct catalog rows.
+      - card_id: TCGdex ids differ from pokemontcg.io ids. Decide the id scheme
+        (use TCGdex's own id; it is stable). Any stored pokemontcg.io id is dead
+        after the wipe — fine.
+  1.3 to_catalog_card price mapping: read TCGdex pricing block -> prices per
+      finish (USD from tcgplayer) AND record cardmarket where present. Decide the
+      display rule: prefer TCGplayer USD; else Cardmarket converted to USD (add a
+      simple FX constant/config, note the conversion in value_note); else none.
+  ACCEPTANCE: unit tests map a real TCGdex card (EN and a JP one) into CatalogCard
+  with correct name/set/number/language/prices. No pokemontcg.io import remains.
+
+PHASE 2 — Wipe + reseed catalog (cards only)
+  [*** CODE DONE — d2b3de4. THE LIVE WIPE HAS NOT BEEN RUN. ***]
+  Delivered: backend/scripts/wipe_catalog.py (NEW, carries the --execute /
+  --confirm-table rail, defaults to dry run), conditional catalog upserts
+  closing 2.0a, purge_card_data + a cat_gen load-then-swap in dynamodb.py,
+  seed_catalog.py reseed path, and 3 new/updated test files. Cleared one
+  Council round (3 converged data-loss findings -> all fixed). Suite at close:
+  739 passed, 6 skipped, 0 failed; ruff clean. Details in Section 6 LOG.
+  Deliberately NOT done here: executing the wipe against the live table — see
+  Section 7 for the sequencing question that decides when it runs.
+  `max_consecutive_failures` remains deferred: it belongs with the depth pass
+  (`refresh_held_prices`), which does not exist yet, so a failure counter with
+  no loop to count in would be speculative. It lands with the depth pass.
+  --- original spec, for reference ---
+  2.0 TWO PRECONDITIONS, both ruled by the Council Judge, both MANDATORY BEFORE
+      the live wipe runs. Do these first, in this order:
+      (a) INTERLEAVED-WRITE RACE. The catalog write path
+          (batch_upsert_catalog_cards in services/dynamodb.py) is check-then-act
+          with NO ConditionExpression and no lock. Phase 1's fix made re-runs
+          idempotent for the SEQUENTIAL case only. The moment Phase 2 adds a
+          depth pass, a depth pass and a breadth reseed interleaving on the same
+          card id let the unconditional put_item overwrite a priced row —
+          silently destroying prices. This was ruled a Phase-2 precondition
+          purely because no depth pass existed yet in Phase 1. Phase 2 creates
+          one. Close it with a ConditionExpression or acquire_import_lock BEFORE
+          the depth pass ships. A note to this effect is in seed_catalog.py's
+          flush() docstring.
+      (b) DESTRUCTIVE-ENTRYPOINT RAIL. Whatever entrypoint performs the live
+          wipe MUST carry seed_catalog.py's --execute / --confirm-table style
+          confirmation rail. (daily_sync.py was exempted only because it is
+          additive-only — do not copy that exemption to the wipe.)
+      Also still missing: `max_consecutive_failures` (RFC §7, default 25) has
+      ZERO occurrences in backend/. It lands with `refresh_held_prices`.
+  2.1 Reseed via seed_catalog.py over TCGdex, writing catalog_card + initial
+      price_point rows, using the dynamodb.py generation swap (load-then-swap) so
+      the site never sees a half-empty catalog.
+  2.2 Deletion: remove OLD catalog_card, inventory_item, price_point, and
+      sheet-derived sale/txn records. PRESERVE shows/consignors/auth/rate-limit
+      (D4). Prefer the generation mechanism over blind table scans-and-deletes.
+  ACCEPTANCE: table holds a fresh TCGdex catalog; zero old inventory_item rows;
+  business master data (shows/consignors) intact.
+
+PHASE 3 — Importer rewrite: Singles ONLY, store everything, show only unsold
+  [*** DONE (as originally scoped) — see LOG 2026-07-27. Council PASS (2
+  seats, 0 gating). SCOPE NARROWED TO SINGLES-ONLY SAME DAY, AFTER this
+  Council-approved diff landed — see LOG "SCOPE NARROWED TO SINGLES ONLY"
+  entry. The 39afd35 diff itself touched import_singles/import_sealed/
+  import_bulk/import_slabs together as general multilingual-architecture
+  work (parse_date fix, language plumbing, DEFERRED_TABS for Slabs) — that
+  landed code is NOT being reverted or removed. What changes going forward is
+  SCOPE: only import_singles gets any FURTHER work (Stage-B rewrite per Phase
+  3.2, listed_price removal per 3.1) as part of THIS rebuild. import_sealed /
+  import_bulk / import_consignments / import_slabs are frozen as-is — see the
+  "DEFERRED — OTHER TABS" callout right after this phase's ACCEPTANCE line
+  for known, deliberately-unfixed issues in them. ***]
+  3.1 import_singles ONLY is in scope for this rebuild (NARROWED, owner, this
+      session — see LOG "SCOPE NARROWED TO SINGLES ONLY"). import_sealed,
+      import_bulk, import_consignments, and import_slabs are OUT OF SCOPE /
+      DEFERRED to a future change — do not touch, test, or fix them as part
+      of this rebuild, even though they already exist as (mostly) working
+      code; leave them exactly as they are. import_singles: import ALL
+      Singles.csv rows (sold + unsold). Set status = SOLD when (Sold amount
+      present AND Date Sold present) else AVAILABLE. Store location,
+      cost_basis (Amount Paid), market_value_at_purchase (Market @ purchase),
+      sold price + dates.
+      REVERSED (owner, this session — see LOG 2026-07-27 "LISTED_PRICE DROPPED"):
+      strike "listed/sticker" from what the importer stores. `listed_price` is
+      OUT OF SCOPE entirely — do not read the (now-gone) Sticker column, do not
+      populate `listed_price` with any meaningful value. `_ItemBase.listed_price`
+      (models/inventory.py) may remain present on the Pydantic model as a dead/
+      unused optional field for now — NOT required to delete it from the model
+      as part of this phase, that's a follow-up cleanup — but nothing in the
+      importer or any UI/API logic should ever write or read it going forward.
+      `current_market_value` is the one and only customer-facing price field,
+      refreshed by the periodic sync job (per D3).
+      REVERSED (owner, this session — see LOG "LLM ENRICHMENT PASS" entry):
+      strike "Language from the TCG Link `Language=` param" as the mechanism —
+      see the rewritten 3.2 below. TCG Link is gone from the sheet anyway (see
+      Section 2's Singles.csv note), and the owner does not want URL-param
+      parsing or a `(jp)`-marker regex as the primary language signal even
+      where a URL exists.
+  3.2 Multilingual + identity matching — REWRITTEN this session (owner, see LOG
+      "LLM ENRICHMENT PASS" entry, then SIMPLIFIED further same day — see LOG
+      "STAGE A SIMPLIFIED TO A PROMPT" entry) into an explicit TWO-STAGE
+      design. This replaces the old single-stage "TCG Link URL param + name-
+      marker regex + live fuzzy-string _match_card" approach as the PRIMARY
+      resolution mechanism (card_text.py's normalizers are not deleted — see
+      Stage B).
+        STAGE A — ONE-TIME MANUAL PROMPT-DRIVEN CONVERSATION, NOT A SCRIPT.
+        CORRECTED (owner, this session): the first draft of this plan described
+        Stage A as a coded/maintained enrichment script. The owner considers
+        that overcomplicated for a ~265-row, run-rarely task. There is NO
+        script to build, own, or test. Instead: the executable prompt already
+        exists at `data/spreadsheet/ENRICHMENT_PROMPT.md` (already written,
+        do not recreate it) — running it is a manual, one-time (re-runnable
+        whenever the sheet changes) step: open a FRESH Claude Code
+        conversation, paste/run that prompt, let it work, review its output.
+        No new service code, no new tests — this is a DATA-PREP task, not
+        application code, and is explicitly exempt from the Council Loop (it
+        produces a data artifact, not a code diff).
+        What the prompt does (see the file itself for the authoritative
+        wording — this is a summary, not a duplicate spec): reads Singles.csv's
+        ACTUAL header at run time (does not hardcode column names — matters
+        given Section 2's documented header drift), and for each row
+        determines (a) language (EN/JP) from the Name + Card # title text
+        itself, with an explicit note that some rows are JP-only by SET (e.g.
+        SV11B, "Shiny Treasure EX" — same two-entry case `language_from_set`
+        in card_text.py already special-cases) rather than by any marker in
+        the name; (b) a candidate TCGdex card, VERIFIED against the LIVE
+        TCGdex API (`https://api.tcgdex.net/v2/...`) rather than trusted off
+        memorized set/number knowledge — a real hallucination guard; (c) a
+        plausibility cross-check using the sheet's own `Market @ purchase`
+        column against the candidate's price band, catching a confidently-
+        wrong match a name/number lookup alone would miss; (d) a
+        high/medium/low confidence rating. Runs in batches of ~50 rows with
+        incremental writes (so a mid-run interruption doesn't lose completed
+        batches). Writes a `Singles_enriched*.csv` artifact — the original
+        columns PLUS `language`, `matched_set_id`, `matched_set_name`,
+        `matched_number`, `matched_card_id`, `match_confidence`,
+        `match_notes`. `Singles.csv` itself is left untouched (the enriched
+        file is a derived working copy, not a replacement).
+        Same rationale as before, restated: reproducibility (the importer's
+        behavior doesn't silently change because an LLM answered differently
+        on a re-run — the enrichment step runs once, its output is committed/
+        reviewable, and THAT is what the importer reads), no runtime model
+        dependency inside a money-touching import pipeline, and a clean audit
+        trail (`match_notes`) of why a row matched what it matched. The
+        market-price cross-check is a bonus this simplification adds over the
+        original scripted design: a human reviewing the enriched file can see
+        AT A GLANCE whether a match's price is plausible, not just whether a
+        name/number string matched.
+        *** STAGE A IS DONE (owner, this session — see LOG "STAGE A COMPLETE"
+        entry). The owner ran the prompt in its own conversation and
+        personally reviewed the output. THE FINAL ARTIFACT, VERIFIED THIS
+        SESSION by reading its header/rows directly, IS
+        `data/spreadsheet/csv/Singles_enriched_v3.csv` — 267 lines (266 data
+        rows + header), header confirmed as exactly: `Date,Location,Name,
+        Card #,Condition,Market @ purchase,Amount Paid,Sold,Date Sold,
+        Venmo?,language,matched_set_id,matched_set_name,matched_number,
+        matched_card_id,match_confidence,match_notes`. THIS IS THE ONE AND
+        ONLY FILE STAGE B MUST READ. The same directory also holds
+        `Singles_enriched.csv`, `Singles_enriched_edited.csv`,
+        `Singles_enriched_final.csv`, and
+        `Singles_enriched_final_information_added.csv` — these are
+        SCRATCH/HISTORY from the review process, NOT the source to import
+        from. They are not deleted (no harm in leaving them) but Stage B
+        code must hardcode/reference `Singles_enriched_v3.csv` specifically,
+        not a generic "Singles_enriched.csv" glob or the bare stem. FINAL
+        TALLY: 266 rows — 247 high confidence, 6 medium confidence, 13 low
+        confidence (no confirmed match). ***
+        STAGE B — import_singles / _match_card CONSUME
+        `Singles_enriched_v3.csv`'s resolved columns DETERMINISTICALLY:
+        language and card_id come from that file, not from a live TCG-Link/
+        name-marker heuristic and not from any live LLM call. `_match_card`
+        and card_text.py's normalizers (normalize_name/number, core_name,
+        number_keys, item_language, etc.) are KEPT as a sanity-check / second
+        opinion where useful (e.g. validating `matched_card_id` still
+        resolves against the current catalog index) — but they are no longer
+        the PRIMARY identity-resolution path for Singles at import time.
+        import_singles itself makes NO LLM calls; it is a deterministic
+        consumer of an already-resolved artifact.
+        CONFIDENCE-TIER HANDLING RULE — RESOLVED (owner, this session, via
+        AskUserQuestion; supersedes the "OPEN IMPLEMENTATION DETAIL" framing
+        this used to carry):
+          - HIGH (247 rows): import normally with the resolved
+            `matched_card_id`/`language`/etc.
+          - MEDIUM (6 rows — #133 Meowth->me02-106, #145, #153 Zarude->
+            mep-088, #181, #189, #248): DOES have a real resolved
+            `matched_card_id` — import WITH that card_id, but still set
+            `needs_review=True`. Not a new rule, just confirming these 6
+            specific rows follow the pre-existing "medium still gets a human
+            second look" path (3.3), not the no-match path below.
+          - LOW / NO MATCH (13 rows, table below): import WITH
+            `needs_review=True` AND `card_id=None` — do NOT skip/omit these
+            rows from the database. The owner explicitly chose "store with
+            needs_review, matching the existing human-in-the-loop pattern"
+            over "skip entirely this run," specifically to avoid ~$300+ of
+            real paid-for inventory becoming invisible to the system. These
+            rows get a `RawInventoryItem` with no `card_id`, using the raw
+            sheet Name+Card # as the `display_name`/notes fallback (existing
+            `format_display_name` pattern), and NO market price (falls back
+            to nothing, since `listed_price` is out of scope per the
+            "LISTED_PRICE DROPPED" decision — `current_market_value` stays
+            `None` until a human resolves the row via build_review.py).
+          THE 13 NO-MATCH ROWS, verbatim (Stage A's own final review — these
+          are genuinely unmatchable via TCGdex per the owner's review, NOT
+          importer bugs to chase down; kept here so this isn't rediscovered):
+            Row 30  — Ultra Ball, Card # 68a, LP, $15.00, EN — League/
+              Championship promo line not in TCGdex at all.
+            Row 48  — Acerola 1st Place League Challenge, Card # 112a, MP,
+              $13.00, EN — same, league/championship promos not catalogued.
+            Row 56  — Quaxly (ch), Card # 507, NM, $3.00, EN — Chinese "Gem
+              Pack" sets exist in TCGdex but have zero card-level data;
+              owner's own sheet note says manual-only (kept verbatim in
+              match_notes).
+            Row 76  — Swablu (jp), Card # 202, NM, $7.00, JP — JA set sm8b is
+              real, zero cards indexed.
+            Row 111 — Skuntank V (Ch), Card # 144, NM, $7.00, EN — matching
+              zh-tw set only has 114 cards, can't reach #144; owner's own
+              sheet note flags as manual (kept verbatim).
+            Row 128 — Victini Promo (jp), Card # 109, NM, $64.00, JP — no
+              JA-locale BW-P promo set exists in TCGdex.
+            Row 167 — Onix Reverse, Card # 71, D, $2.00, EN — two identical
+              Onix candidates tied (sm7-71 vs ex2-71), no way to pick;
+              owner's own sheet note says ignore (kept verbatim).
+            Row 211 — Turtwig, Card # 17, LP, $8.00, EN — three identical
+              plain Turtwig commons tied (pop6/8/9-17), genuinely ambiguous.
+            Row 212 — Turtwig, Card # 17, LP, $8.00, EN — same as row 211,
+              duplicate purchase.
+            Row 215 — Espurr (jp), Card # 16, NM, $56.00, JP — JA set CP3
+              real, zero cards indexed.
+            Row 225 — Pikachu Bulbasaur Deck (Jp), Card # 13, NM+, $38.00,
+              JP — a tentative pop4-13 match was checked and confirmed
+              WRONG; real product is a vintage JP intro deck, not in TCGdex.
+            Row 249 — Typhlosion Ex (jp), Card # 3, LP, $30.00, JP — no
+              matching JP starter-deck product in TCGdex.
+            Row 265 — Magnezone (jp) first, Card # 68, LP, $1.00, JP — JA set
+              DP1 doesn't exist in TCGdex (404).
+      Keep the finish inference this session added for raw pricing (unaffected
+      by any of this — it's a separate axis from language/identity).
+  3.3 Preserve human-in-the-loop: items that don't confidently auto-match (now:
+      the 6 medium-confidence rows above, which DO get a card_id but still
+      needs_review=True, and the 13 no-match rows above, which get
+      needs_review=True with card_id=None) land in the build_review.py queue
+      exactly as today; the applier relinks them. Port the finish-band +
+      bulk-button work forward.
+  ACCEPTANCE: importing Singles.csv (the ONLY tab in scope — see NARROWED
+  above) via `Singles_enriched_v3.csv` yields the right AVAILABLE count
+  (unsold only) shown, with sold items STORED but hidden; JP singles match to
+  a JP catalog row, not banded NA; all 266 enriched rows are stored (247 high
+  imported clean, 6 medium imported with card_id + needs_review, 13 no-match
+  imported with card_id=None + needs_review) — none of the 13 unmatchable
+  rows are silently dropped.
+
+========================================================================
+DEFERRED — OTHER TABS (Sealed / Bulk / Consignments / Slabs)
+========================================================================
+*** NOT PART OF THIS REBUILD (owner, this session — see LOG "SCOPE NARROWED
+TO SINGLES ONLY" entry). Recorded here as KNOWN, DEFERRED issues so they
+aren't lost — tied to whichever FUTURE phase eventually picks these tabs back
+up. Do NOT fix any of this now; it is explicitly out of scope. Investigation
+was read-only (existing code inspected, nothing changed). ***
+  1. `import_sealed` (services/spreadsheet_import.py:539) already exists and
+     works, but still reads the now-dropped `Sticker` -> `listed_price` and
+     `TCG Link` -> `tcg_url` columns — stale per the "LISTED_PRICE DROPPED"
+     and (for Singles) TCG-Link-removal decisions elsewhere in this file.
+     Needs a cleanup pass whenever Sealed is picked back up; not urgent while
+     Sealed isn't being imported at all.
+  2. `import_consignments` (services/spreadsheet_import.py:662) already
+     exists but has a LIKELY REAL BUG: it decides `returned_to_consignor` vs.
+     `available` by checking whether the `Sold/Returned` column literally
+     equals the string `"returned"` (line ~681) — but the REAL
+     Consignments.csv contains `True`/`False` booleans in that column, not
+     `"Sold"`/`"Returned"` text. Existing tests only ever feed it text, so
+     this was never caught. As written, that check always evaluates False,
+     so an item actually returned to its consignor would import as
+     `status="available"` — a customer-facing correctness bug. Currently
+     DORMANT ONLY because this import path isn't being run (Consignments is
+     out of scope). Must be fixed before Consignments import is ever turned
+     on for real data.
+  3. `import_consignments` also auto-imports its one graded row (Slab=Yes) as
+     a fabricated `GradedInventoryItem(company="PSA", cert_number="unknown")`
+     — this CONTRADICTS the "slabs never get an automated import script"
+     decision (D2/Phase 4). Needs rework (route to manual/needs_review
+     instead of fabricating a PSA identity) before Consignments import is
+     ever turned back on.
+  4. `import_slabs` (services/spreadsheet_import.py:466) already exists in
+     code and is intact/tested per Phase 3's LOG entry, but per the "slabs
+     never get an automated import script" decision (D2, this file), it has
+     NO VALID CALL SITE going forward — it is not wired into `run_import`
+     (Slabs is in `DEFERRED_TABS`) and per that decision should never be. Not
+     deleted; simply unreachable by design.
+  5. None of Sealed/Bulk/Consignments' raw-card rows currently get catalog
+     `card_id` resolution — the same identity-matching gap Singles had
+     before this session's Stage A/Stage B redesign (Phase 3.2), just never
+     addressed for these tabs (Consignments has 3 such rows; the others are
+     sealed product / bulk lots without a single catalog card to resolve
+     against in the same way). Whoever picks these tabs back up should decide
+     whether they need their own enrichment pass or can reuse Singles'
+     Stage A tooling/prompt as a template.
+  OPERATIONAL CONSEQUENCE: because Phase 2's wipe deletes ALL card-derived
+  data (inventory_item rows of every kind, per D4) and this rebuild's Phase 3
+  only re-imports Singles, the live site will have ZERO sealed/bulk/
+  consignment/slab inventory after the wipe + Singles-only reseed — not
+  "temporarily empty until Phase 3 finishes," but "stays empty until a FUTURE
+  phase explicitly picks these tabs back up." See Section 7 HANDOFF for the
+  wipe-timing discussion this affects.
+========================================================================
+
+PHASE 4 — Graded slab pipeline (the special path)
+  [*** PAUSED / ON HOLD BY OWNER — NOT the next phase after 3/5/6/7. Do not
+  resume without an explicit owner go-ahead. Distinct from earlier drafts'
+  looser "deferred" wording: this is a hold, and per the owner clarification
+  below, PART of this phase (Slabs.csv CSV import specifically) is not merely
+  paused but WILL NEVER BE BUILT AT ALL — see the CORRECTED bullet below. ***]
+  The owner is holding slab IMPORT until slabs can be scanned in via PSA
+  ("scan a slab in" — future, out of scope now). Phase 3 shipped the
+  deferral mechanism: `DEFERRED_TABS = frozenset({"Slabs"})` + a `skip_tabs`
+  param on run_import (spreadsheet_import.py). Slab SCHEMA support and
+  import_slabs() itself are intact and tested — only the run_import path
+  skips the tab. This also takes the PSA token (Q3) and the PriceCharting key
+  (Q2) off the critical path. Go from Phase 3 -> Phase 5.
+  CORRECTED (owner, this session — see LOG 2026-07-27 post-Phase-3): the
+  above "holding until scan-in exists" framing could be misread as "a
+  Slabs.csv import script is coming once PSA scan-in ships." That is WRONG.
+  There will NEVER be a CSV/spreadsheet import script for the Slabs.csv tab —
+  not deferred-then-built, simply not planned, ever. The only future slab
+  intake path is the PSA scan-a-slab-in feature (cert scan -> auto-fill one
+  slab at a time), which is itself future/out of scope right now. Whoever
+  eventually resumes this phase should build the scan-in flow, NOT a
+  Slabs.csv batch importer wired into run_import.
+  RESOLVED (was open Q3, Section 4): CGC/BGS/SGC (non-PSA) slabs do not get
+  an automated cert-lookup integration either — see D2 above and Section 4 Q3
+  for the manual-admin-entry resolution.
+  --- original spec, for reference ---
+  4.1 New services/psa.py: cert lookup (cert number -> identity + grade + pop +
+      images). Rate-limited; needs an API token (owner to provide; until then use
+      a stub/fixture + the 5/day public demo for manual spot checks).
+  4.2 import_slabs: parse cert# (strip_float_artifact) + grade + language from the
+      "Name (pkm + rarity + language)" cell. When PSA lookup succeeds, take its
+      identity (authoritative) and set card_id via the TCGdex catalog match on the
+      returned name/set/number+language. When it fails or is non-PSA, keep the
+      sheet identity and flag needs_review.
+      CORRECTED / additional realities verified this session on the real 17-row
+      Slabs sheet:
+      - There is NO grading-company column. Grading company must be PARSED from
+        the name text (e.g. a literal "Beckett" token in "Pikachu Beckett" ->
+        GradingCompany.BGS); default to PSA when nothing else indicates otherwise.
+      - RESOLVED (was open Q3, Section 4): PSA slabs get the automated cert
+        lookup described in D2/4.1. Non-PSA slabs (CGC/BGS/SGC) do NOT get an
+        automated integration of any kind — instead, a FUTURE admin-only
+        manual-entry UI (staff types in the slab's info, selecting a grading
+        company other than PSA) is planned, itself out of scope while Phase 4
+        is paused. Do not build a CGC/BGS/SGC cert-lookup client.
+      - 2 of 17 rows have an EMPTY `Cert #` (Charizard V / Brilliant Stars;
+        Venusaur & Snivy GX / Cosmic Eclipse). Per D2 the cert number IS the
+        identity for slabs, so an empty cert can't be looked up — route these to
+        needs_review with the sheet identity kept as-is; do not skip them and do
+        not treat the missing cert as an import error.
+      - Cert numbers carry the same Excel float artifact as everything else
+        (e.g. "89265056.0") — run strip_float_artifact before using a cert number
+        as a lookup key or storing it.
+  4.3 Graded value: PricePoint(kind="graded", company, grade) from PriceCharting
+      (or sheet fallback). _market_price already refuses to price slabs off raw
+      TCGplayer figures — keep that; slabs use graded points / sheet value.
+  ACCEPTANCE: a slab row imports with verified identity + a graded value (or an
+  honest needs_review when unverifiable). No slab is priced from a raw finish.
+
+PHASE 5 — Display scoping (only unsold shown)
+  5.1 Confirm routers/inventory.py (search + summary) and routers/public.py filter
+      status=AVAILABLE, not merely kind. MCP toCard path shows real names.
+  5.2 Sold items must be reachable for internal analytics/P&L but never in the
+      customer search/chat surfaces.
+  ACCEPTANCE: customer search/chat/public endpoints return only AVAILABLE items;
+  a sold item is present in the DB but absent from those responses.
+
+PHASE 6 — Review tooling + docs
+  6.1 build_review.py / apply_review_decisions.py: update for TCGdex ids +
+      multilingual (a JP item now HAS a catalog match, so it should band by
+      confidence, not NA/CONTRADICTION). Keep finish inference + bulk buttons.
+      Regenerate data/spreadsheet/review.html to eyeball the new state.
+  6.2 doc-writer pass: update model/service docstrings that still say
+      "pokemontcg.io" / "English catalog only"; extend docs/learning/ (16-lesson
+      textbook) with a lesson on the multi-source catalog + slab pipeline — extend,
+      don't recreate.
+
+PHASE 7 — Verify + hand off
+  NARROWED (owner, this session — see LOG "SCOPE NARROWED TO SINGLES ONLY"):
+  wherever this phase's acceptance implies "importing the sheet" succeeded, it
+  means Singles.csv specifically — the only tab in scope for this rebuild.
+  Existing tests for import_sealed/import_bulk/import_consignments/import_slabs
+  are NOT being deleted or de-scoped from the suite (they still exist and
+  still need to stay green — they're testing already-shipped code) but no NEW
+  acceptance criteria apply to those tabs as part of this rebuild.
+  - Full suites green: `python -m pytest backend/tests -q --tb=short`,
+    `npm test --workspace=frontend`, `npm test --workspace=mcp-server`.
+  - Lints: `ruff check backend/src`, `cd frontend && npm run lint`.
+  - CORRECTED baseline (measured this session, see VERIFIED BASELINE block above):
+    `python -m pytest backend/tests -q` -> 558 passed, 7 skipped, 0 failed. An
+    earlier draft of this file wrongly claimed "6 pre-existing failures tied to an
+    old 109-row JP snapshot" in tests/scripts/test_language_recall.py — that is
+    FALSE, there are zero failures there. Those 7 tests currently SKIP (reason:
+    "production snapshot not present (gitignored)"). They still need a deliberate
+    REWRITE or retirement as part of this rebuild, since the rebuild removes the
+    English-only/NA-banding premise they were written against — don't leave them
+    skipping forever, but don't go hunting for "6 failures" that don't exist.
+  - pull-request agent for the PR body. Orchestrator handles git.
+
+========================================================================
+PHASE 8 (FUTURE, NOT STARTED) — ADMIN TOOLING / RETOOL INTEGRATION
+========================================================================
+*** OUT OF SCOPE FOR THE CURRENT SINGLES-ONLY REBUILD. This is a PLACEHOLDER
+for a phase that comes AFTER Phase 7, recorded this session (owner research +
+direct code inspection, LOG "PHASE 8 PLACEHOLDER — ADMIN/RETOOL" entry) so the
+decisions and findings aren't lost before the owner is ready to act on them.
+NOT NEXT. NOT BLOCKING. Do not start any part of this — including the design-
+doc step below — until the prerequisite in point 5(a) is satisfied. If you are
+a fresh conversation reading this file top-to-bottom: this phase existing here
+does not change "NEXT ACTION" in Section 7 HANDOFF, which still points at
+Phase 5. ***
+
+THE VISION: the owner wants to eventually stop managing inventory via
+spreadsheet entirely and give non-technical staff (1-3 people) a proper admin
+UI — similar in spirit to how Sanity's `/studio` already lets them edit
+articles today, though STRUCTURALLY DIFFERENT: Sanity is the system of record
+for articles; Retool would be a UI layer OVER the existing DynamoDB-backed
+system of record, not a replacement for it.
+
+1. HARD ARCHITECTURAL CONSTRAINT, not a preference: Retool MUST connect via
+   the FastAPI backend as a REST resource, NEVER directly to DynamoDB. Direct
+   DynamoDB access from Retool would bypass every existing Pydantic
+   validation/guardrail this rebuild has been careful to preserve (string-not-
+   int card numbers — Section 5 guardrail; the wipe's --confirm-table rail —
+   Section 2/7; condition-modifier validation; etc.) and open a second,
+   unvalidated write path straight into production data. Whoever designs the
+   Phase 8 admin API surface (point 5(b) below) must treat "no direct-to-
+   DynamoDB Retool resource, ever" as a fixed constraint, not a design option
+   to reconsider.
+2. COST/AUTH AT THE OWNER'S SCALE: Retool's free tier is sufficient — 5
+   builder + 5 end-user seats, comfortably covers 1-3 staff. No SSO/enterprise
+   tier needed. Simplest access-control approach: a shared API key that only
+   Retool holds server-side, gating the new admin endpoints. This is
+   DELIBERATELY SEPARATE from Cognito — Cognito is customer auth for
+   `/inventory` (see CLAUDE.md Site Pages table); admin/staff auth is a
+   different concern and doesn't need to route through it.
+3. TWO CONCRETE SCHEMA GAPS FOUND, independent of which UI tool is eventually
+   chosen — VERIFIED this session by direct inspection:
+     - `Transaction` (models/business.py:36) has a `trade_id: str | None`
+       field (line 46), but `TransactionType` (line 21) is a StrEnum with
+       ONLY `SALE = "sale"` and `PURCHASE = "purchase"` — CONFIRMED, no
+       `TRADE` member exists. The owner wants to record trades through the
+       admin UI; this needs a real `TransactionType.TRADE` addition (and
+       likely a small amount of supporting logic wherever `TransactionType`
+       is switched on) before that's possible. Not done here — schema work
+       for a future phase, listed under point 5(c) below.
+     - `location` (models/inventory.py, `_ItemBase.location: str | None`) is
+       currently a free-text string — this is the SAME open decision already
+       flagged in Section 1's D3 (the Glass/Toploader/Sealed customer-
+       visibility gate) and Section 6's LOG. That flag now has a SECOND,
+       independent reason to actually be acted on: a free-text field is a
+       poor fit for a dropdown widget staff will use daily in an admin UI.
+       Still not decided/implemented here — just doubly motivated. Whoever
+       picks up either the display-scoping location gate (Phase 5) or this
+       admin phase should coordinate so `location` isn't turned into a
+       StrEnum twice, differently, by two separate efforts.
+   VERIFIED this session (grep, routers/): `routers/` contains ONLY
+   `health.py`, `auth.py`, `chat.py`, `inventory.py`, `public.py` — CONFIRMED
+   zero endpoints exist anywhere exposing Expense/Debt/Payout (the financial-
+   ledger models already defined in models/business.py). This is the basis
+   for point 4's ledger-viewing item below — it would be new API surface, not
+   already-built-but-unwired.
+4. REALISTIC SCOPE of what the admin UI should eventually do, per the owner's
+   stated vision:
+     - Browse/search/filter current inventory.
+     - Edit an item's status (available/on_hold/etc.) and location (public vs.
+       held) inline.
+     - Add a new card to inventory via catalog search + a form (condition/
+       location/cost via dropdowns sourced from the existing enums —
+       `Condition`/`ConditionModifier`/the future `location` StrEnum/etc.).
+     - Record a trade (blocked on point 3's `TransactionType.TRADE` gap).
+     - View the financial ledger (expenses/debts/payouts — models exist,
+       ZERO API endpoints today, confirmed above).
+   This roughly maps onto extending/eventually REPLACING build_review.py's
+   existing needs-review HTML tool with something more capable, not a totally
+   separate concern from the human-in-the-loop mechanism already threaded
+   through Phases 3/6 of this rebuild.
+5. PREREQUISITE WORK, in rough order — DO NOT SKIP AHEAD:
+     (a) *** THE OWNER DRAFTS A USER-STORIES DOC describing everything they
+         want the widgets to do. THIS DOES NOT EXIST YET — the owner is
+         drafting it separately. REQUEST IT / WAIT FOR IT before doing any
+         real design work on this phase. This is the single most important
+         instruction in this section: whoever picks up Phase 8 must ASK THE
+         OWNER FOR THIS DOCUMENT FIRST. Guessing at admin-UI scope without it
+         risks building the wrong widgets for how staff actually work. ***
+     (b) Design an admin API surface (search catalog, list/filter/update
+         inventory, create item, record sale/trade, read ledger) — this is
+         `design-doc`-agent-worthy work (an RFC, like RFC 0003 for the
+         catalog rebuild), NOT something to improvise inline. Do this only
+         AFTER (a) — the user stories are what the API surface should be
+         designed against.
+     (c) Add the `TransactionType.TRADE` and `location` StrEnum schema
+         changes (point 3 above) — small, outside-in-TDD, but genuinely
+         needed before (d).
+     (d) Build the admin FastAPI endpoints under the NORMAL code-writer +
+         Council workflow (per CLAUDE.md's Agent Workflow) — this is real
+         application code, unlike the Singles enrichment prompt (Phase 3.2
+         Stage A), which was deliberately kept out of that workflow because
+         it produces a data artifact, not a code diff. Admin endpoints ARE
+         code and DO need the full Council Loop.
+     (e) Build the actual Retool screens — expected to be fast once the
+         endpoints exist and validate, since Retool's value is in NOT hand-
+         building UI.
+6. ALTERNATIVES CONSIDERED, and why Retool won (owner research this session,
+   via the web-browser agent, plus direct comparison against this codebase's
+   needs):
+     - Appsmith / Budibase: open-source, self-hostable, ALSO has native
+       DynamoDB support (unlike Retool, which is why point 1's REST-only
+       constraint matters — the temptation to skip the backend exists with
+       these tools too, not just Retool). No cost advantage at this scale —
+       Retool's free tier is also $0 for 1-3 people — and self-hosting trades
+       that non-savings for real, ongoing ops burden (hosting, upgrades,
+       backups) the owner would be taking on for no financial benefit.
+     - Raw AWS DynamoDB console: RULED OUT as an owner-facing tool — no
+       business-rule awareness (would let staff write directly around every
+       Pydantic guardrail, same problem as point 1 but worse since there's no
+       REST layer AT ALL to interpose), and the wrong UX for non-technical
+       daily use.
+     - A fully hand-built `/admin` section in the existing Next.js app: named
+       as the RIGHT CALL ONLY IF the business expects to keep investing
+       significant engineering time long-term. Noted as a LIVE POSSIBILITY
+       given the scope of the current rebuild (this codebase already has
+       real engineering investment behind it), but Retool is faster to a
+       usable result and is the current direction. Not a closed decision —
+       worth revisiting if the owner's appetite for ongoing engineering work
+       changes.
+========================================================================
+
+========================================================================
+4 — OPEN QUESTIONS / ASSUMPTIONS FOR THE IMPLEMENTER (raise with owner if blocked)
+========================================================================
+Q1. RESOLVED — DISPLAY in USD. TCGplayer USD when present; else Cardmarket EUR
+    converted via a config FX constant (note the conversion in value_note).
+Q2. Graded price source: PriceCharting needs a paid key. If none, MVP = sheet
+    Sticker/Current Market + needs_review. Confirm budget/key.
+Q3. RESOLVED (owner, this session — see LOG 2026-07-27 post-Phase-3). PSA API
+    token + rate limits: still owner-to-provide, still not blocking (Phase 4 is
+    paused anyway). Non-PSA graders (CGC/BGS/SGC): RESOLVED as manual, by
+    design, permanently — not "leave manual until a free lookup is found."
+    They arrive too rarely to justify their own automated cert-lookup
+    pipeline. Instead: a FUTURE admin-only manual-entry flow where staff key in
+    a non-PSA slab's info directly, including selecting the grading company
+    (GradingCompany StrEnum already has PSA/BGS/CGC/SGC on
+    GradedInventoryItem.company in models/inventory.py — confirmed this
+    session that it still fits, no model change needed). Out of scope for now,
+    same as the rest of Phase 4.
+Q4. RESOLVED — only EN and JP appear. Do NOT add FR/DE/IT/ES/PT — Phase 1.2
+    above is shrunk to match.
+    MECHANISM SUPERSEDED (owner, this session — see LOG "LLM ENRICHMENT PASS"
+    entry, and the rewritten Phase 3.2). The paragraph below is the ORIGINAL
+    Q4 measurement and is kept as historical evidence for why EN/JP-only is
+    correct, but the URL-param / name-marker mechanism it describes is NO
+    LONGER the resolution mechanism for Singles:
+      Singles TCG Link `Language=` values were ONLY `English` (106 of 291 rows)
+      and `all` (11 rows); 170 rows carried no URL at all; 4 URLs lacked the
+      param entirely. Name marker `(jp)` appeared 18 times. In Slabs, one row
+      self-identifies as `Arceus V (jp)`, but others are Japanese only by SET
+      (e.g. set SV11B, set "Shiny Treasure EX") with no name marker at all.
+    CURRENT MECHANISM: for Singles, language is now resolved by a ONE-TIME
+    manual run of the `data/spreadsheet/ENRICHMENT_PROMPT.md` prompt in its
+    own Claude Code conversation (Phase 3.2 Stage A — NOT a coded script, see
+    the LOG "STAGE A SIMPLIFIED TO A PROMPT" entry). THIS RUN IS COMPLETE (see
+    LOG "STAGE A COMPLETE" entry) — the owner reviewed the output personally;
+    the resolved artifact is `data/spreadsheet/csv/Singles_enriched_v3.csv`
+    (266 rows: 247 high / 6 medium / 13 no-match confidence). Reading the
+    Name + Card # title text directly — moot point that TCG Link is gone from
+    the current sheet (Section 2), since the owner did not want URL-param
+    parsing as the
+    primary signal even where a URL existed. The old `(jp)` name-marker regex
+    and the URL `Language=` param become, AT MOST, optional secondary/sanity-
+    check signals the enrichment prompt might itself reason about internally
+    — never the sole or primary mechanism, and never something import_singles
+    itself parses live. For Slabs (still DEFERRED, Phase 4 paused — see D2),
+    the existing card_text.py `language_from_set` two-entry allowlist
+    fallback is UNCHANGED by this reversal; the enrichment prompt is scoped
+    to Singles for now, and whether it should extend to Slabs is a Phase 4
+    question, not decided here.
+Q5. RESOLVED/MOOT — the sheet is NOT mostly sold; see Section 2's Data block. The
+    owner pruned sold Singles/Slabs/Sealed rows before saving the 7-25 workbook:
+    0 of 291 Singles rows currently carry both a Sold amount and a Date Sold
+    (Slabs/Sealed likewise ~0). D3's "store everything, show only unsold"
+    mechanic is unchanged and still required — it just has near-zero sold rows to
+    exercise against today's sheet. Do not pull the stale 7-22 export's rows back
+    in to "restore" sold history; that export is a different, older snapshot, not
+    a deeper window of this one (see the stale-export trap in Section 2).
+
+========================================================================
+5 — GUARDRAILS
+========================================================================
+- OUTSIDE-IN TDD on every behavioral change (RED first, confirm fail, then GREEN).
+- Read-only tools stay read-only: build_review.py must never gain a DynamoDB write.
+- Do not invent data (owner voice/company facts in memory): if a source lacks a
+  price/identity, say so and fall back to the sheet + needs_review — never fabricate.
+- Preserve this session's finish-band inference + bulk Approve/Reject work.
+- cost_basis and internal prices must NEVER reach a customer surface.
+- CARD NUMBER MUST STAY A STRING, END TO END — never coerced to int, never
+  regex/sort/compared as numeric. Some promo card numbers carry letters (e.g.
+  "SWSH001") and would break under integer parsing. VERIFIED this session
+  (owner clarification, LOG 2026-07-27 post-Phase-3): `CatalogCard.number: str`
+  (models/catalog.py:87) and `CardSummary.number` (models/inventory.py) are
+  already plain `str`. Grepped card_text.py and spreadsheet_import.py for
+  `int(...)` casts, digit-only regexes, or numeric comparisons applied to a
+  card number — found NONE (the only `int(...)` calls in spreadsheet_import.py
+  are unrelated `int(needs_review)` bool-to-count coercions). The existing
+  normalizer is `normalize_number()` in card_text.py (line ~68): it runs
+  `strip_float_artifact()` (undoes Excel's `"83.0"` -> `"83"` float export,
+  matched by a `-?\d+\.0+` regex that a letter-containing number like
+  "SWSH001" never matches, so it passes through untouched) then
+  `.strip().lower()` — deliberately NOT routed through `normalize_name()`
+  because the punctuation (the `/` in "182/167") is load-bearing. Reuse
+  `normalize_number`/`number_keys` for any new number-handling code; do not
+  add a competing normalizer or any numeric cast of a card number.
+- CONDITION MODIFIERS (NM+, LP+, LP-, etc.) MUST BE SUPPORTED, not just the
+  bare NM/LP/MP/HP/DMG tiers. VERIFIED this session: `Condition` StrEnum
+  (NM/LP/MP/HP/DMG) and `ConditionModifier` StrEnum (PLUS "+"/MINUS "-") are
+  separate fields on `RawInventoryItem` (models/inventory.py), and
+  `parse_condition()` (spreadsheet_import.py:205-216) already generalizes
+  correctly: it strips a trailing "+" or "-" off the cleaned text into
+  `modifier` BEFORE validating the remaining tier against
+  `Condition.__members__`, so NM+, LP+, LP-, and in fact every tier+modifier
+  combination (MP+/HP-/etc., even if unused in practice) round-trip today —
+  nothing restricts the modifier to specific tiers. Confirmed NOT broken;
+  no fix needed. Do not narrow `parse_condition` to a tier/modifier allowlist
+  — the two-field model is intentionally general and the owner specifically
+  needs NM+/LP+/LP- to keep working.
+- `listed_price` / "sticker price" IS OUT OF SCOPE, PERMANENTLY (owner, this
+  session — see LOG "LISTED_PRICE DROPPED" entry, D3, Phase 3.1). The ONLY
+  customer-facing price field is `current_market_value` (`_ItemBase`), kept
+  fresh by the periodic sync job — exactly what that field's docstring already
+  implies. `_ItemBase.listed_price` (models/inventory.py) may remain defined
+  on the Pydantic model as a dead/unused optional field for now (removing it
+  from the model is a follow-up cleanup, NOT required immediately) — but no
+  importer, sync job, or UI/API code should ever write a meaningful value into
+  it or read it going forward. Do not resurrect a "Sticker" column read
+  against Singles.csv (that column is gone from the sheet AND out of scope).
+- LANGUAGE/IDENTITY RESOLUTION FOR SINGLES IS A TWO-STAGE, OFFLINE-FIRST
+  DESIGN (owner, this session — see LOG "LLM ENRICHMENT PASS" +
+  "STAGE A SIMPLIFIED TO A PROMPT" entries, Phase 3.2). Stage A resolves
+  language + candidate card_id + confidence per row OFFLINE, writing a
+  reviewable artifact (`data/spreadsheet/csv/Singles_enriched.csv`); Stage B
+  (`import_singles`) reads that artifact deterministically — it must NEVER
+  call an LLM live at import time. CORRECTED: Stage A is NOT a coded/
+  maintained script — it is a single, one-time (re-runnable) manual step of
+  running the existing prompt at `data/spreadsheet/ENRICHMENT_PROMPT.md` in
+  its own fresh Claude Code conversation and reviewing the output. Do not
+  build a Python enrichment script for this; do not write tests for Stage A
+  (it's a data-prep task, not application code, and is exempt from the
+  Council Loop). Do not reintroduce TCG-Link URL-param parsing or a `(jp)`
+  name-marker regex as the PRIMARY resolution mechanism for Singles; they are
+  at most optional secondary signals the enrichment prompt may itself
+  consider.
+- Keep changes scoped; another model shares this branch (see COORDINATION NOTE).
+- *** COUNCIL BUDGET RULE (owner directive, 2026-07-26 — binding) ***
+  The Council was re-running for small findings and burning budget the owner
+  needs for the remaining phases. New rule:
+    * Convene the Council ONCE PER PHASE, not once per revision.
+    * Only CODE-BREAKING findings gate a phase: data loss, wrong data reaching
+      a customer, silent failure/silent truncation, security holes.
+    * Everything else — style, naming, doc drift, speculative hardening,
+      YAGNI quibbles — is NOTED in the submission and CARRIED, not re-reviewed.
+    * After a patch pass, ACCEPT and move on. Do not re-convene unless the
+      patch itself is high-risk.
+  Owner's words: "The council should find big code breaking issues, but the
+  minor ones can be noted but ultimately ignored. I need to save tokens for
+  the real important work."
+========================================================================
+
+========================================================================
+6 — LOG
+========================================================================
+2026-07-26  PHASE 1 — Council Revision 2 submitted (awaiting verdict; item NOT
+  yet checked off, per the Council Loop protocol).
+  Revision 1 returned FAIL with 16 confirmed-major findings. Revision 2 resolves
+  the full master checklist:
+  - SEC-1 (top priority, converged x3): `_dec` in services/tcgdex.py now bounds
+    every upstream figure — rejects non-finite, non-positive, sub-cent and
+    >$10M values, treating them as ABSENT rather than clamping. One edit closes
+    Contrarian FATAL-1 ($0.00 to a customer), Security HIGH-1 (upstream figure
+    overriding listed_price at CardTile.tsx:18-19) and Chaos S3 (NaN killing a
+    500-card batch at flush).
+  - SEC-2 image host allowlist; LOG-1/3/4/6 price-mapping fixes (Cardmarket
+    bands now gated on `variants` so no phantom `normal` band on the JP path);
+    LOG-2 pagination rails; FRAIL-1..8 (JSON-decode retry, seed rails, flush on
+    abort, failure-ratio abort, NFC names, aware-UTC stamps, batch dedup,
+    request deadline/Retry-After/body ceiling).
+  - BLOAT-1 resolved by DECISION (path b): deleted the orphaned `sync_catalog`
+    and added `backend/scripts/daily_sync.py` as the executable entry point, so
+    snapshot_graded_prices / snapshot_sealed_prices /
+    refresh_inventory_market_values are reachable again. Covered by a new test
+    that drives the script the way cron would.
+  - PROC-1: the 6 population-count tests in test_language_recall.py now SKIP
+    with an explicit reason (snapshot is 266 records, not the 1266 they were
+    written against). Rewrite stays Phase 6/7.
+  - RFC 0003 amended: §5.2 prose aligned to its own worked example, and the two
+    factually false card_id cost arguments struck.
+  - NOTE for Phase 2: `max_consecutive_failures` (RFC §7, default 25) still has
+    ZERO occurrences in backend/. It lands with `refresh_held_prices`.
+  - Suite: 660 passed, 6 skipped, 0 failed (was 612 passed / 6 failed).
+
+2026-07-26  PHASE 1 — Council Revision 2 verdict: FAIL, 2 confirmed-major
+  (down from 16). Both fixed in a final patch pass; NO third Council round was
+  convened, per the owner's new Council Budget Rule (Section 5).
+  - LOGIC-1 (the real one, converged Contrarian + Chaos): iter_brief_cards
+    treated a single empty `200 []` as unconditional end-of-list, and the
+    MIN_EXPECTED_RATIO=0.9 backstop was fully DISARMED whenever list_sets also
+    failed — so a struggling API could yield a truncated catalog that exits 0
+    and looks successful. Fixed on BOTH routes: the client now re-requests an
+    empty page once and only ends the walk if the confirmation is also empty
+    (bounded at one retry, logged WARNING); and seed_language now raises
+    SeedAborted when it cannot verify its own size, unless the operator passes
+    the new --allow-unverified flag. 4 tests written RED first.
+  - BLOAT-2: RFC 0003's "Provided — internal Python interfaces" block listed
+    the deleted parse_card_id and three now-private helpers as public, and
+    omitted four new TcgdexClient.__init__ kwargs. Reconciled.
+  - Ruled Phase-2 preconditions, NOT fixed here: the interleaved-write race
+    (see Phase 2.0a) and the wipe entrypoint's confirmation rail (Phase 2.0b).
+  - Settled as out of scope: test_rate_limit.py's flake (pre-existing test
+    design flaw — 65 requests against a fixed 60/minute wall-clock window,
+    fails ~1 run in 3, independently confirmed by two advisors as unrelated to
+    this diff); two Contrarian MINORs.
+  - Committed a61f0c6, pushed to origin/Database-Redesign-Second-Round.
+    Suite: 664 passed, 6 skipped, 0 failed. ruff clean on all touched files.
+
+2026-07-27  PHASE 2 — CODE COMPLETE, committed d2b3de4, pushed. Live wipe NOT run.
+  Merge blocker cleared first: the owner's Polishing-For-Deployment merge had
+  already landed as b6fa7a5; post-merge suite verified 710 passed / 6 skipped /
+  0 failed before any Phase 2 work started.
+  FOUND ON ARRIVAL: Phase 2 was already ~95% implemented in the working tree by
+  an earlier session — uncommitted and never reviewed (.claude/council/ still
+  held Phase 1's artifacts). It was inherited rather than rewritten. That
+  inherited state was RED: test_a_failed_load_never_reaches_the_swap omitted the
+  _stale_table() setup its five sibling tests perform, then asserted the stale
+  row survived. Bug was in the test, not production code.
+  BOTH PRECONDITIONS CLOSED: 2.0a via conditional catalog upserts (Chaos
+  independently verified the race is shut at the DynamoDB operation level);
+  2.0b via wipe_catalog.py carrying seed_catalog.py's --execute/--confirm-table
+  rail, defaulting to dry run.
+  COUNCIL: one round, four seats. Contrarian/Security/Architect OBJECTION,
+  Chaos OBJECTION. The Judge was DELIBERATELY SKIPPED and the orchestrator
+  ruled FAIL directly — all four seats converged on the same findings, and the
+  Council Budget Rule prioritizes conserving tokens over arbitrating a
+  unanimous result. Three gating findings, all data-loss class, all fixed with
+  RED-first tests:
+  - DEAD PRESERVE-BRANCH (all four seats): graded_price and item_price_point
+    were in the wipe allowlist, but their only writers never stamped cat_gen,
+    so the "keep if stamped" branch was unreachable and EVERY wipe destroyed
+    all hand-entered slab prices and sealed/bulk price history, exit 0,
+    untested by all 35 Phase-2 tests. Not reseedable — TCGdex cannot recreate
+    hand-curated prices. FIXED by removing them from the outer
+    _CARD_DATA_ENTITIES allowlist. NOTE THE TRAP: removing them from
+    _CATALOG_GEN_ENTITIES instead (the orchestrator's initial suggestion) would
+    have been STRICTLY WORSE — they'd fall through to the unconditional-delete
+    branch. Stamping at the write sites is also incoherent: the reseed writes
+    only catalog_card rows, so such a stamp could only ever record a PAST
+    generation. A comment at the allowlist records this so nobody re-adds them.
+  - LANGUAGE-BLIND PURGE: a --language-scoped run stamped only that language
+    then swept the other language's entire catalog, exit 0. FIXED by scoping
+    the purge to the languages actually loaded. Subtlety: legacy
+    pokemontcg.io rows carry no language prefix, so a naive "keep what isn't my
+    language" rule would have RESCUED every dead row the wipe exists to remove;
+    absent prefix means legacy and still goes. The FakeClient fixture ignored
+    its language argument entirely, which is what hid this — fixed first, or
+    the regression test would not have discriminated.
+  - DISHONEST DRY RUN: nothing is stamped in dry-run mode, so "would delete"
+    counts equalled the whole catalog. FIXED — seed_language collects the ids a
+    run would write, passed as keep_card_ids. Kept out of the printed summary
+    on purpose (a 23k-element set would flood the console).
+  Carried, NOT actioned (per the budget rule): purge_card_data/finalize_import
+  boilerplate duplication, a stray local `import pytest`, and Security's
+  worktree import-shadowing MEDIUM (partly mitigated — --confirm-table makes a
+  wrong-tree run refuse rather than wipe the wrong table).
+  Architect verified the disputed second generation mechanism IS justified:
+  _IMPORT_OWNED_ENTITIES contains "show"/"consignor" but not catalog_card, so
+  reusing finalize_import would have destroyed master data while not deleting
+  the catalog. Do not "unify" the two mechanisms.
+  Suite: 739 passed, 6 skipped, 0 failed. ruff clean. No rate-limit flake.
+
+2026-07-27  PHASE 3 — COMPLETE, committed 39afd35, pushed. Council PASS.
+  RED first (test-qa): 14 failing tests across tests/services/
+  test_spreadsheet_import.py and test_card_text.py. GREEN (code-writer):
+  763 passed, 6 skipped, 0 failed; ruff clean; zero regressions off the 739
+  baseline.
+  THE HIGH-VALUE FIND — a real, live data-correctness bug, not a spec item:
+    parse_date only accepted %m/%d/%Y, %Y-%m-%d, %m/%d/%y. The REAL export
+    writes every date as "2026-04-18 00:00:00". Consequence: 44 of 137 real
+    Bulk rows carried BOTH a Sold amount AND a Date Sold but were classified
+    AVAILABLE with no sale transaction — i.e. sold inventory would have been
+    shown to customers as for-sale. Fixed by adding "%Y-%m-%d %H:%M:%S" and
+    "%m/%d/%Y %H:%M:%S". Pinned by a test asserting 44 sales against the real
+    Bulk.csv. If that test ever reads 0 again, this bug is back.
+  DELIVERED:
+  - card_text.py: CatalogIndex/build_catalog_index re-keyed (name, number_key,
+    language). New coerce_language (raw DynamoDB "JP" string and the pydantic
+    enum land on the same key). New language_from_set — a deliberate TWO-ENTRY
+    allowlist (sv11b, "shiny treasure ex") for the slab rows that are Japanese
+    only by set; unknown sets stay EN rather than guessing. language_from_url
+    reads ?Language= AFTER the path slug, so pokemon-japan + Language=all stays
+    JP while a BARE Language=all stays EN (real counter-example: "Giovanni's
+    Exile" is English with Language=all — do not treat that param as a JP
+    signal on its own). item_language precedence: stored attr -> name marker
+    -> URL -> set.
+  - spreadsheet_import.py: parse_date fix (above); _first_hit/_match_card
+    language-scoped and the old `if language is not Language.EN: return None`
+    gate DELETED, so JP singles match a JP catalog row instead of banding NA;
+    import_slabs falls back to language_from_set; new DEFERRED_TABS =
+    frozenset({"Slabs"}) + a skip_tabs param on run_import, exempt from the
+    _empty_tabs truncation guard. allow_empty semantics deliberately NOT
+    overloaded.
+  IMPORTANT DESIGN CORRECTION vs this file's earlier text: Section 7 used to
+  say "defer the Slabs tab via the existing allow_empty knob". THAT WAS WRONG —
+  allow_empty only FORGIVES a tab that imports zero rows; it does not SKIP a
+  populated tab, so Slabs would still have imported. Hence skip_tabs. skip_tabs
+  DEFAULTS to deferring Slabs so the owner directive cannot be forgotten by a
+  caller.
+  TWO PRE-EXISTING TESTS EDITED (disclosed, and independently verified by the
+  Contrarian seat): test_daily_sync_never_writes_an_english_price_onto_a_
+  japanese_item and test_build_catalog_index_keys_are_normalized indexed the
+  catalog index with a 2-tuple. Only the key literals became 3-tuples; every
+  behavioral assertion is untouched. A 2-tuple compatibility shim was
+  deliberately REJECTED — it would silently re-open the mislinking hole.
+  COUNCIL: one round, TWO seats (Contrarian + Chaos), per the Section 5 budget
+  rule — the two lanes that cover data loss and wrong-data-to-customer. Judge
+  deliberately skipped; orchestrator ruled PASS directly because ZERO gating
+  findings were filed. Both seats independently traced the same worst case and
+  both marked it NON-GATING:
+  - CARRIED, NOT FIXED: a real sale whose Date Sold cell is in a format outside
+    the 5 parse_date accepts still stays AVAILABLE, with no needs_review flag.
+    This is D3's literal contract shape and is PRE-EXISTING; this diff strictly
+    shrinks it (44 rows). Consider a needs_review flag for unparseable dates in
+    a later phase.
+  - Also carried: coerce_language on an unrecognized DynamoDB string, and the
+    two-entry language_from_set allowlist. Neither has a live trigger while
+    Slabs import is deferred (language_from_set is effectively dead code this
+    phase). TCGdex knows every set's languages — a broader source is the Phase
+    6 conversation.
+  Chaos traced clean on garbage cells, mid-flight infra death, the skip_tabs /
+  truncation-guard interaction, re-run idempotency, and cost_basis isolation;
+  the importer's existing "fail loud + roll back the whole generation" behavior
+  held under every infrastructure-death scenario.
+
+2026-07-27  OWNER CLARIFICATIONS (post-Phase-3, planning-doc-only pass; no
+  application code touched — verification only). Eight owner notes folded in:
+  1. Slabs.csv import is not "deferred," it WILL NEVER BE BUILT. The only
+     future slab intake is the PSA scan-a-slab-in feature (future, out of
+     scope). Phase 4 header, D2, and Section 7's "Slabs: schema support YES,
+     IMPORT NO" line all corrected to say this explicitly.
+  2. NEW real filter for D3/Phase 5: customer-visible items need status=
+     AVAILABLE AND location in {Glass, Toploader, Sealed} — not status alone.
+     VERIFIED: location is used for filtering NOWHERE today (grepped
+     routers/inventory.py and routers/public.py; only comment/unrelated hits).
+     `_ItemBase.location` (models/inventory.py:130) is a bare `str | None`, no
+     enum. Flagged an open subtlety: `map_location()` already special-cases
+     literal "Sealed" location text as `factory_sealed=True` (not a location
+     value) for raw singles — the customer-visibility gate must not conflate
+     that with a "physically in a Sealed product" location. Whether `location`
+     should become a StrEnum recorded as an OPEN decision, not implemented.
+  3. Phase 4 marked PAUSED/ON HOLD at the top-level STATUS line and Phase 4's
+     own header — it is explicitly NOT "next" after Phase 3/5/6/7.
+  4. CLAUDE.md gained a new "# Third-Party APIs (Planned)" section recording
+     the PSA cert API + PriceCharting plan (durably, unlike this scratch
+     file): both unbuilt/on hold pending owner API keys; PSA slabs get
+     automated cert lookup when Phase 4 resumes; non-PSA (CGC/BGS/SGC) get a
+     future manual admin-entry path instead (see #5).
+  5. Q3 (Section 4) RESOLVED: non-PSA slabs (CGC/BGS/SGC) get a future
+     admin-only manual-entry flow, not an automated cert-lookup integration —
+     too rare to justify one. VERIFIED `GradingCompany` StrEnum
+     (PSA/BGS/CGC/SGC) on `GradedInventoryItem.company` already fits this,
+     no model change needed. Phase 4.1/4.2 spec text updated to match.
+  6. Card number string guardrail added to Section 5. VERIFIED no int() cast,
+     digit-only regex, or numeric compare touches a card number anywhere in
+     card_text.py / spreadsheet_import.py; `CatalogCard.number` and
+     `CardSummary.number` are already `str`; `normalize_number()`
+     (card_text.py) + its `strip_float_artifact()` helper only ever touch
+     pure-digit-float patterns (`-?\d+\.0+`), so a letter-bearing number like
+     "SWSH001" passes through unchanged. No fix needed, guardrail recorded so
+     it isn't relitigated.
+  7. NM+/LP+/LP- condition-modifier guardrail added to Section 5. VERIFIED
+     `parse_condition()` (spreadsheet_import.py:205-216) already generalizes:
+     it strips a trailing +/- into `ConditionModifier` before validating the
+     remaining tier, with no tier restriction on which modifiers are legal.
+     NM+, LP+, LP- (and any other tier+modifier combo) already round-trip
+     correctly today. No fix needed, guardrail recorded.
+  8. Singles.csv owner edit VERIFIED, NOT a clean pass — see the "*** Singles.
+     csv UPDATED BY THE OWNER ***" block in Section 2. The file is gitignored
+     (no git diff available; read directly instead). Header shrank from 12
+     columns/291 rows to 10 columns/265 rows. Two of the three removed
+     columns ARE read by import_singles and ARE load-bearing:
+       - "TCG Link" fed `language_from_url` (the fallback JP-detection signal
+         for rows with no `(jp)` name marker — 106+11 rows per Q4's own prior
+         measurement), `set_hint_from_url` (singles' only set-disambiguation
+         signal), and the stored `tcg_url` field. All three are now
+         permanently `None` on re-import — real accuracy/data loss, not
+         cosmetic.
+       - "Sticker" (fuzzy-matched "Sticker updated 7/24") fed `listed_price` —
+         now permanently `None` for every Singles row on re-import.
+       - "Notes" removal is genuinely harmless (`.get()` degrades to `None`
+         cleanly).
+     Flagged loudly in Section 2 as a real risk for whoever finishes the
+     Singles importer against the current sheet shape — the owner's belief
+     that nothing load-bearing was cut is NOT fully confirmed. Section 2's
+     Singles.csv column list updated to the current actual header, with the
+     pre-edit shape kept alongside as superseded history.
+  Files touched this pass: claude-progress.txt (Sections 1, 2, 4, 5, 6, 7) and
+  CLAUDE.md (new Third-Party APIs section). No files under backend/src or
+  frontend/src were touched — verification only, per this pass's scope.
+
+2026-07-27  OWNER CLARIFICATIONS ROUND 2 (post-Phase-3, same day, planning-doc-
+  only — no application code touched). Two follow-up decisions SUPERSEDE
+  pieces of the round-1 entry above; read both, this one wins where they
+  conflict.
+  A. "LISTED_PRICE DROPPED" — owner does not want a "sticker/listed price"
+     concept carried anywhere in the pipeline. `current_market_value` (already
+     on `_ItemBase`, refreshed by the periodic TCGdex/graded-price sync) is
+     now the ONE AND ONLY customer-facing price field, full stop. This
+     REVERSES round-1's framing of the Sticker-column removal from Singles.csv
+     as a "real risk" — it is not a risk, it is correct: that column should
+     never have fed anything, and its absence from the edited sheet is fine.
+     Updated: D3 (Section 1) and Phase 3.1 (Section 3) strike `listed_price`/
+     "listed/sticker" as a field the importer populates; Section 2's Singles.
+     csv verification block rewrote the "Sticker" bullet from LOAD-BEARING RISK
+     to MOOT/SUPERSEDED; a new Section 5 guardrail records the field as
+     permanently out of scope. `_ItemBase.listed_price` (models/inventory.py)
+     is NOT required to be deleted from the Pydantic model right now — it may
+     sit unused — but flagged as a follow-up cleanup; nothing should write or
+     read a meaningful value into it going forward.
+  B. "LLM ENRICHMENT PASS" — the TCG-Link-URL-param + `(jp)`-name-marker-regex
+     + live-fuzzy-match design for Singles language/identity resolution is
+     REPLACED with an explicit two-stage architecture (full spec in the
+     rewritten Phase 3.2, Section 3): Stage A is a NEW, one-time/re-runnable
+     OFFLINE script that runs an LLM row-by-row over Singles.csv (~265 rows),
+     reading Name + Card # (title text only — no URL needed), and emits
+     `language` / `matched_card_id` / `match_confidence` onto a working-copy
+     CSV or companion file — a committed, reviewable artifact. Stage B
+     (`import_singles`) then reads those resolved columns DETERMINISTICALLY;
+     it makes NO LLM calls at import time. Low-confidence/unresolved rows land
+     in the existing build_review.py needs_review queue exactly as today —
+     the human-in-the-loop mechanism itself is unchanged, only what feeds
+     "confident" vs. "needs_review" changes. Rationale (owner/orchestrator,
+     recorded as deliberate): reproducibility (a re-run of the importer can't
+     silently change behavior because an LLM answered differently), no
+     runtime model dependency inside a money-touching import pipeline, and a
+     clean audit trail of why a row matched what it matched. card_text.py's
+     normalizers (normalize_name/number, core_name, number_keys, item_
+     language, etc.) are KEPT — not deleted — as a sanity-check / second
+     opinion, and as plumbing a Stage A resolver script may use internally;
+     they are simply no longer the PRIMARY identity-resolution path for
+     Singles at import time. This ALSO makes round-1's "TCG Link removal is a
+     real risk" finding moot from a different angle than point A above: the
+     new design never needed TCG Link to begin with (it reads title text
+     directly), so the column being gone from the edited Singles.csv is a
+     non-issue under the new architecture — though it's still true, as
+     history, that the loss would have been a real regression under the OLD
+     url-param-based design that round 1 evaluated against.
+     Updated: Phase 3.1 (Language line struck), Phase 3.2 (fully rewritten
+     into Stage A / Stage B), Phase 3.3 (needs_review trigger reworded), Q4
+     (Section 4, mechanism marked superseded, original measurement kept as
+     historical evidence for the EN/JP-only conclusion), Section 2's Singles.
+     csv "TCG Link" bullet (LOAD-BEARING RISK -> SUPERSEDED/MOOT), and a new
+     Section 5 guardrail on the two-stage offline-first design.
+     *** SUPERSEDED SAME DAY: the "Stage A is a coded/maintained script"
+     framing in this point B is ITSELF superseded — see the
+     "STAGE A SIMPLIFIED TO A PROMPT" entry immediately below. Kept here only
+     as history of how the design evolved; do not build a script per this
+     paragraph. ***
+  NOT YET DONE (still ahead, not started this pass): the Stage A enrichment
+  script itself does not exist yet — this pass only updates the PLAN. Whoever
+  picks up Phase 3.1/3.2's actual rewrite needs to design/build the enrichment
+  script (its LLM prompt, its output schema/file location, its confidence
+  threshold) before import_singles can be rewritten to consume it.
+  *** THIS "NOT YET DONE" NOTE IS ALSO SUPERSEDED — see the entry immediately
+  below; there is no script to design or build. ***
+
+2026-07-27  OWNER CLARIFICATIONS ROUND 3 — "STAGE A SIMPLIFIED TO A PROMPT"
+  (post-Phase-3, same day, planning-doc-only — no application code touched).
+  Simplifies, not reverses, round 2's point B above: the TWO-STAGE
+  architecture (offline resolution feeding a deterministic importer) is
+  UNCHANGED; only HOW Stage A gets executed changes.
+  OWNER'S CALL: the "Stage A is a coded/maintained enrichment script" framing
+  from round 2 was overcomplicated for what is fundamentally a ~265-row,
+  run-rarely data-prep task. Building and maintaining a bespoke Python script
+  (with its own LLM-calling code, retry/batching logic, and tests) was more
+  engineering than the problem needs.
+  WHAT CHANGED: Stage A is now a SINGLE MANUAL STEP — run the prompt already
+  written at `data/spreadsheet/ENRICHMENT_PROMPT.md` (this file ALREADY
+  EXISTS, created by the owner/coordinator this session — do not recreate it,
+  just reference it) in its own fresh Claude Code conversation, one time,
+  review the output, done. No new service code. No new tests for Stage A —
+  it is a data-prep task, not application code, and is explicitly exempt from
+  the Council Loop (it produces a data artifact, not a code diff, so there is
+  nothing for the Council to review).
+  WHAT THE PROMPT DOES (summarized from the file — see it directly for the
+  authoritative wording): reads Singles.csv's ACTUAL header at run time
+  (does not hardcode column names, given Section 2's documented header
+  drift); determines language per row from the title text, with an explicit
+  note that some rows are JP-only by SET (SV11B, "Shiny Treasure EX" — same
+  case card_text.py's `language_from_set` already special-cases); finds a
+  candidate TCGdex card and VERIFIES it against the LIVE TCGdex API
+  (`https://api.tcgdex.net/v2/...`) rather than trusting memorized set/
+  number knowledge — a hallucination guard round 2's design didn't have;
+  cross-checks the candidate's plausibility against the sheet's own
+  `Market @ purchase` column — a NEW signal round 2's design also didn't
+  have, and one a name/number match alone can't catch (a confidently wrong
+  match on a $2 card priced like a $200 one now stands out); assigns
+  high/medium/low confidence; runs in batches of ~50 rows with incremental
+  writes so a mid-run interruption doesn't lose completed work; writes
+  `data/spreadsheet/csv/Singles_enriched.csv` — the original columns PLUS
+  `language`, `matched_set_id`, `matched_set_name`, `matched_number`,
+  `matched_card_id`, `match_confidence`, `match_notes`. The original
+  Singles.csv is left untouched.
+  STAGE B UNCHANGED FROM ROUND 2: `import_singles` reads `Singles_enriched.
+  csv`'s resolved columns deterministically; makes no LLM calls at import
+  time. `needs_review=True` for anything below `high` confidence — whether
+  `medium` also gets flagged is left as an OPEN Phase 3.1 implementation
+  detail for the importer author to settle then, NOT decided here.
+  BLOCKER CLEARED: round 2's "the Stage A enrichment script doesn't exist
+  yet" blocker is GONE — there is no script to build. The enrichment PROMPT
+  exists and is ready to run. THE NEXT CONCRETE ACTION before Phase 3.1's
+  import code is written is: run `data/spreadsheet/ENRICHMENT_PROMPT.md` in
+  a fresh conversation and review `Singles_enriched.csv`'s output (spot-check
+  a sample of high/medium/low-confidence rows, sanity-check the market-price
+  cross-check actually flagged anything real) — not "build Stage A."
+  Updated: Phase 3.2 (Stage A description rewritten from script to manual
+  prompt-run, output-file schema spelled out), Q4 (Section 4, "Stage A LLM
+  enrichment pass" reworded to "one-time manual prompt run"), Section 5 (the
+  two-stage guardrail corrected to say "manual step," explicit "no script, no
+  tests" language added), Section 7 WHERE THINGS STAND caveat (see below).
+  Files touched this pass: claude-progress.txt only. CLAUDE.md not touched.
+  `data/spreadsheet/ENRICHMENT_PROMPT.md` was created by the owner/
+  coordinator, not by this pass — referenced only, not authored here. No
+  files under backend/src or frontend/src touched.
+  Files touched this pass: claude-progress.txt only (Sections 1, 2, 3, 4, 5,
+  6). CLAUDE.md not touched this round. No files under backend/src or
+  frontend/src touched — planning-doc-only, per this pass's scope.
+
+2026-07-27  OWNER CLARIFICATIONS ROUND 4 — "SCOPE NARROWED TO SINGLES ONLY"
+  (post-Phase-3, same day, planning-doc-only — no application code touched).
+  OWNER'S CALL: for this rebuild, ONLY Singles.csv gets imported. Sealed,
+  Bulk, Consignments, and Slabs are explicitly pushed to a FUTURE change —
+  not part of Phase 3, not part of this rebuild's scope at all right now.
+  REASONING: those four tabs are small relative to Singles (Sealed 3 rows,
+  Bulk 137, Consignments 5, Slabs 17, vs. Singles' 265), so it's safe to
+  defer building/reviewing/fixing them rather than doing all five tabs' worth
+  of work now.
+  CONTEXT SURFACED BY READ-ONLY INVESTIGATION of EXISTING code (done directly
+  in the main conversation, not this pass; no code was changed by either) —
+  recorded verbatim in the new "DEFERRED — OTHER TABS" callout, Section 3,
+  right after Phase 3:
+    1. `import_sealed` (spreadsheet_import.py:539) still reads the now-
+       dropped `Sticker`->`listed_price` and `TCG Link`->`tcg_url` columns —
+       stale, needs a cleanup pass whenever Sealed is picked back up.
+    2. `import_consignments` (spreadsheet_import.py:662) has a LIKELY REAL
+       BUG: `returned_to_consignor` vs. `available` is decided by checking
+       whether `Sold/Returned` literally equals the string `"returned"`
+       (line ~681), but the REAL Consignments.csv holds `True`/`False`
+       booleans there — the check always evaluates False, so a genuinely
+       returned item would import as `status="available"`. Dormant only
+       because Consignments isn't being imported.
+    3. `import_consignments` also auto-imports its one graded row (Slab=Yes)
+       as a fabricated `GradedInventoryItem(company="PSA",
+       cert_number="unknown")` — contradicts the "slabs never get an
+       automated import" decision (D2).
+    4. `import_slabs` (spreadsheet_import.py:466) exists and is intact/tested
+       but has no valid call site going forward, per D2 — not deleted,
+       simply unreachable by design.
+    5. None of Sealed/Bulk/Consignments' raw-card rows get catalog `card_id`
+       resolution today — the same gap Singles had before this session's
+       Stage A/Stage B redesign, just never addressed for these tabs.
+  None of this is being fixed now — recorded as KNOWN, DEFERRED issues, tied
+  to whichever future phase picks these tabs back up.
+  UPDATED: Section 0 (THE GOAL, point 4 narrowed to "the in-scope tab", new
+  scope-narrowing callout added), D3 (Section 1, "Import ALL sheet rows"
+  narrowed to "Import ALL Singles.csv rows"), Phase 3's header/3.1 (Section 3,
+  explicit Singles-only framing, other four import_* functions named as
+  out-of-scope/frozen-as-is), new "DEFERRED — OTHER TABS" callout (Section 3,
+  between Phase 3 and Phase 4, the five findings above plus the operational
+  consequence), Phase 3's ACCEPTANCE line (narrowed to Singles.csv), Phase 7
+  (narrowing note that "importing the sheet" means Singles only, existing
+  tests for the other four import_* functions still need to stay green but
+  get no new acceptance criteria), Section 7 HANDOFF (three edits: the "empty
+  window is minutes not days" claim corrected to apply to Singles only and
+  NOT the other four kinds; step 3 of the wipe sequence says do not run the
+  other import_* functions; "EXPECT AFTER THE IMPORT" rewritten to drop the
+  now-WRONG "Bulk should produce ~44 SOLD rows" expectation for THIS
+  wipe/reseed cycle — that regression check is preserved as valid for
+  whenever Bulk import is eventually turned back on, just not expected now),
+  and a new bullet under THE OWNER'S OPERATING CONSTRAINTS recording the
+  Singles-only scope as a standing constraint.
+  OPERATIONAL CONSEQUENCE, FLAGGED EXPLICITLY: after the Phase 2 wipe + a
+  Singles-only Phase 3 import, the live site will have ZERO sealed/bulk/
+  consignment/slab inventory — whatever currently exists in the live table
+  for those kinds gets wiped by Phase 2's purge (D4: wipe deletes ALL card-
+  derived data, not just Singles') and is NOT rebuilt until a future phase.
+  This is not "empty for a few minutes," it's "singles come back, everything
+  else stays empty until a later phase" — flagged wherever the wipe-timing
+  decision is discussed (Section 7 HANDOFF) since it changes what "the
+  customer-visible gap" means and is a real business-visible tradeoff the
+  owner should be clear-eyed about before --execute runs.
+  Files touched this pass: claude-progress.txt only (Sections 0, 1, 3, 6, 7).
+  CLAUDE.md not touched. No files under backend/src or frontend/src touched —
+  planning-doc-only, per this pass's scope.
+
+2026-07-27  "PHASE 8 PLACEHOLDER — ADMIN/RETOOL" (post-Phase-3, same day,
+  planning-doc-only — no application code touched). Recorded a new "PHASE 8
+  (FUTURE, NOT STARTED) — ADMIN TOOLING / RETOOL INTEGRATION" section
+  (Section 3, placed after Phase 7 so it reads as clearly out-of-scope for
+  the current Singles-only rebuild) capturing owner research (web-browser
+  agent) plus direct code inspection this session:
+  - Hard constraint recorded: Retool must connect via the FastAPI backend as
+    a REST resource, never directly to DynamoDB (bypasses every Pydantic
+    guardrail this rebuild has been protecting).
+  - Retool's free tier (5 builder + 5 end-user seats) is sufficient at the
+    owner's 1-3-person scale; access control via a Retool-only shared API
+    key, deliberately separate from Cognito (customer auth, different
+    concern).
+  - Two schema gaps VERIFIED by direct inspection: `TransactionType`
+    (models/business.py:21) has only `SALE`/`PURCHASE`, no `TRADE`, despite
+    `Transaction.trade_id` already existing (line 46); `location`
+    (models/inventory.py) is still a free-text string, doubly motivating the
+    StrEnum conversion already flagged as an open decision under D3's
+    location-visibility gate. Also verified: `routers/` contains only
+    health.py/auth.py/chat.py/inventory.py/public.py — zero endpoints expose
+    the existing Expense/Debt/Payout ledger models.
+  - Realistic admin-UI scope, prerequisite ordering (a-e), and the
+    alternatives-considered comparison (Appsmith/Budibase, raw DynamoDB
+    console, hand-built `/admin`) all recorded per the coordinator's brief.
+  MOST IMPORTANT PART OF THIS ENTRY: this phase is BLOCKED on an owner
+  user-stories document that DOES NOT YET EXIST (being drafted separately).
+  Made prominent, twice, in the new section: whoever picks up Phase 8 must
+  ASK THE OWNER FOR THAT DOCUMENT FIRST — no design-doc work, no scope
+  guessing, before it lands.
+  STATUS: NOT STARTED. NOT NEXT. Does not change Section 7 HANDOFF's next-
+  action pointer (at the time of this entry, "PHASE 5" — NOTE: that pointer
+  was ITSELF updated later the same day by the "STAGE A COMPLETE" entry
+  below, to Phase 3.1; this entry's "PHASE 5" reference is historical, not
+  current) — this is a placeholder for a phase that comes after Phase 7,
+  recorded now purely so the research/decisions above aren't lost before the
+  owner is ready to act on them.
+  Files touched this pass: claude-progress.txt only (new Phase 8 section in
+  Section 3, this LOG entry). CLAUDE.md not touched. No files under
+  backend/src or frontend/src touched — planning-doc-only.
+
+2026-07-27  "STAGE A COMPLETE — SINGLES_ENRICHED_V3.CSV REVIEWED" (post-
+  Phase-3, same day, planning-doc-only — no application code touched). The
+  owner ran `data/spreadsheet/ENRICHMENT_PROMPT.md` (Phase 3.2 Stage A) in a
+  separate Claude Code conversation and personally reviewed the output.
+  Stage A is DONE — it is no longer a pending/blocking step.
+  FINAL ARTIFACT, VERIFIED THIS SESSION by reading its header and sample rows
+  directly: `data/spreadsheet/csv/Singles_enriched_v3.csv` — 267 lines total
+  (266 data rows + header), header confirmed exactly `Date,Location,Name,
+  Card #,Condition,Market @ purchase,Amount Paid,Sold,Date Sold,Venmo?,
+  language,matched_set_id,matched_set_name,matched_number,matched_card_id,
+  match_confidence,match_notes` (original Singles.csv columns PLUS the 7
+  enrichment columns, as designed). Also confirmed by direct read: `Location`
+  already contains real lowercase values like `glass`/`toploader` in the
+  actual data — a good sign for whenever the `location` StrEnum conversion
+  (flagged under D3 and again under Phase 8) happens.
+  FILENAME TRAP, recorded so nobody picks the wrong file: the same directory
+  ALSO holds `Singles_enriched.csv`, `Singles_enriched_edited.csv`,
+  `Singles_enriched_final.csv`, and
+  `Singles_enriched_final_information_added.csv` — these are SCRATCH/HISTORY
+  from the review process, NOT the file to import from. They are not deleted
+  (no harm leaving them) but `import_singles` (Stage B) must read
+  `Singles_enriched_v3.csv` specifically, hardcoded/referenced by that exact
+  name — not a glob, not the bare "Singles_enriched" stem.
+  FINAL TALLY: 266 rows — 247 high confidence, 6 medium confidence, 13 low
+  confidence (no confirmed match).
+  NEW DECISION (owner, via AskUserQuestion) — confidence-tier handling rule
+  for Stage B, RESOLVING the "OPEN IMPLEMENTATION DETAIL" this used to carry:
+    - high (247 rows): import normally with the resolved matched_card_id/
+      language/etc.
+    - medium (6 rows: #133 Meowth->me02-106, #145, #153 Zarude->mep-088,
+      #181, #189, #248): DOES have a real resolved matched_card_id — import
+      WITH that card_id, but still set needs_review=True. Confirms these 6
+      specific rows follow the existing "medium still gets a human second
+      look" path (Phase 3.3), not the no-match path.
+    - low / no match (13 rows): import WITH needs_review=True AND
+      card_id=None — do NOT skip/omit them. Owner explicitly chose "store
+      with needs_review, matching the existing human-in-the-loop pattern"
+      over "skip entirely this run," specifically to avoid ~$300+ of real
+      paid-for inventory becoming invisible to the system. These get a
+      RawInventoryItem with no card_id, raw sheet Name+Card # as the
+      display_name/notes fallback (existing format_display_name pattern),
+      and no market price (current_market_value stays None until a human
+      resolves it via build_review.py — listed_price stays out of scope per
+      the earlier "LISTED_PRICE DROPPED" decision).
+  The 13 no-match rows (verbatim, from Stage A's own final review — genuinely
+  unmatchable via TCGdex per the owner's review, NOT importer bugs to chase)
+  are recorded in full in Phase 3.2 Stage B (Section 3) to avoid duplicating
+  a long table in two places; see there for row numbers, names, card #s,
+  conditions, amounts paid, languages, and the specific reason each one
+  didn't resolve (promo lines TCGdex doesn't catalog, zero-indexed JA sets,
+  tied ambiguous candidates, a checked-and-rejected false match, etc.).
+  NEXT CONCRETE ACTION, UPDATED: Stage A is no longer pending. Phase 3.1
+  (Stage B — writing the actual `import_singles` code against
+  `Singles_enriched_v3.csv`, implementing the confidence-tier rule above,
+  under outside-in TDD per CLAUDE.md, RED tests first) is now the LIVE NEXT
+  STEP and is about to be dispatched to code-writer.
+  Updated: Phase 3.2 (Section 3 — Stage A marked complete with the verified
+  filename/tally/filename-trap warning, Stage B rewritten with the
+  confidence-tier rule and the 13-row table, 3.3 and ACCEPTANCE reworded to
+  match), Q4 (Section 4 — "CURRENT MECHANISM" marked complete with the
+  filename/tally), Section 7 WHERE THINGS STAND (next-action pointer moved
+  from Phase 5 to Phase 3.1, CAVEAT rewritten, EXPECT AFTER THE IMPORT
+  updated to reference Singles_enriched_v3.csv and the confidence-tier
+  outcome).
+  Files touched this pass: claude-progress.txt only (Sections 3, 4, 7). No
+  files under backend/src or frontend/src touched — planning-doc-only;
+  `data/spreadsheet/csv/Singles_enriched_v3.csv` itself was produced by the
+  owner's separate conversation, not by this pass.
+
+2026-07-28  PHASE 3.1 STAGE B — COMPLETE, committed and pushed. Council PASS.
+  Outside-in TDD: RED (11 tests, 3 failing) -> GREEN (minimal import_singles
+  rewrite, all 774 pass) -> Council (Contrarian + Chaos, 0 gating, 3+3 MINORs
+  carried).
+  DELIVERED: `import_singles` in `spreadsheet_import.py` now has an enriched
+  path (`"match_confidence" in row`) that:
+    - Reads `language` from the enriched `language` column (EN/JP), NOT from
+      `parse_language()` on the name or `language_from_url()`. `parse_language`
+      is still called but only to strip `(jp)` markers from the display name.
+    - Reads `card_id` from the enriched `matched_card_id` column, NOT from
+      `_match_card()`. Empty string treated as None.
+    - Implements confidence-tier → needs_review logic:
+      * HIGH + non-null card_id: needs_review only if condition is blank
+      * MEDIUM, LOW, or null card_id: needs_review=True always
+    - listed_price=None (LISTED_PRICE DROPPED decision)
+    - tcg_url=None (column gone from sheet)
+  Legacy path (for old-style rows without enrichment columns) is completely
+  preserved — all 128 pre-existing tests pass unchanged.
+  COUNCIL (2 seats per budget rule, same scoping as Phase 3):
+    Contrarian: NO FATAL FLAWS. 3 MINORs carried:
+      MINOR-1: card_id accepted without catalog validation (narrow window,
+        owner-reviewed, missing-price not wrong-price consequence)
+      MINOR-2: Venmo Fees column absent — fees always zero (pre-existing)
+      MINOR-3: Unknown language codes default to EN (only EN/JP exist)
+    Chaos: SURVIVES CHAOS. 3 MINORs carried:
+      MINOR-1: No log when legacy path activates on header typo (pre-existing)
+      MINOR-2: Unknown language codes default to EN (same as Contrarian)
+      MINOR-3: Dangling card_id references (by design, pre-verified at Stage A)
+    Orchestrator ruled PASS directly — zero gating findings from either seat.
+  Suite: 774 passed, 6 skipped, 0 failed. Ruff clean.
+  Files touched: spreadsheet_import.py (39 ins, 18 del), test_spreadsheet_
+  import.py (195 ins), claude-progress.txt (this entry + Section 7 HANDOFF
+  updated), CLAUDE.md (Third-Party APIs section from prior session's owner
+  clarifications, committed alongside).
+
+========================================================================
+7 — HANDOFF (rewritten 2026-07-27 after Phase 3, for a fresh conversation)
+========================================================================
+WHERE THINGS STAND
+  Phase 1 DONE (a61f0c6). Phase 2 CODE DONE (d2b3de4). Phase 3 DONE (39afd35,
+  pushed) FOR THE GENERAL ARCHITECTURE ONLY — see the CAVEAT immediately below,
+  which supersedes the plain "DONE" reading. Phase 4 PAUSED/ON HOLD BY OWNER —
+  skip it, and do not treat it as "next" after 5/6/7 either; it resumes only
+  on an explicit owner go-ahead (see owner clarifications, LOG 2026-07-27
+  post-Phase-3). Phases 5, 6, 7 NOT STARTED.
+  NEXT ACTION FOR A NEW CONVERSATION: **PHASE 5 — display scoping** (only
+  unsold items with customer-visible locations shown). Phase 3.1 Stage B is
+  DONE (committed and pushed this session — see LOG 2026-07-28). The
+  import_singles rewrite against Singles_enriched_v3.csv is complete and
+  Council-approved. Phase 5 is the next roadmap item.
+  *** CAVEAT ON "PHASE 3 DONE" — NOW RESOLVED: the original caveat warned that
+  39afd35 was the general architecture only, and two items were NOT YET
+  IMPLEMENTED IN CODE: (1) strip listed_price/"Sticker" handling, and (2)
+  rewrite import_singles to consume Singles_enriched_v3.csv's resolved
+  language/card_id/confidence columns. BOTH ARE NOW DONE — committed this
+  session (2026-07-28) as Phase 3.1 Stage B. The import_singles function now
+  has an enriched path that reads matched_card_id/language/match_confidence
+  from the enriched CSV deterministically, with confidence-tier-driven
+  needs_review (high→clean, medium→needs_review+card_id, low→needs_review+
+  no card_id). listed_price is None on the enriched path. tcg_url is None.
+  Council PASS (Contrarian + Chaos, 0 gating findings, 3+3 MINORs carried).
+  "Phase 3 DONE" now means the Singles import IS finished against the
+  current sheet shape. ***
+  STAGE A IS NOW COMPLETE — the "run the prompt" step that used to sit here
+  is DONE. The owner ran `data/spreadsheet/ENRICHMENT_PROMPT.md` in its own
+  conversation and personally reviewed the output: 266 rows, 247 high /
+  6 medium / 13 low(no-match) confidence, final artifact VERIFIED this
+  session as `data/spreadsheet/csv/Singles_enriched_v3.csv` (267 lines
+  including header, header columns confirmed by direct read). Sibling files
+  in the same directory (`Singles_enriched.csv`, `_edited`, `_final`,
+  `_final_information_added`) are review-process scratch, NOT the import
+  source — do not read from them. THE NEXT CONCRETE ACTION is no longer
+  "run Stage A" — it is: write Stage B (`import_singles`) against
+  `Singles_enriched_v3.csv`, under TDD (RED tests first, per CLAUDE.md),
+  implementing the confidence-tier rule and the listed_price removal
+  together, then clear the Council Loop. ***
+  Suite: 774 passed, 6 skipped, 0 failed (was 763 before Phase 3.1 Stage B).
+  `python -m ruff check backend/src` clean. NOTE: `ruff` is not on PATH in
+  this environment — run `python -m ruff`.
+  Working tree at handoff: ONLY frontend/next.config.ts modified-unstaged, and
+  it belongs to the OTHER model (RFC 0002). Leave it alone; never commit it.
+
+*** THE LIVE WIPE IS NOW UNBLOCKED AND WAITING ON THE OWNER TO FIRE IT ***
+  The blocker is GONE: the Phase 3 importer now exists, so the wipe can be
+  paired with an immediate reseed+import and the customer-visible empty window
+  is minutes, not days. The wipe has still NOT been run, deliberately — there
+  is NO BACKUP (the owner explicitly declined one), so this is the owner's
+  trigger to pull, not something a model should do unattended.
+  *** SCOPE NARROWED (owner, this session — see LOG "SCOPE NARROWED TO
+  SINGLES ONLY"): the "customer-visible empty window is minutes, not days"
+  claim above needs a correction. It's still true for SINGLES. It is NO
+  LONGER true for Sealed/Bulk/Consignments/Slabs — those tabs are NOT being
+  re-imported as part of this rebuild at all (see the "DEFERRED — OTHER
+  TABS" callout, Section 3, right after Phase 3). Once the wipe runs, whatever
+  currently exists in the live table for those kinds is GONE and STAYS gone
+  until a FUTURE phase explicitly picks those tabs back up — not "empty for
+  a few minutes," empty indefinitely. If any of those kinds currently have
+  real customer-visible inventory in the live table, confirm with the owner
+  that they're OK losing that visibility before running --execute; this plan
+  does not by itself make that tradeoff obviously safe just because Phase 2
+  was pre-approved to run destructively. ***
+  RUN THE THREE STEPS BACK-TO-BACK, IN THIS ORDER, FROM backend/:
+    1. python -m scripts.wipe_catalog --confirm-table merlins-cards      (dry)
+       -> inspect the "would delete" counts before going further
+    2. python -m scripts.wipe_catalog --confirm-table merlins-cards --execute
+    3. reseed the catalog (seed_catalog.py) and then run the Singles-only
+       spreadsheet import immediately — do not stop between 2 and 3. Do NOT
+       run import_sealed/import_bulk/import_consignments/import_slabs; they
+       are out of scope for this rebuild (see DEFERRED — OTHER TABS).
+  ALWAYS `python -m` FROM backend/, never `python backend/scripts/...` — see
+  the worktree import-shadowing trap in the VERIFIED BASELINE block.
+  --confirm-table also protects you: a wrong-tree run refuses rather than
+  wiping the wrong table.
+  WHAT THE WIPE PRESERVES (Council-verified): shows, consignors, auth,
+  rate-limit rows, live-app sale records (record_sale writes carry no import
+  gen), and hand-curated graded_price / item_price_point rows.
+  EXPECT AFTER THE IMPORT — REWRITTEN for the Singles-only scope (the prior
+  draft's "Bulk should produce ~44 SOLD rows" expectation is STALE and WRONG
+  now that Bulk isn't being imported at all as part of this rebuild — do not
+  go looking for those 44 rows post-wipe, they will not appear): Singles
+  should populate with its AVAILABLE count from `Singles_enriched_v3.csv`
+  (247 high + 6 medium confidence rows resolve a card_id; the 13 no-match
+  rows also import, with `card_id=None` and `needs_review=True`, per the
+  confidence-tier handling rule in Phase 3.2 — none of the 266 enriched rows
+  should be missing); Sealed,
+  Bulk, Consignments, and Slabs will ALL be ABSENT from the live table after
+  the wipe+reseed, on purpose, until a future phase imports them (see
+  DEFERRED — OTHER TABS, Section 3). The 44-SOLD-Bulk-rows figure remains
+  valid as a regression check for whenever Bulk import IS eventually turned
+  back on (the parse_date fix from Phase 3's 39afd35 diff is still in the
+  code and still correct) — it's just not an expectation for THIS wipe/
+  reseed cycle.
+
+HOW TO RUN THE WIPE WHEN THE TIME COMES
+  It defaults to a DRY RUN. The dry run now reports what would ACTUALLY be
+  deleted (this was a Council finding — it used to report the whole catalog).
+  Inspect that output before adding --execute. The rail is:
+      python -m scripts.wipe_catalog --confirm-table merlins-cards          (dry)
+      python -m scripts.wipe_catalog --confirm-table merlins-cards --execute
+  Run it as `python -m` FROM backend/, never as `python backend/scripts/...` —
+  see the worktree shadowing trap in the VERIFIED BASELINE block.
+  --confirm-table also protects you: a wrong-tree run refuses rather than
+  wiping the wrong table.
+  WHAT IT PRESERVES (verified by the Council): shows, consignors, auth,
+  rate-limit rows, live-app sale records (record_sale writes carry no import
+  gen), and hand-curated graded_price / item_price_point rows.
+
+THE OWNER'S OPERATING CONSTRAINTS (still in force)
+  - Commit and push to Database-Redesign-Second-Round as each phase lands.
+  - DO NOT OPEN A PR. Leave a PR body ready for the owner to copy manually.
+  - Phase 2's wipe is APPROVED to run LIVE against merlins-cards. No backup
+    step was requested; do not add one. Do use the generation load-then-swap.
+  - Slabs: schema support YES, IMPORT NO — and NOT "no import for now." A
+    Slabs.csv CSV/spreadsheet import script will NEVER be built, ever (owner
+    clarification, LOG 2026-07-27 post-Phase-3) — this is not the same as
+    "deferred until PSA scan-in ships." The only future slab-intake path is
+    the PSA scan-a-slab-in feature (cert scan -> auto-fill), itself future/
+    out of scope now. In-code: Slabs is skipped via `DEFERRED_TABS =
+    frozenset({"Slabs"})` + the `skip_tabs` param on `run_import`
+    (spreadsheet_import.py, landed in Phase 3 — NOT the `allow_empty` knob;
+    an earlier draft of this file was wrong about that, see Phase 3's LOG
+    entry). This also takes the PSA token (Q3) and PriceCharting key (Q2) off
+    the critical path entirely, and Phase 4 (all of D2, PSA + PriceCharting +
+    slab pipeline) is PAUSED — do not resume without an explicit owner
+    go-ahead. Non-PSA graders (CGC/BGS/SGC) get a future manual admin-entry
+    flow instead of any automated lookup — see D2/Q3.
+  - Council Budget Rule: see Section 5. Once per phase, code-breaking only.
+  - THIS REBUILD IMPORTS SINGLES.CSV ONLY (owner, this session — see LOG
+    "SCOPE NARROWED TO SINGLES ONLY"). Sealed, Bulk, Consignments, and Slabs
+    are explicitly pushed to a future change — low row counts (3/137/5/17
+    respectively vs. Singles' 265) made it safe to defer building/reviewing/
+    fixing them now rather than doing all five tabs at once. import_sealed/
+    import_bulk/import_consignments/import_slabs remain as already-written
+    code (not deleted) but get NO further work, and are NOT wired into
+    whatever the Phase 3 reseed-and-import step runs. See the "DEFERRED —
+    OTHER TABS" callout in Section 3 for known bugs in that already-written
+    code, and the wipe-timing section above for the operational consequence.
+
+DEFERRED — A SEPARATE TASK, AFTER ALL 7 PHASES
+  The owner reports being signed out of their session far more often than
+  expected; sessions should last much longer than they do. Likely suspects:
+  Cognito token lifetime/refresh-token rotation, or the frontend not
+  refreshing an expired ID token. NOT part of this rebuild — do not start it
+  until the catalog work is finished and handed off.
+========================================================================

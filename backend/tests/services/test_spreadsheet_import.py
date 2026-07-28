@@ -1846,3 +1846,198 @@ def test_an_unmatched_singles_row_surfaces_in_build_review_and_is_relinked(
     relinked = dynamo_repo.get_inventory_item(item.item_id)
     assert relinked.card_id == "base1-4"
     assert relinked.needs_review is False
+
+
+# =============================================================================
+# PHASE 3.1 STAGE B: import_singles consumes Singles_enriched_v3.csv columns
+# deterministically. Language + card_id come from the enriched file, not from
+# URL-param parsing or live _match_card. Confidence tiers drive needs_review.
+# =============================================================================
+
+_ENRICHED_CSV = "Singles_enriched_v3"
+
+
+def _enriched_singles_row(**over):
+    """A row shaped like Singles_enriched_v3.csv (Stage B input)."""
+    row = {
+        "Date": "1/5/2026", "Location": "Glass", "Name": "Pikachu",
+        "Card #": "25", "Condition": "LP +",
+        "Market @ purchase": "$12.00", "Amount Paid": "$8.00",
+        "Sold": "", "Date Sold": "", "Venmo?": "",
+        # Enrichment columns (Stage A output):
+        "language": "EN",
+        "matched_set_id": "base1",
+        "matched_set_name": "Base Set",
+        "matched_number": "25",
+        "matched_card_id": "base1-25",
+        "match_confidence": "high",
+        "match_notes": "",
+    }
+    row.update(over)
+    return row
+
+
+def test_enriched_high_confidence_row_imports_with_resolved_card_id(dynamo_repo):
+    """HIGH confidence: card_id comes from the enriched matched_card_id column
+    deterministically, language from the enriched language column. No _match_card
+    call, no URL-param parsing."""
+    ctx = ImportContext(repo=dynamo_repo)
+    row = _enriched_singles_row(
+        Name="Pikachu", **{"Card #": "25"},
+        language="EN", matched_card_id="base1-25", match_confidence="high",
+    )
+    summary = import_singles([row], ctx)
+    assert summary["imported"] == 1
+    [item] = dynamo_repo.list_inventory()
+    assert item.card_id == "base1-25"
+    assert item.language is Language.EN
+    assert item.needs_review is False
+
+
+def test_enriched_medium_confidence_row_imports_with_card_id_and_needs_review(
+        dynamo_repo):
+    """MEDIUM confidence: card_id IS populated from the enriched file, but the
+    row is always flagged needs_review=True so a human can verify."""
+    ctx = ImportContext(repo=dynamo_repo)
+    row = _enriched_singles_row(
+        Name="Meowth", **{"Card #": "106"},
+        language="EN", matched_card_id="me02-106", match_confidence="medium",
+    )
+    summary = import_singles([row], ctx)
+    assert summary["imported"] == 1
+    assert summary["needs_review"] == 1
+    [item] = dynamo_repo.list_inventory()
+    assert item.card_id == "me02-106"
+    assert item.needs_review is True
+
+
+def test_enriched_low_confidence_row_imports_with_no_card_id_and_needs_review(
+        dynamo_repo):
+    """LOW confidence / no match: card_id is None, needs_review is True, but the
+    row IS stored (not skipped). display_name uses format_display_name output."""
+    ctx = ImportContext(repo=dynamo_repo)
+    row = _enriched_singles_row(
+        Name="Ultra Ball", **{"Card #": "68a"},
+        language="EN", matched_card_id="", match_confidence="low",
+    )
+    summary = import_singles([row], ctx)
+    assert summary["imported"] == 1
+    assert summary["skipped"] == 0
+    [item] = dynamo_repo.list_inventory()
+    assert item.card_id is None
+    assert item.needs_review is True
+    # display_name from format_display_name(name, card_number):
+    assert item.display_name == "Ultra Ball #68a"
+
+
+def test_enriched_row_does_not_populate_listed_price(dynamo_repo):
+    """The enriched CSV has no Sticker column. listed_price must be None —
+    it is out of scope entirely (LISTED_PRICE DROPPED decision)."""
+    ctx = ImportContext(repo=dynamo_repo)
+    row = _enriched_singles_row()
+    summary = import_singles([row], ctx)
+    assert summary["imported"] == 1
+    [item] = dynamo_repo.list_inventory()
+    assert item.listed_price is None
+
+
+def test_enriched_row_does_not_store_tcg_url(dynamo_repo):
+    """The enriched CSV has no TCG Link column. tcg_url must be None."""
+    ctx = ImportContext(repo=dynamo_repo)
+    row = _enriched_singles_row()
+    summary = import_singles([row], ctx)
+    assert summary["imported"] == 1
+    [item] = dynamo_repo.list_inventory()
+    assert item.tcg_url is None
+
+
+def test_enriched_japanese_row_maps_language_correctly(dynamo_repo):
+    """Language comes from the enriched 'language' column, not from
+    parse_language / language_from_url. Using a name WITHOUT a '(jp)' marker
+    to prove the enrichment column is the source — parse_language alone would
+    return EN for this name."""
+    ctx = ImportContext(repo=dynamo_repo)
+    row = _enriched_singles_row(
+        Name="Espurr", **{"Card #": "16"},
+        language="JP", matched_card_id="ja:cp3-16", match_confidence="high",
+    )
+    summary = import_singles([row], ctx)
+    assert summary["imported"] == 1
+    [item] = dynamo_repo.list_inventory()
+    assert item.language is Language.JP
+    assert item.card_id == "ja:cp3-16"
+
+
+def test_enriched_sold_row_records_sale_transaction(dynamo_repo):
+    """Sold/available logic is unchanged: SOLD when BOTH Sold amount AND
+    Date Sold are present."""
+    show = Show(show_id="s1", name="Show", date=date(2026, 3, 8))
+    ctx = ImportContext(repo=dynamo_repo, shows=[show])
+    row = _enriched_singles_row(
+        Sold="$40.00", **{"Date Sold": "3/7/2026", "Venmo?": "Yes"},
+    )
+    summary = import_singles([row], ctx)
+    assert summary["sales"] == 1
+    [item] = dynamo_repo.list_inventory()
+    assert item.status.value == "sold"
+    txns = dynamo_repo.list_transactions(date(2026, 3, 1), date(2026, 3, 31))
+    assert len(txns) == 1
+    assert txns[0].amount == Decimal("40.00")
+
+
+def test_enriched_row_stores_cost_basis_and_market_value(dynamo_repo):
+    """cost_basis and market_value_at_purchase come from Amount Paid and
+    Market @ purchase, same as before."""
+    ctx = ImportContext(repo=dynamo_repo)
+    row = _enriched_singles_row()
+    import_singles([row], ctx)
+    [item] = dynamo_repo.list_inventory()
+    assert item.cost_basis == Decimal("8.00")
+    assert item.market_value_at_purchase == Decimal("12.00")
+
+
+def test_enriched_blank_matched_card_id_treated_as_no_match(dynamo_repo):
+    """An empty matched_card_id string means no match, even if confidence
+    says 'high'. card_id=None and needs_review=True."""
+    ctx = ImportContext(repo=dynamo_repo)
+    row = _enriched_singles_row(
+        matched_card_id="", match_confidence="high",
+    )
+    summary = import_singles([row], ctx)
+    assert summary["imported"] == 1
+    [item] = dynamo_repo.list_inventory()
+    assert item.card_id is None
+    assert item.needs_review is True
+
+
+def test_enriched_row_blank_condition_still_defaults_nm_needs_review(dynamo_repo):
+    """A high-confidence row with a blank Condition still defaults to NM
+    but forces needs_review=True (blank condition overrides confidence)."""
+    ctx = ImportContext(repo=dynamo_repo)
+    row = _enriched_singles_row(Condition="", match_confidence="high")
+    summary = import_singles([row], ctx)
+    assert summary["imported"] == 1
+    [item] = dynamo_repo.list_inventory()
+    assert item.condition is Condition.NM
+    assert item.needs_review is True
+
+
+def test_real_enriched_csv_stores_every_row(dynamo_repo):
+    """Read the actual Singles_enriched_v3.csv and confirm every row is
+    accounted for. None are silently dropped. listed_price and tcg_url
+    are never set."""
+    rows = _real_rows(_ENRICHED_CSV)
+    ctx = ImportContext(repo=dynamo_repo)
+    summary = import_singles(rows, ctx)
+    # All 266 rows accounted for (imported + skipped = total):
+    assert summary["imported"] + summary["skipped"] == 266
+    # At minimum 19 need review (13 low + 6 medium):
+    assert summary["needs_review"] >= 19
+    # Every stored item: no listed_price, no tcg_url
+    items = dynamo_repo.list_inventory()
+    assert len(items) == summary["imported"]
+    for item in items:
+        assert item.listed_price is None, (
+            f"listed_price must be None, got {item.listed_price} on {item.item_id}")
+        assert item.tcg_url is None, (
+            f"tcg_url must be None, got {item.tcg_url} on {item.item_id}")

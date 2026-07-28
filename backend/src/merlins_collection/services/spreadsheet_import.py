@@ -390,6 +390,7 @@ def _record_sheet_sale(ctx, item, *, sold, date_sold, venmo, venmo_fees, categor
 
 def import_singles(rows: list[dict], ctx: ImportContext) -> dict:
     summary = {"imported": 0, "sales": 0, "skipped": 0, "needs_review": 0}
+    _LANG_MAP = {"EN": Language.EN, "JP": Language.JP}
     for row in rows:
         try:
             raw_condition = str(row.get("Condition") or "").strip()
@@ -400,23 +401,43 @@ def import_singles(rows: list[dict], ctx: ImportContext) -> dict:
                 # A card with no condition: default NM but flag it rather than drop.
                 condition, modifier, blank_condition = Condition.NM, None, True
             loc = map_location(row.get("Location"))
-            # Language is read FIRST: it decides whether the English catalog may
-            # be consulted at all, and the cleaned name is what gets matched and
-            # preserved. Three live rows carry no marker in the name and are
-            # identifiable only from their TCGplayer link, so that is consulted
-            # as a fallback.
-            tcg_url = str(row.get("TCG Link") or "").strip() or None
-            language, name = parse_language(row["Name"])
-            if language is Language.EN:
-                language = language_from_url(tcg_url)
-            # The Singles tab has no Set column, so a name+number shared across
-            # several sets can't be resolved from the row alone. The TCGplayer
-            # link does carry the set in its slug, so derive a set hint from it
-            # to narrow those ties (``_match_card`` already narrows a multi-hit by
-            # set text; singles simply never had any to pass).
-            card_id = _match_card(ctx, name, row.get("Card #", ""), language=language,
-                                  set_text=set_hint_from_url(tcg_url))
-            needs_review = card_id is None or blank_condition
+
+            enriched = "match_confidence" in row
+
+            if enriched:
+                # --- Enriched path (Stage B): language, card_id, and
+                # confidence come from the pre-resolved enrichment columns.
+                # parse_language is called only to strip markers from the
+                # display name; its language return value is ignored.
+                _ignored_lang, name = parse_language(row["Name"])
+                lang_code = str(row.get("language") or "").strip().upper()
+                language = _LANG_MAP.get(lang_code, Language.EN)
+
+                raw_card_id = str(row.get("matched_card_id") or "").strip()
+                card_id = raw_card_id or None
+
+                confidence = str(row.get("match_confidence") or "").strip().lower()
+                if confidence == "high" and card_id is not None:
+                    needs_review = blank_condition
+                else:
+                    # medium, low, empty, or card_id is None
+                    needs_review = True
+
+                tcg_url = None
+                listed_price = None
+            else:
+                # --- Legacy path: URL-param parsing + live _match_card.
+                tcg_url = str(row.get("TCG Link") or "").strip() or None
+                language, name = parse_language(row["Name"])
+                if language is Language.EN:
+                    language = language_from_url(tcg_url)
+                card_id = _match_card(
+                    ctx, name, row.get("Card #", ""), language=language,
+                    set_text=set_hint_from_url(tcg_url),
+                )
+                needs_review = card_id is None or blank_condition
+                listed_price = parse_money(_find(row, "Sticker"))
+
             notes = " — ".join(x for x in (
                 f"{name} #{row.get('Card #', '')}".strip(" #"),
                 str(row.get("Notes") or "").strip() or None,
@@ -438,7 +459,7 @@ def import_singles(rows: list[dict], ctx: ImportContext) -> dict:
                 location=loc["location"],
                 cost_basis=parse_money(row.get("Amount Paid")) or Decimal("0"),
                 market_value_at_purchase=parse_money(row.get("Market @ purchase")),
-                listed_price=parse_money(_find(row, "Sticker")),
+                listed_price=listed_price,
                 acquired_at=parse_date(row.get("Date")) or date(2026, 1, 1),
                 notes=notes or None,
                 tcg_url=tcg_url,
