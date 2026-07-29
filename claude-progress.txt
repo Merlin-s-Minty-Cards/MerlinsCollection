@@ -1796,6 +1796,197 @@ Q5. RESOLVED/MOOT — the sheet is NOT mostly sold; see Section 2's Data block. 
   Files touched this pass: claude-progress.txt only (this entry + Section 7
   HANDOFF "NEXT ACTION" line). No application code touched.
 
+2026-07-28  PER-LANGUAGE FLOOR FOR THE SEED'S MAGNITUDE RAIL. DONE, Council
+  PASS (revision 1). *** THIS RESOLVES THE BLOCKER RECORDED IN THE ENTRY
+  DIRECTLY ABOVE. *** Not a numbered phase item — it is the follow-up the
+  "LIVE WIPE ATTEMPT — BLOCKED BY TCGDEX" entry demanded before --execute
+  could be attempted again.
+  OWNER'S DECISION (given directly this session, the one that entry said to
+  go get): PROCEED WITH BOTH LANGUAGES. Accept TCGdex's current Japanese
+  completeness as the new normal — a half-populated JP catalog beats the
+  previous state, which had zero JP support at all — rather than blocking on
+  JA, dropping to EN-only, or waiting for TCGdex's community to catch up.
+  This is option (a) of the four the investigation sketched. Options (b),
+  (c), (d) were NOT taken.
+  WHAT CHANGED (backend/scripts/seed_catalog.py, +50/-5):
+    - New MIN_EXPECTED_RATIO_BY_LANGUAGE = {Language.EN: 0.9, Language.JP:
+      0.4}, with a dated ~30-line comment block recording the live 2026-07-28
+      measurements, why JA's gap is structural, and — deliberately — which
+      direction the number should move (UP, as TCGdex fills in) and what is
+      required to move it DOWN (re-measure upstream first, then say so in the
+      comment). The block opens "THIS IS NOT A WEAKENED RAIL" on purpose: the
+      likeliest future failure here is someone reading 0.4 as licence to
+      shave another safety limit in this file.
+    - MIN_EXPECTED_RATIO = 0.9 KEPT as the .get() fallback, so a language
+      added to the enum without a measured floor lands on the STRICT bar and
+      fails loudly rather than on a permissive one. A test asserts the table
+      covers the whole enum, so the fallback should never fire.
+    - seed_language's min_expected_ratio now defaults to None (sentinel) and
+      resolves per-language inside the body.
+    - Abort message now names the observed ratio, the floor applied AND the
+      language. Once floors differ per language, "seeded 8159 of 16192" alone
+      no longer tells an operator whether they breached a 90% bar or a 40%
+      one — and that operator is deciding whether to override in front of an
+      irreversible, backup-less wipe.
+  NEITHER CALL SITE WAS TOUCHED. seed_catalog.main() and
+  wipe_catalog.wipe_and_reseed() (lines 100-107 — the live wipe's actual
+  path) both still omit the kwarg and now pick up the right floor
+  automatically. Repo-wide grep confirms no other consumers of the constant.
+  TDD per CLAUDE.md, phases NOT combined. RED confirmed first: the JA
+  acceptance test failed with the exact production abort that blocked the
+  wipe ("seeded 50 of the 100 cards..."), and the new constant did not exist
+  (AttributeError). THEN implemented. 5 new tests, all additive, no existing
+  test modified: JA at 50/100 passes; JA at 30/100 STILL aborts; EN at 50/100
+  STILL aborts (this one exists specifically to catch "someone applied JA's
+  loose floor globally" — it would fail under that bug, not pass by luck);
+  explicit min_expected_ratio= overrides still win in both directions; the
+  floor table covers every Language member.
+  COUNCIL (all four seats filed, revision 1, PASS): Contrarian NO FATAL
+  FLAWS (verified the `is None` sentinel, so an explicit 0.0 override is not
+  swallowed by truthiness). Security NO EXPLOITABLE FINDINGS (worst item a
+  MEDIUM hardening note on the widened acceptance window, self-scoped as
+  data-integrity not vulnerability). Chaos SURVIVES CHAOS (worst: MINOR, the
+  40-50% JP blind spot, already disclosed in the submission). Architect
+  ACCEPTABLY SIMPLE (worst: NITPICK on comment length). Confirmed-major
+  count 0/0/0/0; nothing overruled because nothing reached MAJOR.
+  Judge spot-checked the destructive ordering, the item closest to the gate:
+  purge_card_data (wipe_catalog.py:122) is reached ONLY after every
+  seed_language call returns, so a JP walk truncating below 0.4 still raises
+  SeedAborted out of the loop and the purge never executes. Load-then-swap
+  ordering and the separate `if not seeded` guard (line 110) both hold. The
+  rail remains load-bearing in front of the irreversible operation.
+  Judge's delta-rule reasoning on the widened window, worth preserving:
+  pre-diff, JP's real ~50.4% sat permanently below the flat 0.9, so JP
+  aborted on EVERY run and wipe_and_reseed could never reach its purge for
+  that language at all — a permanent block, not a working alarm calibrated
+  to 90%. Post-diff JP gains a FUNCTIONING alarm at 40%. Not a regression.
+  4 NON-GATING FOLLOW-UPS carried (verdict.md "Conditions"; none require a
+  patch or another Council round):
+    1. *** WATCH ITEM — carry the JP 40-50% BLIND SPOT forward once the live
+       wipe actually runs. *** A JA regression to ~45% completeness would now
+       pass the rail unnoticed. Accepted deliberately: a floor hugging 50.4%
+       would abort the wipe on ordinary upstream churn, which is the exact
+       failure this change exists to fix. Remediation path is already in the
+       code comment — re-measure upstream, raise the floor as TCGdex fills in.
+    2. Consider a JA set-COUNT cross-check (177 sets seen vs advertised) as a
+       future complement to the aggregate card-count ratio, since the JA
+       failure mode is whole sets going to zero cards. Pre-existing; not
+       introduced by this diff.
+    3. Docstring note that min_expected_ratio=None means "use the per-language
+       default", NOT "no floor" — already covered by the docstring as written;
+       re-check if a future caller starts passing it.
+    4. Optional future trim of the comment block. Documentation, not debt.
+  KNOWN LIMITS, on the record: the floors are a 2026-07-28 SNAPSHOT and
+  nothing automates re-measurement (automating it would defeat the rail — a
+  self-calibrating floor cannot detect a decline). 0.4 is a judgment call
+  (50.4% minus ~10 points of headroom), not derived. The rail measures
+  TOTALS, not distribution — 50% of JA arriving is accepted whether it is the
+  expected 50% or a different 50% (equally true of the flat rail before).
+  Suite: 784 passed, 6 skipped, 0 failed. Baseline was 779; +5 is exactly
+  this change's new tests. `python -m ruff check backend/src` clean; both
+  touched files clean. (Unrelated: 4 PRE-EXISTING ruff errors sit in
+  backend/scripts/import_held_singles.py — outside the documented lint scope,
+  not touched here, still there.)
+  NO LIVE AWS TOUCHED. --execute was NOT run; that stays with the owner/
+  orchestrator. DynamoDB is still at its pre-attempt state.
+  Files touched: backend/scripts/seed_catalog.py, backend/tests/scripts/
+  test_seed_catalog.py, claude-progress.txt (this entry + Section 7 live-wipe
+  block below). Committed: NOT YET at time of writing.
+
+2026-07-28  LIVE WIPE STEPS 1-2 EXECUTED — CATALOG SUCCESSFULLY WIPED +
+  RESEEDED. STEP 4 (SINGLES IMPORT) HIT A NEW, SEPARATE BLOCKER — DO NOT
+  RUN `import_spreadsheet.py` BARE AGAINST THIS TABLE, SEE BELOW.
+  Orchestrator/main-thread ran this directly (same ops-runbook rationale as
+  the earlier LOG entries; no agent fits "execute an approved live-infra
+  runbook").
+  STEP 1 (dry run) re-run after the seed_catalog fix: CLEARED CLEANLY, no
+  abort. Reported "would remove: catalog_card 20359, inventory_item 550,
+  price_point 32940, transaction 1119; preserved: shows, consignors,
+  config, auth, rate-limit rows, hand-entered graded prices, sealed/bulk
+  price history." Sanity-checked against the table's known 55,210 total
+  (54,968 removed + ~242 preserved matches the documented preservation
+  set). Owner reviewed and approved proceeding.
+  STEP 2 (`wipe_catalog.py --execute`) RUN LIVE, SUCCEEDED. Counts matched
+  the dry run exactly: EN 23,444 written, JA 8,159 written, 0 failures;
+  removed catalog_card 20359 / inventory_item 550 / price_point 32940 /
+  transaction 1119. Ran >300s (real AWS writes for ~31.6k cards), completed
+  in background. Spot-checked live post-write via a raw DynamoDB scan:
+  real card data confirmed (e.g. `en:base1-4`... actually verified
+  `en:B1-268`="May", `en:base1-17`="Beedrill", real TCGdex image URLs, a
+  fresh `cat_gen` ULID, `last_synced_at` matching the run) — not blanks or
+  ULIDs. `describe-table`'s `ItemCount` is a ~6h-stale AWS estimate, NOT a
+  live count — do not trust it for post-write verification; use a scoped
+  scan/query instead, as done here.
+  STEP 3 (`seed_catalog.py --execute` as a separate command) SKIPPED, owner
+  approved. `wipe_catalog.py`'s `wipe_and_reseed()` already IS "load, then
+  swap" — it calls the identical `seed_language()` reseed internally before
+  purging (see `wipe_catalog.py` lines 100-107), so step 2 above already
+  performed the reseed. A separate step-3 invocation would be a fully
+  redundant second full TCGdex walk + rewrite of the same 31,603 rows, no
+  new data, just extra load on TCGdex's free API. NOTE FOR THE NEXT
+  SESSION: the original 4-step instruction listed this as a distinct step;
+  it is not, given the current code. If wipe_catalog.py's internal reseed
+  logic ever changes to NOT reseed inline, re-add step 3.
+
+  STEP 4 (`import_spreadsheet.py` — Singles-only) — DISCOVERED UNSAFE AS
+  ORIGINALLY INSTRUCTED, NOT RUN, before anything was executed (caught by
+  pre-flight code + live-data investigation, not by a failed live attempt).
+  *** THE ORIGINAL 4-STEP PLAN'S PREMISE WAS WRONG: it assumed
+  `DEFERRED_TABS`/`skip_tabs` already scopes a bare `import_spreadsheet.py`
+  run to Singles-only. It does not. *** Investigated and confirmed:
+    - `run_import()` (spreadsheet_import.py:1145) processes ALL 18 tabs in
+      `_TAB_IMPORTERS` (line 1062: Vending Net->shows, Cash, Buying
+      Guidelines, Singles, Slabs, Sealed, Bulk, Consignments, Show Fees,
+      Other COGS, Marketing, Supplies, Employee Wages, Employee Expenses,
+      Debts, Payouts, 2x Balance Sheet). Only `DEFERRED_TABS = {"Slabs"}`
+      (line 1142) is skipped by default. The CLI (`scripts/
+      import_spreadsheet.py`) exposes NO flag to skip any other tab.
+    - LIVE READ-ONLY CHECK against merlins-cards, this session, confirmed
+      REAL PRE-EXISTING BUSINESS DATA totally unrelated to card inventory:
+      SHOWLIST 28, DEBTLIST 104, PAYOUTLIST 33, BALANCESHEET 2,
+      CONSIGNORLIST 3, CONFIG 25 (month-partitioned cash/expense/wage
+      ledgers not probed, likely also populated). This is NOT a fresh
+      catalog-only table — real business history predates this session.
+    - `run_import`'s outermost guard, `find_import_owned_entity()`
+      (dynamodb.py:173), checks `_IMPORT_OWNED_ENTITIES` (dynamodb.py:160,
+      11 types incl. show/consignor/debt/payout/etc.) across
+      `_BUSINESS_PARTITIONS` (dynamodb.py:166). It WILL find the data
+      above and raise `ExistingBusinessDataError` UNLESS `--force-replace`
+      is passed (not in the original instructions).
+    - Worse: even a manually-scoped `skip_tabs` workaround would NOT be
+      safe, because `finalize_import()` (dynamodb.py:288)'s commit is
+      ALL-OR-NOTHING per entity type: "delete every import-owned record
+      that is NOT of this generation" (line 291). Skipping a tab does not
+      mean "leave its data alone" under this mechanism — it means "that
+      entity type's existing rows never get re-stamped, so the commit
+      sweep deletes them as stale." A Singles-only skip_tabs run that
+      committed would have DELETED the 28 shows / 104 debts / 33 payouts /
+      2 balance sheets / 3 consignors / config data outright, with no
+      backup. `--force-replace` instead would import all 17 non-Slabs
+      tabs, wholesale-replacing that same real data with whatever this CSV
+      snapshot says, AND reactivating two bugs Section 3 documents as
+      "DEFERRED — OTHER TABS" (import_consignments' returned/boolean bug,
+      the fabricated-PSA-slab-identity bug) — currently dormant only
+      because this path isn't run.
+  BOTTOM LINE: there was no existing way to import Singles.csv alone
+  without either refusing outright or silently destroying/overwriting real
+  unrelated business data. NOTHING WAS RUN for step 4 — caught during
+  pre-flight investigation, not via a failed live attempt.
+  OWNER'S DECISION when reported: build a proper, scoped Singles-only
+  import code path (real code change, TDD + full Council review — this
+  touches the core commit-safety mechanism protecting live financial
+  records, so proportionality calls for the full 4-seat Council, not a
+  reduced round) rather than force-replacing everything or giving up on
+  the Singles import. Dispatched to code-writer same session; see the
+  following LOG entry for outcome IF this note is being read before that
+  entry exists yet, code-writer's fix is still in flight — check
+  `.claude/council/verdict.md` and this section's latest entries for
+  current status before assuming it's done.
+  NEXT ACTION: do NOT run `import_spreadsheet.py` (bare or with
+  `--force-replace`) against merlins-cards until the scoped Singles-only
+  path lands and clears Council. The catalog (from steps 1-2) is already
+  live, correct, and does not depend on step 4 landing.
+
 ========================================================================
 7 — HANDOFF (rewritten 2026-07-27 after Phase 3, for a fresh conversation)
 ========================================================================
@@ -1808,7 +1999,11 @@ WHERE THINGS STAND
   PASS (Security + Contrarian, 0 gating findings).
   Phases 6, 7 NOT STARTED.
   NEXT ACTION FOR A NEW CONVERSATION: **PHASE 6 — review tooling + docs**.
-  Phase 6 is the next roadmap item.
+  Phase 6 is the next roadmap item. BUT NOTE, competing for "next": the live
+  wipe is no longer blocked as of 2026-07-28 (the seed's magnitude rail now
+  has a per-language floor; see the live-wipe block below and the LOG entry
+  "PER-LANGUAGE FLOOR FOR THE SEED'S MAGNITUDE RAIL"). Which of the two goes
+  first is the owner's call, not an agent's — surface it rather than picking.
   *** CAVEAT ON "PHASE 3 DONE" — NOW RESOLVED: the original caveat warned that
   39afd35 was the general architecture only, and two items were NOT YET
   IMPLEMENTED IN CODE: (1) strip listed_price/"Sticker" handling, and (2)
@@ -1835,14 +2030,35 @@ WHERE THINGS STAND
   `Singles_enriched_v3.csv`, under TDD (RED tests first, per CLAUDE.md),
   implementing the confidence-tier rule and the listed_price removal
   together, then clear the Council Loop. ***
-  Suite: 779 passed, 6 skipped, 0 failed (was 774 before Phase 5).
+  Suite: 784 passed, 6 skipped, 0 failed (was 779 after Phase 5; +5 from the
+  per-language seed-rail change, LOG 2026-07-28).
   MCP: 73 passed, 0 failed.
   `python -m ruff check backend/src` clean. NOTE: `ruff` is not on PATH in
-  this environment — run `python -m ruff`.
-  Working tree at handoff: ONLY frontend/next.config.ts modified-unstaged, and
-  it belongs to the OTHER model (RFC 0002). Leave it alone; never commit it.
+  this environment — run `python -m ruff`. Also note 4 PRE-EXISTING ruff
+  errors in backend/scripts/import_held_singles.py — outside the documented
+  lint scope (`backend/src`), pre-date this work, left alone.
+  Working tree at handoff: frontend/next.config.ts modified-unstaged, which
+  belongs to the OTHER model (RFC 0002) — leave it alone, never commit it.
+  ALSO UNCOMMITTED: backend/scripts/seed_catalog.py and backend/tests/scripts/
+  test_seed_catalog.py (the per-language seed-rail change — Council PASSED,
+  tests green, just not committed yet) plus this file. Those three DO belong
+  together in one commit.
 
-*** THE LIVE WIPE IS OWNER-APPROVED BUT BLOCKED ON A NEW OWNER DECISION, NOT RUN ***
+*** THE LIVE WIPE IS OWNER-APPROVED AND NO LONGER BLOCKED — STILL NOT RUN ***
+  *** UPDATED 2026-07-28 (see LOG "PER-LANGUAGE FLOOR FOR THE SEED'S MAGNITUDE
+  RAIL"): the owner decision this block used to be waiting on HAS BEEN GIVEN
+  AND IMPLEMENTED. Do NOT go hunting for it again. The owner chose option (a),
+  proceed with BOTH languages; seed_catalog.py now carries
+  MIN_EXPECTED_RATIO_BY_LANGUAGE = {EN: 0.9, JP: 0.4} and the change cleared
+  the Council (all four seats, PASS, revision 1). The next concrete action is
+  therefore simply: RE-RUN THE DRY RUN (it should now clear the JA rail that
+  aborted all three previous attempts), confirm the "would delete" counts look
+  sane, then proceed through steps 2-4 with --execute. Remember the
+  PYTHONPATH="$(pwd)/src" prefix — the worktree-shadowing trap was confirmed
+  LIVE, plain `python -m` was NOT sufficient. Expect the reseed to load a JP
+  catalog that is ~50% of what JA set metadata advertises; that is the accepted
+  outcome, not a fault to debug. The paragraph below is kept for history —
+  read its "THE REAL BLOCKER NOW" sentence as ALREADY SATISFIED. ***
   The design/code blocker is GONE (Phase 3 importer exists, wipe pairs with an
   immediate reseed+import). The OWNER'S GO-AHEAD IS ALSO IN (see LOG
   2026-07-28 "LIVE WIPE ATTEMPT" entry — owner explicitly approved firing it

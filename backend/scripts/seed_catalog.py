@@ -23,7 +23,11 @@ rails** (revision-1 verdict, FRAIL-2/3/4):
   price away and revert those rows to ``brief`` — whole-item writes do not
   merge — and recovery would be a full depth re-run;
 - it **aborts non-zero** on a wholesale mapping failure or a catalog that comes
-  back implausibly short, instead of reporting a successful no-op;
+  back implausibly short, instead of reporting a successful no-op. "Implausibly
+  short" is measured PER LANGUAGE (``MIN_EXPECTED_RATIO_BY_LANGUAGE``): TCGdex
+  is ~98.7% complete in English and ~50% in Japanese, so one flat floor would
+  have to be either too loose to catch an English regression or so tight it
+  rejects a correct Japanese seed;
 - writes are paced, because the 0.1 s politeness budget in ``TcgdexClient`` is
   aimed at the party that is NOT under load.
 
@@ -62,7 +66,43 @@ MAX_FAILURE_RATIO = 0.1
 # itself advertises. This is the magnitude rail against a silently truncated
 # walk: `list_sets` already reports how many cards each set holds and the seed
 # used to fetch that and throw it away.
+#
+# The floor is PER LANGUAGE because "complete" means something different per
+# language upstream, and one flat number cannot be both a real check for
+# English and a survivable one for Japanese. It is the fallback for a language
+# with no entry in the table below.
 MIN_EXPECTED_RATIO = 0.9
+
+# THIS IS NOT A WEAKENED RAIL — it is the same rail calibrated to what each
+# language's upstream actually contains. Measured live against TCGdex on
+# 2026-07-28 (see claude-progress.txt LOG 2026-07-28 "LIVE WIPE ATTEMPT",
+# FOLLOW-UP):
+#
+#   EN  23,444 of 23,746 advertised (98.7%) — only 25 of 218 sets missing, all
+#       niche promo products. A normal long tail; 0.9 is a real check here and
+#       stays untouched.
+#   JA   8,159 of 16,192 advertised (50.4%) — 108 of TCGdex's 177 JA sets carry
+#       set metadata (name, official card count) but ZERO card-level rows, even
+#       when queried individually at `GET /v2/ja/sets/<id>`. Spanning 2003-2024
+#       and including mainline releases, so this is not a long tail: nobody has
+#       entered those cards into TCGdex's community database yet. Confirmed
+#       reproducible across repeated raw fetches — not an outage, not our
+#       pagination, and it will not resolve by retrying later. TCGdex's own
+#       status page treats per-language completeness as an accepted, varying
+#       steady state rather than a tracked defect.
+#
+# 0.4 for JA is ~10 points of margin under the measured 50.4%, so ordinary
+# set-count drift does not false-positive, while a genuine regression — TCGdex
+# losing more data, or our own walk truncating — still trips it. If JA's real
+# ratio climbs as the community fills sets in, RAISE this to sit just under the
+# new figure. Lowering it further needs the same treatment this entry got:
+# measure upstream first, then move the number, and say so here. The owner
+# accepted TCGdex's current Japanese completeness as normal on 2026-07-28,
+# because a half-populated JP catalog is what exists and beats no JP at all.
+MIN_EXPECTED_RATIO_BY_LANGUAGE = {
+    Language.EN: 0.9,
+    Language.JP: 0.4,
+}
 
 # Pause between write batches. boto3 otherwise bursts ~23k rows into a table
 # that is concurrently serving `/inventory`.
@@ -97,7 +137,7 @@ def _set_metadata(client, language):
 
 def seed_language(repo, client, language: Language, *, batch_size: int = BATCH_SIZE,
                   execute: bool = False, max_failure_ratio: float = MAX_FAILURE_RATIO,
-                  min_expected_ratio: float = MIN_EXPECTED_RATIO,
+                  min_expected_ratio: float | None = None,
                   allow_unverified: bool = False, id_sink: set | None = None) -> dict:
     """Upsert every card of one language as a brief catalog row.
 
@@ -109,12 +149,22 @@ def seed_language(repo, client, language: Language, *, batch_size: int = BATCH_S
     unless ``allow_unverified`` is set: an unverifiable run is not a passing
     run. See the ``SeedAborted`` at the bottom of this function.
 
+    ``min_expected_ratio`` defaults to ``None``, meaning "use this language's
+    floor" from ``MIN_EXPECTED_RATIO_BY_LANGUAGE``. Resolving it here rather
+    than in the signature is what lets every caller — ``main`` below and
+    ``wipe_catalog.wipe_and_reseed`` — get the right floor per language without
+    either of them knowing the table exists. Passing a number still overrides
+    it outright.
+
     ``id_sink``, when given, collects every card id this run mapped. The wipe's
     DRY RUN needs it to predict honestly: a dry run writes nothing, so without
     the ids it would report the whole catalog as "would be deleted" instead of
     just the rows the reseed does not replace. It is deliberately NOT returned in
     the summary, which gets printed.
     """
+    if min_expected_ratio is None:
+        min_expected_ratio = MIN_EXPECTED_RATIO_BY_LANGUAGE.get(language,
+                                                                MIN_EXPECTED_RATIO)
     set_names, expected = _set_metadata(client, language)
 
     synced_at = datetime.now(timezone.utc)
@@ -199,8 +249,9 @@ def seed_language(repo, client, language: Language, *, batch_size: int = BATCH_S
     if expected and seeded < expected * min_expected_ratio:
         raise SeedAborted(
             f"catalog came back short: seeded {seeded} of the {expected} cards "
-            f"the set list advertises; a truncated walk must not look like a "
-            f"successful run: {summary}"
+            f"the set list advertises ({seeded / expected:.1%}), below the "
+            f"{min_expected_ratio:.0%} floor for {language.value}; a truncated "
+            f"walk must not look like a successful run: {summary}"
         )
     if not expected and not allow_unverified:
         # LOGIC-1. Without an expected count the magnitude rail above is not

@@ -195,6 +195,82 @@ def test_the_cross_check_passes_when_the_counts_agree(seed, dynamo_repo):
 
 
 # --------------------------------------------------------------------------
+# the magnitude rail is calibrated PER LANGUAGE (2026-07-28)
+#
+# TCGdex's Japanese catalog is genuinely ~50% complete at the card level: 108
+# of its 177 JA sets carry set metadata but zero cards, even at the per-set
+# endpoint. A flat 90% floor therefore reads a correct, complete-as-it-can-be
+# Japanese seed as a truncated walk and aborts the wipe. English is unaffected
+# (~98.7%) and keeps the stricter bar.
+# --------------------------------------------------------------------------
+
+
+def _rows(count, set_id):
+    """``count`` mappable brief rows in one set, for exercising the ratio."""
+    return [{"id": f"{set_id}-{n:03d}", "localId": f"{n:03d}", "name": f"Card {n}"}
+            for n in range(1, count + 1)]
+
+
+def test_japanese_is_accepted_at_the_completeness_tcgdex_actually_has(seed, dynamo_repo):
+    """~50 of 100 is the live JA state, not a truncated walk. Under the old flat
+    0.9 floor this aborted, which is what blocked the live wipe+reseed."""
+    client = FakeClient(_rows(50, "S4a"),
+                        sets=[{"id": "S4a", "name": "Shiny Star V",
+                               "cardCount": {"total": 100}}])
+
+    summary = seed.seed_language(dynamo_repo, client, Language.JP, execute=True)
+
+    assert summary["cards_seeded"] == 50
+    assert summary["cards_expected"] == 100
+
+
+def test_japanese_still_aborts_when_it_falls_below_its_own_floor(seed, dynamo_repo):
+    """The rail is re-calibrated, not removed. 30 of 100 is below anything
+    TCGdex has served, so it is a real regression — upstream getting worse, or
+    our own walk truncating — and must still refuse to swap the catalog."""
+    client = FakeClient(_rows(30, "S4a"),
+                        sets=[{"id": "S4a", "name": "Shiny Star V",
+                               "cardCount": {"total": 100}}])
+
+    with pytest.raises(seed.SeedAborted, match="short"):
+        seed.seed_language(dynamo_repo, client, Language.JP, execute=True)
+
+
+def test_english_keeps_its_stricter_floor_and_is_not_given_japans(seed, dynamo_repo):
+    """Guards the mistake this change invites: applying the loose JA floor to
+    every language. 50 of 100 is fine for Japanese and is a half-missing
+    catalog for English, whose upstream is ~98.7% complete."""
+    client = FakeClient(_rows(50, "base1"),
+                        sets=[{"id": "base1", "name": "Base Set",
+                               "cardCount": {"total": 100}}])
+
+    with pytest.raises(seed.SeedAborted, match="short"):
+        seed.seed_language(dynamo_repo, client, Language.EN, execute=True)
+
+
+def test_an_explicitly_passed_floor_still_overrides_the_per_language_one(seed, dynamo_repo):
+    """The parameter is a per-language DEFAULT, not a hard-coded table: a
+    caller that names a ratio still gets exactly that ratio."""
+    client = FakeClient(_rows(30, "S4a"),
+                        sets=[{"id": "S4a", "name": "Shiny Star V",
+                               "cardCount": {"total": 100}}])
+
+    summary = seed.seed_language(dynamo_repo, client, Language.JP, execute=True,
+                                 min_expected_ratio=0.2)
+    assert summary["cards_seeded"] == 30
+
+    with pytest.raises(seed.SeedAborted, match="short"):
+        seed.seed_language(dynamo_repo, client, Language.JP, execute=True,
+                           min_expected_ratio=0.5)
+
+
+def test_every_language_has_a_floor_so_none_falls_back_to_the_flat_default(seed):
+    """A language added later must not silently inherit 0.9 by accident: the
+    table is the place where "how complete is this upstream" is decided."""
+    assert set(seed.MIN_EXPECTED_RATIO_BY_LANGUAGE) == set(Language)
+
+
+# --------------------------------------------------------------------------
 # behaviour preserved from revision 1
 # --------------------------------------------------------------------------
 
