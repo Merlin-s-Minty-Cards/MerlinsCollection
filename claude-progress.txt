@@ -1987,6 +1987,38 @@ Q5. RESOLVED/MOOT — the sheet is NOT mostly sold; see Section 2's Data block. 
   path lands and clears Council. The catalog (from steps 1-2) is already
   live, correct, and does not depend on step 4 landing.
 
+  *** CURRENT LIVE STATE OF merlins-cards, VERIFIED 2026-07-28 ~17:10 PDT
+  (read this before assuming anything about the table) ***
+    - catalog_card: FRESH AND CORRECT. 31,603 rows written this session
+      (EN 23,444 + JA 8,159), stamped with a new cat_gen, spot-checked
+      against live data. This is the good outcome of steps 1-2.
+    - inventory_item: **ZERO ROWS.** Confirmed by querying all ten `INV#`
+      shards directly (0 across every shard). The wipe removed the old 550
+      inventory rows as designed, and the Singles re-import (step 4) has
+      NOT run because of the blocker above. So the /inventory surface has
+      NOTHING to show right now — no singles, and also none of the
+      sealed/bulk/consignment/slab kinds (those were already expected to
+      stay empty indefinitely per "DEFERRED — OTHER TABS").
+      THIS IS EXPECTED, NOT A BUG, and per the owner it is acceptable
+      because there are no real customers on the site yet — but it IS a
+      customer-visible empty state that persists until the scoped
+      Singles-only import lands and is run. Do not "fix" it by force-
+      replacing the full spreadsheet; that is the exact trap documented
+      above.
+    - Business master data SURVIVED the wipe as designed, re-verified by
+      direct query AFTER the live wipe: SHOWLIST 28, DEBTLIST 104,
+      PAYOUTLIST 33, BALANCESHEET 2, CONSIGNORLIST 3, CONFIG 25. The D4
+      preservation contract held.
+  STATUS OF THE FIX FOR STEP 4: dispatched to code-writer this session; the
+  agent TERMINATED EARLY on an API session limit (resets 19:20 PDT
+  2026-07-28) BEFORE writing any code — `spreadsheet_import.py`,
+  `dynamodb.py` and their tests are UNTOUCHED, so this is a clean slate,
+  not a half-applied change. Re-dispatch the same task after the limit
+  resets. The full design brief is in the OWNER'S DECISION paragraph above
+  plus the four investigated facts (18 tabs / DEFERRED_TABS only covers
+  Slabs / find_import_owned_entity guard / finalize_import all-or-nothing
+  sweep) — re-derive from those rather than trusting memory.
+
 ========================================================================
 7 — HANDOFF (rewritten 2026-07-27 after Phase 3, for a fresh conversation)
 ========================================================================
