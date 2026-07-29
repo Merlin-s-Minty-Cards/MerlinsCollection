@@ -2346,9 +2346,9 @@ Q5. RESOLVED/MOOT — the sheet is NOT mostly sold; see Section 2's Data block. 
   public.py change grants no new trust — tcgdex.py already treats that host as
   authoritative. Residual risks carried, not re-reviewed, per the budget rule.
 
-*** BLOCKER FOUND, NOT FIXED — EVERY INVENTORY card_id IS ORPHANED ***
-  Found while verifying the DANGLING band against the live table. This is a
-  PHASE 3.1 defect, not a Phase 6 one, and it is NOT fixed.
+*** BLOCKER — EVERY INVENTORY card_id WAS ORPHANED — NOW FIXED (6685a28) ***
+  Found while verifying the DANGLING band against the live table. This was a
+  PHASE 3.1 defect, not a Phase 6 one.
   MEASURED LIVE (2026-07-28, merlins-cards):
     inventory items 266, of which 256 carry a card_id
     resolve against the catalog AS STORED:              0
@@ -2358,19 +2358,20 @@ Q5. RESOLVED/MOOT — the sheet is NOT mostly sold; see Section 2's Data block. 
   `en:base1-17`, `ja:SV11W-056`. Stage A resolved raw TCGdex ids against the live
   API (`smp-SM211`, `g1-RC8`, `SV11B-170`) and `import_singles` stored them
   VERBATIM. Nobody bridged the two schemes.
-  CONSEQUENCE: not one imported item joins to its catalog card, so NOTHING can be
-  priced. This also means the public.py image fix above is NECESSARY BUT NOT
-  SUFFICIENT for featured finds — that path needs `catalog.get(item.card_id)` to
-  resolve first, so the strip stays empty until this is fixed too.
-  NOTE: Phase 3.1's Council rated exactly this MINOR ("dangling card_id
-  references — by design, pre-verified at Stage A"; "card_id accepted without
-  catalog validation — missing-price not wrong-price"). That rating was WRONG in
-  degree: it is not a narrow window, it is 100% of rows.
-  LIKELY FIX (not implemented, owner's call): normalize `matched_card_id` to
-  `{en|ja}:{id}` at import time in `import_singles`, validate it against the
-  catalog index, then re-run the Singles-only import (re-runnable; sweeps only
-  inventory_item/transaction). The 3 that still won't resolve are the JA
-  zero-data sets TCGdex advertises but does not populate.
+  FIX (6685a28, 2026-07-29):
+    card_text.py: added `by_card_id` dict to CatalogIndex, populated in
+    build_catalog_index() — direct identity lookup for callers holding a
+    pre-resolved id.
+    spreadsheet_import.py: enriched path now builds composite id via
+    build_card_id(language, raw_tcgdex_id), validates against
+    ctx.catalog_index.by_card_id, drops to None on miss. Unresolvable ids
+    route to human review regardless of confidence.
+    5 new tests (composite lookup, EN/JP resolution, dangling detection,
+    JP composite prefix) + 3 existing tests updated to seed catalog cards
+    and assert on composite ids. Full suite: 824 passed, 7 skipped, 0 failed.
+  *** THE LIVE TABLE STILL HAS THE OLD BARE IDS. Re-running the Singles-only
+  import (`--singles-only`) will apply this fix to live data. That is the
+  owner's call — this commit fixes the CODE, not the stored data. ***
 
 ========================================================================
 7 — HANDOFF (rewritten 2026-07-27 after Phase 3, for a fresh conversation)
@@ -2386,17 +2387,10 @@ WHERE THINGS STAND
   band, plus a live customer-facing image-host fix in routers/public.py. No
   Council (owner token directive); reasoning recorded in the LOG entry.
   Phase 6.2 — textbook lesson DROPPED by the owner; docstring half DONE.
+  Orphaned card_id scheme FIXED (6685a28) — enriched import now builds
+  composite ids and validates against the catalog before storing. The CODE
+  is fixed; re-running `--singles-only` against live data is the owner's call.
   Phase 7 NOT STARTED.
-  *** NEXT ACTION FOR A NEW CONVERSATION: FIX THE ORPHANED card_id SCHEME. ***
-  See the LOG block "BLOCKER FOUND, NOT FIXED — EVERY INVENTORY card_id IS
-  ORPHANED" immediately above Section 7. Measured live: 256 of 256 linked
-  inventory items point at ids the catalog does not contain, because Stage A
-  stored raw TCGdex ids while the catalog uses Phase 1's `en:`/`ja:` composite.
-  Nothing can be priced and featured finds stays empty until this is fixed. It
-  outranks Phase 7 — verifying/handing off a catalog whose inventory join is
-  100% broken is not meaningful. This is a Phase 3.1 defect surfaced by Phase 6
-  tooling, and the fix (normalize + validate at import, then re-run the
-  Singles-only import) is the owner's call, not an agent's.
   *** CAVEAT ON "PHASE 3 DONE" — NOW RESOLVED: the original caveat warned that
   39afd35 was the general architecture only, and two items were NOT YET
   IMPLEMENTED IN CODE: (1) strip listed_price/"Sticker" handling, and (2)
