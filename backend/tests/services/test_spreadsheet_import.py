@@ -1417,6 +1417,17 @@ def test_build_catalog_index_keys_are_normalized(dynamo_repo):
     assert hits[0].card_id == "swsh6-181"
 
 
+def test_build_catalog_index_exposes_a_card_id_lookup(dynamo_repo):
+    """The enriched-path validation needs a direct card_id -> card lookup, not
+    just the name/number indexes _match_card uses."""
+    from merlins_collection.services.spreadsheet_import import build_catalog_index
+
+    card = _catalog_card(card_id="en:base1-4", name="Charizard", number="4")
+    index = build_catalog_index([card])
+    assert index.by_card_id["en:base1-4"].card_id == "en:base1-4"
+    assert index.by_card_id.get("en:nonexistent") is None
+
+
 # ===== Council revision-2 MUST-FIX 2 & 3: conservative single-hit auto-link =====
 # The rev-1 matcher auto-linked ANY unique hit before checking set agreement, and
 # auto-linked a variant to the base card when core_name stripped a qualifier. Both
@@ -1882,8 +1893,11 @@ def _enriched_singles_row(**over):
 def test_enriched_high_confidence_row_imports_with_resolved_card_id(dynamo_repo):
     """HIGH confidence: card_id comes from the enriched matched_card_id column
     deterministically, language from the enriched language column. No _match_card
-    call, no URL-param parsing."""
-    ctx = ImportContext(repo=dynamo_repo)
+    call, no URL-param parsing. The stored card_id is the composite
+    ``{language}:{tcgdex_id}`` form the catalog actually keys on, validated
+    against a real catalog_index — not the bare id straight off the CSV."""
+    card = _catalog_card(card_id="en:base1-25", name="Pikachu", number="25")
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_normalized_index([card]))
     row = _enriched_singles_row(
         Name="Pikachu", **{"Card #": "25"},
         language="EN", matched_card_id="base1-25", match_confidence="high",
@@ -1891,16 +1905,18 @@ def test_enriched_high_confidence_row_imports_with_resolved_card_id(dynamo_repo)
     summary = import_singles([row], ctx)
     assert summary["imported"] == 1
     [item] = dynamo_repo.list_inventory()
-    assert item.card_id == "base1-25"
+    assert item.card_id == "en:base1-25"
     assert item.language is Language.EN
     assert item.needs_review is False
 
 
 def test_enriched_medium_confidence_row_imports_with_card_id_and_needs_review(
         dynamo_repo):
-    """MEDIUM confidence: card_id IS populated from the enriched file, but the
-    row is always flagged needs_review=True so a human can verify."""
-    ctx = ImportContext(repo=dynamo_repo)
+    """MEDIUM confidence: card_id IS populated from the enriched file (as the
+    composite ``{language}:{tcgdex_id}`` form, validated against the catalog),
+    but the row is always flagged needs_review=True so a human can verify."""
+    card = _catalog_card(card_id="en:me02-106", name="Meowth", number="106")
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_normalized_index([card]))
     row = _enriched_singles_row(
         Name="Meowth", **{"Card #": "106"},
         language="EN", matched_card_id="me02-106", match_confidence="medium",
@@ -1909,7 +1925,7 @@ def test_enriched_medium_confidence_row_imports_with_card_id_and_needs_review(
     assert summary["imported"] == 1
     assert summary["needs_review"] == 1
     [item] = dynamo_repo.list_inventory()
-    assert item.card_id == "me02-106"
+    assert item.card_id == "en:me02-106"
     assert item.needs_review is True
 
 
@@ -1930,6 +1946,43 @@ def test_enriched_low_confidence_row_imports_with_no_card_id_and_needs_review(
     assert item.needs_review is True
     # display_name from format_display_name(name, card_number):
     assert item.display_name == "Ultra Ball #68a"
+
+
+def test_enriched_high_confidence_row_with_a_dangling_card_id_is_not_trusted(
+        dynamo_repo):
+    """A HIGH-confidence matched_card_id that does not resolve against the
+    catalog (TCGdex sometimes advertises a set it holds zero card data for —
+    Stage A resolved the id live, but the reseed's catalog never got the card)
+    must not be trusted just because confidence says 'high'. It must import
+    with card_id=None + needs_review=True, exactly like the no-match tier —
+    never store a reference to a card that does not exist."""
+    ctx = ImportContext(repo=dynamo_repo)  # no catalog card seeded — empty index
+    row = _enriched_singles_row(
+        Name="Meloetta ex", **{"Card #": "170"},
+        language="JP", matched_card_id="SV11B-170", match_confidence="high",
+    )
+    summary = import_singles([row], ctx)
+    assert summary["imported"] == 1
+    assert summary["needs_review"] == 1
+    [item] = dynamo_repo.list_inventory()
+    assert item.card_id is None
+    assert item.needs_review is True
+
+
+def test_enriched_high_confidence_japanese_row_gets_the_ja_composite_prefix(
+        dynamo_repo):
+    """The composite scheme is per-language: a JP row's matched_card_id must be
+    prefixed 'ja:', never 'en:' — verified against a real JP catalog card."""
+    card = _catalog_card(card_id="ja:sv11b-1", name="Pikachu", number="1")
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_normalized_index([card]))
+    row = _enriched_singles_row(
+        Name="Pikachu", **{"Card #": "1"},
+        language="JP", matched_card_id="sv11b-1", match_confidence="high",
+    )
+    summary = import_singles([row], ctx)
+    [item] = dynamo_repo.list_inventory()
+    assert item.card_id == "ja:sv11b-1"
+    assert item.language is Language.JP
 
 
 def test_enriched_row_does_not_populate_listed_price(dynamo_repo):
@@ -1958,10 +2011,12 @@ def test_enriched_japanese_row_maps_language_correctly(dynamo_repo):
     parse_language / language_from_url. Using a name WITHOUT a '(jp)' marker
     to prove the enrichment column is the source — parse_language alone would
     return EN for this name."""
-    ctx = ImportContext(repo=dynamo_repo)
+    card = _catalog_card(card_id="ja:cp3-16", name="Espurr", number="16",
+                         language=Language.JP)
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_normalized_index([card]))
     row = _enriched_singles_row(
         Name="Espurr", **{"Card #": "16"},
-        language="JP", matched_card_id="ja:cp3-16", match_confidence="high",
+        language="JP", matched_card_id="cp3-16", match_confidence="high",
     )
     summary = import_singles([row], ctx)
     assert summary["imported"] == 1
@@ -2069,6 +2124,21 @@ def _write_enriched(tmp_path, body=_ENRICHED_ROW, header=_ENRICHED_HEADER):
     (tmp_path / SINGLES_ONLY_CSV_NAME).write_text(header + body, encoding="utf-8")
 
 
+def _seed_default_enriched_catalog_card(repo):
+    """Seed the catalog card that ``_ENRICHED_ROW`` references so
+    ``run_singles_only_import`` can validate the composite card_id against the
+    catalog index it builds from the repo."""
+    from datetime import datetime, timezone
+
+    from merlins_collection.models.catalog import CatalogCard
+    repo.batch_upsert_catalog_cards([CatalogCard(
+        card_id="en:base1-25", name="Pikachu", set_id="base1",
+        set_name="Base Set", number="25",
+        images={"small": "s", "large": "l"},
+        last_synced_at=datetime.now(tz=timezone.utc),
+    )])
+
+
 def _seed_untouchable_business_data(repo):
     """The live post-wipe survivors: every import-owned entity EXCEPT
     inventory_item / transaction. Written under a committed prior generation,
@@ -2123,6 +2193,7 @@ def test_singles_only_import_runs_despite_other_business_data(tmp_path, dynamo_r
     """The whole point: 28 shows / 104 debts / 33 payouts on the live table must
     not refuse a Singles-only run that never touches them. No --force-replace."""
     _seed_untouchable_business_data(dynamo_repo)
+    _seed_default_enriched_catalog_card(dynamo_repo)
     _write_enriched(tmp_path)
 
     summaries = run_singles_only_import(tmp_path, dynamo_repo)
@@ -2130,7 +2201,7 @@ def test_singles_only_import_runs_despite_other_business_data(tmp_path, dynamo_r
     assert summaries["_committed"] is True
     assert summaries["Singles"]["imported"] == 1
     [item] = dynamo_repo.list_inventory()
-    assert item.card_id == "base1-25"
+    assert item.card_id == "en:base1-25"
 
 
 def test_singles_only_import_leaves_other_business_data_byte_identical(
@@ -2187,10 +2258,11 @@ def test_singles_only_import_force_replace_proceeds(tmp_path, dynamo_repo):
     dynamo_repo.put_inventory_item(RawInventoryItem(
         card_id="stale-1", cost_basis=Decimal("1"), acquired_at=date(2026, 1, 1),
         finish="normal", condition=Condition.NM))
+    _seed_default_enriched_catalog_card(dynamo_repo)
     _write_enriched(tmp_path)
     summaries = run_singles_only_import(tmp_path, dynamo_repo, force_replace=True)
     assert summaries["_committed"] is True
-    assert [i.card_id for i in dynamo_repo.list_inventory()] == ["base1-25"]
+    assert [i.card_id for i in dynamo_repo.list_inventory()] == ["en:base1-25"]
 
 
 def test_singles_only_import_sweeps_prior_inventory_but_nothing_else(

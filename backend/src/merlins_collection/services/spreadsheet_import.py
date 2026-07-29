@@ -79,6 +79,11 @@ from merlins_collection.services.card_text import (
     sets_agree,
 )
 
+# The catalog keys cards on a LANGUAGE-COMPOSITE id ("en:base1-25"); the enriched
+# CSV carries the bare TCGdex id ("base1-25"). One shared constructor keeps the
+# importer's key and the seeder's key from drifting apart.
+from merlins_collection.services.tcgdex import build_card_id
+
 logger = logging.getLogger(__name__)
 
 # A per-row guard skips only genuine DATA problems (a bad cell). Infrastructure
@@ -413,8 +418,23 @@ def import_singles(rows: list[dict], ctx: ImportContext) -> dict:
                 lang_code = str(row.get("language") or "").strip().upper()
                 language = _LANG_MAP.get(lang_code, Language.EN)
 
+                # Stage A resolved a BARE TCGdex id ("base1-25"); the catalog
+                # keys on the language composite ("en:base1-25"). Build the
+                # composite, then require it to actually exist in the catalog
+                # before storing it: TCGdex advertises sets it holds zero
+                # card-level data for, so a live Stage-A hit is no guarantee the
+                # reseed ever got that card. An id that resolves nowhere is
+                # worse than no id — it hangs inventory off a phantom card — so
+                # a validation miss drops to None and routes to human review,
+                # whatever the confidence column claims.
                 raw_card_id = str(row.get("matched_card_id") or "").strip()
-                card_id = raw_card_id or None
+                if raw_card_id:
+                    composite = build_card_id(language, raw_card_id)
+                    card_id = (composite
+                               if composite in ctx.catalog_index.by_card_id
+                               else None)
+                else:
+                    card_id = None
 
                 confidence = str(row.get("match_confidence") or "").strip().lower()
                 if confidence == "high" and card_id is not None:
@@ -1295,9 +1315,10 @@ def run_singles_only_import(csv_dir, repo, *, force_replace: bool = False) -> di
     A Singles row is resolved here EXACTLY as the Singles tab resolves it inside a
     full run — same ``import_singles``, same catalog index, same show list. The
     only differences are which tabs run and how wide the guard and sweep reach.
-    (The catalog index is built even though the enriched path never consults it:
-    keeping ``ImportContext`` identical means a malformed row degrades the way it
-    already does today rather than in some new way particular to this path.)
+    (The catalog index is load-bearing on this path: the enriched path validates
+    each row's composite ``card_id`` against it before storing the reference. An
+    empty or stale catalog therefore does not mislink anything — every row simply
+    lands with ``card_id=None`` and ``needs_review=True``.)
 
     Shows are read back from the TABLE rather than re-imported from ``Vending
     Net.csv``, so a sold single still links to the show it was sold at. That

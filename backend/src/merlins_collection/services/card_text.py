@@ -179,6 +179,11 @@ class CatalogIndex:
     ``number_keys`` form. Both maps are plain dicts, so ``.get(key, [])`` is a
     safe miss.
 
+    ``by_card_id[card_id] -> card`` is the direct identity lookup (one card, not
+    a list — ``card_id`` is the catalog's primary key). It exists so a caller
+    holding an ALREADY-RESOLVED id (the enriched importer path) can prove that id
+    actually exists in the catalog before storing a reference to it.
+
     Language is part of the KEY, not a post-hoc filter over the hits. Since the
     catalog became multilingual a JP printing and its EN twin share a name and a
     number, so filtering afterwards would turn a previously unique EN hit into an
@@ -189,6 +194,7 @@ class CatalogIndex:
 
     by_name_number: dict = field(default_factory=dict)
     by_core_number: dict = field(default_factory=dict)
+    by_card_id: dict = field(default_factory=dict)
 
 
 def coerce_language(value) -> Language:
@@ -218,15 +224,17 @@ def build_catalog_index(cards) -> CatalogIndex:
     """
     by_name_number: dict = defaultdict(list)
     by_core_number: dict = defaultdict(list)
+    by_card_id: dict = {}
     for card in cards:
         name = normalize_name(_field(card, "name"))
         core = core_name(_field(card, "name"))
         number = normalize_number(_field(card, "number"))
         language = coerce_language(_field(card, "language"))
+        by_card_id[_field(card, "card_id")] = card
         for key in number_keys(number):
             by_name_number[(name, key, language)].append(card)
             by_core_number[(core, key, language)].append(card)
-    return CatalogIndex(dict(by_name_number), dict(by_core_number))
+    return CatalogIndex(dict(by_name_number), dict(by_core_number), by_card_id)
 
 
 # --- print language ------------------------------------------------------
