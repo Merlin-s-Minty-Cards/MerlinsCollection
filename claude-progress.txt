@@ -2240,6 +2240,71 @@ Q5. RESOLVED/MOOT — the sheet is NOT mostly sold; see Section 2's Data block. 
   were never touched, staged or stashed — re-verified with `git status` after
   every stash cycle.
 
+2026-07-28  *** LIVE SINGLES IMPORT RUN — SUCCEEDED. THE FULL WIPE ->
+  RESEED -> IMPORT SEQUENCE IS NOW COMPLETE AGAINST merlins-cards. ***
+  Run by the orchestrator/main thread after the scoped-import commit
+  (0d88a71). Command actually used, from backend/:
+      PYTHONPATH="$(pwd)/src" python scripts/import_spreadsheet.py \
+          ../data/spreadsheet/csv --table merlins-cards --singles-only
+  (note `../data/...` — data/ is at the REPO ROOT, not under backend/.
+  `--force-replace` was NOT needed and NOT passed: the scoped guard probes
+  only inventory_item/transaction, both at zero rows after the wipe.)
+  PRE-FLIGHT, all verified before running: worktree resolution forced to
+  THIS checkout via PYTHONPATH (the shadowing trap is still live);
+  Singles_enriched_v3.csv = 267 lines (266 data + header) with the
+  match_confidence column present; inventory_item = 0 rows.
+  RESULT: `Singles: {'imported': 266, 'sales': 0, 'skipped': 0,
+  'needs_review': 19}` / `_removed: 0` / `_committed: True`.
+  VERIFIED AGAINST THE LIVE TABLE afterward (not just trusting the summary):
+    - inventory_item: 266 rows. All kind='raw'. Zero sealed/bulk/graded/
+      consignment kinds — Sealed/Bulk/Consignments/Slabs are correctly
+      ABSENT, exactly as the DEFERRED — OTHER TABS scope requires.
+    - languages EN 249 / JP 17. status: available 228, on_hold 37,
+      out_for_grading 1. Zero blank display_names.
+    - Spot-checked real data, not ULIDs/blanks: e.g. 'Zekrom #xy76'
+      card_id=xyp-XY76 cost=24 mv@purchase=30 loc='glass'; 'Xurkitree GX
+      #sm68' card_id=smp-SM68 loc='toploader'.
+    - BUSINESS DATA PRESERVED EXACTLY, re-counted after the import and
+      byte-identical to before it: SHOWLIST 28, DEBTLIST 104, PAYOUTLIST 33,
+      BALANCESHEET 2, CONSIGNORLIST 3, CONFIG 25. The scoped sweep did what
+      it was built to do — `_removed: 0`, nothing outside inventory_item/
+      transaction was touched.
+    - needs_review = 19 = the 6 medium + all 13 low rows. Matches the
+      documented confidence-tier rule exactly.
+  *** ONE DEVIATION FROM THE DOCUMENTED ACCEPTANCE CRITERIA — OPEN, NOT A
+  BUG IN THE SCOPED-IMPORT CHANGE, OWNER DECISION NEEDED. ***
+  Acceptance (Phase 3.2 / Section 7) says the 13 LOW/no-match rows import
+  with `needs_review=True` AND `card_id=None`. Actual: only 10 have
+  card_id=None; 3 carry a card_id. CAUSE — verified by reading the source
+  CSV directly, it is the DATA, not the importer misbehaving: 3 of the 13
+  low rows carry a TENTATIVE `matched_card_id` in
+  Singles_enriched_v3.csv itself, and `import_singles`'s enriched path
+  honors `matched_card_id` whenever it is non-empty, regardless of tier
+  (that is the Phase 3.1 Stage B code committed at 3a69d2a and
+  Council-approved — NOT today's scoped-import work, which only chooses
+  which tabs run and how wide the guard/sweep reach). The 3 rows:
+      'Onix Reverse' #71   -> sm7-71   (Stage A note: literally "ignore")
+      'Turtwig' #17        -> pop6-17  (x2, duplicate purchase; Stage A note
+        says all of pop6/pop8/pop9-17 are identical plain commons, nothing
+        in the row can disambiguate, "Kept pop6-17 as the tentative/
+        best-guess candidate only")
+  CSV tier/id breakdown, for the record: high 247 (247 with id), medium 6
+  (6 with id), low 13 (3 with a tentative id, 10 empty).
+  IMPACT: low but real. All 3 are flagged needs_review=True so they land in
+  the build_review.py human queue as intended, and all 3 are cheap ($2-8
+  cost basis). But a tentative card_id links the item to a catalog row, so
+  until a human resolves it the item can display/price off a possibly-wrong
+  card — which is precisely what the "low -> card_id=None" rule existed to
+  prevent. OPTIONS for the owner: (a) leave as-is and let build_review.py
+  resolve them (they are already queued); (b) null out those 3 card_ids in
+  the live table; (c) tighten import_singles so LOW tier forces
+  card_id=None regardless of what the CSV carries, then re-run the import
+  (cheap and safe now — the scoped path is re-runnable and would sweep only
+  inventory_item/transaction). NOT DONE EITHER WAY — surfaced, not decided.
+  NEXT ACTION AFTER THIS: the original 4-step runbook is COMPLETE. Phase 5
+  (display scoping) was landed separately by the concurrent model (52ee96a),
+  so PHASE 6 is the roadmap's next item — plus the owner decision above.
+
 ========================================================================
 7 — HANDOFF (rewritten 2026-07-27 after Phase 3, for a fresh conversation)
 ========================================================================
