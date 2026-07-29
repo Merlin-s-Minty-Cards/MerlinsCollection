@@ -170,7 +170,38 @@ class InventoryRepository:
     _BUSINESS_PARTITIONS = ("SHOWLIST", "DEBTLIST", "PAYOUTLIST", "BALANCESHEET",
                             "CONSIGNORLIST", "CONFIG")
 
-    def find_import_owned_entity(self) -> str | None:
+    # Which fixed partitions a SCOPED probe reads for each import-owned entity.
+    # Consulted ONLY when a caller narrows `find_import_owned_entity` with
+    # ``entities=``; the unscoped probe still walks the full list above, so the
+    # default path is untouched by this table's existence.
+    #
+    # The two month-partitioned ledgers map to NO partition on purpose: their
+    # partition names are unbounded (``TXN#<YYYY-MM>`` / ``EXP#<YYYY-MM>``) and
+    # are never queried directly, so neither is probeable on its own. Each is
+    # covered only in company of an entity that IS probed and that it cannot
+    # exist without (a sale writes its ``INV#`` item in the same transaction as
+    # its txn row; every import seeds the ``CONFIG`` payment methods before any
+    # expense tab runs). A scope naming one of them ALONE is therefore refused
+    # rather than silently answering "no data" — see the ``entities`` docs.
+    #
+    # A test asserts this map covers every ``_IMPORT_OWNED_ENTITIES`` member and
+    # that its values union to exactly the unscoped partition list, so the two
+    # cannot drift apart when an entity is added.
+    _ENTITY_PARTITIONS = {
+        "inventory_item": tuple(f"INV#{b}" for b in range(INVENTORY_SHARD_COUNT)),
+        "transaction": (),               # TXN#<YYYY-MM> — see above
+        "expense": (),                   # EXP#<YYYY-MM> — see above
+        "show": ("SHOWLIST",),
+        "debt": ("DEBTLIST",),
+        "payout": ("PAYOUTLIST",),
+        "consignor": ("CONSIGNORLIST",),
+        "balance_sheet_snapshot": ("BALANCESHEET",),
+        "cash_account": ("CONFIG",),
+        "buying_policy": ("CONFIG",),
+        "payment_method": ("CONFIG",),
+    }
+
+    def find_import_owned_entity(self, *, entities=None) -> str | None:
         """Name of an import-owned entity already present in this table, else ``None``.
 
         Cheap by construction: one ``Limit=1``, strongly-consistent Query per KNOWN
@@ -189,9 +220,45 @@ class InventoryRepository:
         tab runs, and a sale writes its ``INV#`` item alongside the txn, so any run
         that produced a ledger row necessarily left a probed partition non-empty —
         and a rollback removes both together, since they share one generation.
+
+        ``entities`` (default ``None`` = today's full scope, byte-for-byte) narrows
+        the question to a SUBSET of ``_IMPORT_OWNED_ENTITIES``: only the partitions
+        those entities live in are read, and only their tags count as a hit. A
+        single-tab run that will write — and later sweep — nothing but
+        ``inventory_item``/``transaction`` asks with that pair, so the live table's
+        shows/debts/payouts/consignors/config neither refuse it nor get read.
+
+        Narrowing the probe narrows the PROTECTION with it: an entity left out is
+        no longer checked for pre-existing data, which is only safe because the
+        caller also never writes or sweeps it. Pair ``entities`` with the matching
+        ``finalize_import(entity_scope=...)`` or the guarantee breaks.
+
+        Raises ``ValueError`` for a name that is not import-owned, and for a scope
+        with no probeable partition (empty, or only month-partitioned ledgers) —
+        such a probe could only ever answer ``None``, which would read as "the
+        table is clean" and silently disarm the guard.
         """
-        partitions = [f"INV#{b}" for b in range(INVENTORY_SHARD_COUNT)]
-        partitions.extend(self._BUSINESS_PARTITIONS)
+        if entities is None:
+            wanted = self._IMPORT_OWNED_ENTITIES
+            partitions = [f"INV#{b}" for b in range(INVENTORY_SHARD_COUNT)]
+            partitions.extend(self._BUSINESS_PARTITIONS)
+        else:
+            wanted = frozenset(entities)
+            unknown = wanted - self._IMPORT_OWNED_ENTITIES
+            if unknown:
+                raise ValueError(
+                    f"cannot scope the re-import probe to {sorted(unknown)}: "
+                    f"not import-owned entities")
+            partitions = sorted({p for entity in wanted
+                                 for p in self._ENTITY_PARTITIONS[entity]})
+            if not partitions:
+                raise ValueError(
+                    f"cannot scope the re-import probe to {sorted(wanted)}: no "
+                    f"probeable partition — the month-partitioned ledgers are "
+                    f"never queried directly, so this probe could only ever "
+                    f"answer 'no data'. Include the entity that stands for them "
+                    f"(inventory_item for transaction, a CONFIG entity for "
+                    f"expense).")
         for pk in partitions:
             kwargs = {
                 "KeyConditionExpression": Key("PK").eq(pk),
@@ -203,7 +270,7 @@ class InventoryRepository:
             while True:
                 resp = self._table.query(**kwargs)
                 for item in resp.get("Items", []):
-                    if item.get("entity") in self._IMPORT_OWNED_ENTITIES:
+                    if item.get("entity") in wanted:
                         return item["entity"]
                 last = resp.get("LastEvaluatedKey")
                 if not last:
@@ -285,7 +352,7 @@ class InventoryRepository:
         """
         return f"{sk}#{self._import_gen}" if self._import_gen else sk
 
-    def finalize_import(self, gen, *, committed: bool) -> int:
+    def finalize_import(self, gen, *, committed: bool, entity_scope=None) -> int:
         """End an import stamped with ``gen`` (load-then-swap):
 
         * ``committed=True`` — delete every import-owned record that is NOT of this
@@ -311,7 +378,41 @@ class InventoryRepository:
         itself created, so a bad baseline is never locked in permanently.
 
         The catalog/price entities are never touched. Returns records removed.
+
+        ``entity_scope`` (default ``None`` = today's full ``_IMPORT_OWNED_ENTITIES``
+        sweep, byte-for-byte) restricts BOTH halves of the swap to a subset of the
+        import-owned entities. Rows of any other entity type are skipped outright —
+        never deleted, whatever generation they carry. That is what lets a
+        single-tab run replace its own entity types without the sweep reading
+        "these were not re-stamped this run" as "these are stale" and destroying
+        ledgers the run never even opened.
+
+        The sentinel is ``None``, not falsiness: an EMPTY scope is a caller bug
+        (a sweep that can remove nothing), so it raises rather than silently
+        turning the swap into a no-op. Unknown entity names raise too.
+
+        *** SCOPING IS BY ENTITY TYPE, WHICH IS COARSER THAN "one tab's rows". ***
+        Every tab that writes inventory (Singles, Sealed, Bulk, Consignments)
+        writes the SAME ``inventory_item`` entity, so a scoped sweep cannot tell
+        one tab's rows from another's — it removes every prior-generation row of
+        the types in scope. See ``run_singles_only_import`` in
+        ``services/spreadsheet_import.py`` for why that is exactly right today and
+        precisely what must change before a second inventory-writing tab is turned
+        back on. Do not read this parameter as general multi-tab safety.
         """
+        if entity_scope is None:
+            scope = self._IMPORT_OWNED_ENTITIES
+        else:
+            scope = frozenset(entity_scope)
+            unknown = scope - self._IMPORT_OWNED_ENTITIES
+            if unknown:
+                raise ValueError(
+                    f"cannot scope the import sweep to {sorted(unknown)}: not "
+                    f"import-owned entities")
+            if not scope:
+                raise ValueError(
+                    "entity_scope is empty — a sweep that can remove nothing is a "
+                    "caller bug; pass None for the full sweep")
         this_gen_keys: list[dict] = []
         other_gen_keys: list[dict] = []
         kwargs = {
@@ -324,7 +425,7 @@ class InventoryRepository:
             resp = self._table.scan(**kwargs)
             for item in resp.get("Items", []):
                 entity = item.get("entity")
-                if entity not in self._IMPORT_OWNED_ENTITIES:
+                if entity not in scope:
                     continue
                 key = {"PK": item["PK"], "SK": item["SK"]}
                 if entity == "balance_sheet_snapshot" and item.get("frozen"):

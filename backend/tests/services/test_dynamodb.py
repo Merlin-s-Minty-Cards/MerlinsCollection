@@ -3,6 +3,8 @@ from datetime import date as _date
 from datetime import datetime
 from decimal import Decimal
 
+import pytest
+
 from merlins_collection.models.business import (
     BuyingPolicy,
     CashAccount,
@@ -580,3 +582,163 @@ def test_R5_finalize_scan_reads_strongly_consistent(dynamo_repo):
     dynamo_repo.set_import_generation(None)
     assert scan_consistency  # the finalize scan ran
     assert all(c is True for c in scan_consistency)  # every page read strongly-consistent
+
+
+# ======================= scoped guard + scoped sweep =========================
+# A Singles-only import must be able to ask "does inventory/transaction data
+# already exist?" and to sweep ONLY inventory/transaction on commit, without the
+# shows/debts/payouts/consignors/config rows it never touches being probed,
+# refused over, or deleted. Both knobs sentinel-default to today's full scope.
+
+_SCOPED = frozenset({"inventory_item", "transaction"})
+
+
+def _seed_other_business_data(repo):
+    """One row of every import-owned entity a Singles-only run must NOT touch."""
+    from merlins_collection.models.business import (
+        BalanceSheetLine,
+        BalanceSheetSection,
+        BalanceSheetSnapshot,
+        Payout,
+    )
+    repo.put_show(Show(show_id="s1", name="Mint City", date=_date(2026, 3, 8)))
+    repo.put_debt(_debt("Colin"))
+    repo.put_payout(Payout(event="E1", partner="Casey", amount=Decimal("40")))
+    repo.put_consignor(Consignor(consignor_id="c1", name="Rylan"))
+    repo.put_cash_account(CashAccount(account="venmo", balance=Decimal("10")))
+    repo.put_payment_method(PaymentMethod(method="cash"))
+    repo.put_buying_policy(BuyingPolicy(product_type="raw", cash_pct_min=Decimal("60")))
+    repo.put_balance_sheet(BalanceSheetSnapshot(
+        snapshot_id="current", label="current", frozen=False,
+        lines=[BalanceSheetLine(section=BalanceSheetSection.ASSET,
+                                label="Inventory", amount=Decimal("100"))]))
+
+
+def test_find_import_owned_entity_scoped_ignores_out_of_scope_entities(dynamo_repo):
+    _seed_other_business_data(dynamo_repo)
+    # Unscoped, this table plainly holds business data...
+    assert dynamo_repo.find_import_owned_entity() is not None
+    # ...but a Singles-only run asks only about inventory/transactions.
+    assert dynamo_repo.find_import_owned_entity(entities=_SCOPED) is None
+
+
+def test_find_import_owned_entity_scoped_still_detects_in_scope_entities(dynamo_repo):
+    dynamo_repo.put_inventory_item(_raw_item())
+    assert dynamo_repo.find_import_owned_entity(entities=_SCOPED) == "inventory_item"
+
+
+def test_find_import_owned_entity_scoped_does_not_query_other_partitions(dynamo_repo):
+    # "Not swept" is not enough — the out-of-scope partitions must not even be READ.
+    _seed_other_business_data(dynamo_repo)
+    queried, original_query = [], dynamo_repo._table.query
+
+    def _spy(**kwargs):
+        queried.append(kwargs["KeyConditionExpression"].get_expression()["values"][1])
+        return original_query(**kwargs)
+
+    dynamo_repo._table.query = _spy
+    assert dynamo_repo.find_import_owned_entity(entities=_SCOPED) is None
+    assert queried  # the probe really ran
+    assert set(queried) == {f"INV#{b}" for b in range(INVENTORY_SHARD_COUNT)}
+
+
+def test_find_import_owned_entity_rejects_an_unknown_entity_name(dynamo_repo):
+    with pytest.raises(ValueError, match="not import-owned"):
+        dynamo_repo.find_import_owned_entity(entities={"catalog_card"})
+
+
+def test_find_import_owned_entity_rejects_a_scope_with_no_probeable_partition(
+        dynamo_repo):
+    # The month-partitioned ledgers are never probed directly, so a scope naming
+    # ONLY one of them would silently always answer "no data" — refuse instead.
+    dynamo_repo.put_inventory_item(_raw_item())
+    with pytest.raises(ValueError, match="no probeable partition"):
+        dynamo_repo.find_import_owned_entity(entities={"transaction"})
+    with pytest.raises(ValueError, match="no probeable partition"):
+        dynamo_repo.find_import_owned_entity(entities=frozenset())
+
+
+def test_entity_partition_map_matches_the_unscoped_probe(dynamo_repo):
+    # The scoped map and the unscoped partition list must not drift: every
+    # import-owned entity has an entry, and their union is exactly what an
+    # unscoped probe reads. An entity added without an entry fails here.
+    repo = type(dynamo_repo)
+    assert set(repo._ENTITY_PARTITIONS) == set(repo._IMPORT_OWNED_ENTITIES)
+    union = {p for ps in repo._ENTITY_PARTITIONS.values() for p in ps}
+    unscoped = {f"INV#{b}" for b in range(INVENTORY_SHARD_COUNT)}
+    unscoped |= set(repo._BUSINESS_PARTITIONS)
+    assert union == unscoped
+
+
+def test_finalize_import_entity_scope_leaves_other_entities_alone(dynamo_repo):
+    # Prior generation: everything. New generation: inventory only.
+    dynamo_repo.set_import_generation("gen-old")
+    _seed_other_business_data(dynamo_repo)
+    dynamo_repo.put_inventory_item(_raw_item(card_id="old-1"))
+    dynamo_repo.finalize_import("gen-old", committed=True)
+
+    dynamo_repo.set_import_generation("gen-new")
+    dynamo_repo.put_inventory_item(_raw_item(card_id="new-1"))
+    removed = dynamo_repo.finalize_import("gen-new", committed=True,
+                                          entity_scope=_SCOPED)
+    dynamo_repo.set_import_generation(None)
+
+    assert removed == 1  # only the prior generation's inventory row
+    assert [i.card_id for i in dynamo_repo.list_inventory()] == ["new-1"]
+    # Everything outside the scope survived, gen-old tag and all.
+    assert len(dynamo_repo.list_shows()) == 1
+    assert len(dynamo_repo.list_debts()) == 1
+    assert len(dynamo_repo.list_payouts()) == 1
+    assert len(dynamo_repo.list_consignors()) == 1
+    assert len(dynamo_repo.list_cash_accounts()) == 1
+    assert len(dynamo_repo.list_payment_methods()) == 1
+    assert len(dynamo_repo.list_buying_policies()) == 1
+    assert len(dynamo_repo.list_balance_sheets()) == 1
+
+
+def test_finalize_import_without_a_scope_still_sweeps_everything(dynamo_repo):
+    # REGRESSION GUARD (mirrors the scoped test above exactly, minus the kwarg):
+    # omitting entity_scope must keep today's all-or-nothing swap behavior.
+    dynamo_repo.set_import_generation("gen-old")
+    _seed_other_business_data(dynamo_repo)
+    dynamo_repo.put_inventory_item(_raw_item(card_id="old-1"))
+    dynamo_repo.finalize_import("gen-old", committed=True)
+
+    dynamo_repo.set_import_generation("gen-new")
+    dynamo_repo.put_inventory_item(_raw_item(card_id="new-1"))
+    dynamo_repo.finalize_import("gen-new", committed=True)
+    dynamo_repo.set_import_generation(None)
+
+    assert [i.card_id for i in dynamo_repo.list_inventory()] == ["new-1"]
+    assert dynamo_repo.list_shows() == []
+    assert dynamo_repo.list_debts() == []
+    assert dynamo_repo.list_payouts() == []
+    assert dynamo_repo.list_consignors() == []
+    assert dynamo_repo.list_cash_accounts() == []
+    assert dynamo_repo.list_payment_methods() == []
+    assert dynamo_repo.list_buying_policies() == []
+    assert dynamo_repo.list_balance_sheets() == []
+
+
+def test_finalize_import_entity_scope_also_scopes_a_rollback(dynamo_repo):
+    # A scoped ROLLBACK must not delete this generation's out-of-scope rows
+    # either — it only unwinds what the scoped run itself was allowed to write.
+    dynamo_repo.set_import_generation("gen-x")
+    _seed_other_business_data(dynamo_repo)
+    dynamo_repo.put_inventory_item(_raw_item(card_id="doomed"))
+    removed = dynamo_repo.finalize_import("gen-x", committed=False,
+                                          entity_scope=_SCOPED)
+    dynamo_repo.set_import_generation(None)
+
+    assert removed == 1
+    assert dynamo_repo.list_inventory() == []
+    assert len(dynamo_repo.list_shows()) == 1
+
+
+def test_finalize_import_rejects_a_bad_entity_scope(dynamo_repo):
+    with pytest.raises(ValueError, match="not import-owned"):
+        dynamo_repo.finalize_import("gen-x", committed=True,
+                                    entity_scope={"catalog_card"})
+    with pytest.raises(ValueError, match="empty"):
+        dynamo_repo.finalize_import("gen-x", committed=True,
+                                    entity_scope=frozenset())

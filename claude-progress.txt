@@ -20,6 +20,16 @@ STATUS: **PHASE 1 COMPLETE (a61f0c6). PHASE 2 CODE COMPLETE (d2b3de4, pushed).
         should treat this), not on TCGdex recovering.
         PHASE 5 COMPLETE — display scoping location gate. Council PASS
         (Security + Contrarian, 0 gating findings). PHASE 6 IS NEXT.
+        *** CORRECTION TO THE PARAGRAPH ABOVE, ADDED 2026-07-28 (leaving the
+        original text intact as history): THE LIVE WIPE HAS SINCE BEEN RUN
+        AND SUCCEEDED. The TCGdex blocker was resolved by the per-language
+        seed floor (2949817). merlins-cards now holds a fresh 31,603-row
+        catalog; inventory_item is at ZERO rows pending step 4. Step 4 —
+        the Singles import — is UNBLOCKED as of this session and its command
+        is `python scripts/import_spreadsheet.py <csv_dir> --table
+        merlins-cards --singles-only` (the --singles-only flag is MANDATORY;
+        the bare invocation is still the all-18-tab trap). See LOG 2026-07-28
+        "SCOPED SINGLES-ONLY IMPORT PATH" and Section 7 step 4. ***
         *** PHASE 4 IS PAUSED / ON HOLD, NOT "next" or "deferred-then-resumed
         soon" — it does not become the active phase after 3/5/6/7 without an
         explicit owner go-ahead. See owner clarifications, LOG 2026-07-27
@@ -2009,7 +2019,14 @@ Q5. RESOLVED/MOOT — the sheet is NOT mostly sold; see Section 2's Data block. 
       direct query AFTER the live wipe: SHOWLIST 28, DEBTLIST 104,
       PAYOUTLIST 33, BALANCESHEET 2, CONSIGNORLIST 3, CONFIG 25. The D4
       preservation contract held.
-  STATUS OF THE FIX FOR STEP 4: dispatched to code-writer this session; the
+  STATUS OF THE FIX FOR STEP 4: *** SUPERSEDED — THE FIX IS DONE AND HAS
+  CLEARED COUNCIL. See the LOG entry immediately below, "SCOPED SINGLES-ONLY
+  IMPORT PATH". Step 4's correct command is now
+  `python scripts/import_spreadsheet.py <csv_dir> --table merlins-cards
+  --singles-only`; the BARE invocation is still the all-18-tab trap described
+  above. The paragraph below is kept only as history of the first, aborted
+  attempt — do NOT act on its "re-dispatch the same task" instruction. ***
+  dispatched to code-writer this session; the first
   agent TERMINATED EARLY on an API session limit (resets 19:20 PDT
   2026-07-28) BEFORE writing any code — `spreadsheet_import.py`,
   `dynamodb.py` and their tests are UNTOUCHED, so this is a clean slate,
@@ -2018,6 +2035,210 @@ Q5. RESOLVED/MOOT — the sheet is NOT mostly sold; see Section 2's Data block. 
   plus the four investigated facts (18 tabs / DEFERRED_TABS only covers
   Slabs / find_import_owned_entity guard / finalize_import all-or-nothing
   sweep) — re-derive from those rather than trusting memory.
+
+2026-07-28  SCOPED SINGLES-ONLY IMPORT PATH. DONE, Council PASS (revision 1,
+  all four seats). *** THIS UNBLOCKS STEP 4 OF THE 4-STEP LIVE PLAN — the
+  blocker recorded in the entry directly above ("STEP 4 ... DISCOVERED UNSAFE
+  AS ORIGINALLY INSTRUCTED"). *** Not a numbered phase item; it is the code
+  change the OWNER'S DECISION paragraph in that entry asked for.
+  *** THE CORRECT COMMAND FOR STEP 4 IS NOW, FROM backend/:
+        PYTHONPATH="$(pwd)/src" python scripts/import_spreadsheet.py \
+            ../data/spreadsheet/csv --table merlins-cards --singles-only
+      THE BARE INVOCATION (no --singles-only) IS STILL THE ALL-18-TAB PATH
+      AND IS STILL THE EXACT TRAP THE ENTRY ABOVE DOCUMENTS. It was NOT
+      changed and must NOT be used here. ***
+  NO LIVE AWS TOUCHED. Nothing was run against merlins-cards; verification is
+  tests only (moto). The live import stays with the owner/orchestrator.
+  NOT COMMITTED at time of writing.
+
+  THE PROBLEM (restated only as far as the fix needs; full detail is in the
+  entry above): `run_import`'s guard refused the run over the surviving
+  business data, and its commit sweep — "delete every import-owned record NOT
+  of this generation" — could not tell "this entity type was deliberately not
+  touched this run" from "this entity type's old generation is stale." So a
+  Singles-only run was impossible without either refusing outright or
+  force-replacing 17 tabs over SHOWLIST 28 / DEBTLIST 104 / PAYOUTLIST 33 /
+  BALANCESHEET 2 / CONSIGNORLIST 3 / CONFIG 25 — real, backup-less financial
+  records.
+
+  WHAT CHANGED (3 source files, +293/-13; 3 test files, +534):
+    - dynamodb.py: `find_import_owned_entity(*, entities=None)`. None keeps
+      today's exact 16-partition walk. A subset narrows BOTH which partitions
+      are queried AND which entity tags count as a hit, driven by a new
+      `_ENTITY_PARTITIONS` class map. Raises ValueError on a non-import-owned
+      name, and on a scope with no probeable partition (empty, or only the
+      month-partitioned ledgers) — such a probe could only ever answer None,
+      which reads as "the table is clean" and would silently disarm the only
+      guard in front of the irreplaceable rows.
+    - dynamodb.py: `finalize_import(gen, *, committed, entity_scope=None)`.
+      Sentinel-defaulted exactly like seed_catalog's min_expected_ratio. The
+      only behavioral edit is one skip condition (`if entity not in scope`)
+      in place of `... not in self._IMPORT_OWNED_ENTITIES`. Frozen-baseline
+      rule, ConsistentRead scan, commit/rollback key selection and the batch
+      delete are all untouched.
+    - spreadsheet_import.py: NEW `run_singles_only_import(csv_dir, repo, *,
+      force_replace=False)`, a PEER of `run_import`, not a mode inside it —
+      `run_import` is byte-for-byte unedited, so its five-guarantee contract
+      is literally unchanged. Reads exactly one file, guards with the scope
+      narrowed to {inventory_item, transaction}, writes under a fresh
+      generation, and on commit sweeps only those two entity types. Plus
+      constants SINGLES_ONLY_CSV_NAME / SINGLES_ONLY_ENTITIES.
+    - scripts/import_spreadsheet.py: opt-in `--singles-only`. Also errors on
+      `--singles-only --allow-empty` (that flag names TABS; accepting it
+      silently would imply an acknowledgement had been taken).
+
+  THREE DELIBERATE DEVIATIONS FROM THE DISPATCH BRIEF, all flagged by the
+  author in the submission rather than buried, all APPROVED by the Judge on
+  independent evidence rather than on the orchestrator's say-so:
+    1. READS `Singles_enriched_v3.csv`, NOT `Singles.csv`. The brief said
+       "Singles.csv"; that file has no enrichment columns, and
+       spreadsheet_import.py:405 switches on `enriched = "match_confidence"
+       in row` — so every row would have silently diverted to the LEGACY
+       live-fuzzy-match identity path, bypassing all Council-approved Phase
+       3.1 Stage B work with no error at all. Judge cited this file's own
+       ACCEPTANCE line ("importing Singles.csv (the ONLY tab in scope) VIA
+       Singles_enriched_v3.csv") and the two "must hardcode that exact name"
+       instructions, and ruled THE BRIEF was the defect, not the deviation.
+       A header check now refuses a wrong-file-under-the-right-name.
+    2. READS `repo.list_shows()` — an out-of-scope read, against the brief's
+       "not read" wording. Approved: strictly read-only, cannot mutate
+       SHOWLIST, and reproduces existing full-run semantics (a full run reads
+       shows before Singles via _TAB_IMPORTERS). Without it all 266 rows'
+       sales land with show_id=None and there is no backfill short of a full
+       re-import.
+    3. DOES NOT CALL `seed_payment_methods`. No advisor checked this, so the
+       Judge verified it directly and ruled that CALLING it would have been
+       the bug: `_gen_sk` generation-scopes payment_method SKs, and
+       payment_method sits OUTSIDE the sweep scope, so re-seeding would
+       write `...#cash#<new-gen>` beside `...#cash#<old-gen>` and the scoped
+       sweep would delete neither — a permanently stranded duplicate.
+
+  *** KNOWN LIMITATION — WATCH ITEM FOR WHOEVER TURNS SEALED/BULK/
+  CONSIGNMENTS BACK ON. *** The sweep is scoped by ENTITY TYPE, which is
+  COARSER than "the rows this tab wrote." Sealed, Bulk and Consignments all
+  write the SAME `inventory_item` entity Singles does. That is not merely
+  acceptable today, it is exactly correct: the live wipe left inventory_item
+  and transaction at ZERO rows and Singles is the only tab in scope, so
+  "delete every inventory_item/transaction not of this generation" has
+  nothing to delete but this path's own prior attempts. It is NOT
+  future-proof. Once those tabs are re-enabled (a FUTURE phase — see
+  "DEFERRED — OTHER TABS", Section 3), a Singles-only re-run would delete
+  THEIR inventory rows too, because it cannot see the difference. Before that
+  happens the scope must get finer than entity type: filter by the tab-origin
+  already carried on each item (the `kind` discriminator, or a new explicit
+  source tag). This is a deliberate YAGNI boundary for a one-tab rebuild, not
+  an oversight. It is documented in two loud in-code comment blocks AND
+  PINNED BY A TEST (`..._sweeps_prior_inventory_but_nothing_else` asserts a
+  prior-generation Bulk lot IS removed) — so the limitation is proven, not
+  merely described.
+
+  TDD per CLAUDE.md, phases NOT combined. RED observed first in all three
+  test files, by `git stash push` of ONLY the author's own source files
+  (never the concurrent model's five in-flight files), then re-running:
+  test_dynamodb.py 9 failed (AttributeError: no attribute
+  '_ENTITY_PARTITIONS'; TypeError: unexpected keyword argument
+  'entity_scope'); test_spreadsheet_import.py collection ERROR (ImportError:
+  cannot import name 'SINGLES_ONLY_CSV_NAME'); test_import_spreadsheet.py 4
+  errors. THEN implemented. 27 new tests, all additive — NO existing test
+  modified or deleted. Three regression guards specifically pin the unscoped
+  path: `..._without_a_scope_still_sweeps_everything` (mirrors the scoped
+  test exactly, minus the kwarg — it PASSED pre-implementation, which is the
+  point), `test_full_import_still_probes_and_sweeps_every_entity` (asserts
+  run_import passes probe_kwargs == [{}] and finalize_kwargs ==
+  [{"committed": True}], i.e. no narrowing whatsoever), and
+  `test_default_invocation_still_runs_the_full_import` (the bare CLI still
+  calls run_import with identical arguments).
+
+  COUNCIL (all four seats filed, revision 1, PASS): Contrarian NO FATAL
+  FLAWS. Security NO EXPLOITABLE FINDINGS (worst: MEDIUM hardening note on
+  the guard/sweep scope pairing). Chaos SURVIVES CHAOS (worst: MINOR,
+  list_shows outside the inner try/except). Architect OBJECTION, 1 MAJOR —
+  OVERRULED. Confirmed-major count in the four gating classes: 0/0/0/0.
+  THE OVERRULED MAJOR, recorded because overruling the only objection on the
+  board deserves the record: Architect argued `_ENTITY_PARTITIONS` + generic
+  subset validation is ~90 lines of N-entity machinery for one call site
+  (factually confirmed by the Judge — 2 production call sites, both passing
+  the same constant; 9 of 11 map entries exercised only by the drift test).
+  Overruled on four grounds: (1) the review disqualified its own finding
+  verbatim — "this does not rise to 'unwind later' territory"; (2) the
+  90-line figure double-counted comment/docstring the SAME review had already
+  ruled non-gating house style — real executable cost is ~42 lines, roughly
+  half of it ValueError message text; (3) the proposed replacement
+  (`singles_only: bool`) pulls a spreadsheet_import concept down into the
+  persistence layer and hardcodes the INV# shard list twice — though the
+  Judge credited its one real advantage, that a shared boolean would make the
+  guard/sweep pairing harder to desynchronize; (4) the no-probeable-partition
+  rail is genuine safety on a backup-less table, catching the one scope whose
+  probe could answer "clean" when it wasn't. Timing was decisive: retracting
+  the shape means rewriting two repository methods and reworking a meaningful
+  share of 27 tests, on the eve of a live run against unbacked-up financial
+  records, to net ~29 lines. Author and Architect actually AGREE on the
+  conclusion ("do not extend this further" — which the KNOWN LIMITATION
+  docstring already says); they differed only on retracting first.
+  Judge's delta reasoning, worth preserving: BEFORE this change a Singles-only
+  load required refusing outright or --force-replace across 17 tabs, sweeping
+  all 170 rows of backup-less financial data. AFTER, the narrow path is
+  reachable without disarming protection for untouched entities, and
+  --force-replace remains exactly as dangerous and exactly as unchanged. The
+  blast surface is BETTER than before, not worse.
+
+  5 NON-GATING FOLLOW-UPS CARRIED (verdict.md "Conditions"). Per protocol
+  these must NOT trigger a patch-and-re-review cycle — carried, not fixed:
+    1. *** DO NOT EXTEND `_ENTITY_PARTITIONS`-BASED SCOPING TO A SECOND
+       CALLER. *** (Architect, upheld in substance though overruled as a
+       gate.) When a second scoped importer arrives, build the tab-origin/
+       `kind` filter the KNOWN LIMITATION above identifies — do NOT widen the
+       entity-set map to reach for it. The current shape is endorsed for
+       exactly one caller.
+    2. *** STRONGEST ITEM ON THE BOARD — three seats converged independently
+       (Security MEDIUM, Contrarian, Chaos). *** Couple the guard and sweep
+       scopes before a second scoped caller exists: `entities` ⊇
+       `entity_scope` is a CONVENTION enforced by the caller and by two
+       docstrings, not by the type system. Not reachable today — both are
+       Python kwargs, not CLI-exposed, and the sole caller passes one
+       constant to both.
+    3. WATCH ITEM (Chaos MINOR): move `repo.list_shows()` INSIDE the inner
+       try/except. One line; yields the tidy {"failed": ...} envelope instead
+       of a bare traceback if the network blips during the live run.
+    4. WATCH ITEM (Contrarian MINOR): an EMPTY SHOWLIST currently orphans
+       every sale->show link with no log, counter or exception. A warning
+       when ctx.shows is empty, or a `show_unlinked` counter in the summary,
+       closes it. Not the live table's state (SHOWLIST is 28), but it is
+       silent if it ever happens.
+    5. Consider a precondition check that payment_method CONFIG rows exist
+       (Contrarian MINOR). Latent only on a table that never went through a
+       full run_import; not the live table's state.
+  NON-BLOCKING MINORS ALSO ON THE RECORD (verdict Appendix, no action):
+  enriched-CSV STALENESS is undetectable (the header check catches "wrong
+  file," not "right file, stale contents" — process risk, and the code
+  deliberately cannot see it since Singles.csv is unread by design); a TOCTOU
+  seam between the header sniff and _read_tab_rows (both Chaos and Security
+  declined to escalate); the header is read twice; ~15 lines of lock/
+  generation/finally scaffolding duplicated from run_import (accepted — the
+  Architect itself endorsed the peer function over parameterizing
+  run_import); the catalog index is built but provably unread on the enriched
+  path (kept so ImportContext is identical to a full run's — leave it); lock
+  TTL as sole crash recovery, pre-existing and inherited.
+
+  Suite: 817 passed, 6 skipped, 0 failed. Baseline was 790; +27 is exactly
+  this change's new tests (10 dynamodb + 13 spreadsheet_import + 4 CLI).
+  `python -m ruff check backend/src` clean, as are both touched scripts and
+  the new test file. (Unrelated: the 4 PRE-EXISTING ruff errors in
+  backend/tests/services/test_dynamodb.py and test_spreadsheet_import.py —
+  I001 x2, E402 x2 — were VERIFIED pre-existing by stashing the test changes
+  and re-running; outside the documented lint scope, not touched. Separately,
+  the 4 pre-existing errors in backend/scripts/import_held_singles.py noted
+  in earlier entries are also still there.)
+  Files touched: backend/src/merlins_collection/services/dynamodb.py,
+  backend/src/merlins_collection/services/spreadsheet_import.py,
+  backend/scripts/import_spreadsheet.py, backend/tests/services/
+  test_dynamodb.py, backend/tests/services/test_spreadsheet_import.py,
+  backend/tests/scripts/test_import_spreadsheet.py (NEW), claude-progress.txt
+  (this entry + the Section 7 step-4 command block). The concurrent model's
+  five in-flight files (backend/scripts/build_review.py,
+  apply_review_decisions.py, their two test files, frontend/next.config.ts)
+  were never touched, staged or stashed — re-verified with `git status` after
+  every stash cycle.
 
 ========================================================================
 7 — HANDOFF (rewritten 2026-07-27 after Phase 3, for a fresh conversation)
@@ -2062,8 +2283,10 @@ WHERE THINGS STAND
   `Singles_enriched_v3.csv`, under TDD (RED tests first, per CLAUDE.md),
   implementing the confidence-tier rule and the listed_price removal
   together, then clear the Council Loop. ***
-  Suite: 784 passed, 6 skipped, 0 failed (was 779 after Phase 5; +5 from the
-  per-language seed-rail change, LOG 2026-07-28).
+  Suite: 817 passed, 6 skipped, 0 failed (was 790 before the scoped
+  Singles-only import path; +27 from that change's new tests, LOG 2026-07-28
+  "SCOPED SINGLES-ONLY IMPORT PATH". Earlier waypoints: 779 after Phase 5,
+  784 after the per-language seed-rail change).
   MCP: 73 passed, 0 failed.
   `python -m ruff check backend/src` clean. NOTE: `ruff` is not on PATH in
   this environment — run `python -m ruff`. Also note 4 PRE-EXISTING ruff
@@ -2071,10 +2294,19 @@ WHERE THINGS STAND
   lint scope (`backend/src`), pre-date this work, left alone.
   Working tree at handoff: frontend/next.config.ts modified-unstaged, which
   belongs to the OTHER model (RFC 0002) — leave it alone, never commit it.
-  ALSO UNCOMMITTED: backend/scripts/seed_catalog.py and backend/tests/scripts/
-  test_seed_catalog.py (the per-language seed-rail change — Council PASSED,
-  tests green, just not committed yet) plus this file. Those three DO belong
-  together in one commit.
+  ALSO UNCOMMITTED at handoff: the SCOPED SINGLES-ONLY IMPORT PATH —
+  backend/src/merlins_collection/services/dynamodb.py,
+  backend/src/merlins_collection/services/spreadsheet_import.py,
+  backend/scripts/import_spreadsheet.py, backend/tests/services/
+  test_dynamodb.py, backend/tests/services/test_spreadsheet_import.py,
+  backend/tests/scripts/test_import_spreadsheet.py (NEW FILE) — Council
+  PASSED, tests green, just not committed yet. Those six plus this file
+  belong together in one commit. (The earlier per-language seed-rail change,
+  backend/scripts/seed_catalog.py + its test, has since been committed as
+  2949817 — no longer pending.)
+  ALSO UNCOMMITTED AND NOT YOURS: backend/scripts/build_review.py,
+  backend/scripts/apply_review_decisions.py and their two test files belong
+  to a CONCURRENT model — do not touch, revert, stage or commit them.
 
 *** THE LIVE WIPE IS OWNER-APPROVED AND NO LONGER BLOCKED — STILL NOT RUN ***
   *** UPDATED 2026-07-28 (see LOG "PER-LANGUAGE FLOOR FOR THE SEED'S MAGNITUDE
@@ -2139,6 +2371,31 @@ WHERE THINGS STAND
        spreadsheet import immediately — do not stop between 2 and 3. Do NOT
        run import_sealed/import_bulk/import_consignments/import_slabs; they
        are out of scope for this rebuild (see DEFERRED — OTHER TABS).
+    4. THE SINGLES-ONLY IMPORT, from backend/ — *** THE --singles-only FLAG
+       IS MANDATORY: ***
+         PYTHONPATH="$(pwd)/src" python scripts/import_spreadsheet.py              ../data/spreadsheet/csv --table merlins-cards --singles-only
+       *** DO NOT RUN THE BARE INVOCATION (no --singles-only). *** It is
+       UNCHANGED and still the ALL-18-TAB path with the full guard and the
+       full all-or-nothing commit sweep — i.e. it is still exactly the trap
+       documented in LOG 2026-07-28 "STEP 4 ... DISCOVERED UNSAFE AS
+       ORIGINALLY INSTRUCTED": it would refuse over the surviving business
+       data, or with --force-replace wholesale-replace SHOWLIST 28 /
+       DEBTLIST 104 / PAYOUTLIST 33 / BALANCESHEET 2 / CONSIGNORLIST 3 /
+       CONFIG 25 and reactivate the two dormant bugs in DEFERRED — OTHER
+       TABS. That path was deliberately left byte-for-byte unchanged.
+       WHAT --singles-only DOES: reads ONLY
+       `data/spreadsheet/csv/Singles_enriched_v3.csv` (NOT Singles.csv — the
+       raw file has no enrichment columns and would silently fall back to the
+       legacy fuzzy-match identity path; the run refuses a file without a
+       `match_confidence` header), guards and sweeps ONLY
+       inventory_item/transaction, and leaves every other import-owned entity
+       untouched. It needs NO --force-replace on the current live table,
+       because inventory_item is at zero rows. It refuses to commit a
+       zero-row file, and there is no --allow-empty escape (passing that flag
+       with --singles-only is a CLI error, by design).
+       See LOG 2026-07-28 "SCOPED SINGLES-ONLY IMPORT PATH" for the full
+       design, the Council PASS, and the KNOWN LIMITATION that matters once
+       Sealed/Bulk/Consignments are ever turned back on.
   ALWAYS `python -m` FROM backend/, never `python backend/scripts/...` — see
   the worktree import-shadowing trap in the VERIFIED BASELINE block.
   --confirm-table also protects you: a wrong-tree run refuses rather than

@@ -1254,3 +1254,159 @@ def run_import(csv_dir, repo, *, require_complete: bool = True,
         repo.set_import_generation(None)
         repo.release_import_lock(gen)
     return summaries
+
+
+# ============================ Singles-only import ============================
+# The ONE file a Singles-only run reads, hardcoded by exact name on purpose: the
+# same directory also holds `Singles.csv` (the raw, un-enriched export) and four
+# superseded scratch copies from the Stage A review (`Singles_enriched.csv`,
+# `_edited`, `_final`, `_final_information_added`). Only this one is the reviewed
+# artifact. No glob, no bare stem.
+SINGLES_ONLY_CSV_NAME = "Singles_enriched_v3.csv"
+
+# The entity types a Singles-only run writes — and therefore the ONLY ones its
+# existing-data guard probes and its commit sweep is allowed to delete.
+SINGLES_ONLY_ENTITIES = frozenset({"inventory_item", "transaction"})
+
+
+def run_singles_only_import(csv_dir, repo, *, force_replace: bool = False) -> dict:
+    """Import ONLY ``Singles_enriched_v3.csv``, leaving every other import-owned
+    entity's existing rows alone — not probed, not swept, not at risk.
+
+    ``run_import`` cannot express this. Its guard refuses the run over ANY
+    import-owned data, and its commit sweep deletes every import-owned record not
+    stamped with this generation — it cannot tell "this entity type was
+    deliberately not touched this run" from "this entity type's old generation is
+    stale". Against the live table (28 shows, 104 debts, 33 payouts, 3 consignors,
+    2 balance sheets, 25 config rows, all still authoritative and all with no
+    backup) that leaves only two bad options: refuse, or ``--force-replace`` all 17
+    non-Slabs tabs over real financial records. This is the third door.
+
+    What it does, and only this:
+
+    * reads exactly one CSV — the other 17 tabs are never opened, so the two
+      documented dormant bugs in ``import_sealed``/``import_consignments``
+      (see claude-progress.txt "DEFERRED — OTHER TABS") stay dormant;
+    * checks for pre-existing data with the guard scoped to
+      ``SINGLES_ONLY_ENTITIES``, so shows/debts/payouts cannot refuse it;
+    * writes under a fresh generation, exactly like a full run;
+    * on commit, sweeps the prior generation of ``SINGLES_ONLY_ENTITIES`` ONLY.
+
+    A Singles row is resolved here EXACTLY as the Singles tab resolves it inside a
+    full run — same ``import_singles``, same catalog index, same show list. The
+    only differences are which tabs run and how wide the guard and sweep reach.
+    (The catalog index is built even though the enriched path never consults it:
+    keeping ``ImportContext`` identical means a malformed row degrades the way it
+    already does today rather than in some new way particular to this path.)
+
+    Shows are read back from the TABLE rather than re-imported from ``Vending
+    Net.csv``, so a sold single still links to the show it was sold at. That
+    read is the only contact this run makes with an out-of-scope entity, and it
+    is read-only.
+
+    ``seed_payment_methods`` is deliberately NOT called: ``payment_method`` is
+    outside the sweep scope, and config sort keys are generation-scoped
+    (``_gen_sk``), so re-seeding would strand a duplicate copy under the new
+    generation that nothing ever cleans up. Nothing on the Singles path needs it
+    — ``record_sale`` stores the method as a plain string — and the live table's
+    payment methods are already there from the first import.
+
+    *** KNOWN LIMITATION — READ BEFORE REUSING THIS FOR A SECOND TAB. ***
+    The sweep is scoped by ENTITY TYPE, which is coarser than "the rows this tab
+    wrote". Sealed, Bulk and Consignments all write the SAME ``inventory_item``
+    entity that Singles does. Today that is not merely acceptable, it is exactly
+    correct: the 2026-07-28 wipe left ``inventory_item`` and ``transaction`` at
+    ZERO rows, Singles is the only tab in scope for this rebuild, and so "delete
+    every inventory_item/transaction not of this generation" has nothing to
+    delete but this path's own prior attempts.
+    It is NOT future-proof. Once Sealed/Bulk/Consignments are turned back on — a
+    FUTURE phase (claude-progress.txt "DEFERRED — OTHER TABS"), NOT now, and
+    nothing here should be built for it in advance — a Singles-only re-run would
+    delete THEIR inventory rows too, because it cannot see the difference. Before
+    that happens the scope has to get finer than entity type: filter the sweep by
+    the tab-origin already carried on each item (the ``kind`` discriminator, or a
+    new explicit source tag) instead of by entity name alone. That boundary is a
+    deliberate YAGNI call for a one-tab rebuild, not an oversight — do not read
+    ``entity_scope`` as general multi-tab safety.
+
+    Returns ``{"Singles": <summary>, "_committed": bool, "_removed": int}``.
+    """
+    import csv
+    from pathlib import Path
+
+    path = Path(csv_dir) / SINGLES_ONLY_CSV_NAME
+    if not path.exists():
+        raise ImportError(
+            f"refusing to import: {SINGLES_ONLY_CSV_NAME} not found at {path}. "
+            f"A Singles-only run reads that exact file — the reviewed Stage A "
+            f"enrichment artifact — and nothing else.")
+
+    with path.open(newline="", encoding="utf-8-sig") as f:
+        try:
+            header = _dedupe_headers(next(csv.reader(f)))
+        except StopIteration:
+            header = []
+    if "match_confidence" not in header:
+        # Guards against the likeliest operator slip: copying the raw
+        # `Singles.csv` over this name. `import_singles` switches to its LEGACY
+        # live-fuzzy-match path per row when the enrichment columns are absent,
+        # so such a file would import quietly and resolve card identities a
+        # different way than the reviewed artifact does.
+        raise ImportError(
+            f"refusing to import: {path} has no 'match_confidence' column, so it "
+            f"is not the Stage A enrichment artifact. Importing it would silently "
+            f"fall back to the legacy fuzzy-match identity path.")
+
+    rows = _read_tab_rows(path, csv)
+
+    # Same outermost guard as `run_import`, narrowed to what this run writes.
+    if not force_replace:
+        existing = repo.find_import_owned_entity(entities=SINGLES_ONLY_ENTITIES)
+        if existing is not None:
+            raise ExistingBusinessDataError(
+                f"refusing to import: this table already contains imported "
+                f"inventory data (found an existing {existing!r} record). A "
+                f"Singles-only run REPLACES every inventory_item and transaction "
+                f"with this file's contents, discarding anything written or "
+                f"corrected since. Other business data (shows, debts, payouts, "
+                f"consignors, cash accounts, buying policies, payment methods, "
+                f"balance sheets) is NOT touched either way. If replacing the "
+                f"inventory is genuinely what you want, re-run deliberately with "
+                f"--force-replace (run_singles_only_import(..., "
+                f"force_replace=True))."
+            )
+
+    gen = new_ulid()
+    repo.acquire_import_lock(gen)  # raises ImportInProgressError if one is running
+    summaries: dict = {}
+    try:
+        repo.set_import_generation(gen)
+        ctx = ImportContext(
+            repo=repo,
+            shows=repo.list_shows(),
+            catalog_index=build_catalog_index(repo.iter_catalog_cards()),
+        )
+        try:
+            summary = import_singles(rows, ctx)
+        except Exception as exc:  # isolate the failure exactly as run_import does
+            logger.exception("Singles-only import failed")
+            summary = {"failed": repr(exc)}
+        summaries["Singles"] = summary
+        committed = "failed" not in summary
+        if committed and not summary.get("imported"):
+            # Same fail-closed rule as `_empty_tabs`, with no allow_empty escape:
+            # a Singles-only run exists to load 266 rows, so zero rows is a
+            # truncated/wrong file every time. Committing it would sweep the prior
+            # inventory generation and reload nothing.
+            logger.error(
+                "refusing to commit: %s imported zero records (truncated or wrong "
+                "file?) — the prior inventory generation is left in place.",
+                SINGLES_ONLY_CSV_NAME)
+            committed = False
+        summaries["_removed"] = repo.finalize_import(
+            gen, committed=committed, entity_scope=SINGLES_ONLY_ENTITIES)
+        summaries["_committed"] = committed
+    finally:
+        repo.set_import_generation(None)
+        repo.release_import_lock(gen)
+    return summaries

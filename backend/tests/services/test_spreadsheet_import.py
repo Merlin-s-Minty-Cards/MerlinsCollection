@@ -3,9 +3,10 @@ from decimal import Decimal
 
 import pytest
 
-from merlins_collection.models.business import Show
+from merlins_collection.models.business import Consignor, Show
 from merlins_collection.models.inventory import Condition, ConditionModifier, Language
 from merlins_collection.services.spreadsheet_import import (
+    SINGLES_ONLY_CSV_NAME,
     ExistingBusinessDataError,
     ImportContext,
     _match_card,
@@ -26,6 +27,7 @@ from merlins_collection.services.spreadsheet_import import (
     parse_language,
     parse_money,
     run_import,
+    run_singles_only_import,
     seed_payment_methods,
 )
 
@@ -2041,3 +2043,279 @@ def test_real_enriched_csv_stores_every_row(dynamo_repo):
             f"listed_price must be None, got {item.listed_price} on {item.item_id}")
         assert item.tcg_url is None, (
             f"tcg_url must be None, got {item.tcg_url} on {item.item_id}")
+
+
+# =============================================================================
+# SINGLES-ONLY IMPORT (scoped guard + scoped sweep)
+# The live table holds real shows/debts/payouts/consignors/config that this
+# rebuild never re-imports. A Singles-only run must land Singles' inventory and
+# transactions under a fresh generation and leave all of that alone — neither
+# refused over by the re-import guard nor deleted by the commit sweep.
+# =============================================================================
+
+_ENRICHED_HEADER = (
+    "Date,Location,Name,Card #,Condition,Market @ purchase,Amount Paid,Sold,"
+    "Date Sold,Venmo?,language,matched_set_id,matched_set_name,matched_number,"
+    "matched_card_id,match_confidence,match_notes\n"
+)
+
+_ENRICHED_ROW = (
+    "1/5/2026,Glass,Pikachu,25,LP +,$12.00,$8.00,,,,"
+    "EN,base1,Base Set,25,base1-25,high,\n"
+)
+
+
+def _write_enriched(tmp_path, body=_ENRICHED_ROW, header=_ENRICHED_HEADER):
+    (tmp_path / SINGLES_ONLY_CSV_NAME).write_text(header + body, encoding="utf-8")
+
+
+def _seed_untouchable_business_data(repo):
+    """The live post-wipe survivors: every import-owned entity EXCEPT
+    inventory_item / transaction. Written under a committed prior generation,
+    exactly like the real table's rows."""
+    from merlins_collection.models.business import (
+        BalanceSheetLine,
+        BalanceSheetSection,
+        BalanceSheetSnapshot,
+        BuyingPolicy,
+        CashAccount,
+        Debt,
+        DebtDirection,
+        PaymentMethod,
+        Payout,
+    )
+    repo.set_import_generation("gen-prior")
+    repo.put_show(Show(show_id="s1", name="Mint City", date=date(2026, 3, 8)))
+    repo.put_debt(Debt(direction=DebtDirection.OWED_TO_US, date=date(2026, 1, 1),
+                       amount=Decimal("10"), counterparty="Colin"))
+    repo.put_payout(Payout(event="E1", partner="Casey", amount=Decimal("40")))
+    repo.put_consignor(Consignor(consignor_id="c1", name="Rylan"))
+    repo.put_cash_account(CashAccount(account="venmo", balance=Decimal("10")))
+    repo.put_payment_method(PaymentMethod(method="cash"))
+    repo.put_buying_policy(BuyingPolicy(product_type="raw",
+                                        cash_pct_min=Decimal("60")))
+    repo.put_balance_sheet(BalanceSheetSnapshot(
+        snapshot_id="beginning", label="beginning", frozen=True,
+        lines=[BalanceSheetLine(section=BalanceSheetSection.ASSET,
+                                label="Inventory", amount=Decimal("100"))]))
+    repo.set_import_generation(None)
+
+
+_SINGLES_SCOPE = frozenset({"inventory_item", "transaction"})
+
+
+def _out_of_scope_snapshot(repo) -> list:
+    """Every stored row that is NOT inventory/transaction, fully materialized,
+    so "untouched" can be proven byte-for-byte rather than by a count."""
+    items, kwargs = [], {"ConsistentRead": True}
+    while True:
+        resp = repo._table.scan(**kwargs)
+        items.extend(resp.get("Items", []))
+        last = resp.get("LastEvaluatedKey")
+        if not last:
+            break
+        kwargs["ExclusiveStartKey"] = last
+    return sorted((i["PK"], i["SK"], repr(sorted(i.items()))) for i in items
+                  if i.get("entity") not in _SINGLES_SCOPE)
+
+
+def test_singles_only_import_runs_despite_other_business_data(tmp_path, dynamo_repo):
+    """The whole point: 28 shows / 104 debts / 33 payouts on the live table must
+    not refuse a Singles-only run that never touches them. No --force-replace."""
+    _seed_untouchable_business_data(dynamo_repo)
+    _write_enriched(tmp_path)
+
+    summaries = run_singles_only_import(tmp_path, dynamo_repo)
+
+    assert summaries["_committed"] is True
+    assert summaries["Singles"]["imported"] == 1
+    [item] = dynamo_repo.list_inventory()
+    assert item.card_id == "base1-25"
+
+
+def test_singles_only_import_leaves_other_business_data_byte_identical(
+        tmp_path, dynamo_repo):
+    _seed_untouchable_business_data(dynamo_repo)
+    _write_enriched(tmp_path)
+    before = _out_of_scope_snapshot(dynamo_repo)
+    assert before  # the fixture really did land data
+
+    assert run_singles_only_import(tmp_path, dynamo_repo)["_committed"] is True
+
+    assert _out_of_scope_snapshot(dynamo_repo) == before
+    # And spelled out per entity, so a future reader sees WHAT survived:
+    assert len(dynamo_repo.list_shows()) == 1
+    assert len(dynamo_repo.list_debts()) == 1
+    assert len(dynamo_repo.list_payouts()) == 1
+    assert len(dynamo_repo.list_consignors()) == 1
+    assert len(dynamo_repo.list_cash_accounts()) == 1
+    assert len(dynamo_repo.list_payment_methods()) == 1
+    assert len(dynamo_repo.list_buying_policies()) == 1
+    assert len(dynamo_repo.list_balance_sheets()) == 1
+
+
+def test_singles_only_import_does_not_reseed_payment_methods(tmp_path, dynamo_repo):
+    """payment_method is OUT of the sweep scope, so re-seeding it would strand a
+    duplicate copy under the new generation that nothing ever cleans up."""
+    _seed_untouchable_business_data(dynamo_repo)
+    _write_enriched(tmp_path)
+    run_singles_only_import(tmp_path, dynamo_repo)
+    assert [m.method for m in dynamo_repo.list_payment_methods()] == ["cash"]
+
+
+def test_singles_only_import_is_refused_when_inventory_already_exists(
+        tmp_path, dynamo_repo, monkeypatch):
+    from merlins_collection.models.inventory import RawInventoryItem
+    dynamo_repo.put_inventory_item(RawInventoryItem(
+        card_id="swsh1-1", cost_basis=Decimal("1"), acquired_at=date(2026, 1, 1),
+        finish="normal", condition=Condition.NM))
+    _write_enriched(tmp_path)
+
+    def _forbidden(*a, **k):
+        raise AssertionError("mutating call reached past the scoped guard")
+
+    monkeypatch.setattr(dynamo_repo, "acquire_import_lock", _forbidden)
+    monkeypatch.setattr(dynamo_repo, "set_import_generation", _forbidden)
+    monkeypatch.setattr(dynamo_repo, "finalize_import", _forbidden)
+    with pytest.raises(ExistingBusinessDataError, match="force-replace"):
+        run_singles_only_import(tmp_path, dynamo_repo)
+    assert dynamo_repo._import_gen is None
+
+
+def test_singles_only_import_force_replace_proceeds(tmp_path, dynamo_repo):
+    from merlins_collection.models.inventory import RawInventoryItem
+    dynamo_repo.put_inventory_item(RawInventoryItem(
+        card_id="stale-1", cost_basis=Decimal("1"), acquired_at=date(2026, 1, 1),
+        finish="normal", condition=Condition.NM))
+    _write_enriched(tmp_path)
+    summaries = run_singles_only_import(tmp_path, dynamo_repo, force_replace=True)
+    assert summaries["_committed"] is True
+    assert [i.card_id for i in dynamo_repo.list_inventory()] == ["base1-25"]
+
+
+def test_singles_only_import_sweeps_prior_inventory_but_nothing_else(
+        tmp_path, dynamo_repo):
+    """KNOWN LIMITATION, asserted rather than merely commented: the sweep is
+    scoped by ENTITY TYPE, so it removes EVERY prior-generation inventory row —
+    including one a future Sealed/Bulk run would have written. Correct today
+    (inventory is empty post-wipe and Singles is the only tab in scope); it is
+    exactly what must change before a second tab is turned back on."""
+    _seed_untouchable_business_data(dynamo_repo)
+    from merlins_collection.models.inventory import BulkInventoryItem
+    dynamo_repo.set_import_generation("gen-prior")
+    dynamo_repo.put_inventory_item(BulkInventoryItem(
+        description="lot A", cost_basis=Decimal("10"),
+        acquired_at=date(2026, 1, 1)))
+    dynamo_repo.set_import_generation(None)
+    _write_enriched(tmp_path)
+
+    summaries = run_singles_only_import(tmp_path, dynamo_repo, force_replace=True)
+
+    assert summaries["_committed"] is True
+    assert summaries["_removed"] == 1                       # the prior bulk lot
+    assert [i.display_name for i in dynamo_repo.list_inventory()] == ["Pikachu #25"]
+    assert len(dynamo_repo.list_shows()) == 1               # still untouched
+
+
+def test_singles_only_import_links_sales_to_shows_already_in_the_table(
+        tmp_path, dynamo_repo):
+    """The Vending Net tab is not read, so the shows a sale links to come from
+    the table. Without this the 28 live shows would silently lose every new
+    sale's linkage."""
+    _seed_untouchable_business_data(dynamo_repo)
+    _write_enriched(tmp_path, body=(
+        "1/5/2026,Glass,Pikachu,25,LP +,$12.00,$8.00,$20.00,3/9/2026,,"
+        "EN,base1,Base Set,25,base1-25,high,\n"))
+
+    summaries = run_singles_only_import(tmp_path, dynamo_repo)
+
+    assert summaries["Singles"]["sales"] == 1
+    [txn] = dynamo_repo.list_transactions(date(2026, 3, 1), date(2026, 3, 31))
+    assert txn.show_id == "s1"
+
+
+def test_singles_only_import_reads_no_other_tab(tmp_path, dynamo_repo):
+    _seed_untouchable_business_data(dynamo_repo)
+    _write_enriched(tmp_path)
+    # Poison every other tab: if any of them is read, the assertions below break.
+    _write(tmp_path, "Singles.csv",
+           "Date,Location,Name,Card #,Condition\n1/1/2026,Glass,Charizard,4,NM\n")
+    _write_bulk_csv(tmp_path, "lot Z,10,25,3/7/2026,No,,\n")
+    _write(tmp_path, "Vending Net.csv", "Day,Show,Goal\n3/8/2026,Ghost Show,$500\n")
+    _write(tmp_path, "Debts.csv", "Date,Amount,Who,Reason\n1/1/2026,99,Ghost,x\n")
+
+    assert run_singles_only_import(tmp_path, dynamo_repo)["_committed"] is True
+
+    names = [i.display_name for i in dynamo_repo.list_inventory()]
+    assert names == ["Pikachu #25"]                       # no Charizard, no lot Z
+    assert [s.name for s in dynamo_repo.list_shows()] == ["Mint City"]
+    assert [d.counterparty for d in dynamo_repo.list_debts()] == ["Colin"]
+
+
+def test_singles_only_import_requires_the_enriched_csv(tmp_path, dynamo_repo):
+    with pytest.raises(ImportError, match=SINGLES_ONLY_CSV_NAME):
+        run_singles_only_import(tmp_path, dynamo_repo)
+
+
+def test_singles_only_import_rejects_a_non_enriched_csv(tmp_path, dynamo_repo):
+    """The plain Singles.csv columns produce the LEGACY fuzzy-match path. Under
+    that name it would import silently and wrongly, so the header is checked."""
+    (tmp_path / SINGLES_ONLY_CSV_NAME).write_text(
+        "Date,Location,Name,Card #,Condition\n1/1/2026,Glass,Pikachu,25,NM\n",
+        encoding="utf-8")
+    with pytest.raises(ImportError, match="match_confidence"):
+        run_singles_only_import(tmp_path, dynamo_repo)
+
+
+def test_singles_only_import_fails_closed_on_zero_rows(tmp_path, dynamo_repo):
+    """A truncated export must not commit — that would sweep the prior
+    inventory generation and reload nothing."""
+    _seed_untouchable_business_data(dynamo_repo)
+    from merlins_collection.models.inventory import RawInventoryItem
+    dynamo_repo.set_import_generation("gen-prior")
+    dynamo_repo.put_inventory_item(RawInventoryItem(
+        card_id="survivor-1", cost_basis=Decimal("1"), acquired_at=date(2026, 1, 1),
+        finish="normal", condition=Condition.NM))
+    dynamo_repo.set_import_generation(None)
+    _write_enriched(tmp_path, body="")
+
+    summaries = run_singles_only_import(tmp_path, dynamo_repo, force_replace=True)
+
+    assert summaries["_committed"] is False
+    assert [i.card_id for i in dynamo_repo.list_inventory()] == ["survivor-1"]
+    assert len(dynamo_repo.list_shows()) == 1
+
+
+def test_singles_only_import_releases_the_lock(tmp_path, dynamo_repo):
+    _write_enriched(tmp_path)
+    run_singles_only_import(tmp_path, dynamo_repo)
+    dynamo_repo.acquire_import_lock("gen-after")  # no ImportInProgressError
+    dynamo_repo.release_import_lock("gen-after")
+
+
+# ---- regression guards: the full-import path is scoped by NOBODY ------------
+
+def test_full_import_still_probes_and_sweeps_every_entity(tmp_path, dynamo_repo,
+                                                          monkeypatch):
+    """The existing CLI path must be byte-identical in behavior: an UNSCOPED
+    guard and an UNSCOPED sweep. Same spirit as the seed_catalog fix's "English
+    keeps its stricter floor" test — this fails if the new scoping leaks in."""
+    _seed_workbook(tmp_path)
+    probe_kwargs, finalize_kwargs = [], []
+    real_probe = dynamo_repo.find_import_owned_entity
+    real_finalize = dynamo_repo.finalize_import
+
+    def _probe(**kwargs):
+        probe_kwargs.append(kwargs)
+        return real_probe(**kwargs)
+
+    def _finalize(gen, **kwargs):
+        finalize_kwargs.append(kwargs)
+        return real_finalize(gen, **kwargs)
+
+    monkeypatch.setattr(dynamo_repo, "find_import_owned_entity", _probe)
+    monkeypatch.setattr(dynamo_repo, "finalize_import", _finalize)
+    assert run_import(tmp_path, dynamo_repo, require_complete=False)["_committed"]
+
+    assert probe_kwargs == [{}]                       # no entities= narrowing
+    assert finalize_kwargs == [{"committed": True}]   # no entity_scope= narrowing
