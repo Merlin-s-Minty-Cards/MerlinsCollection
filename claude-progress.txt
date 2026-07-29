@@ -2305,6 +2305,73 @@ Q5. RESOLVED/MOOT — the sheet is NOT mostly sold; see Section 2's Data block. 
   (display scoping) was landed separately by the concurrent model (52ee96a),
   so PHASE 6 is the roadmap's next item — plus the owner decision above.
 
+2026-07-28  PHASE 6.1 — REVIEW TOOLING MULTILINGUAL + TWO LIVE BUGS FOUND.
+  DONE, committed + pushed 76d839d. Council NOT convened (owner directive this
+  session: "only run it if you really think it is worth the extra tokens").
+  Phase 6.2's textbook lesson was DROPPED by the owner this session; the
+  docstring half was done (card_text.py). docs/learning/ is gitignored and
+  lives ONLY in the sibling checkout, so it was never extendable from this
+  worktree anyway — recorded so nobody hunts for it again.
+  DELIVERED (TDD, phases not combined, RED confirmed before each GREEN):
+  - build_review.py / apply_review_decisions.py: the blanket "non-EN can never
+    match" gate became a language-MISMATCH check. A JP item + JP card = correct;
+    JP item + EN card = still refused. predict_card filters cross-language
+    candidates so a name collision can't hand a JP item its English twin.
+  - NEW `DANGLING` band. Running the tool against the LIVE table showed 11 rows
+    reported as "linked to an English catalog card" when the card_id was absent
+    from the catalog entirely — a FALSE claim that outranked genuinely mislinked
+    rows. A card_id resolving to nothing is now its own honest band, visible even
+    when needs_review=False (9 of the 11 were already "resolved" and would have
+    been invisible forever — the BLOCKER-1(d) trap).
+  - test_language_recall.py's slug reconciliation now SKIPS (7 skipped, the
+    documented baseline). Its signal came from the sheet's "TCG Link" column,
+    which the owner removed; tcg_url is None by design since Phase 3.1, so no
+    regenerated snapshot can ever carry a pokemon-japan URL again. NOTE: this
+    test only surfaced because regenerating review.html IS regenerating its
+    fixture — the two are the same file.
+  *** LIVE CUSTOMER-FACING BUG FIXED (routers/public.py) ***
+  `_ALLOWED_IMAGE_HOSTS` still listed only images.pokemontcg.io while every
+  reseeded card carries assets.tcgdex.net (services/tcgdex.py DROPS any other
+  host). Measured live: 4324 of 5472 sampled cards on assets.tcgdex.net, ZERO on
+  pokemontcg.io — so _is_safe_image_url rejected EVERY card and the home page's
+  featured strip was silently empty. next.config.ts already allowed the host
+  (the other model added it, uncommitted), so the two were out of the lockstep
+  public.py's own comment demands. Fixed backend-side only; next.config.ts left
+  untouched as the other model's file.
+  Suite: 243 passed / 7 skipped in the affected areas; ruff clean.
+  WHY NO COUNCIL (recorded deliberately): build_review.py is read-only
+  (test-enforced), the applier defaults to dry-run and fails closed,
+  CatalogCard.language is a pydantic-validated enum so a bad value cannot reach
+  the comparison, and both cross-language refusals carry regression guards. The
+  public.py change grants no new trust — tcgdex.py already treats that host as
+  authoritative. Residual risks carried, not re-reviewed, per the budget rule.
+
+*** BLOCKER FOUND, NOT FIXED — EVERY INVENTORY card_id IS ORPHANED ***
+  Found while verifying the DANGLING band against the live table. This is a
+  PHASE 3.1 defect, not a Phase 6 one, and it is NOT fixed.
+  MEASURED LIVE (2026-07-28, merlins-cards):
+    inventory items 266, of which 256 carry a card_id
+    resolve against the catalog AS STORED:              0
+    dangling:                                         256
+    resolve once an en:/ja: prefix is added:          253
+  ROOT CAUSE: Phase 1 made card identity a LANGUAGE COMPOSITE — catalog rows are
+  `en:base1-17`, `ja:SV11W-056`. Stage A resolved raw TCGdex ids against the live
+  API (`smp-SM211`, `g1-RC8`, `SV11B-170`) and `import_singles` stored them
+  VERBATIM. Nobody bridged the two schemes.
+  CONSEQUENCE: not one imported item joins to its catalog card, so NOTHING can be
+  priced. This also means the public.py image fix above is NECESSARY BUT NOT
+  SUFFICIENT for featured finds — that path needs `catalog.get(item.card_id)` to
+  resolve first, so the strip stays empty until this is fixed too.
+  NOTE: Phase 3.1's Council rated exactly this MINOR ("dangling card_id
+  references — by design, pre-verified at Stage A"; "card_id accepted without
+  catalog validation — missing-price not wrong-price"). That rating was WRONG in
+  degree: it is not a narrow window, it is 100% of rows.
+  LIKELY FIX (not implemented, owner's call): normalize `matched_card_id` to
+  `{en|ja}:{id}` at import time in `import_singles`, validate it against the
+  catalog index, then re-run the Singles-only import (re-runnable; sweeps only
+  inventory_item/transaction). The 3 that still won't resolve are the JA
+  zero-data sets TCGdex advertises but does not populate.
+
 ========================================================================
 7 — HANDOFF (rewritten 2026-07-27 after Phase 3, for a fresh conversation)
 ========================================================================
@@ -2315,13 +2382,21 @@ WHERE THINGS STAND
   5/6/7 either; it resumes only on an explicit owner go-ahead.
   Phase 5 DONE (52ee96a, pushed) — display scoping location gate. Council
   PASS (Security + Contrarian, 0 gating findings).
-  Phases 6, 7 NOT STARTED.
-  NEXT ACTION FOR A NEW CONVERSATION: **PHASE 6 — review tooling + docs**.
-  Phase 6 is the next roadmap item. BUT NOTE, competing for "next": the live
-  wipe is no longer blocked as of 2026-07-28 (the seed's magnitude rail now
-  has a per-language floor; see the live-wipe block below and the LOG entry
-  "PER-LANGUAGE FLOOR FOR THE SEED'S MAGNITUDE RAIL"). Which of the two goes
-  first is the owner's call, not an agent's — surface it rather than picking.
+  Phase 6.1 DONE (76d839d, pushed) — multilingual review tooling, new DANGLING
+  band, plus a live customer-facing image-host fix in routers/public.py. No
+  Council (owner token directive); reasoning recorded in the LOG entry.
+  Phase 6.2 — textbook lesson DROPPED by the owner; docstring half DONE.
+  Phase 7 NOT STARTED.
+  *** NEXT ACTION FOR A NEW CONVERSATION: FIX THE ORPHANED card_id SCHEME. ***
+  See the LOG block "BLOCKER FOUND, NOT FIXED — EVERY INVENTORY card_id IS
+  ORPHANED" immediately above Section 7. Measured live: 256 of 256 linked
+  inventory items point at ids the catalog does not contain, because Stage A
+  stored raw TCGdex ids while the catalog uses Phase 1's `en:`/`ja:` composite.
+  Nothing can be priced and featured finds stays empty until this is fixed. It
+  outranks Phase 7 — verifying/handing off a catalog whose inventory join is
+  100% broken is not meaningful. This is a Phase 3.1 defect surfaced by Phase 6
+  tooling, and the fix (normalize + validate at import, then re-run the
+  Singles-only import) is the owner's call, not an agent's.
   *** CAVEAT ON "PHASE 3 DONE" — NOW RESOLVED: the original caveat warned that
   39afd35 was the general architecture only, and two items were NOT YET
   IMPLEMENTED IN CODE: (1) strip listed_price/"Sticker" handling, and (2)
