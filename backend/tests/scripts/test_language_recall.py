@@ -84,7 +84,20 @@ def test_the_text_parser_agrees_with_the_tcgplayer_category_slug(records):
     text, which is why ``item_language`` consults the URL.
     """
     by_url = [r for r in records if language_from_url(r["tcg_url"]) is Language.JP]
-    assert by_url, "snapshot has no pokemon-japan URLs — fixture is wrong"
+    if not by_url:
+        # RETIRED, not broken (Phase 6). This reconciles the text parser against
+        # TCGplayer's category slug, which reached us only via the sheet's "TCG
+        # Link" column. The owner removed that column, and the rebuild replaced
+        # URL-param language detection wholesale with the Stage A enrichment
+        # pass — `import_singles` now stores `tcg_url=None` by design, so no
+        # regenerated snapshot can ever carry a pokemon-japan URL again. There
+        # is no live signal left to reconcile, so this SKIPS rather than
+        # failing on a fixture the pipeline is no longer able to produce.
+        pytest.skip(
+            "no pokemon-japan URLs in the snapshot: the 'TCG Link' column was "
+            "dropped from the sheet and tcg_url is None by design since Phase "
+            "3.1, so the URL signal this reconciles against no longer exists"
+        )
     missed = [r["item_id"] for r in by_url if item_language(r) is not Language.JP]
     assert missed == []
 

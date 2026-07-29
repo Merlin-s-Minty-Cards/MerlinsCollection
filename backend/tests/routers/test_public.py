@@ -210,6 +210,24 @@ def test_featured_cards_excludes_non_allowlisted_or_insecure_image_hosts(pub_cli
     assert names == ["Good"]
 
 
+def test_featured_cards_accepts_tcgdex_hosted_images(pub_client):
+    """The catalog is now seeded from TCGdex, which serves every card image from
+    ``assets.tcgdex.net`` (see ``services/tcgdex.py`` ALLOWED_IMAGE_HOSTS, which
+    DROPS an image on any other host). With the old pokemontcg.io-only allowlist
+    here, no reseeded card could ever qualify and the home page's featured strip
+    went silently empty. ``next.config.ts`` already allows this host; this keeps
+    the backend in the lockstep its own comment demands."""
+    client, repo = pub_client
+    repo.batch_upsert_catalog_cards([
+        _catalog("c1", "Tcgdex", small="https://assets.tcgdex.net/en/sv/sv01/1/high.png"),
+    ])
+    repo.put_inventory_item(_raw("c1", market="10.00"))
+
+    resp = client.get("/public/featured-cards")
+    names = [c["name"] for c in resp.json()["cards"]]
+    assert names == ["Tcgdex"]
+
+
 def test_featured_cards_dedupes_by_card_id_keeping_highest_ranked(pub_client):
     """Multiple copies of one card (same card_id) render at most one tile."""
     client, repo = pub_client

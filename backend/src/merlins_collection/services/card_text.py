@@ -11,7 +11,11 @@ ends import it (Council R7 BLOCKER-9).
 
 The language half is here for the same reason: an item's language must be decided
 identically by the importer, the review page, the applier and the backfill, or
-they disagree about which cards the English catalog may be matched against.
+they disagree about which catalog cards an item may be matched against. Since the
+catalog moved to TCGdex it holds Japanese printings alongside English ones, so
+language is no longer a gate that rules the catalog out entirely — it is part of
+a card's identity, and a match is valid only when item and catalog card agree on
+it (a JP item belongs to a JP card, never its English twin).
 """
 
 from __future__ import annotations

@@ -75,7 +75,16 @@ _BUSINESS_TZ = ZoneInfo("America/Los_Angeles")
 # image on any other host — or a non-https / malformed URL — throws inside
 # next/image at SSR and 500s the whole home page, so a non-conforming card must
 # never become a FeaturedCard. Keep this in lockstep with next.config.ts.
-_ALLOWED_IMAGE_HOSTS = frozenset({"images.pokemontcg.io"})
+#
+# ``assets.tcgdex.net`` is the host every reseeded card carries: the TCGdex
+# mapper (``services/tcgdex.py``) DROPS an image on any other host, so it is the
+# only one the current catalog can produce. It was missing here while
+# next.config.ts already allowed it, which put the two out of the lockstep this
+# comment demands and emptied the featured strip for every card in the reseeded
+# catalog. ``images.pokemontcg.io`` is retained only for rows predating the
+# reseed; drop it once no stored card carries such a URL (same note as
+# next.config.ts).
+_ALLOWED_IMAGE_HOSTS = frozenset({"assets.tcgdex.net", "images.pokemontcg.io"})
 
 T = TypeVar("T")
 

@@ -30,7 +30,7 @@ br = _load_script()
 # --- fixture builders ----------------------------------------------------
 
 def catalog_card(card_id, name, set_name, number, *, set_id=None, market="10.00",
-                 rarity="Rare", finish="normal"):
+                 rarity="Rare", finish="normal", language="EN"):
     return {
         "entity": "catalog_card",
         "card_id": card_id,
@@ -45,6 +45,7 @@ def catalog_card(card_id, name, set_name, number, *, set_id=None, market="10.00"
         "prices": {finish: {"market": Decimal(market), "low": None,
                             "mid": None, "high": None}},
         "last_synced_at": "2026-07-01T00:00:00+00:00",
+        "language": language,
     }
 
 
@@ -325,6 +326,119 @@ def test_japanese_rows_sort_below_every_row_that_still_needs_a_decision():
 def test_review_page_can_filter_the_na_band():
     html = br.render_html([], table_name="t", generated_at="now")
     assert 'value="NA"' in html
+
+
+# --- Phase 6.1: the catalog is no longer English-only (TCGdex adds JP) ---
+# The EN-only gate in ``predict_card`` predates TCGdex. Now that the catalog
+# holds JP cards too, a JP item must be allowed to search and match one, not
+# be shunted to NA before the search ever runs.
+
+JP_MATCHING_CATALOG = [
+    catalog_card("sv4a-123", "Pikachu", "Shiny Treasure EX", "123",
+                 market="15.00", language="JP"),
+]
+
+
+def test_predict_card_matches_a_japanese_catalog_card_for_a_japanese_item():
+    """A JP item must go through normal matching and band by confidence, not
+    be gated to NA — the catalog now holds JP cards via TCGdex."""
+    index = br.CatalogIndex.build(JP_MATCHING_CATALOG)
+    src = br.SourceText(name="Pikachu", number="123", language="JP")
+    pred = br.predict_card(src, index)
+    assert pred.confidence in {"HIGH", "MEDIUM", "LOW"}
+    assert pred.confidence != "NA"
+    assert pred.best["card_id"] == "sv4a-123"
+
+
+# --- Phase 6.1: a JP item + JP card_id is the CORRECT state, not a --------
+# --- contradiction (only a language MISMATCH is) --------------------------
+
+JP_CONTRADICTION_CATALOG = [
+    catalog_card("sv4a-123", "Pikachu", "Shiny Treasure EX", "123",
+                 market="15.00", language="JP"),
+    catalog_card("sv3pt5-173", "Pikachu", "151", "173", market="93.50"),  # EN
+]
+
+
+def test_a_japanese_item_correctly_linked_to_a_japanese_card_is_not_a_contradiction():
+    """Now that the catalog carries JP cards, a JP item holding a JP card_id is
+    the correct, resolved state — it must not be flagged CONTRADICTION, and
+    since needs_review is False and nothing is wrong, the row must not appear
+    on the page at all."""
+    item = raw_item("JPOK", "Pikachu (jp) #123", card_id="sv4a-123",
+                    needs_review=False)
+    rows = br.build_card_rows([item], br.CatalogIndex.build(JP_CONTRADICTION_CATALOG), {})
+    assert rows == []
+
+
+def test_a_japanese_item_linked_to_an_english_card_id_is_still_a_contradiction():
+    """Regression guard: a JP item is still wrong when linked to an EN card —
+    only the language MATCHING the linked card makes it correct now."""
+    item = raw_item("MISLINK2", "Pikachu (jp) #123", card_id="sv3pt5-173",
+                    needs_review=False)
+    rows = br.build_card_rows([item], br.CatalogIndex.build(JP_CONTRADICTION_CATALOG), {})
+    assert [r["item_id"] for r in rows] == ["MISLINK2"]
+    assert rows[0]["confidence"] == "CONTRADICTION"
+
+
+# --- Phase 6.1: build_card_rows integration — a matched JP item gets a real
+# --- prediction, not the blanket NA the English-only assumption produced ---
+
+def test_build_card_rows_gives_a_matched_japanese_item_a_real_prediction():
+    index = br.CatalogIndex.build(JP_MATCHING_CATALOG)
+    points = {"sv4a-123": [{"card_id": "sv4a-123", "kind": "raw", "finish": "normal",
+                            "date": "2026-07-01", "market": Decimal("15.00")}]}
+    item = raw_item("JP2", "Pikachu (jp) #123", listed_price=Decimal("5"))
+    row = br.build_card_rows([item], index, points)[0]
+    assert row["prediction"] is not None
+    assert row["confidence"] != "NA"
+    assert row["divergence"] is not None
+
+
+# --- Phase 6.1: a card_id that is not in the catalog is DANGLING, not a ---
+# --- language contradiction ----------------------------------------------
+# Live finding (2026-07-28, real table): 11 JP singles carry card_ids like
+# SV11B-170 / SM11b-036 / PMCG5-048 that TCGdex advertises in set metadata but
+# has ZERO card-level data for, so the reseed never created them. Reporting
+# those as "linked to an English catalog card" is factually false — the card is
+# not English, it does not exist — and it buried the genuinely mislinked rows.
+
+def test_a_card_id_missing_from_the_catalog_is_reported_as_dangling():
+    """The honest diagnosis is 'this id is not in the catalog', not a language
+    claim about a card nobody can look at."""
+    item = raw_item("DANGLE", "Meloetta ex (jp) #170", card_id="SV11B-170",
+                    needs_review=False)
+    rows = br.build_card_rows([item], br.CatalogIndex.build(JP_CONTRADICTION_CATALOG), {})
+    assert [r["item_id"] for r in rows] == ["DANGLE"]
+    assert rows[0]["confidence"] == br.DANGLING_BAND
+    assert "SV11B-170" in rows[0]["reason"]
+    # It must NOT assert the card is English — that is the false claim.
+    assert "english" not in rows[0]["reason"].lower()
+
+
+def test_an_english_item_with_a_dangling_card_id_is_also_surfaced():
+    """Nothing about a dangling link is language-specific; an EN item pointing at
+    a nonexistent card is just as unpriceable and must not be skipped."""
+    item = raw_item("DANGLE_EN", "Charizard #4", card_id="nosuchset-999",
+                    needs_review=False)
+    rows = br.build_card_rows([item], br.CatalogIndex.build(JP_CONTRADICTION_CATALOG), {})
+    assert [r["item_id"] for r in rows] == ["DANGLE_EN"]
+    assert rows[0]["confidence"] == br.DANGLING_BAND
+
+
+def test_a_dangling_row_stays_visible_even_when_resolved():
+    """9 of the 11 live rows carry needs_review=False, so the ordinary filter
+    would hide them forever — the BLOCKER-1(d) self-concealment trap."""
+    item = raw_item("HIDDEN", "Liepard (jp) #135", card_id="SV11W-135",
+                    needs_review=False)
+    rows = br.build_card_rows([item], br.CatalogIndex.build(JP_CONTRADICTION_CATALOG), {})
+    assert len(rows) == 1
+    assert rows[0]["priority"] > 0
+
+
+def test_the_review_page_can_filter_the_dangling_band():
+    html = br.render_html([], table_name="t", generated_at="now")
+    assert f'value="{br.DANGLING_BAND}"' in html
 
 
 # --- BLOCKER-1(a): the marker is often in the SET half of the notes ------
