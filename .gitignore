@@ -59,9 +59,12 @@ docs/learning/
 # Agent workflow progress/roadmap scaffolding (not project docs)
 claude-progress.txt
 
+# Claude AI agent runtime artifacts (reviews, temp state)
+.claude/council/
+.claude/scheduled_tasks.lock
+
 # Business spreadsheet exports (private financial data — never commit)
 data/spreadsheet/
-/.claude/council
 
 # Review-triage artifacts (contain cost bases / internal notes — never commit)
 review*.html

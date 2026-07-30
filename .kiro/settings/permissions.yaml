@@ -1,0 +1,7 @@
+rules:
+  - capability: shell
+    effect: allow
+    match:
+      - "*"
+  - capability: all
+    effect: allow
