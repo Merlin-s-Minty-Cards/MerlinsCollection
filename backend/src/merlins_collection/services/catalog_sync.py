@@ -8,7 +8,10 @@ individual steps are exposed for testing:
 - ``snapshot_sealed_prices`` — the same for sealed products, whose history hangs
   off the item rather than a catalog card.
 - ``refresh_inventory_market_values`` — denormalize the latest market value onto
-  each inventory item so list/search reads don't need a second lookup.
+  each inventory item so list/search reads don't need a second lookup. Resolves
+  raw items' prices through the SAME finish-aware helper as the read paths
+  (``models.inventory._market_price``) rather than its own lookup — see the
+  function's docstring for why that sharing is load-bearing (Phase 12).
 - ``refresh_held_prices`` — the Tier 2 DEPTH pass: the one step here that talks
   to TCGdex, fetching per-card detail (rarity + prices) for the cards the
   business actually holds.

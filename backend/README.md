@@ -99,6 +99,15 @@ The status codes are deliberate and distinguish *whose* problem it is:
 
 `/inventory/search` loads inventory and filters in-process; `cost_basis`
 (our purchase price) is stripped from the response and never reaches customers.
+Filters run cheapest-first, with one deliberate exception: a `min_price`/
+`max_price` bound is applied **last**, after every other filter. The response
+carries `hidden_no_price` — the count of otherwise-matching items excluded
+purely because they have no resolvable price (an unpriced item can't honestly
+be claimed to fall inside a price range). Running the price bound last is what
+makes that count meaningful: it reflects only what the price bound itself hid,
+not items some earlier filter had already ruled out. `hidden_no_price` is
+always `0` when no price bound is set. See the `search_inventory` module
+docstring in `routers/inventory.py` for the full ordering rationale.
 
 ### The customer-visible cohort
 
@@ -139,10 +148,14 @@ because production runs on UTC and a same-day show would otherwise misfile as
 counts as upcoming. `venue`/`city` are optional on `Show` and may be `null`.
 
 `/public/featured-cards` ranks the customer-visible cohort by
-`current_market_value ?? listed_price ?? 0` (market-value-first, the opposite
-of search's listed-price-first ordering), keeps only items whose catalog image
+`current_market_value ?? listed_price ?? 0` (market-value-first; unpriced items
+rank last rather than being excluded), keeps only items whose catalog image
 is an `https://images.pokemontcg.io/...` URL, de-duplicates by `card_id`, and
-returns the top 5.
+returns the top 5. This ranking helper (`_market_first`) is intentionally
+separate from `/inventory/search`'s price filter (`_price`, which since Phase
+12 returns `current_market_value` outright with no `listed_price` fallback,
+since `listed_price` is null on every item by owner decision) — one ranks for
+display, the other excludes for a price bound, and they are allowed to diverge.
 
 ## DynamoDB single-table design
 

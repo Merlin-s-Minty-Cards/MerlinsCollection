@@ -441,6 +441,32 @@ dropped** (that is silent data loss) and **not guessed into** a canonical key
 figure". Guard: a mapped key containing `#` is rejected and counted as a mapping
 failure, because it would corrupt the `PRICE#RAW#…` sort key.
 
+> **Resolved (2026-07-30, Phase 12).** This last-resort fallback's *order* is
+> unchanged, but its *reach* is not what it was when this section was written.
+> Before Phase 12, `_market_price` backed exactly one caller —
+> `CardSummary.from_catalog`, the read path that renders a search-result tile —
+> so a card falling through to "any finish that carries a market figure" only
+> ever produced an ephemeral, per-request display price. Phase 12 collapsed the
+> write path and the summary path onto the same function (see the "Provided
+> — internal Python interfaces" table below and `_market_price`'s own
+> docstring), so that same last-resort figure is now also:
+>
+> - **persisted** as `current_market_value` on the inventory item by
+>   `catalog_sync.refresh_inventory_market_values` (nightly),
+> - the value a `min_price`/`max_price` filter bound is evaluated against
+>   (`routers/inventory.py::_price`), and
+> - summed into the `/inventory/summary` **Est. value** total.
+>
+> Concretely: a card with no band under the item's own finish and no band under
+> any name in `_MARKET_FINISH_FALLBACK` now gets whichever finish happens to
+> come first in `card.prices` insertion order written to storage as its
+> authoritative price, used to decide whether it passes a price filter, and
+> counted toward the dashboard total — not just shown once on a search tile.
+> The Council reviewed this widened reach for Phase 12 and ruled it intended
+> (it is what fixed 174 of 213 live items reading as unpriced), not a bug to
+> narrow back down. It is recorded here as a disclosure of current behavior,
+> not an endorsement to extend it further without another look.
+
 **`finish_from_source` is not changed by this RFC, and may not be.** Its output
 vocabulary is the contract the mapper targets. It can legitimately return
 `1stEditionHolofoil`/`unlimitedHolofoil`, which TCGdex never emits under any
@@ -750,6 +776,17 @@ phases should run back-to-back.
 | `backend/scripts/seed_catalog.py` | repointed at Tier 1 breadth + `finalize_catalog` |
 | `backend/scripts/wipe_card_data.py` | **new** — the only genuinely new component; §9 |
 | `backend/scripts/build_review.py` | **no change in this RFC** — `finish_from_source`, `FINISH_PREFERENCE`, `_finish_caveat`, `predict_value` and the bulk buttons are preserved verbatim (banding changes are Phase 6.1) |
+
+> **Resolved (2026-07-30, Phase 12).** The `models/inventory.py` row above is no
+> longer accurate; it described this RFC's own scope, and a later phase changed
+> the file beyond a docstring. `_market_price`'s own body/order is unchanged,
+> but the file gained a new field (`InventorySearchResult.hidden_no_price`) and,
+> more importantly, `_market_price` is now called across module boundaries by
+> `services/catalog_sync.py::refresh_inventory_market_values` (the write path)
+> and `routers/inventory.py::inventory_summary` (the dashboard total), not just
+> by `CardSummary.from_catalog` as when this table was written. See §6's
+> Phase 12 resolved note above for what that widened reach means in practice,
+> and `_market_price`'s own docstring for the current list of callers.
 
 **Flagged addition:** `wipe_card_data.py` is the one new component this RFC
 introduces beyond replacing an existing one. It is justified because D4's
