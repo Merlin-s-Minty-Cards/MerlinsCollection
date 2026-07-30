@@ -6,7 +6,10 @@ const nextConfig: NextConfig = {
   output: 'standalone',
   images: {
     remotePatterns: [
-      // pokemontcg.io card art (returned by the inventory backend)
+      // TCGdex card art (returned by the inventory backend)
+      { protocol: 'https', hostname: 'assets.tcgdex.net' },
+      // pokemontcg.io card art — still live in DynamoDB until the catalog is
+      // reseeded over TCGdex; remove once no stored card carries these URLs.
       { protocol: 'https', hostname: 'images.pokemontcg.io' },
       // Sanity CMS article images. Scoped to our own project: allowing all of
       // cdn.sanity.io would turn /_next/image into an open image proxy that
