@@ -90,6 +90,13 @@ export type InventoryItem =
 export interface InventorySearchResult {
   items: InventoryItem[]
   total: number
+  /**
+   * How many otherwise-matching cards the price range excluded purely because
+   * they have no price on file. They stay excluded — a card with no known price
+   * cannot honestly be claimed to be under $500 — but the UI surfaces the count
+   * so they are not dropped invisibly. Always 0 when no price bound was sent.
+   */
+  hidden_no_price: number
 }
 
 /** Flat filter params the FastAPI `/inventory/search` endpoint accepts. */

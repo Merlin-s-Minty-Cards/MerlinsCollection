@@ -57,6 +57,7 @@ logger = logging.getLogger(__name__)
 # and the code is what goes in `card_id` — because a stored `card_id` must be
 # enough on its own to rebuild the card's request path.
 LANGUAGE_API_CODE = {Language.EN: "en", Language.JP: "ja"}
+LANGUAGE_BY_API_CODE = {code: language for language, code in LANGUAGE_API_CODE.items()}
 
 # TCGdex returns an extensionless, quality-less image base URL; the suffix is
 # ours to append. webp is the smallest and `next/image` consumes it fine.
@@ -176,6 +177,31 @@ def _text(value) -> str:
     return unicodedata.normalize("NFC", value).strip()
 
 
+def _optional_text(value) -> str | None:
+    """``_text`` for a field TCGdex may omit entirely; absent stays ``None``.
+
+    ``None`` and ``""`` are different facts about a ``rarity`` — "upstream does
+    not say" versus "upstream says it is blank" — so the absent case is passed
+    through rather than flattened into empty text.
+    """
+    return None if value is None else _text(value)
+
+
+def _text_list(value) -> list[str]:
+    """``_text`` over an optional list field (``types``); absent means ``[]``.
+
+    The ``isinstance`` check is not defensive padding: a bare string here would
+    iterate into single characters, so ``"Grass"`` would land as five one-letter
+    types and validate cleanly. Raising keeps the pre-normalization behavior,
+    where pydantic refused a non-list outright.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"expected a list field, got {value!r}")
+    return [_text(entry) for entry in value]
+
+
 def _parse_updated(value) -> datetime | None:
     """Parse a provider's ISO-8601 ``updated`` stamp as aware UTC, else ``None``.
 
@@ -211,6 +237,27 @@ def build_card_id(language: Language, tcgdex_id: str) -> str:
     f"{set_id}-{local_id}"`` keeps holding structurally across languages.
     """
     return f"{LANGUAGE_API_CODE[language]}:{tcgdex_id}"
+
+
+def parse_card_id(card_id: str) -> tuple[Language, str] | None:
+    """Split a composite ``card_id`` back into ``(language, tcgdex_id)``, or ``None``.
+
+    The inverse of ``build_card_id``, and the only place the composite is taken
+    apart to rebuild a request path — for the same reason ``build_card_id`` is
+    the only place it is assembled. Splits on the FIRST ``:`` (mirroring
+    ``dynamodb.InventoryRepository._card_language``), since a TCGdex id may
+    contain one.
+
+    ``None`` means the id is not a TCGdex composite at all: a dead
+    pokemontcg.io-era row (``"xy7-54"``), or a language code this build does not
+    speak. Neither is fetchable, and both are a stored-data defect for the caller
+    to count and report rather than an exception to unwind a batch job with.
+    """
+    language_code, separator, tcgdex_id = card_id.partition(":")
+    if not separator or not tcgdex_id:
+        return None
+    language = LANGUAGE_BY_API_CODE.get(language_code)
+    return None if language is None else (language, tcgdex_id)
 
 
 def _tcgdex_set_id(tcgdex_id: str, local_id: str) -> str:
@@ -500,8 +547,8 @@ def to_catalog_card(
         set_id=build_card_id(language, raw_set_id),
         set_name=_text(card_set.get("name", "")),
         number=local_id,
-        rarity=raw.get("rarity"),
-        types=raw.get("types") or [],
+        rarity=_optional_text(raw.get("rarity")),
+        types=_text_list(raw.get("types")),
         images=_images(raw),
         prices=_prices_from_pricing(raw.get("pricing"), fx_rate, raw.get("variants")),
         detail="full",

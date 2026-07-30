@@ -98,6 +98,17 @@ class ImportInProgressError(Exception):
     """
 
 
+class CatalogReseedInProgressError(Exception):
+    """A catalog reseed already holds the single-flight catalog lock.
+
+    The catalog's counterpart to ``ImportInProgressError``, and deliberately a
+    DISTINCT type: the two locks guard unrelated lifecycles, and the daily depth
+    pass swallows this one (it skips and retries tomorrow) while an import
+    holding up another import is an operator-facing refusal. One exception type
+    for both would make the depth pass silently swallow an import collision too.
+    """
+
+
 class InventoryRepository:
     """Data-access layer over the single DynamoDB table.
 
@@ -287,7 +298,48 @@ class InventoryRepository:
     # committed generation). The lock item is NOT an import-owned entity, so
     # `finalize_import` never sweeps it.
     _LOCK_KEY = {"PK": "IMPORTLOCK", "SK": "LOCK"}
-    _LOCK_TTL_SECONDS = 3600  # >> a full import; only a crashed holder is stolen
+    _LOCK_TTL_SECONDS = 3600  # >> a full import or reseed; only a crashed holder is stolen
+
+    def _acquire_lock(self, key, gen, ttl, *, entity, error, message):
+        """Take a single-flight lock item, or raise ``error``.
+
+        ONE algorithm, two configurations (RFC 0003 §8): the import lock and the
+        catalog lock differ only in their key, entity tag and refusal message.
+        Copying the body per domain is how the two silently drift — one gains a
+        TTL reclaim or a condition fix and the other does not — so the domains
+        below are thin wrappers and this is the only place the semantics live.
+
+        Conditional on the lock being absent or EXPIRED, so a crashed holder's
+        stale lock is reclaimed after ``ttl`` instead of wedging the pipeline
+        forever.
+        """
+        now = int(time.time())
+        try:
+            self._table.put_item(
+                Item={**key, "entity": entity, "gen": gen,
+                      "acquired_at": now, "expires_at": now + ttl},
+                ConditionExpression="attribute_not_exists(PK) OR #x < :now",
+                ExpressionAttributeNames={"#x": "expires_at"},
+                ExpressionAttributeValues={":now": now},
+            )
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                raise error(message) from exc
+            raise
+
+    def _release_lock(self, key, gen, *, label):
+        """Delete a lock item if ``gen`` still holds it (no-op if it was stolen)."""
+        try:
+            self._table.delete_item(
+                Key=key,
+                ConditionExpression="#g = :gen",
+                ExpressionAttributeNames={"#g": "gen"},
+                ExpressionAttributeValues={":gen": gen},
+            )
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                raise
+            logger.warning("%s lock was not ours to release (gen=%r)", label, gen)
 
     def acquire_import_lock(self, gen, *, ttl_seconds: int | None = None):
         """Take the single-flight import lock for ``gen``.
@@ -296,37 +348,17 @@ class InventoryRepository:
         stale lock is reclaimed after ``ttl_seconds`` instead of wedging imports
         forever. Raises ``ImportInProgressError`` if a live lock is held.
         """
-        ttl = self._LOCK_TTL_SECONDS if ttl_seconds is None else ttl_seconds
-        now = int(time.time())
-        try:
-            self._table.put_item(
-                Item={**self._LOCK_KEY, "entity": "import_lock", "gen": gen,
-                      "acquired_at": now, "expires_at": now + ttl},
-                ConditionExpression="attribute_not_exists(PK) OR #x < :now",
-                ExpressionAttributeNames={"#x": "expires_at"},
-                ExpressionAttributeValues={":now": now},
-            )
-        except ClientError as exc:
-            if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
-                raise ImportInProgressError(
-                    "another import is already in flight (import lock held); "
-                    "refusing to start a second run"
-                ) from exc
-            raise
+        self._acquire_lock(
+            self._LOCK_KEY, gen,
+            self._LOCK_TTL_SECONDS if ttl_seconds is None else ttl_seconds,
+            entity="import_lock", error=ImportInProgressError,
+            message="another import is already in flight (import lock held); "
+                    "refusing to start a second run",
+        )
 
     def release_import_lock(self, gen):
         """Release the lock if we still hold it (no-op if it was stolen)."""
-        try:
-            self._table.delete_item(
-                Key=self._LOCK_KEY,
-                ConditionExpression="#g = :gen",
-                ExpressionAttributeNames={"#g": "gen"},
-                ExpressionAttributeValues={":gen": gen},
-            )
-        except ClientError as exc:
-            if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
-                raise
-            logger.warning("import lock was not ours to release (gen=%r)", gen)
+        self._release_lock(self._LOCK_KEY, gen, label="import")
 
     # ---- import generations (load-then-swap replace) ----
     def set_import_generation(self, gen):
@@ -494,6 +526,60 @@ class InventoryRepository:
     def _cat_gen(self) -> dict:
         return {"cat_gen": self._catalog_gen} if self._catalog_gen else {}
 
+    # ---- single-flight catalog lock (RFC 0003 §8) ----
+    # A second, PARALLEL lock domain — not an extension of the import lock. The
+    # spreadsheet import and a catalog reseed touch disjoint entities and run on
+    # unrelated cadences, so sharing one lock item would make each block the other
+    # for no reason. Both go through `_acquire_lock`/`_release_lock` above, so
+    # there is one algorithm with two configurations rather than a copy.
+    #
+    # What it actually guards: a reseed's `finalize_catalog` deletes every
+    # `catalog_card` not of its generation. A depth-pass write landing after the
+    # reseed has passed that card but before the swap carries the OLD generation
+    # and is deleted — the card silently vanishes from a live catalog. So the
+    # daily depth pass takes this lock too, and skips its whole run when a reseed
+    # holds it.
+    _CATALOG_LOCK_KEY = {"PK": "CATALOGLOCK", "SK": "LOCK"}
+
+    # The committed catalog generation, written by the reseed's finalize step.
+    _CATALOG_GEN_KEY = {"PK": "CATALOGGEN", "SK": "CURRENT"}
+
+    def acquire_catalog_lock(self, gen, *, ttl_seconds: int | None = None):
+        """Take the single-flight catalog lock for ``gen``.
+
+        Same conditional-write + TTL-expiry semantics as the import lock, in its
+        own key space. Raises ``CatalogReseedInProgressError`` if a live lock is
+        held.
+        """
+        self._acquire_lock(
+            self._CATALOG_LOCK_KEY, gen,
+            self._LOCK_TTL_SECONDS if ttl_seconds is None else ttl_seconds,
+            entity="catalog_lock", error=CatalogReseedInProgressError,
+            message="a catalog reseed is already in flight (catalog lock held); "
+                    "refusing to start a second run",
+        )
+
+    def release_catalog_lock(self, gen):
+        """Release the catalog lock if we still hold it (no-op if it was stolen)."""
+        self._release_lock(self._CATALOG_LOCK_KEY, gen, label="catalog")
+
+    def current_catalog_generation(self):
+        """The generation of the catalog currently committed, or ``None``.
+
+        Read strongly-consistently: the depth pass uses it to stamp its own
+        writes, and an eventually-consistent read straight after a reseed's
+        finalize would stamp them with the SUPERSEDED generation — precisely the
+        rows the next swap deletes.
+
+        ``None`` means no reseed has ever committed a generation (a fresh table,
+        or today's not-yet-wired reseed path). Callers stamp nothing in that
+        case, which is exactly how catalog writes behave today.
+        """
+        item = self._table.get_item(
+            Key=self._CATALOG_GEN_KEY, ConsistentRead=True
+        ).get("Item")
+        return item.get("gen") if item else None
+
     @staticmethod
     def _card_language(pk: str):
         """The language code embedded in a ``CARD#`` partition key, or ``None``.
@@ -637,8 +723,13 @@ class InventoryRepository:
         write capacity, more round trips, and it drops the ``batch_get`` the old
         shape needed, so the seed's read cost goes to zero.
 
-        The default (unconditional) path stays for the depth pass, which is
-        *supposed* to replace rows. There, ``overwrite_by_pkeys`` is load-bearing
+        The default (unconditional) path is a whole-item replace and will
+        therefore blank a stored ``prices`` map if handed a card that has none —
+        a write that carries prices, or carries none *by construction* (the
+        BREADTH seed's brief rows), is fine here. **A depth-pass write, whose
+        emptiness means "upstream told us nothing today", must go through
+        ``upsert_catalog_card_preserving_prices`` instead.** There,
+        ``overwrite_by_pkeys`` is load-bearing
         rather than tidiness: boto3 does NOT deduplicate a batch, so two rows
         carrying the same id in one page raise ``ValidationException: Provided
         list of item keys contains duplicates`` and fail the entire 25-item batch
@@ -680,6 +771,63 @@ class InventoryRepository:
                         ExpressionAttributeValues={":gen": self._catalog_gen},
                     )
         return preserved
+
+    def upsert_catalog_card_preserving_prices(self, card: CatalogCard) -> None:
+        """Write ``card``, but NEVER replace a stored price map with an empty one.
+
+        This is the depth pass's write, and it exists because RFC 0003 §7's
+        "never deletes, zeroes, or nulls an existing price" has to be a property
+        of the write itself. ``to_catalog_card`` returns ``prices={}`` for a
+        perfectly good HTTP 200 whose ``pricing`` block is absent or yields no
+        band — ``services.tcgdex`` calls that routine, not exceptional — and it
+        raises nothing, so a caller has no signal to react to. Through
+        ``batch_upsert_catalog_cards`` that ``{}`` is a whole-item ``put_item``
+        and yesterday's bands are gone.
+
+        The policy, and it is deliberate:
+
+        * an **empty** incoming ``prices`` is the absence of information, so it
+          is omitted from the write and the stored map survives untouched;
+        * a **non-empty** one replaces the stored map wholesale rather than
+          merging finish by finish. ``_prices_from_pricing`` applies its provider
+          preference at CARD level precisely so a card is never described by two
+          providers at once; a per-finish merge would reintroduce exactly the
+          mixed TCGplayer/Cardmarket bands that rule exists to prevent, and would
+          keep a retired finish alive forever;
+        * every non-price field is written either way. A priceless response can
+          still carry a corrected ``rarity`` or ``name``, and skipping the write
+          outright would trade one data-loss problem for a smaller one.
+
+        One ``update_item``, not a read-then-decide. That is the same reasoning
+        ``_upsert_catalog_cards_preserving_priced`` already applies one method
+        up: reading the prior card in the caller and merging its prices into the
+        model before a ``put_item`` is check-then-act, and a concurrent write
+        landing in that window is erased anyway. DynamoDB evaluates this inside
+        the same operation as the write, so there is no window.
+
+        Side effect of ``update_item``: an attribute absent from the item — a
+        ``cat_gen`` this process is not stamping — is LEFT ALONE rather than
+        removed. That is the behavior we want and the opposite of ``put_item``'s:
+        a depth-pass write must not strip a reseed's generation stamp off a row
+        and orphan it into the next purge.
+        """
+        item = self._catalog_item(card)
+        attributes = {k: v for k, v in item.items() if k not in ("PK", "SK")}
+        if not card.prices:
+            attributes.pop("prices", None)
+        # Placeholders for every name: `name` is a DynamoDB reserved word, and
+        # so is any field a future model adds.
+        names, values, assignments = {}, {}, []
+        for index, (attribute, value) in enumerate(attributes.items()):
+            names[f"#a{index}"] = attribute
+            values[f":v{index}"] = value
+            assignments.append(f"#a{index} = :v{index}")
+        self._table.update_item(
+            Key={"PK": item["PK"], "SK": item["SK"]},
+            UpdateExpression="SET " + ", ".join(assignments),
+            ExpressionAttributeNames=names,
+            ExpressionAttributeValues=values,
+        )
 
     def batch_get_catalog_cards(self, card_ids):
         """Point-read many catalog cards at once; missing ids are simply absent.

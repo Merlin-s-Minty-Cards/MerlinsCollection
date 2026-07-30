@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, cleanup } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
@@ -43,13 +43,49 @@ const charizard: InventoryItem = {
   },
 }
 
-function response(items: InventoryItem[]): InventorySearchResult {
-  return { items, total: items.length }
+function response(items: InventoryItem[], hiddenNoPrice = 0): InventorySearchResult {
+  return { items, total: items.length, hidden_no_price: hiddenNoPrice }
 }
 
 function sentQuery(): URLSearchParams {
   const path = String(mockedApiFetch.mock.calls[0][0])
   return new URLSearchParams(path.split('?')[1] ?? '')
+}
+
+// Ground truth for the Set dropdown, verified against the live DynamoDB catalog
+// table (full scan of catalog_card rows, matched on exact set_name).
+//
+// The catalog is TCGdex-sourced now, and `CatalogCard.set_id` is built as
+// build_card_id(language, tcgdex_set_id) — a LANGUAGE-PREFIXED COMPOSITE
+// (backend/src/merlins_collection/services/tcgdex.py). The backend's set_id
+// filter looks the value up verbatim via repo.list_cards_by_set(set_id), so a
+// bare pokemontcg.io id ("base1") matches zero rows and the dropdown silently
+// returns "no cards". Every id below therefore carries the `en:` prefix, and
+// two sets' TCGdex spelling also differs from the old pokemontcg.io spelling
+// (sv1 → sv01, sv3pt5 → sv03.5).
+const EXPECTED_SET_IDS: Array<[string, string]> = [
+  ['Base', 'en:base1'],
+  ['Jungle', 'en:base2'],
+  ['Fossil', 'en:base3'],
+  ['Team Rocket', 'en:base5'],
+  ['Neo Genesis', 'en:neo1'],
+  ['Expedition', 'en:ecard1'],
+  ['Ruby & Sapphire', 'en:ex1'],
+  ['Diamond & Pearl', 'en:dp1'],
+  ['Black & White', 'en:bw1'],
+  ['Evolutions', 'en:xy12'],
+  ['Sword & Shield', 'en:swsh1'],
+  ['Brilliant Stars', 'en:swsh9'],
+  ['Scarlet & Violet', 'en:sv01'],
+  ['151', 'en:sv03.5'],
+]
+
+async function searchWithSet(label: string): Promise<URLSearchParams> {
+  mockedApiFetch.mockResolvedValue(response([]))
+  render(<FilterPanel />)
+  await userEvent.selectOptions(screen.getByLabelText(/set/i), label)
+  await userEvent.click(screen.getByRole('button', { name: /search/i }))
+  return sentQuery()
 }
 
 describe('FilterPanel', () => {
@@ -65,15 +101,38 @@ describe('FilterPanel', () => {
     expect(screen.getByText('$250.42')).toBeInTheDocument()
   })
 
-  it('sends the set as a set_id (display names map to pokemontcg.io ids)', async () => {
+  it('sends the set as a set_id (display names map to composite catalog ids)', async () => {
+    const query = await searchWithSet('Base')
+
+    expect(query.get('set_id')).toBe('en:base1')
+    expect(query.get('set')).toBeNull()
+  })
+
+  it.each(EXPECTED_SET_IDS)(
+    'maps the %s option to the composite catalog set_id %s',
+    async (label, expected) => {
+      expect((await searchWithSet(label)).get('set_id')).toBe(expected)
+    },
+  )
+
+  it('offers exactly the curated set labels (no option can be an unmapped dead end)', () => {
     mockedApiFetch.mockResolvedValue(response([]))
     render(<FilterPanel />)
 
-    await userEvent.selectOptions(screen.getByLabelText(/set/i), 'Base')
-    await userEvent.click(screen.getByRole('button', { name: /search/i }))
+    const options = Array.from(
+      screen.getByLabelText(/set/i).querySelectorAll('option'),
+    ).map((o) => o.textContent)
 
-    expect(sentQuery().get('set_id')).toBe('base1')
-    expect(sentQuery().get('set')).toBeNull()
+    expect(options).toEqual(['Any set', ...EXPECTED_SET_IDS.map(([label]) => label)])
+  })
+
+  it('never sends a bare pokemontcg.io set id (the pre-TCGdex shape that matched nothing)', async () => {
+    for (const [label] of EXPECTED_SET_IDS) {
+      vi.clearAllMocks()
+      const sent = (await searchWithSet(label)).get('set_id')
+      expect(sent, `${label} sent a non-composite set_id`).toMatch(/^en:/)
+      cleanup()
+    }
   })
 
   it('offers raw-condition grades instead of a Pokémon type filter', async () => {
@@ -141,10 +200,45 @@ describe('FilterPanel', () => {
   })
 
   it('shows the total from the backend', async () => {
-    mockedApiFetch.mockResolvedValue({ items: [charizard], total: 1 })
+    mockedApiFetch.mockResolvedValue({ items: [charizard], total: 1, hidden_no_price: 0 })
     render(<FilterPanel />)
     await userEvent.click(screen.getByRole('button', { name: /search/i }))
     expect(await screen.findByText(/1 result\b/i)).toBeInTheDocument()
+  })
+
+  // Phase 12, owner decision 2: a price-bounded search still EXCLUDES items
+  // with no resolvable price (a card with no known price cannot honestly be
+  // claimed to be under $500), but the backend now reports how many it hid so
+  // they are not dropped invisibly.
+  it('surfaces the count of cards the price bound hid for having no price', async () => {
+    mockedApiFetch.mockResolvedValue(response([charizard], 3))
+    render(<FilterPanel />)
+    await userEvent.click(screen.getByRole('button', { name: /search/i }))
+    expect(await screen.findByText(/3 cards hidden \(no price on file\)/i)).toBeInTheDocument()
+  })
+
+  it('surfaces the hidden count even when the price bound hid everything', async () => {
+    // The exact shape of the owner's bug report: an empty grid that used to
+    // say only "No cards found" must now explain WHY it is empty.
+    mockedApiFetch.mockResolvedValue(response([], 12))
+    render(<FilterPanel />)
+    await userEvent.click(screen.getByRole('button', { name: /search/i }))
+    expect(await screen.findByText(/12 cards hidden \(no price on file\)/i)).toBeInTheDocument()
+  })
+
+  it('says "card" not "cards" when exactly one was hidden', async () => {
+    mockedApiFetch.mockResolvedValue(response([charizard], 1))
+    render(<FilterPanel />)
+    await userEvent.click(screen.getByRole('button', { name: /search/i }))
+    expect(await screen.findByText(/1 card hidden \(no price on file\)/i)).toBeInTheDocument()
+  })
+
+  it('renders no hidden-cards notice when nothing was hidden', async () => {
+    mockedApiFetch.mockResolvedValue(response([charizard], 0))
+    render(<FilterPanel />)
+    await userEvent.click(screen.getByRole('button', { name: /search/i }))
+    await screen.findByText(/1 result\b/i)
+    expect(screen.queryByText(/no price on file/i)).not.toBeInTheDocument()
   })
 
   it('shows an empty state when nothing matches', async () => {

@@ -66,6 +66,7 @@ credentials are normally supplied by the ambient credential chain (IAM role,
 | Bedrock model id | `BEDROCK_MODEL_ID` | Claude 3.5 Sonnet |
 | MCP server path | `MCP_SERVER_PATH` | `../mcp-server/dist/index.js` |
 | EUR->USD rate | `EUR_USD_RATE` | `1.08` |
+| Catalog price staleness threshold | `CATALOG_PRICE_STALE_DAYS` | `30` |
 
 ## Authentication
 
@@ -196,17 +197,33 @@ stable regardless of how a grade was spelled, `_grade_key` normalizes them
 
 ## Daily sync
 
-`catalog_sync.run_daily_sync` is the batch job, run on a schedule via
-**`python scripts/daily_sync.py`**:
+`catalog_sync.run_daily_sync(repo, client, today)` is the batch job, run on a
+schedule via **`python scripts/daily_sync.py`**. The depth pass runs FIRST —
+the order is load-bearing, since step 4 denormalizes whatever prices step 1
+just wrote:
 
-1. `snapshot_graded_prices` — record a daily history point for each owned graded
+1. `refresh_held_prices` — the Tier 2 DEPTH pass, and the only step here that
+   talks to an upstream API. Fetches per-card rarity + prices from TCGdex for
+   every held *raw* Singles card (graded slabs are excluded by design — see
+   below). Never deletes, zeroes, or nulls an existing price on failure or on
+   a priceless response; aborts after 25 consecutive per-card failures rather
+   than burning the whole run against a dead endpoint (RFC 0003 §7).
+2. `snapshot_graded_prices` — record a daily history point for each owned graded
    slab that has a manual market value.
-2. `snapshot_sealed_prices` — the same for sealed products, whose history hangs
+3. `snapshot_sealed_prices` — the same for sealed products, whose history hangs
    off the item rather than a catalog card.
-3. `refresh_inventory_market_values` — denormalize the latest market value onto
+4. `refresh_inventory_market_values` — denormalize the latest market value onto
    each inventory item so search/list reads don't need a second lookup.
 
-It touches no upstream API; every step works off data already in DynamoDB.
+Steps 2-4 touch no upstream API — only step 1 does, and only for cards the
+business actually holds (~300 requests/day, paced). The site itself never
+reads from TCGdex; every customer-facing read comes from DynamoDB, so a TCGdex
+outage delays a refresh without taking the site down.
+
+`scripts/daily_sync.py` exits `0` on a completed run, `1` if the depth pass
+aborted on consecutive failures, or `2` if it was skipped because a catalog
+reseed held the lock — see that script's own module docstring for the full
+exit-code table.
 
 Catalog data arrives through two separate passes, because TCGdex serves pricing
 **only** from its per-card detail endpoint:
@@ -214,5 +231,8 @@ Catalog data arrives through two separate passes, because TCGdex serves pricing
 - **Tier 1, breadth** — `scripts/seed_catalog.py`, one cheap request per
   language for the whole catalog, identity only, no prices. Dry run by default;
   see `docs/aws-setup.md` for the `--execute` / `--confirm-table` rails.
-- **Tier 2, depth** — `refresh_held_prices`, one request per *held* card, which
-  is where prices come from. Phase 2 (RFC 0003 §7).
+- **Tier 2, depth** — `refresh_held_prices` (above), one request per *held raw*
+  card, which is where prices and rarity come from (RFC 0003 §7). Graded slabs
+  are excluded permanently, by owner decision — their price and detail come
+  from the PSA cert API + PriceCharting once Phase 4 resumes, so a card held
+  only as a slab keeps `rarity: null` until then.

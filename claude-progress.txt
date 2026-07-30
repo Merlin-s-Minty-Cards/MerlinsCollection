@@ -34,6 +34,36 @@ STATUS: **PHASE 1 COMPLETE (a61f0c6). PHASE 2 CODE COMPLETE (d2b3de4, pushed).
         soon" — it does not become the active phase after 3/5/6/7 without an
         explicit owner go-ahead. See owner clarifications, LOG 2026-07-27
         (post-Phase-3). ***
+        *** THIRD UPDATE 2026-07-30 — OWNER BUG REPORT: THE FRONTEND WAS
+        NEVER TESTED AGAINST THE DATABASE REDESIGN. Read this block first;
+        everything above in this STATUS block is now history. The owner
+        reported that DB changes broke the frontend and nothing caught it —
+        four read-only audits this session confirmed this is STRUCTURAL, not
+        a perception problem: every test on both sides is self-referential
+        (frontend asserts its own query strings against its own constants;
+        backend asserts filter logic against fixtures the backend test file
+        invents), so when set_id became a language-prefixed TCGdex composite
+        (en:base1) BOTH suites stayed 100% green (frontend 274/274, backend
+        875/875) while every set search returned zero in production — and
+        the identical unfixed failure class sits in the rarity vocabulary
+        RIGHT NOW, with the suites STILL green. See Section 6 LOG,
+        "2026-07-30 OWNER BUG REPORT — FRONTEND WAS NEVER TESTED AGAINST THE
+        DATABASE REDESIGN" for the full 13-finding audit — do not
+        re-investigate what it already verified.
+        SEVEN NEW PHASES ADDED — PHASE 12 through PHASE 18 (Section 3, right
+        after Phase 11). PHASE 10 IS SUBSUMED INTO PHASE 12 — its text stays
+        intact (do not re-scope it), follow the pointer at its header. PHASE
+        12 (inventory price correctness) IS THE ACTIVE TASK, task 1.
+        NEW OWNER DECISIONS (full text in the OWNER DECISIONS addendum below
+        and Section 6 LOG): (1) live data operations are now AUTHORIZED for
+        the agent to run directly (supervised), reversing the prior "owner
+        runs all live jobs" pattern; (2) THE SANITY/DICTIONARY CONVERSION IS
+        CANCELLED (the owner asked, then explicitly retracted it) — not
+        deferred, no phase created for it.
+        Four work tracks (A/B/C/D) covering Phases 12-17 can proceed in
+        parallel across SEPARATE conversations — see the CONCURRENCY
+        subsection immediately before Phase 12 in Section 3, and Section 7
+        HANDOFF for the current handoff snapshot. ***
 This file is the full instruction set for the next model to execute this
 rebuild. Read it top to bottom before touching code. Everything in here
 supersedes the previous roadmap (deployment + the card_id-matching bug) —
@@ -91,6 +121,92 @@ leftover number, trust this block and the Phase/Section notes marked
   - The owner supplied the xlsx and confirmed only the first five tabs
     (Sealed, Slabs, Singles, Bulk, Consignments) are in scope; finance tabs
     are out of scope and must not be imported.
+
+## OWNER DECISIONS — ADDENDUM 2026-07-30 (THIRD UPDATE THIS DAY, following
+the owner bug report — see Section 6 LOG "OWNER BUG REPORT — FRONTEND WAS
+NEVER TESTED AGAINST THE DATABASE REDESIGN")
+  - Live data operations are now AUTHORIZED for the agent to run directly
+    (supervised), REVERSING the prior "owner runs all live jobs" pattern
+    this file has followed in practice up to now (e.g. every prior live run,
+    including Phase 9's first live production run, was framed as a
+    supervised/owner-adjacent step). Going forward, the price-refresh/
+    denormalizer jobs (Phase 9's `refresh_held_prices`, Phase 12's corrected
+    denormalizer) MAY be run directly against live `merlins-cards` once the
+    code has cleared the Council Loop and its own tests — no separate
+    owner go-ahead is needed per run.
+  - THE SANITY/DICTIONARY CONVERSION IS CANCELLED, NOT DEFERRED. The owner
+    initially asked for the Collectors Dictionary to be converted to
+    Sanity-managed per-entry pages like Articles, then explicitly retracted
+    it in the same session: "Actually I changed my mind about sanity, just
+    forget about it." No phase exists for this and none should be created.
+    For the record, so the information isn't lost if it's ever revived: the
+    audit found the dictionary is 10 hardcoded terms in
+    `frontend/components/dictionary/DictionaryExplorer.tsx:8-46`, and Sanity
+    has exactly one document type (`article`) with `structureTool()`
+    registered bare (no desk structure).
+
+## OWNER DECISIONS — ADDENDUM 2026-07-30 (FOURTH UPDATE THIS DAY, resolving
+FINDING 11 / the condition-aware-pricing OPEN DECISION recorded at Finding
+11 in Section 6 LOG and inside Phase 12's NOT-IN-SCOPE line — see the new
+PHASE 19, Section 3, immediately after Phase 18)
+  - CONDITION-AWARE PRICING IS NOW DECIDED, NOT OPEN. The owner DOES want
+    prices to be condition-adjusted. Verbatim: "I do want that to be how
+    prices are calculated, I just want to make sure we have the most
+    accurate formula we can get." This resolves the OPEN DECISION at
+    Finding 11 — the CONCEPT is approved. It does NOT approve any specific
+    multiplier numbers; see below.
+  - RESEARCH IS MANDATORY AND IS NOT THE IMPLEMENTER'S JUDGMENT CALL.
+    Before any multiplier value is written into code, a `web-browser`
+    agent (the project's live-internet research specialist) must run a
+    research pass and report back. This is recorded as PHASE 19 STEP 1 and
+    is ALREADY IN FLIGHT as of this session — dispatched by the
+    orchestrator to the `web-browser` agent this session. It covers:
+    observed price ratios by condition as a % of Near Mint; whether an
+    age/era dimension is evidence-supported (see next bullet); whether
+    card value/rarity changes the penalty; how `+`/intermediate modifiers
+    should be handled; how comparable marketplaces implement it; and the
+    Cardmarket (MT/NM/EX/GD/LP/PL/PO) vs TCGplayer (NM/LP/MP/HP/DM) scale
+    mismatch, since both are ingested.
+  - CARD AGE IS A HYPOTHESIS, NOT A SETTLED REQUIREMENT. The owner
+    hypothesized the correct discount might depend on how old the card is.
+    The common hobby claim is that vintage cards hold value in played
+    condition far better than modern cards do — the research must test
+    that against real evidence and, if it holds, quantify where the era
+    boundary falls. Do not hardcode an age/era dimension unless the
+    research substantiates it.
+  - THE MULTIPLIER VALUES THEMSELVES STILL REQUIRE A SEPARATE, EXPLICIT
+    OWNER SIGN-OFF (PHASE 19 STEP 2, a hard gate) — the owner approved the
+    CONCEPT here, not any specific number. See PHASE 19 for the full gate.
+    *** SUPERSEDED IN PART 2026-07-30 (FIFTH UPDATE THIS DAY) — the gate
+    described in this bullet is now CLOSED. See the addendum immediately
+    below. The bullet is left intact as history of how the gate was framed
+    before it closed. ***
+
+## OWNER DECISIONS — ADDENDUM 2026-07-30 (FIFTH UPDATE THIS DAY, closing
+PHASE 19 STEP 1/STEP 2 — the `web-browser` research dispatched above has
+COMPLETED and the owner has reviewed it; see Section 6 LOG
+"CONDITION-PRICING RESEARCH COMPLETE — MULTIPLIERS APPROVED" for the full
+findings and PHASE 19's own text, Section 3, for the updated phase status)
+  - STEP 2 GATE CLOSED — MULTIPLIER TABLE ADOPTED AS-IS. The owner reviewed
+    the researched table and multiplier VALUES are now APPROVED, not just
+    the concept: NM 1.00 (anchor) / LP 0.82 / MP 0.58 / HP 0.33 / DMG 0.15,
+    with `+`/`-` at the midpoint between adjacent tiers (e.g. LP+ =
+    midpoint(0.82, 1.00) = 0.91; LP- = midpoint(0.82, 0.58) = 0.70).
+    Implementation is UNBLOCKED on values; Phase 19's only remaining
+    prerequisite is Phase 12's shared price helper existing first (Track A
+    ordering, unchanged).
+  - STEP 1 CONFIDENCE IS MEDIUM, NOT HIGH — carry this into implementation
+    and any customer/owner-facing documentation of the feature, do not
+    round it up to "verified." Neither TCGplayer nor Cardmarket publishes
+    an official condition-multiplier rate card; the table is triangulated
+    from convergent secondary-source ranges plus one real shipped buylist
+    formula (Card Kingdom, MTG). These are defensible launch defaults, not
+    measured constants.
+  - AGE/ERA DIMENSION: DROPPED, NOT DEFERRED-PENDING-DATA. The owner's
+    decision is explicit: this is not "revisit when more data exists," it
+    is dropped for now. It is only revisitable if the owner later observes
+    vintage played stock being systematically mispriced in practice —
+    record this as the sole reentry condition, not a scheduled follow-up.
 
 ## COORDINATION NOTE
 Another model may be working in this same branch on an UNRELATED task (RFC 0002:
@@ -963,6 +1079,1183 @@ system of record, not a replacement for it.
        usable result and is the current direction. Not a closed decision —
        worth revisiting if the owner's appetite for ongoing engineering work
        changes.
+7. *** NEW HARD PREREQUISITE, ADDED 2026-07-30 — PHASE 12's LOST-UPDATE
+   RACE (FU-2 from the Council's Chaos seat, `.claude/council/verdict.md`
+   PASS-with-follow-ups): Phase 12 converted ~174 previously-silent no-op
+   writes into ~174 real unconditional `put_item` overwrites per nightly
+   sync run. `put_inventory_item` (`services/dynamodb.py:898-912`) has NO
+   version/condition check and NO lock. This was OVERRULED as gating for
+   Phase 12 itself because the second writer doesn't exist YET — the judge
+   verified the only mutating HTTP endpoint in the whole backend today is
+   `POST /chat`; every other caller is an operator-invoked script, and this
+   Phase 8 admin surface is the thing that changes that. THE DAY ANY
+   PHASE 8 ADMIN WRITE ENDPOINT LANDS (point 5(d) below), THIS RACE BECOMES
+   REAL AND MUST BE CLOSED FIRST — before that endpoint ships, not after.
+   Fix shape: a `ConditionExpression` or a lock at the repository seam,
+   matching the Phase 2.0a precedent (Section 2/7) — NOTE Phase 9
+   deliberately rejected caller-side read-then-merge as check-then-act, so
+   the fix belongs in `services/dynamodb.py`, not at a call site. Add this
+   as an explicit item inside point 5(d)'s "build the admin FastAPI
+   endpoints" step, not as an afterthought once endpoints already exist. ***
+
+========================================================================
+PHASE 9 — Price & rarity depth pass (refresh_held_prices)
+========================================================================
+  [*** DONE — Council PASS on revision 2 (`.claude/council/verdict.md`), doc
+  pass closed out 2026-07-30. Numbered 9, not 8: Phase 8 immediately above is
+  a pre-existing, deliberately-deferred admin/Retool PLACEHOLDER ("NOT NEXT.
+  NOT BLOCKING."). This phase was unrelated to it, was not blocked by it, and
+  does not change Phase 8's own "not next" status. See Section 7 HANDOFF for
+  the full Phase 7 close-out this phase followed. ***]
+
+  PROBLEM (empirically confirmed live, 2026-07-29, via a DynamoDB scan): every
+  one of ~31,600 live catalog_card rows has `rarity: null`, and all 266 live
+  inventory items have `current_market_value`/`listed_price: null`. Root
+  cause: only the Tier-1 "breadth" sync (`sync_catalog_breadth`) exists; the
+  Tier-2 "depth pass" that fetches per-card detail (rarity + prices) from
+  TCGdex was never built. This gap was already flagged near lines 452-454
+  (Phase 2, "max_consecutive_failures... lands with the depth pass") and
+  ~1136 (Phase 1's Council LOG note, same conclusion) and was hit again as a
+  practical consequence in the 2026-07-29 LOG entry "BUG — SET DROPDOWN
+  RETURNED ZERO RESULTS": once that dropdown was fixed, the Rarity dropdown
+  and price-range filter were confirmed to still be no-ops in production for
+  this same reason. Do not re-investigate root cause — it is confirmed.
+
+  DESIGN IS ALREADY DONE. Do not dispatch design-doc for this phase — it
+  would be redundant work. The authoritative spec is
+  `docs/rfcs/0003-tcgdex-catalog-data-layer.md`, section "7. Sync cadence,
+  staleness, and outage behavior" (~line 458). It specifies:
+    - function shape `refresh_held_prices(repo, client, today, *,
+      request_delay_seconds=0.1, max_consecutive_failures=25) -> dict`
+      (NOTE: the RFC's own code-interface-sketch appendix, ~line 838, shows a
+      slightly different parameter list — `fx_rate: Decimal` in place of
+      `request_delay_seconds` — a drift between that appendix and RFC §7's
+      prose. Reconcile it during implementation; §7's prose is what this
+      phase is scoped against.)
+    - the held-card-set predicate: `{item.card_id for item in
+      repo.list_inventory() if item.card_id and item.status in (AVAILABLE,
+      ON_HOLD)}` (sold items excluded, by design — see §7).
+    - staleness handling: `catalog_price_stale_days` (default 30) appends a
+      staleness note to `value_note` rather than hiding or deleting the price.
+    - outage/failure posture: never null or delete an existing price on
+      failure; abort after `max_consecutive_failures` (default 25)
+      consecutive per-card failures rather than burning the full run against
+      a dead endpoint; `request_delay_seconds` (default 0.1) paces requests.
+    - catalog-lock coordination with the reseed generation-swap (RFC §8): the
+      depth pass must acquire the same catalog lock as
+      `sync_catalog_breadth`'s reseed and skip with `{"skipped": "catalog
+      reseed in flight"}` if the lock is already held, so a depth-pass write
+      can never race a breadth reseed's `finalize_catalog` and get silently
+      swept.
+
+  ACCEPTANCE:
+    - `rarity` and `current_market_value` populate for held Singles cards
+      after a run against the live catalog (spot-checkable via the same kind
+      of DynamoDB scan used to confirm the gap above).
+    - a new test suite for `refresh_held_prices` covering: a normal run;
+      a per-card failure that is counted but not fatal; the
+      `max_consecutive_failures` abort path; the staleness/`value_note`
+      behavior; and the catalog-lock skip-if-reseed-in-flight behavior.
+    - existing backend/frontend/mcp-server suites stay green and ruff/eslint
+      stay clean (same bar as every prior phase).
+    - wired into `scripts/daily_sync.py`'s `run_daily_sync`, per RFC §7:
+      "`run_daily_sync` becomes `refresh_held_prices` + the three existing
+      steps."
+    - outage/failure behavior matches RFC 0003 §7's spec exactly (see the
+      bullet list above) — this is Council-checkable against the RFC text
+      directly, not a judgment call.
+    - Council Loop applies before this phase is marked DONE (code-writer ->
+      advisor-contrarian / advisor-security / advisor-chaos /
+      advisor-architect -> council-judge), same as every other phase in this
+      rebuild.
+
+  NOT IN SCOPE FOR THIS PHASE: the PSA cert API / PriceCharting API (Phase 4,
+  still PAUSED/ON HOLD — do not resume without an explicit owner go-ahead)
+  and Phase 8's admin/Retool tooling (separate, deferred, unrelated placeholder).
+
+  STATUS 2026-07-30 — DONE. `.claude/council/verdict.md` reads PASS for
+  revision 2 (revision 1's FAIL is preserved in that same file as an
+  appendix, for history — do not re-litigate it).
+    Revision 1: FAIL. Two gating findings, both delta-introduced:
+      BLOCKING-1 (Contrarian, data loss) — an HTTP 200 whose `pricing` block
+        yields no band returns `prices={}` from `to_catalog_card` and raises
+        nothing, so the whole-item `put_item` in `batch_upsert_catalog_cards`
+        erased the stored bands while reporting a clean success. Violated
+        RFC 0003 §7's "never deletes, zeroes, or nulls an existing price".
+      BLOCKING-2 (Chaos, operational safety) — `daily_sync.main()` returned 0
+        unconditionally, so the two new complete-normally-while-doing-nothing
+        states (`aborted`, `skipped`) were invisible to any exit-code monitor.
+    Revision 2 fixes both, plus non-gating N1 (test coverage for
+    `parse_card_id`/`LANGUAGE_BY_API_CODE`/`unparsable_card_ids`) and N2
+    (`rarity`/`types` now cross `_text()`).
+    BLOCKING-1's seam is the REPOSITORY, not the caller: new
+    `InventoryRepository.upsert_catalog_card_preserving_prices` does one
+    `update_item` that omits `prices` from the SET clause when the incoming
+    map is empty. A caller-side read-then-merge was rejected as check-then-act
+    — the exact shape this repo already removed from
+    `_upsert_catalog_cards_preserving_priced` in Phase 2.0a.
+    New summary key `no_usable_price` (a SUBSET of `cards_updated`, not a
+    failure) makes the priceless-success state visible.
+    daily_sync exit codes are now 0 = completed, 1 = aborted, 2 = skipped;
+    `skipped` is deliberately NON-ZERO (a wedged lock must not look like a
+    clean run for a week) but distinct from an abort (different operator
+    response). `test_daily_sync.py::assert main() == 0` was NOT modified —
+    its fixture's held set is empty, so it is still a clean run.
+    FINAL VERIFIED STATE (2026-07-30, after the doc-alignment pass — no code
+    changed): backend 875 passed / 7 skipped / 0 failed; frontend 274 passed;
+    mcp-server 73 passed; `ruff check backend/src` clean; `cd frontend && npm
+    run lint` clean.
+    OWNER DECISIONS RECORDED THIS PHASE (both are permanent policy, not
+    provisional — see RFC 0003 §7 for the full reasoning, now inline there):
+      - graded slabs are EXCLUDED from this pass (`_held_card_ids` filters
+        `item.kind == "raw"`) — slab price + detail are Phase 4's job
+        end-to-end. Accepted consequence: a slab-only-held card keeps
+        `rarity: null` until Phase 4 resumes.
+      - a TCGdex 404 on a held card is treated as a SKIP (`not_found`), not a
+        failure — it neither increments nor resets the consecutive-failure
+        counter, since counting retirements as failures would abort the job
+        every morning on a perfectly healthy endpoint.
+    CARRIED FORWARD, NOT FIXED THIS ROUND (Judge's explicit instruction —
+    none of N3-N8 may be patched-and-re-reviewed as a fresh Council round):
+      N3 is a HARD PREREQUISITE BEFORE THE RESEED SIDE IS WIRED —
+        `total_deadline_seconds` (tcgdex.py:678) is consulted only inside
+        `_read_bounded`, i.e. on the 200 path, so it bounds neither non-200
+        retries nor the backoff sleeps. 25 slow-failing cards can exceed the
+        3600s catalog-lock TTL, letting a second lock consumer steal the lock
+        mid-run. Dormant today only because the reseed is unwired and
+        `current_catalog_generation()` returns None. Fix with a wall-clock
+        deadline over the whole `_refresh_held_prices` run, or a lock
+        heartbeat that renews the TTL. DO NOT WIRE THE RESEED FIRST — this is
+        the one item on this list that turns from dormant to dangerous the
+        moment Phase 2's reseed lands.
+      N4 — `run_daily_sync` has no per-step isolation: a non-
+        `CatalogReseedInProgressError` raise from the lock/generation prologue
+        costs the three DynamoDB-only steps their day. Loud, non-corrupting,
+        self-heals next day.
+      N5 — `daily_sync.py` has no `_client()` seam mirroring `_repository()`,
+        so the script test is one added raw held item away from a live network
+        call in CI. The new exit-code tests patch `TcgdexClient` directly and
+        do not close the underlying trapdoor. Harmless today only because
+        `test_daily_sync.py`'s fixture holds an empty held set.
+      N6 — `daily_sync.py`'s exit-code table (0/1/2) does not account for the
+        interpreter's own exit `1` on an unhandled exception from the
+        lock/generation prologue, so `EXIT_ABORTED=1` and a setup-phase crash
+        share a code. Council-confirmed as a real but non-gating
+        documentation/observability gap — the two are still disambiguated in
+        practice by their stdout, just not by `$?` alone. Cheap fix is a third
+        docstring table row; the sharper fix is catching at `main()`'s
+        boundary and reserving a distinct code.
+      N7 — the non-empty wholesale-replace policy (see the RFC §7 "Resolved"
+        block above) can drop a previously-priced finish when TCGplayer nulls
+        one variant's `marketPrice` while keeping another's. The "prevents
+        mixed-provider bands" justification does not cover this same-provider
+        partial-drop case; the honest framing is a stated tradeoff, not a
+        prevented bug.
+      N8 — `update_item` throttling now surfaces into the same
+        `failures`/`consecutive` counter a TCGdex outage uses, where
+        `batch_write_item`'s `UnprocessedItems` retry used to absorb some of
+        it. Judge's correction, worth remembering: revision 1 was ALREADY one
+        `batch_write_item` per card, so request volume is essentially
+        unchanged — the real delta is failure-surfacing, not throughput.
+    RELEASE-READINESS NOTE (Council Judge, not a gate): nothing in this phase
+    has run against live data yet. The first real signal will be
+    `no_usable_price`'s value on the first supervised production run — if it
+    comes back near ~300 (i.e. most of the held set), investigate before
+    trusting the depth pass; that would mean TCGdex's pricing feed is
+    effectively absent for our holdings, not that the code is broken.
+========================================================================
+
+========================================================================
+PHASE 10 — Inventory price denormalization: fix the finish-mismatch gap
+========================================================================
+*** SUPERSEDED 2026-07-30 (THIRD UPDATE THIS DAY) — SUBSUMED INTO PHASE 12.
+This phase's analysis below is still correct and still the authority on the
+finish-mismatch root cause and the canonical fallback order
+(`_MARKET_FINISH_FALLBACK`) — do NOT re-derive it. But do not implement it
+standalone: PHASE 12 (Section 3, after Phase 11 and the CONCURRENCY
+subsection) absorbs this fix into one shared price helper alongside two more
+symptoms of the same root cause (the $0 Est. value dashboard and the
+price-range filter wiping the inventory) discovered in the 2026-07-30 owner
+bug report (Section 6 LOG). Go to Phase 12 for the actual scope/acceptance
+criteria; keep reading this entry only for the root-cause evidence. ***
+
+*** THIS IS THE HIGHEST-VALUE NEXT ITEM, AND IT IS SMALL. It is the reason
+the owner "still isn't seeing prices" on the live site despite Phase 9's
+depth pass succeeding (see LOG 2026-07-30 "FIRST LIVE PRODUCTION RUN",
+Section 6). Prices exist in the catalog now; they are just not reaching
+most inventory items. ***
+
+EMPIRICALLY MEASURED, 2026-07-30, against live data — do not re-investigate:
+  - Of 253 raw items with a `card_id`, only 40 have a `current_market_value`;
+    213 are null.
+  - Cause breakdown: 174 = a finish mismatch (see below); 39 = the card
+    genuinely has no usable price (the same 39-of-230 `no_usable_price`
+    cards the depth pass already reported honestly — not a bug).
+  - Every mismatch is an item whose `finish` is stored as `"normal"` against
+    a card that TCGdex only prices under a holo-family key:
+
+    | item finish | card's finishes                            | count |
+    |-------------|---------------------------------------------|-------|
+    | normal      | holofoil                                     | 155  |
+    | normal      | holofoil, reverseHolofoil                     | 11  |
+    | normal      | 1stEdition, unlimited                         | 7   |
+    | normal      | 1stEditionHolofoil, unlimitedHolofoil         | 1   |
+
+ROOT CAUSE — TWO CODE PATHS DISAGREE:
+  - `models/inventory.py:205` `_market_price(card, finish)` already
+    implements a correct fallback chain (item's own finish -> the
+    `_MARKET_FINISH_FALLBACK` table -> any band carrying a market figure).
+    This is the API READ path — called at line 262 — and it is correct.
+  - `services/catalog_sync.py:91` `refresh_inventory_market_values` does a
+    bare `card.prices.get(item.finish)` — an EXACT match, no fallback. This
+    is the path that WRITES `current_market_value` onto the stored item, so
+    a `"normal"`-finish item against a holo-only card gets no match and
+    stays null even though the read path could have priced it correctly.
+
+MEASURED FIX IMPACT: routing `refresh_inventory_market_values` through the
+SAME `_market_price` helper the read path already uses resolves 174 of the
+213 nulls immediately — coverage goes from 40/253 to 214/253. The residual
+39 are the genuinely priceless cards; nothing further recovers them.
+
+CONTRIBUTING UPSTREAM CAUSE, worth recording but NOT necessarily the fix to
+make now: `services/spreadsheet_import.py` hardcodes `finish="normal"` at
+lines 474 and 746. A card that exists ONLY as holofoil cannot actually be a
+"normal" copy, so the stored finish is wrong at the SOURCE, not just at the
+read/write mismatch above. OPEN QUESTION FOR THE IMPLEMENTER: fix the
+SYMPTOM (use the existing fallback in the denormalizer — small, safe,
+immediately effective) versus the CAUSE (infer finish correctly at import
+time — larger, touches the importer, and re-running the import against live
+data is the owner's call, same as every other live-data decision in this
+file). RECOMMENDATION: do the denormalizer fix first — it is small,
+reversible, and unblocks the owner's actual complaint today; import-time
+finish inference can follow later as separate, larger work.
+
+ACCEPTANCE:
+  - `refresh_inventory_market_values` and the API read path use ONE SHARED
+    helper for finish-aware price lookup, not two independently-maintained
+    lookups that can drift again.
+  - A test pins the holo-only-card case (a `"normal"`-finish item against a
+    card priced only under `holofoil`) resolving to a non-null
+    `current_market_value` via the fallback chain.
+  - Existing suites stay green — this is a bug fix in an already-shipped
+    denormalizer, not new behavior; outside-in TDD per CLAUDE.md still
+    applies (RED first, confirm it fails, then GREEN).
+  - Council Loop applies before this phase is marked DONE, same as every
+    other phase in this rebuild.
+
+NOT IN SCOPE FOR THIS PHASE: the import-time `finish="normal"` hardcoding in
+spreadsheet_import.py (recorded above as a contributing cause, deliberately
+left as a separate future decision) and Phase 11 (JP English names,
+immediately below — unrelated).
+========================================================================
+
+========================================================================
+PHASE 11 — English names for Japanese cards
+========================================================================
+OWNER REQUEST, 2026-07-30: this is an English-language website. Japanese
+cards should display the ENGLISH Pokemon name in the inventory, while still
+being MARKED AS JP and still showing the JAPANESE card image, so they stay
+visually distinguishable from an English printing of the same card.
+
+MEASURED SCOPE — SMALL. Of inventory `card_id`s: 244 are `en`, 9 are `ja`,
+13 have no `card_id` at all. Only 9 cards need this today: `ja:E2-058`,
+`ja:M2a-205`, `ja:M3-086`, `ja:M4-084`, `ja:PMCG1-011`, `ja:PMCG5-048`,
+`ja:SM11b-036`, `ja:SV11B-170`, `ja:SV11W-135`.
+
+VERIFIED UPSTREAM DATA, checked live against TCGdex, 2026-07-30: JP card
+detail payloads DO carry `dexId` (the national Pokedex number array, e.g.
+`[778]`) and `category` (e.g. `"Pokemon"`), alongside the Japanese `name`.
+
+*** THE KEY CATCH, VERIFIED — record it prominently, do not lose it: `dexId`
+yields the SPECIES name only, not the card's actual title. `ja:M2a-205` is
+`ロケット団のミミッキュ`, whose true English card name is "Team Rocket's
+Mimikyu" — `dexId` 778 alone gives just "Mimikyu". A dex-number lookup is an
+APPROXIMATION, not a translation. ***
+
+CANDIDATE APPROACHES, recorded without picking one — the next conversation
+should choose, with the owner if it's not obvious:
+  (A) ONE-TIME MANUAL/LLM ENRICHMENT, storing the resolved names. Strong
+      precedent in this codebase: `data/spreadsheet/ENRICHMENT_PROMPT.md`
+      (Phase 3.2 Stage A) did exactly this shape of thing for language
+      resolution, and was owner-reviewed. At 9 cards this is proportionate,
+      and it matches the reasoning already accepted for non-PSA slabs ("too
+      rare to justify an automated pipeline" — D2/Q3, Section 1/4).
+  (B) `dexId` -> ENGLISH SPECIES-NAME TABLE. Automated and cheap, since the
+      depth pass (Phase 9) already fetches this field. Loses prefixes/
+      suffixes ("Team Rocket's", "ex", "V") and fails entirely for
+      Trainer/Energy cards, which carry no `dexId`.
+  (C) LOCAL JOIN AGAINST THE EXISTING EN CATALOG. The catalog already holds
+      ~31,600 EN rows. Match a JP card to its EN twin on language-
+      independent keys (`dexId` + illustrator + hp/attacks) to recover the
+      exact English card name, with zero extra API calls. Fails for
+      JP-exclusive cards that have no EN printing.
+
+SUGGESTED SHAPE, to be confirmed by whoever picks this up: a `name_en: str |
+None` field on `CatalogCard`; the frontend renders `name_en or name` plus a
+JP badge; the JP image is retained deliberately (that's the point — visually
+distinguishable, not hidden).
+
+*** NOTE THE SEARCH IMPLICATION, easy to miss: `/inventory/search`'s name
+matching must query BOTH `name` and `name_en`, or searching "Charizard" will
+still silently miss a Japanese Charizard that only has `name_en` populated.
+***
+
+NOT IN SCOPE FOR THIS PHASE: Phase 10 (finish-mismatch fix, immediately
+above — unrelated, and should land first since it's smaller and higher-
+value) and anything under Phase 4 (PSA/PriceCharting, still paused).
+========================================================================
+
+========================================================================
+CONCURRENCY — WHICH OF PHASES 12-19 CAN RUN IN PARALLEL
+(owner asked this directly, 2026-07-30 — see Section 6 LOG "OWNER BUG
+REPORT — FRONTEND WAS NEVER TESTED AGAINST THE DATABASE REDESIGN"; TRACK A
+ORDER UPDATED 2026-07-30, same day, to insert PHASE 19 — see Section 6 LOG
+"OWNER DECISION — CONDITION-AWARE PRICING APPROVED")
+========================================================================
+- TRACK A (sequential, ONE conversation): PHASE 12 -> PHASE 19 -> PHASE 13
+  -> PHASE 14, in that order. UPDATED 2026-07-30 to insert PHASE 19
+  (condition-aware pricing) between 12 and 13: Phase 19 extends the very
+  price helper Phase 12 creates, so it must not be attempted before that
+  helper exists; and doing it before Phase 14 (sort) means sort-by-price
+  orders on final, correct prices rather than on figures that are about to
+  change underneath it. All four edit `routers/inventory.py` and/or
+  `frontend/components/inventory/FilterPanel.tsx`; running them out of
+  order or in parallel conversations will produce merge conflicts on the
+  same functions (`_price`, the search predicate, the dropdown constants).
+- TRACK B (independent conversation): PHASE 15. Confined to `mcp-server/` +
+  `shared/tool-contract.json`. Does not touch any file Track A touches.
+- TRACK C (independent conversation): PHASE 16. Confined to
+  `routers/public.py` + public-site frontend components
+  (`frontend/lib/public.ts`, `frontend/components/home/**`,
+  `frontend/app/(public)/shows/**`). Does not touch any file Track A/B
+  touches.
+- TRACK D (independent conversation): PHASE 17. Confined to the auth layer
+  (frontend auth/session code, `routers/auth.py`, Cognito config). Does not
+  touch any file Track A/B/C touches.
+- PHASE 18 runs LAST, after A/B/C/D land — or is folded piecemeal into each
+  track as it closes its own drift channel (see Phase 18's own text below).
+  Do not start it before at least one of A/B/C is done; there is nothing to
+  sweep yet.
+
+*** WARNING — TRACK A AND TRACK B SHARE ONE CONCEPTUAL FIX IN TWO LANGUAGES.
+Phase 12 (Python) and Phase 15 (TypeScript) both implement the SAME
+finish-aware price fallback, independently, in two different codebases. If
+two different conversations invent two different fallback ORDERS, the site
+and the chatbot will quote two different prices for the same card — a new,
+subtler version of the exact bug this whole block of work exists to kill.
+THE CANONICAL ORDER IS `models/inventory.py:199-202` `_MARKET_FINISH_FALLBACK`:
+    ("normal", "holofoil", "reverseHolofoil", "1stEditionHolofoil",
+     "1stEditionNormal", "unlimitedHolofoil")
+tried in that order after the item's own finish, then any finish carrying a
+market figure as a last resort (see `_market_price()`, same file, lines
+205-233). BOTH Track A/Phase 12 and Track B/Phase 15 implement AGAINST THIS
+EXACT ORDER — it is not up for reinvention in either language. ***
+
+*** WARNING, ADDED 2026-07-30 — PHASE 19 AND PHASE 15 ALSO SHARE PRICE
+RESOLUTION IN TWO LANGUAGES. Phase 19 (condition-aware pricing, Track A)
+and Phase 15 (MCP price visibility, Track B) both touch price resolution,
+one language each. If Phase 15 lands without the condition adjustment and
+nobody follows up, the website and the Bedrock chat will quote two
+different prices for the same item — the same class of bug the warning
+above already exists to prevent for the finish-fallback order. Phase 15
+should either land AFTER Phase 19 (so it can pick up the adjustment
+immediately) or explicitly take the condition adjustment as its own
+follow-up task if it lands first — it must not be left to drift silently.
+***
+
+*** WARNING — `frontend/next.config.ts` IS CURRENTLY MODIFIED-UNCOMMITTED
+with DISPUTED ATTRIBUTION (see Finding 10 in the Section 6 LOG entry below:
+this file previously attributed the change to a concurrent RFC 0002 model,
+but it already allows `assets.tcgdex.net`, which Phase 16 needs). TRACK C
+MUST resolve that attribution — read the diff, confirm what it actually
+changed and why, and either keep it, fold it into Phase 16's own commit, or
+flag it back to the owner — BEFORE making any further edit to that file. ***
+
+UNCOMMITTED WORKING-TREE STATE AT THIS BASELINE (2026-07-30, so a fresh
+conversation on any track isn't surprised by `git status`): modified —
+backend/README.md, backend/scripts/daily_sync.py,
+backend/src/merlins_collection/{config.py,services/catalog_sync.py,
+services/dynamodb.py,services/tcgdex.py},
+backend/tests/{scripts/test_daily_sync.py,services/test_catalog_sync.py,
+services/test_dynamodb.py,services/test_tcgdex.py}, claude-progress.txt,
+docs/rfcs/0003-tcgdex-catalog-data-layer.md,
+frontend/components/inventory/FilterPanel.tsx + its test,
+frontend/next.config.ts. Untracked: zhcn_sets_list.txt. Branch is
+Database-Redesign-Second-Round; the PR is still deliberately NOT opened.
+========================================================================
+
+========================================================================
+PHASE 12 — Inventory price correctness (THE ACTIVE TASK, task 1)
+========================================================================
+TRACK A, step 1 of 3 (see CONCURRENCY above). OWNER BUG REPORT, 2026-07-30
+(Section 6 LOG, "OWNER BUG REPORT — FRONTEND WAS NEVER TESTED AGAINST THE
+DATABASE REDESIGN"): three reported symptoms — the price-range filter, the
+$0 "Est. value" dashboard figure, and Bedrock chat reporting no/zero prices
+— trace to ONE root cause plus two more bugs in the same neighborhood.
+ABSORBS PHASE 10 (immediately above) — Phase 10's finish-mismatch analysis
+and its canonical fallback order are the authority for this phase's root
+cause; this entry extends them, it does not re-derive them. Phase 10 is
+marked SUBSUMED, not deleted — read it for the evidence.
+
+*** STATUS: DONE, 2026-07-30 — Council PASS (`.claude/council/verdict.md`),
+zero confirmed-major findings across all four seats (Contrarian 0,
+Security 0, Chaos 0, Architect 0). Full close-out record is in Section 6
+LOG, "PHASE 12 CLOSED — COUNCIL PASS, LIVE VERIFICATION DONE"; this header
+only summarizes, read the LOG entry for the complete picture. Verified
+suite state at close: backend 898 passed / 7 skipped / 0 failed (baseline
+entering the phase was 875 passed: +16 RED tests turned green, +4 new for
+`hidden_no_price`, +3 from RED-phase controls); frontend 278 passed;
+`python -m ruff check backend/src` clean; frontend lint and `tsc
+--noEmit` clean. NO NEW ABSTRACTION WAS CREATED to satisfy SCOPE's "extract
+ONE shared helper" bullet below — `models/inventory.py::_market_price` was
+already correct and already carried the canonical `_MARKET_FINISH_FALLBACK`
+order, so `services/catalog_sync.py` (write path) and
+`routers/inventory.py::inventory_summary` (summary path) were routed
+through IT instead of a new module being invented (`CardSummary.from_catalog`
+already did). The Architect seat ruled this "acceptably simple." Three
+Council follow-ups were opened, none gating — FU-1 (last-resort price
+disclosure via `value_note`), FU-2 (lost-update race on
+`put_inventory_item`, now a HARD PREREQUISITE recorded in the Phase 8
+section above), FU-3 (throttle-masking on `batch_get_catalog_cards`
+distinguishability) — plus FU-4, an Architect nitpick (redundant `if card
+else None` guard, two-line cleanup). Read the rest of this phase's text
+below for the original problem framing (kept intact as history); the LOG
+entry is the current, authoritative close-out record. ***
+
+PROBLEM 1 — finish-mismatch (Phase 10's original finding, still the base
+cause): `services/catalog_sync.py:87-92`'s `refresh_inventory_market_values`
+does `card.prices.get(item.finish)` — a bare exact match — while
+`models/inventory.py:199-233`'s `_market_price()` has the correct
+`_MARKET_FINISH_FALLBACK` chain. Measured live: of 253 raw items with a
+card_id, only 40 have `current_market_value`; 213 null, 174 of them this
+mismatch. Upstream contributing cause (NOT fixed by this phase, recorded for
+awareness): `spreadsheet_import.py:474` and `:746` hardcode `finish="normal"`
+on every raw item at import time.
+
+PROBLEM 2 — the price-range filter wipes the inventory
+(`routers/inventory.py:148-151`): the PREDICATE, not the query path, is
+broken. `FilterPanel.tsx:241-254` -> `normalizePriceRange` (`:80-89`) ->
+`buildSearchQuery` (`frontend/lib/inventory.ts:140-149`) -> the backend
+defaults (`routers/inventory.py:112-113`) are ALL correct — no coercion bug,
+no bad default, no `and`/`or` inversion. The bug is `_price()` itself
+(`:74-76`): `item.listed_price if not None else item.current_market_value`.
+`listed_price` is null on EVERY item, by design (D3/Section 1 — permanently
+out of scope), so `_price()` degrades to `current_market_value`, which is
+null on ~85% of items — so ANY price bound drops nearly everything. THIS
+CONTRACT IS CURRENTLY PINNED BY A PASSING TEST:
+`backend/tests/routers/test_inventory.py:672-687` — that test must be
+REWRITTEN as part of this phase's RED step, not just left green.
+
+PROBLEM 3 — Est. value = $0 (`routers/inventory.py:196-232`):
+`inventory_summary` sums the STORED `current_market_value ?? listed_price`
+field directly (lines 218-222) and never calls
+`_market_price`/`CardSummary.from_catalog` — even though the catalog IS
+already fetched at line 225 (used only for `sets_tracked`). Contrast
+`_enrich` (`:264-266`), which DOES route through `CardSummary.from_catalog`
+— the search path is finish-aware, the summary path is not. `formatPrice`
+(`frontend/lib/inventory.ts:187`) renders the resulting `Decimal(0)` as
+"$0.00", not "Price N/A" (that only fires for null/NaN), so the dashboard
+shows a confident, wrong zero instead of an honest unknown.
+
+SCOPE:
+  - Extract ONE shared, finish-aware price-lookup helper (or make
+    `refresh_inventory_market_values` and `inventory_summary` both call the
+    EXISTING `_market_price`/`CardSummary.from_catalog` machinery instead of
+    hand-rolling their own) so the write path, the read/search path, and the
+    summary path can never drift again. This is also the Python half of the
+    canonical-fallback-order warning in the CONCURRENCY block above.
+  - `_price()` in `routers/inventory.py` stops preferring the permanently-
+    dead `listed_price`; decide and implement what it prefers instead
+    (RECOMMEND: `current_market_value` outright, since `listed_price` is
+    dead per Section 1/D3 and Section 5's guardrail).
+    *** DONE, 2026-07-30: `_price()` now returns `current_market_value`
+    outright, per the recommendation. A market-first-with-listed-fallback
+    variant was tried and fails a RED test — `listed_price` cannot be
+    consulted at all. ***
+  - `inventory_summary`'s `est_value` computation stops summing the raw
+    stored field and goes through the shared finish-aware helper.
+    *** DONE, 2026-07-30, WITH A RATIFIED DEVIATION: the OWNER-RATIFIED
+    contract is now "use the stored `current_market_value` whenever the
+    shared helper yields no price," not the originally-stated "only when
+    the item has no catalog card." Reason: graded slabs DO resolve a
+    catalog card but `_market_price` returns `None` for them by design (no
+    finish; the grade premium isn't something the raw catalog knows), so
+    the literal rule would have made every PSA slab with a hand-maintained
+    value contribute $0 — a new money-facing undercount introduced by the
+    fix. The owner was asked explicitly and ratified the deviation; treat
+    it as the settled contract. Also DONE: the catalog fetch moved ABOVE
+    the summary loop, so this costs no new I/O. See Section 6 LOG for full
+    detail. ***
+  - DECIDE AND RECORD (open decision, resolve during this phase, not
+    before): once this denormalizer fix lands, ~39 cards remain genuinely
+    priceless (`no_usable_price`). Does a price-bound filter continue to
+    silently exclude them (current behavior), or does the UI need an
+    affordance (e.g. an explicit "no listed price" bucket) so they aren't
+    invisibly dropped? Record the decision and its rationale in Section 6
+    LOG when made.
+    *** RESOLVED, 2026-07-30: excluded but counted. A card with no
+    resolvable price is not claimed to be under a price bound, but a new
+    `hidden_no_price` count on the search response (surfaced in the
+    frontend) reports how many were withheld, so the exclusion is never
+    silent. The price filter runs LAST among filters so the count reflects
+    the cohort every other filter already narrowed — pinned by
+    `test_search_hidden_count_excludes_items_other_filters_already_dropped`.
+    ***
+  - REQUIRED LIVE VERIFICATION STEP, before assuming the fix alone repairs
+    the dashboard: the audit could not statically confirm why the ~40 items
+    that already HAVE a `current_market_value` don't move Est. value off
+    zero today. Scan the `location` field of those ~40 items live — either
+    they fall outside `_CUSTOMER_VISIBLE_LOCATIONS`
+    (`{"glass","toploader"}`, `routers/inventory.py:45`), in which case
+    that's a separate, real finding to record, or something else is wrong
+    and needs its own investigation. Note `map_location()`
+    (`spreadsheet_import.py:224-249`) passes through unrecognized location
+    strings verbatim, so rows labeled `binder`/`home`/blank silently leave
+    the customer-visible cohort — a likely candidate.
+    *** DONE, 2026-07-30 — NEITHER explanation above turned out to be the
+    (whole) answer. Live scan: 266 total `inventory_item` rows, 40 carry a
+    `current_market_value`; 228 pass the customer-visibility gate; 39 of
+    those are BOTH visible AND priced (the 40th falls outside the gate),
+    summing to $778.49. THE 40 PRICED ITEMS WERE NOT HIDDEN BY THE
+    LOCATION GATE. The backend logic — verified against the real
+    `customer_visible_items` and `_price` source, not a re-implementation —
+    should therefore have been returning $778.49, not $0, at the time of
+    the owner's report. So the reported "$0" is NOT fully explained by the
+    finish-mismatch bug fixed in this phase. Full three-way open item
+    (owner-observation timing vs. stale production deploy vs. a third
+    frontend bug) recorded in Section 6 LOG — do not assume this phase
+    closes that question. ***
+  - NOW AUTHORIZED (new owner decision, this session — see the OWNER
+    DECISIONS addendum near the top of this file): once this code clears
+    the Council Loop and its own tests, run the corrected denormalizer
+    (`refresh_inventory_market_values` / `refresh_held_prices`) LIVE against
+    `merlins-cards` directly — no separate per-run owner go-ahead needed.
+
+ACCEPTANCE:
+  - A test pins the holo-only-card case (Phase 10's original acceptance
+    criterion) resolving to a non-null `current_market_value` via the
+    shared helper.
+  - A test pins that a `min_price`/`max_price` bound no longer excludes an
+    item purely because `listed_price` is null when `current_market_value`
+    is present — i.e. `test_inventory.py:672-687`'s current assertion is
+    rewritten to match the corrected contract, not left asserting the bug.
+  - A test pins that `inventory_summary`'s `est_value` reflects the
+    finish-aware price, not the raw stored field (a fixture item priced
+    only under a fallback finish must contribute to `est_value`).
+  - The live-verification step above is performed and its result (which of
+    the two explanations for Finding 6 is correct) is recorded in Section 6
+    LOG before this phase is marked DONE.
+    *** DONE, 2026-07-30 — performed; result was NEITHER of the two
+    originally-anticipated explanations alone (see the annotation on the
+    SCOPE bullet above and the Section 6 LOG entry for the full numbers and
+    the resulting three-way open item). ***
+  - Existing suites stay green; outside-in TDD per CLAUDE.md (RED first,
+    confirm it fails, then GREEN) applies throughout.
+  - Council Loop applies before this phase is marked DONE — this phase
+    touches money-facing, customer-visible figures, so treat any finding
+    about silently-wrong prices as gating per the Council Budget Rule
+    (Section 5): data reaching a customer wrong or silently is exactly the
+    class of finding the budget rule keeps as gating.
+
+NOT IN SCOPE FOR THIS PHASE: the import-time `finish="normal"` hardcoding
+in `spreadsheet_import.py` (recorded as a contributing cause, still a
+separate future decision, same as Phase 10 left it); Phase 13's facets
+endpoint/dropdown work (must run AFTER this phase, same track); Phase 15's
+MCP-side fix (a DIFFERENT language implementing the SAME canonical fallback
+order — see the CONCURRENCY warning above, do not fold it in here); Finding
+11's condition-aware pricing (a separate open owner decision, not addressed
+by this phase — condition never touches price resolution before or after
+this phase's fix).
+========================================================================
+
+========================================================================
+PHASE 13 — Facets endpoint + DB-driven dropdowns + set combobox
+========================================================================
+TRACK A, step 2 of 3 — MUST RUN AFTER PHASE 12, same conversation/track:
+both phases edit `routers/inventory.py` and `FilterPanel.tsx`.
+
+PROBLEM: all four filter dropdowns are hardcoded TypeScript, disconnected
+from the database:
+  - Set: `FilterPanel.tsx:23-38`, only 14 curated sets, sends a set id
+    mapped from a label (`:39`, applied `:152-158`). Backend uses it
+    verbatim as a GSI partition key (`Key("GSI1PK").eq(f"SET#{set_id}")`,
+    `services/dynamodb.py:888-895`, written at `:696`), but the stored
+    `set_id` is the language-prefixed composite `services/tcgdex.py:233-239`
+    `build_card_id` produces (`en:base1`), NOT the bare pokemontcg.io-era
+    id (`base1`) HEAD still ships. THE FIX EXISTS but is UNCOMMITTED —
+    working-tree-only in `FilterPanel.tsx` and its test, held per this
+    file's line ~2960. HEAD, and anything deployed from the repo, still
+    ships bare ids matching zero GSI rows. This is not a regression and not
+    partial — it is UNDEPLOYED. Commit it (or supersede it if this phase's
+    combobox work replaces the mapping entirely) as part of this phase.
+  - Rarity: `FilterPanel.tsx:45-58` hardcodes pokemontcg.io-era spellings
+    (`'Rare Ultra'`, `'Rare Secret'`, `'Rare Rainbow'`, `'Rare Holo VMAX'`)
+    against TCGdex's actual vocabulary (e.g. `"Ultra Rare"`); the backend
+    compares with `==` (`routers/inventory.py:171-176`), so it never
+    matches — the identical bug class as the set-id mismatch, still
+    unfixed. The stale comment at `FilterPanel.tsx:41-44` claiming rarity
+    is a no-op is itself now out of date (Phase 9 shipped and ran live) and
+    needs correcting alongside the vocabulary fix.
+  - Condition/Language: hardcoded TS arrays (`FilterPanel.tsx:62-68`,
+    `:72-76`) duplicating `Condition`/`Language` enums already defined in
+    Python (`models/inventory.py:28-36`, `:38-52`) and AGAIN as TS unions in
+    `frontend/lib/inventory.ts:9`, `:34` — three copies of the same
+    vocabulary.
+  - NO ENDPOINT ANYWHERE returns distinct/facet values from DynamoDB. Full
+    route table today: `/auth/me`, `/inventory/search`, `/inventory/summary`,
+    `/chat/`, `/health`, `/public/shows`, `/public/featured-cards`. The only
+    distinct-value computation in the codebase is `sets_tracked =
+    len({card.set_id ...})` at `routers/inventory.py:226` — a COUNT, not a
+    list. `repo.iter_catalog_cards()` (`services/dynamodb.py:874-886`) is a
+    full table scan explicitly marked "import-time only" — a facets
+    endpoint needs a real caching/derivation strategy, not a scan per
+    request.
+
+ADDITIONAL RARITY CAUSES (beyond the vocabulary mismatch above, both must
+also be handled by this phase since they land in the same dropdown/filter
+surface):
+  - Rarity is populated only on the ~230 catalog rows the Phase 9 depth pass
+    touched (`catalog_sync.py:141-147` — raw-only, held-only); graded
+    slabs' catalog rows keep `rarity: null` and are silently dropped by any
+    rarity selection.
+  - The literal STRING `"None"` (4 characters, not a real null) arrives from
+    TCGdex for some cards and is stored verbatim (`services/tcgdex.py:550`)
+    — already logged in Section 6 LOG ("LITERAL STRING 'None' AS RARITY").
+    Must not appear as a selectable facet option, or must be given a
+    friendlier label — the facets endpoint is the natural place to filter
+    or relabel it once, instead of patching the frontend.
+
+OWNER REQUIREMENT: every rarity, condition, set, and language PRESENT IN THE
+DATABASE must appear in its dropdown, and NO option may appear that is not
+actually in the data. The set dropdown must become a TYPE-TO-NARROW
+COMBOBOX (filterable dropdown, narrows as you type — explicitly NOT a
+free-text string search) covering ALL ~91 sets tracked in the database,
+sorted alphabetically, not the current 14-set curated list.
+
+SCOPE:
+  - A facets endpoint (e.g. `GET /inventory/facets`) returning the distinct
+    sets/rarities/conditions/languages actually present among
+    customer-visible catalog/inventory rows, with a caching or
+    derivation strategy that avoids a full scan per request (e.g. computed
+    and cached at sync time, alongside Phase 9's depth pass or Phase 12's
+    denormalizer, and served from a cheap read — not `iter_catalog_cards()`
+    called synchronously per HTTP request).
+  - `FilterPanel.tsx`'s four dropdowns all source their options from this
+    endpoint instead of hardcoded constants.
+  - The set dropdown becomes a type-to-narrow combobox over the full
+    alphabetically-sorted set list from the facets endpoint.
+  - The rarity vocabulary fix: compare against TCGdex's actual spellings,
+    not the pokemontcg.io-era list; correct or remove the stale no-op
+    comment.
+  - The literal `"None"` rarity value is excluded or relabeled at the
+    facets layer.
+  - Commit (or deliberately supersede) the uncommitted `en:`-prefixed
+    set-id fix in `FilterPanel.tsx` + its test.
+
+ACCEPTANCE:
+  - A test pins that the facets endpoint returns only values present in
+    fixture data, and never a hardcoded value absent from the fixtures.
+  - A test pins that a TCGdex-spelled rarity (e.g. `"Ultra Rare"`) now
+    matches in `/inventory/search`, replacing/extending whatever pinned the
+    old pokemontcg.io spelling.
+  - A test pins that the literal string `"None"` never appears as a facet
+    option.
+  - A frontend test drives the set combobox by typing a partial set name
+    and asserts the option list narrows to matching sets from the full
+    ~91-set list, not the old 14.
+  - Existing suites stay green; outside-in TDD applies.
+  - Council Loop applies before this phase is marked DONE.
+
+NOT IN SCOPE: Phase 14's sort control (must run after this phase, same
+track); Phase 15's MCP-side rarity/set handling (separate language/track,
+though it should eventually consume the SAME vocabulary fix conceptually —
+not this phase's job to wire that).
+========================================================================
+
+========================================================================
+PHASE 14 — Sort control
+========================================================================
+TRACK A, step 3 of 3 — MUST RUN AFTER PHASE 13, same track: overlaps both
+Phase 12 and Phase 13's files.
+
+PROBLEM: no sort capability exists anywhere. `/inventory/search` has no
+sort parameter; `FilterPanel.tsx` has no sort UI. Owner wants: newest,
+oldest, most expensive, least expensive, alphabetical, and other options
+("etc.").
+
+SCOPE:
+  - A `sort` query param on `/inventory/search` with a closed, validated
+    set of allowed values (e.g. `newest`, `oldest`, `price_desc`,
+    `price_asc`, `name_asc`, `name_desc`).
+  - Server-side ordering: NOTE results are assembled in Python from a
+    sharded scan (see `services/dynamodb.py`'s sharding,
+    `INVENTORY_SHARD_COUNT = 10`), so this is a Python list sort after
+    assembly, not a DynamoDB index/query-side concern.
+  - A sort control in `FilterPanel.tsx`/the inventory search UI.
+  - DECIDE (and record the decision alongside this phase's test coverage):
+    when sorting by price, where do the ~39 genuinely priceless cards
+    (Finding 12/Phase 12's `no_usable_price` cohort) go? RECOMMENDED
+    DEFAULT: always last, regardless of ascending/descending direction —
+    implement this unless the owner says otherwise.
+
+ACCEPTANCE:
+  - A test pins each allowed sort value producing the expected order
+    against a fixture set that includes at least one priceless item,
+    confirming it sorts last under both `price_asc` and `price_desc`.
+  - A test pins that an invalid/unrecognized `sort` value is rejected (or
+    falls back to a documented default) rather than silently ignored.
+  - Existing suites stay green; outside-in TDD applies.
+  - Council Loop applies before this phase is marked DONE.
+
+NOT IN SCOPE: anything in Phase 15/16/17 (different tracks/files entirely).
+========================================================================
+
+========================================================================
+PHASE 15 — MCP/Bedrock price visibility
+========================================================================
+TRACK B (concurrent-safe with Track A) — confined to `mcp-server/` +
+`shared/tool-contract.json`. See the CONCURRENCY warning above: this phase
+and Phase 12 both implement the SAME finish-aware fallback in two languages
+and MUST agree on the order.
+
+PROBLEM: the MCP server reads DynamoDB DIRECTLY via its own TS repository
+(`mcp-server/src/dynamodb-repository.ts`), NOT via the FastAPI backend, so
+it shares none of the Python price helpers and repeats every one of their
+bugs independently, plus a new one:
+  - `repository.ts:9-25` defines `value` and `marketPrice`;
+    `dynamodb-repository.ts:188-189` sets `value: asNumber(row.listed_price)`
+    — universally null, coerced to `0` by `asNumber` (`:71-74`) — so tools
+    report a CONFIDENT ZERO rather than an absent value.
+  - `search_inventory`: `marketPrice` IS STRIPPED FROM THE OUTPUT ENTIRELY —
+    `CardResult` (`tools/search-inventory.ts:23-33`, built `:79-87`) has no
+    market-price field at all, only `currentValue: card.value` = 0. Its
+    `minValue`/`maxValue` filters compare against that 0, so any
+    `min_value > 0` matches nothing. This alone matches the owner's report
+    of chat prices being wrong.
+  - `get_inventory_summary` (`:33`) and `calculate_inventory_value`
+    (`:29-32`) both sum `value` -> `totalValue: 0`, never touching
+    `marketPrice`.
+  - `flag_underpriced_cards` (`:37-48`) drops every item where
+    `marketPrice <= 0` (the ~174 finish-mismatched items) and flags the
+    rump at `discountPercent: 100`, `listedPrice: 0` — actively misleading
+    output, not just an absent figure.
+  - `get_card_price_history` is the ONLY tool returning real prices — it
+    reads the `PRICE#` history rows the depth pass writes
+    (`dynamodb-repository.ts:128-150`) and bypasses `current_market_value`
+    entirely; it needs an exact `card_id`, obtainable only from
+    `search_inventory`'s `id`.
+  - `dynamodb-repository.ts:205` repeats the Python finish-mismatch bug
+    independently: `prices?.[String(row.finish)]?.market ?? 0` — a bare
+    exact match, no fallback.
+
+SCOPE:
+  - `search_inventory`'s `CardResult` gains a market-price field, populated
+    via a finish-aware fallback implemented against the SAME canonical
+    order as `models/inventory.py:199-202` `_MARKET_FINISH_FALLBACK` (see
+    the CONCURRENCY warning above — do not invent a different order).
+  - `dynamodb-repository.ts:205`'s bare exact-match lookup is replaced with
+    that same fallback chain.
+  - `get_inventory_summary`/`calculate_inventory_value` stop summing the
+    dead `listed_price`-derived `value` field; they use the corrected
+    market-price figure.
+  - `flag_underpriced_cards` stops treating a finish-mismatched null as a
+    100%-discount flag.
+  - ANY change to tool output shape goes through `shared/tool-contract.json`
+    and its contract test, `backend/tests/test_tool_contract.py` — the
+    schemas are pinned across the Python/TypeScript boundary; do not change
+    a tool's shape without updating the contract and its test together.
+
+ACCEPTANCE:
+  - A test pins that `search_inventory` returns a non-zero market price for
+    a fixture card priced only under a fallback finish (mirroring Phase
+    12's equivalent Python test — same fixture shape if practical, so the
+    two suites are provably testing the same contract).
+  - A test pins that `min_value`/`max_value` filtering in `search_inventory`
+    now matches against the real market price, not the dead `value` field.
+  - A test pins that `flag_underpriced_cards` no longer flags a
+    finish-mismatched (now-resolved) item as underpriced.
+  - `backend/tests/test_tool_contract.py` stays green, or is updated
+    alongside any deliberate shape change.
+  - Existing mcp-server suite stays green; outside-in TDD applies.
+  - Council Loop applies before this phase is marked DONE.
+
+NOT IN SCOPE: any change to `routers/inventory.py` or FastAPI endpoints
+(Phase 12/13/14's territory — different track, do not cross); Finding 11's
+condition-aware pricing (separate open decision).
+========================================================================
+
+========================================================================
+PHASE 16 — Public site data wiring
+========================================================================
+TRACK C (concurrent-safe with Tracks A/B) — confined to
+`routers/public.py` + `frontend/lib/public.ts` +
+`frontend/components/home/**` + `frontend/app/(public)/shows/**`. See the
+CONCURRENCY warning above about `frontend/next.config.ts`'s disputed
+attribution — resolve it before editing that file.
+
+PROBLEM 1 — past shows have no lower bound: `/shows` IS already DB-backed
+end to end (`frontend/app/(public)/shows/page.tsx`, revalidate 300 ->
+`lib/public.ts:40-44` -> `GET /public/shows` -> `routers/public.py:232-238`
+`_compute_shows` `:218-229` -> `repo.list_shows()` ->
+`dynamodb.py:1089-1092` `Query(PK="SHOWLIST")`). Splits upcoming/past on
+`_business_today()` (`public.py:186-188`). THE GAP: no lower bound on past
+shows — every past show ever recorded is returned and rendered
+(`page.tsx:119-125`). Owner wants past limited to the LAST 3 MONTHS. The
+existing test `test_public.py:473` seeds a show 20 days old, so a 90-day
+cutoff leaves it green — a NEW test seeding an older show is required to
+actually pin the cutoff.
+
+PROBLEM 2 — home page shows preview is 100% hardcoded:
+`frontend/components/home/ShowsPreview.tsx` is a sync component with
+hardcoded JSX (`:24-33`: "Seattle Trading Card Con", "AUG 14"), zero
+imports from `lib/public`, and no shared code with `/shows` — it
+re-implements the date badge inline instead of reusing
+`showBadge()`/`formatShowDate()` (`lib/public.ts:67,77`). Its own comment
+(`:6-10`) claims it is "sourced from DynamoDB SHOWLIST" — false today.
+`sections-bottom.test.tsx:27-33` asserts only the heading and link, not any
+data.
+
+PROBLEM 3 — featured cards: the BACKEND is already correct
+(`routers/public.py:268-297` — filters to `customer_visible_items`,
+resolves catalog cards, keeps only safe image URLs, sorts by price
+descending, dedupes, takes 5), but `frontend/lib/public.ts:87`'s
+image-host allowlist is `new Set(['images.pokemontcg.io'])` while every
+live card is on `assets.tcgdex.net` (4324/5472 sampled; zero on
+pokemontcg.io) — `FeaturedFinds.tsx:31-33` re-filters through this stale
+allowlist, empties the list client-side, and falls back to 4 bundled
+static images. `next.config.ts:10` ALREADY allows `assets.tcgdex.net`, so
+`lib/public.ts` is out of lockstep with both the backend AND its own
+next.config. No test anywhere asserts an `assets.tcgdex.net` URL survives
+the frontend filter (every test URL is `images.pokemontcg.io`); the
+backend has `test_featured_cards_accepts_tcgdex_hosted_images`
+(`test_public.py:213`) with no frontend mirror. `FeaturedFinds.tsx:10-11`
+also carries a stale comment blaming null card_ids, contradicted by the
+orphaned-card_id fix (6685a28).
+
+SCOPE:
+  - `_compute_shows`/`list_shows` (or the call site) gains a 90-day lower
+    bound on past shows.
+  - `ShowsPreview.tsx` becomes a data-driven component sourced from
+    `lib/public.ts`/`GET /public/shows`, reusing `showBadge()`/
+    `formatShowDate()` rather than reimplementing them.
+  - If there are no upcoming shows in the live table, seed ONE placeholder
+    show far enough in the future to stay upcoming for a long time, so
+    this can actually be verified working end to end (live data op — now
+    authorized per the OWNER DECISIONS addendum, after Council/tests
+    pass).
+  - `frontend/lib/public.ts:87`'s image-host allowlist is fixed to match
+    the backend's (`routers/public.py:87`: `{"assets.tcgdex.net",
+    "images.pokemontcg.io"}`) and `next.config.ts`, closing the drift.
+  - Resolve `next.config.ts`'s disputed attribution (per the CONCURRENCY
+    warning) before touching it further.
+  - Correct the stale comments in `ShowsPreview.tsx:6-10` and
+    `FeaturedFinds.tsx:10-11`.
+  - ADDED 2026-07-30 (owed by Phase 12's close-out, Section 6 LOG "PHASE 12
+    CLOSED — COUNCIL PASS, LIVE VERIFICATION DONE"): `routers/public.py:259`
+    also now carries a stale comment describing `_price` as "listed-first,"
+    which stopped being true once Phase 12 made `_price()` return
+    `current_market_value` outright. Deliberately left unfixed by Phase 12
+    (out of its file scope) — correct it as part of this phase's comment
+    cleanup pass, alongside the two above.
+
+ACCEPTANCE:
+  - A test seeds a show older than 90 days and pins that it is excluded
+    from `/public/shows`'s past list (extending, not replacing,
+    `test_public.py:473`'s existing 20-day-old fixture).
+  - A test pins `ShowsPreview` rendering real data from a mocked
+    `/public/shows` response, including the no-upcoming-shows path.
+  - A FRONTEND test mirroring
+    `test_featured_cards_accepts_tcgdex_hosted_images` pins that an
+    `assets.tcgdex.net` URL survives `isSafeImageUrl`/the frontend filter,
+    closing the untested gap.
+  - Existing suites stay green; outside-in TDD applies.
+  - Council Loop applies before this phase is marked DONE.
+
+NOT IN SCOPE: any inventory/search/MCP file (Tracks A/B's territory).
+========================================================================
+
+========================================================================
+PHASE 17 — Session/sign-out investigation and fix
+========================================================================
+TRACK D (concurrent-safe with Tracks A/B/C) — confined to the frontend
+auth/session layer, `routers/auth.py`, and Cognito configuration.
+PROMOTED out of the "DEFERRED — A SEPARATE TASK, AFTER ALL 7 PHASES" note
+at the bottom of Section 7 HANDOFF (see the superseding note left there
+pointing here) — the owner now wants this ADDRESSED, not deferred.
+
+PROBLEM: the owner reports being signed out far more often than expected;
+sessions should last much longer than they do. THIS IS GENUINELY
+UNDIAGNOSED — no audit has been run on it. Suspects, none yet confirmed:
+Cognito user-pool token/refresh-token lifetime and rotation settings, or
+the frontend not refreshing an expired ID token before it lapses.
+
+SCOPE:
+  - INVESTIGATION FIRST, before any fix is scoped further than this: check
+    the Cognito user-pool's token validity settings (ID/access/refresh
+    token lifetimes, refresh-token rotation), the frontend's session/
+    auth-layer configuration, and whether the frontend actually attempts a
+    refresh before an ID token expires or only discovers the expiry on a
+    failed request.
+  - Once the actual cause is identified, scope and implement the fix as a
+    follow-up within this same phase (do not split into a second phase
+    number for the fix — the investigation and the fix both live under
+    Phase 17).
+
+ACCEPTANCE:
+  - The investigation's findings (actual root cause, not a guess) are
+    recorded in Section 6 LOG before any fix is written.
+  - A test reproduces the premature-sign-out behavior against the
+    identified cause (e.g. a token-expiry test, a refresh-flow test)
+    failing RED before the fix, and passing GREEN after — outside-in TDD
+    applies even though this phase starts as an investigation.
+  - Existing suites stay green.
+  - Council Loop applies before this phase is marked DONE — treat any
+    finding about a customer being unexpectedly logged out (a functional
+    regression from the customer's point of view) as gating.
+
+NOT IN SCOPE: anything in Tracks A/B/C.
+========================================================================
+
+========================================================================
+PHASE 18 — Cross-boundary contract tests (the anti-recurrence phase)
+========================================================================
+Runs LAST, after Phases 12-17 land — or is folded piecemeal into each of
+those phases as they each touch their own drift channel (several are
+explicitly called out below as best done inline); Phase 18 is then the
+SWEEP that closes whatever remains, not a full rebuild from scratch.
+
+THIS PHASE EXISTS BECAUSE OF THE OWNER'S CORE COMPLAINT, RECORD THIS
+EXPLICITLY: every test on both sides of this codebase is currently
+self-referential — the frontend asserts its own query strings against
+constants copied from the frontend itself; the backend asserts filter
+logic against fixtures the backend test file invents. That is WHY the
+set_id composite-format break and the still-live rarity-vocabulary break
+both shipped through 100%-green suites (frontend 274/274, backend 875/875)
+while production returned zero results. Phase 18 is what makes that class
+of bug STRUCTURALLY IMPOSSIBLE TO REPEAT, not just fixes the current
+instances of it (Phases 12-17 do that).
+
+DUPLICATION FACTS TO CLOSE, each a silent drift channel — the phase most
+naturally responsible for each is noted; Phase 18 sweeps whatever those
+phases don't already close:
+  - Finish-aware price lookup, THREE places / TWO behaviors:
+    `models/inventory.py:205` `_market_price` (correct),
+    `catalog_sync.py:91` (broken),
+    `mcp-server/src/dynamodb-repository.ts:205` (broken). BEST CLOSED
+    inline by Phase 12 (Python side) and Phase 15 (TS side) — Phase 18
+    only needs to confirm no third copy exists anywhere and that both
+    sides demonstrably agree (see the CONCURRENCY warning's canonical
+    order).
+  - Visible-location allowlist duplicated by hand:
+    `routers/inventory.py:45` `_CUSTOMER_VISIBLE_LOCATIONS` and
+    `mcp-server/src/dynamodb-repository.ts:45` `PUBLIC_LOCATIONS`. Not
+    touched by any of Phases 12-17 — THIS IS PHASE 18's OWN WORK:
+    establish one source of truth (e.g. the Python enum exported into
+    `shared/tool-contract.json` or an equivalent generated/shared
+    constant) and have both sides consume it.
+  - Image-host allowlist duplicated and ALREADY DRIFTED:
+    `routers/public.py:87` vs. `frontend/lib/public.ts:87`. CLOSED inline
+    by Phase 16 for the immediate drift; Phase 18 adds the structural
+    guard (a test asserting the two lists are equal, or a single generated
+    source) so it can't silently drift a second time.
+  - Shard count duplicated: backend `INVENTORY_SHARD_COUNT` (=10,
+    `services/dynamodb.py:54`) vs.
+    `mcp-server/src/dynamodb-repository.ts:30` `SHARD_COUNT = 10`. Not
+    touched by Phases 12-17 — THIS IS PHASE 18's OWN WORK.
+  - Condition/Language vocabularies in FOUR places: Python enums
+    (`models/inventory.py:28-36`, `:38-52`), hardcoded TS arrays
+    (`FilterPanel.tsx:62-68`, `:72-76`), and TS unions
+    (`frontend/lib/inventory.ts:9`, `:34`). Phase 13 replaces the
+    FilterPanel hardcoding with facets-endpoint-driven values (removing
+    two of the four copies); Phase 18 sweeps whatever's left (the
+    `lib/inventory.ts` unions) and decides whether they can be derived
+    from the facets response's runtime shape rather than hand-maintained.
+
+SCOPE (the sweep, after 12-17):
+  - Audit for any remaining hardcoded vocabulary/allowlist/constant that
+    exists in more than one place across the Python/TypeScript boundary
+    and consolidate each to one source of truth (shared JSON contract,
+    generated constant, or an endpoint the other side queries — pick
+    per-case, record the choice).
+  - Add tests that assert the FRONTEND's value vocabularies (rarity, set,
+    condition, language) against REAL catalog data (e.g. a snapshot of
+    live-shaped fixture data pulled through the same code path the app
+    uses) rather than against frontend-only constants — this is the
+    direct fix for the self-referential-test problem named in the owner's
+    complaint.
+  - Add a cross-boundary test (or a pair of mirrored tests, one per
+    language) for at least the finish-price fallback and the visible-
+    location allowlist, proving both languages agree, not just that each
+    agrees with itself.
+
+ACCEPTANCE:
+  - For each duplication fact above, either a single source of truth
+    exists, or an explicit equality test pins both copies staying in
+    sync, with a clear comment at each copy pointing to its counterpart.
+  - At least one frontend test is rewritten to assert against realistic
+    catalog-shaped fixture data (e.g. a TCGdex-format rarity string, an
+    `en:`-prefixed set id) rather than a frontend-only constant,
+    demonstrably the kind of test that WOULD have caught the set-id and
+    rarity breaks.
+  - Existing suites stay green; outside-in TDD applies.
+  - Council Loop applies before this phase is marked DONE.
+
+NOT IN SCOPE: introducing new product behavior — this phase is exclusively
+about closing drift channels and improving test fidelity, not adding
+features.
+========================================================================
+
+========================================================================
+PHASE 19 — Condition-aware pricing
+========================================================================
+ADDED 2026-07-30. TRACK A, inserted between Phase 12 and Phase 13 (see the
+CONCURRENCY subsection above, updated by this entry). OWNER-DECIDED
+2026-07-30 — see the OWNER DECISIONS addendum near the top of this file
+and Section 6 LOG "OWNER DECISION — CONDITION-AWARE PRICING APPROVED."
+Resolves FINDING 11 (Section 6 LOG) and the OPEN DECISION Phase 12
+explicitly left untouched ("condition never touches price resolution
+before or after this phase's fix").
+
+*** STATUS UPDATE 2026-07-30 (SAME DAY) — STEP 1 (research) IS DONE AND
+STEP 2 (owner sign-off) IS CLOSED. See Section 6 LOG "CONDITION-PRICING
+RESEARCH COMPLETE — MULTIPLIERS APPROVED" for the full findings. Phase 19
+is now unblocked to implement whenever Track A reaches it; its only
+remaining prerequisite is Phase 12's shared price helper existing first.
+THE APPROVED SPEC (owner adopted the researched table AS-IS):
+    NM  1.00  (anchor)
+    LP  0.82
+    MP  0.58
+    HP  0.33
+    DMG 0.15
+  `+`/`-` = midpoint between own tier and the adjacent tier in that
+  direction (e.g. LP+ = midpoint(0.82, 1.00) = 0.91; LP- =
+  midpoint(0.82, 0.58) = 0.70). NM+ and DMG- are OPEN EDGE CASES with no
+  adjacent tier in that direction — RECOMMENDATION: clamp both to their
+  base tier's multiplier (NM+ = 1.00, DMG- = 0.15), but this is an
+  explicit decision to implement and test, not a silent default (added to
+  ACCEPTANCE below). CONFIDENCE IS MEDIUM, NOT HIGH — these are triangulated
+  launch defaults, not measured constants; carry that framing into any
+  owner/customer-facing description of the feature. THE AGE/ERA DIMENSION
+  DESCRIBED AS A HYPOTHESIS BELOW IS DROPPED, NOT DEFERRED — do not
+  implement it; it is revisitable only if the owner later observes vintage
+  played stock being systematically mispriced. Read the STEP 1/STEP 2/
+  HYPOTHESIS bullets in SCOPE below for the original framing (kept intact
+  as history); this status block is the current, authoritative answer. ***
+
+PROBLEM. Our price source is finish-keyed, not condition-keyed. TCGdex
+relays TCGplayer USD / Cardmarket EUR as ONE market figure per finish
+(`TCGDEX_FINISH_MAP`, `services/tcgdex.py:77-81`), and that figure is
+effectively a Near Mint price. `Condition` (`models/inventory.py:28-36`)
+is stored on every item and used for filtering and display but NEVER
+enters price resolution. Consequence: a Damaged card displays the same
+price as a Near Mint one, on a money-facing customer surface. The owner's
+"average LP and NM" framing cannot be implemented literally — there is no
+LP price to average, only one price per finish — so the mechanism must be
+a multiplier applied to the market figure, with the multiplier values
+coming from the research step below.
+
+SCOPE:
+  - STEP 1, MANDATORY, BEFORE ANY CODE: a `web-browser` agent research
+    pass (the project's live-internet research specialist). ALREADY IN
+    FLIGHT as of this session, dispatched by the orchestrator — do not
+    re-dispatch it; pick up its findings when it returns. Its output must
+    be a recommended multiplier table keyed to our ACTUAL `Condition` enum
+    members (not a generic hobby scale), an evidence verdict on the
+    age/era dimension (see the hypothesis below — confirm, refute, or
+    refine it, with the era boundary quantified if it holds), a verdict on
+    `+`/intermediate-modifier handling (the owner's proposed
+    midpoint-between-adjacent-tiers, e.g. LP+ = average of LP and NM —
+    check whether the real market curve is linear enough for a midpoint to
+    be correct, or whether it needs a different interpolation), and a
+    per-recommendation confidence rating with an explicit list of gaps/
+    unknowns. It must also cover: observed price ratios by condition as a
+    % of Near Mint; whether card value/rarity changes the penalty; how
+    comparable marketplaces implement condition pricing; and the
+    Cardmarket (MT/NM/EX/GD/LP/PL/PO) vs TCGplayer (NM/LP/MP/HP/DM) scale
+    mismatch, since both are ingested and must map onto ONE multiplier
+    table.
+    *** STEP 1 STATUS: DONE, 2026-07-30 — see the STATUS UPDATE block above
+    and Section 6 LOG for the full findings and the approved table. ***
+  - HYPOTHESIS, NOT A REQUIREMENT: card age/era may change the correct
+    discount — the common hobby claim is that vintage cards hold value in
+    played condition far better than modern cards do. The research must
+    test this against real evidence before it becomes part of the
+    implementation. Do not hardcode an age/era dimension unless the
+    research substantiates it.
+    *** RESOLVED 2026-07-30: NOT SUPPORTED by the research (no source
+    quantifies a vintage/modern multiplier difference; a 2026 PLOS ONE
+    study found no age interaction; the one real shipped formula that
+    treats vintage differently penalizes it MORE steeply, the opposite
+    direction). Also blocked by CatalogCard having no release_date/era
+    field. The owner DROPPED this dimension — not deferred pending more
+    data. Do not implement it. See Section 6 LOG for full detail. ***
+  - STEP 2: OWNER SIGN-OFF ON THE MULTIPLIER VALUES — A HARD GATE. The
+    owner has approved the CONCEPT of condition-based pricing, not any
+    specific numbers. Because this directly changes prices shown to
+    customers, the actual multipliers must be confirmed by the owner
+    before implementation, and the research's confidence ratings and gaps
+    must be surfaced to them explicitly — not buried in an agent report.
+    *** STEP 2 STATUS: CLOSED, 2026-07-30 — the owner reviewed the
+    research and adopted the table AS-IS (see the STATUS UPDATE block
+    above). This gate no longer blocks implementation. ***
+  - STEP 3: implementation, under outside-in TDD (RED first, confirm it
+    fails, then GREEN). The condition adjustment must be applied INSIDE
+    the single shared finish-aware price helper Phase 12 establishes — NOT
+    bolted on at a call site, and NOT duplicated. NOTE THE CROSS-TRACK
+    REQUIREMENT: Track B/Phase 15 resolves prices independently in
+    `mcp-server/src/dynamodb-repository.ts` (TypeScript, reads DynamoDB
+    directly, shares no code with the Python backend). The condition
+    adjustment has to reach that path too, or the Bedrock chat will quote
+    a different price than the website for the identical item — the exact
+    class of bug this whole rebuild exists to kill. Flag this explicitly
+    as a cross-track coordination requirement, not an afterthought.
+  - IMPLEMENTER DECISION, WITH THE TRADEOFF RECORDED, COUNCIL TO RULE ON
+    IT: where does the adjustment apply — at denormalization time (stored
+    on the item, e.g. baked into `current_market_value`) or at read time
+    (computed per response)? Storing it means a multiplier change requires
+    a re-run over all items to take effect; computing it at read time means
+    the stored `current_market_value` and the displayed price differ,
+    which is its own source of confusion (e.g. for the Est. value
+    dashboard, Phase 12's Problem 3). Leave the choice to the implementer
+    but require the Council Loop to explicitly rule on it rather than let
+    it pass silently.
+  - VISIBILITY REQUIREMENT: the adjustment must be VISIBLE to both the
+    customer and the owner, not silent. The existing `value_note` field is
+    the natural carrier — it already carries FX-conversion and staleness
+    notes (see Section 1/D3 and Section 5). A customer seeing a reduced
+    price must be able to tell it was condition-adjusted; the owner
+    auditing prices must be able to tell the same thing.
+
+ACCEPTANCE:
+  - Every `Condition` member (`models/inventory.py:28-36`) resolves to a
+    defined multiplier with no silent fallthrough (an unhandled condition
+    must fail loudly, not default to 1.0 unnoticed).
+  - A test pins each tier's multiplier against the shared price helper.
+  - ADDED 2026-07-30: a test pins the NM+ edge case (no tier above NM) and
+    a test pins the DMG- edge case (no tier below DMG) to explicit,
+    documented behavior (RECOMMENDED: clamp both to their base tier's
+    multiplier — NM+ = 1.00, DMG- = 0.15) rather than an undefined or
+    silently-defaulted result.
+  - The website (`routers/inventory.py`) and the MCP chat
+    (`mcp-server/src/dynamodb-repository.ts`) quote the SAME
+    condition-adjusted price for the same item — a cross-boundary test or
+    mirrored tests per Phase 18's pattern.
+  - `value_note` records the adjustment on any item where it was applied.
+  - Existing suites stay green; outside-in TDD per CLAUDE.md applies
+    throughout (RED first, confirm it fails, then GREEN).
+  - Council Loop applies before this phase is marked DONE — this is a
+    money-facing behavior change, squarely in the "convene" category per
+    the Council Budget Rule (Section 5), and the Council must explicitly
+    rule on the denormalization-time-vs-read-time tradeoff above.
+
+NOT IN SCOPE: graded slabs (Phase 4, still paused — graded pricing is a
+per-grade problem sourced from PriceCharting, a different mechanism than a
+raw-condition multiplier, and must not be conflated with this phase). Also
+out of scope: sourcing real per-condition prices from a different provider
+(e.g. TCGplayer's own per-condition listings) — that approach was
+considered and set aside in favor of the multiplier approach; it is the
+recorded FALLBACK if the research in Step 1 concludes multipliers cannot
+be made accurate enough to trust.
 ========================================================================
 
 ========================================================================
@@ -2373,10 +3666,1013 @@ Q5. RESOLVED/MOOT — the sheet is NOT mostly sold; see Section 2's Data block. 
   import (`--singles-only`) will apply this fix to live data. That is the
   owner's call — this commit fixes the CODE, not the stored data. ***
 
+2026-07-29  BUG — SET DROPDOWN RETURNED ZERO RESULTS FOR EVERY SET (FIXED)
+  NOT a roadmap checkbox. Found during the owner's manual verification of the
+  live site while Phase 7 (verify + hand off) was otherwise complete. Singles
+  only, so in scope for this rebuild.
+  SYMPTOM: on the customer-facing /inventory filter search, picking ANY set
+  from the Set dropdown returned "no cards found" — silently, with no error,
+  in production.
+  ROOT CAUSE: the SAME language-composite mismatch as the orphaned-card_id
+  blocker above, on the OTHER side of the wire. frontend/components/inventory/
+  FilterPanel.tsx hardcoded a SETS array of bare pokemontcg.io-style set ids
+  (`base1`, `swsh1`, `sv1`, `sv3pt5`) that were correct for the OLD catalog
+  source. This rebuild migrated to TCGdex, where CatalogCard.set_id is
+  build_card_id(language, raw_tcgdex_set_id) — a language-prefixed composite
+  (services/tcgdex.py:463-469). routers/inventory.py:154-158 looks the value up
+  verbatim (repo.list_cards_by_set(set_id), then matches item.card_id against
+  that set's card ids), so a bare id matched zero catalog rows every time. Two
+  sets also had a TCGdex spelling change on top of the missing prefix.
+  GROUND TRUTH used for the fix: the owner scanned the LIVE DynamoDB catalog
+  table (~31,600 catalog_card rows) and matched each curated set on exact
+  set_name. All 14 ids gained the `en:` prefix; `sv1` → `en:sv01` and
+  `sv3pt5` → `en:sv03.5` also changed spelling.
+  FIX: values-only change to the SETS array in FilterPanel.tsx, plus its
+  explanatory comment (now records the composite-id rule and the live-scan
+  provenance). No logic, no component, no backend change — the frontend was
+  already sending the right PARAM (`set_id`), just the wrong VALUES.
+  TDD: RED first, per CLAUDE.md. FilterPanel.test.tsx previously pinned only
+  one set (`Base` → `base1`), which is why this shipped. It now carries an
+  EXPECTED_SET_IDS table pinning ALL 14 label→id pairs (it.each), a shape guard
+  asserting no id can regress to a bare non-`en:` value, and a guard asserting
+  the dropdown offers exactly the 14 curated labels so a future option cannot
+  be added without an id mapping. 16 assertions failed against the unfixed
+  source, then passed after it.
+  Suite: frontend 274 passed / 41 files, 0 failed; `npm run lint` clean.
+  (ChatPanel.test.tsx intermittently times out at 5000ms under parallel load —
+  pre-existing, verified against pristine HEAD, unrelated; passes in isolation.)
+  FOLLOW-UP, NOT FIXED HERE (deferred by the owner, already documented — see
+  the Phase 2/3 notes near lines 452-454 and the Phase 1 Council note at ~1136,
+  do not re-litigate): every live catalog card still has `rarity: null` and
+  every inventory item `current_market_value`/`listed_price: null`, because the
+  Tier-2 TCGdex depth pass (`refresh_held_prices`, RFC 0003 §7) has never been
+  built. So the Rarity dropdown and the price-range inputs remain no-ops in
+  production even now that Set works. A one-line comment marking that was added
+  above RARITIES in FilterPanel.tsx; the RARITIES values themselves are
+  untouched. Both start working when the depth pass ships.
+
+2026-07-30  PHASE 9 CLOSED — PRICE & RARITY DEPTH PASS, COUNCIL PASS + DOC PASS.
+  DONE. Council PASS on revision 2 (`.claude/council/verdict.md`); this entry
+  additionally records the documentation-alignment pass that followed.
+  BUILT: `refresh_held_prices(repo, client, today, *, request_delay_seconds=0.1,
+  max_consecutive_failures=25)` in `services/catalog_sync.py` — the Tier-2 depth
+  pass RFC 0003 §7 specified, fetching per-card rarity + prices from TCGdex for
+  held raw inventory. Wired into `run_daily_sync`, which now takes a `client`
+  and runs the depth pass FIRST (so the same-day denormalization step sees
+  fresh prices, not yesterday's). Supporting changes: a catalog-lock domain in
+  `dynamodb.py` (`acquire_catalog_lock`/`release_catalog_lock`/
+  `current_catalog_generation`/`CatalogReseedInProgressError`, sharing one
+  extracted lock algorithm with the pre-existing import lock);
+  `upsert_catalog_card_preserving_prices`; `parse_card_id` +
+  `LANGUAGE_BY_API_CODE` + `_optional_text`/`_text_list` in `tcgdex.py`;
+  `catalog_price_stale_days: int = 30` in `config.py`; and exit codes
+  `EXIT_OK=0`/`EXIT_ABORTED=1`/`EXIT_SKIPPED=2` plus a `_report()` helper in
+  `scripts/daily_sync.py`.
+  COUNCIL HISTORY: revision 1 FAILED on two gating findings, both
+  delta-introduced by this diff — BLOCKING-1 (Contrarian, data loss): an HTTP
+  200 whose `pricing` block yields no band returned `prices={}` from
+  `to_catalog_card` and raised nothing, so the whole-item `put_item` erased a
+  card's stored price bands while reporting a clean success, violating RFC
+  0003 §7's "never deletes, zeroes, or nulls an existing price"; BLOCKING-2
+  (Chaos, operational safety): `daily_sync.main()` returned 0 unconditionally,
+  so the two new complete-normally-while-doing-nothing states (`aborted`,
+  `skipped`) were invisible to any exit-code monitor. Revision 2 fixed both —
+  BLOCKING-1 at the repository seam (`upsert_catalog_card_preserving_prices`
+  omits `prices` from the update expression when the incoming map is empty,
+  one `update_item`, not a caller-side read-then-merge) and BLOCKING-2 via the
+  new 0/1/2 exit-code table — and PASSED. Carried-forward, non-gating N3-N8
+  are recorded in the Phase 9 entry above (Section 3) and were NOT
+  re-litigated or patched this round, per the Judge's explicit instruction;
+  N3 is flagged there as a hard prerequisite before Phase 2's reseed side is
+  ever wired.
+  OWNER DECISIONS (both permanent policy): graded slabs are excluded from
+  this pass entirely (`_held_card_ids` filters `item.kind == "raw"`) — a
+  slab's price and its rarity both come from the PSA cert API +
+  PriceCharting once Phase 4 resumes, so a slab-only-held card keeps
+  `rarity: null` until then, by design; a TCGdex 404 on a held card counts as
+  a skip (`not_found`), not a failure, so retired cards can never abort a
+  healthy run.
+  DOC-ALIGNMENT PASS (this entry): `docs/rfcs/0003-tcgdex-catalog-data-layer.md`
+  §7 gained four "Resolved" blockquotes (the `kind=="raw"` narrowing, 404
+  handling, the `no_usable_price`/`upsert_catalog_card_preserving_prices`
+  policy including the Judge's "we accept per-finish drops as the price of
+  card-level provider preference" framing) and §8 gained one (the lock is
+  half-built — reseed side unwired, `current_catalog_generation()` always
+  `None` in production today — plus N3 restated as a hard prerequisite). The
+  code-interface-sketch appendix (~line 800, previously showing a stale
+  `fx_rate`-parameter signature and three `dynamodb.py` functions that were
+  never built — `finalize_catalog`/`count_by_entity`/`delete_entities`) was
+  reconciled to the shipped signatures and to what actually exists
+  (`set_catalog_generation`/`current_catalog_generation`/
+  `acquire_catalog_lock`/`release_catalog_lock`/`purge_card_data`), with a
+  blockquote explaining why it drifted rather than silently rewriting it.
+  `catalog_sync.py`'s module docstring and `daily_sync.py`'s module docstring
+  were both checked against the shipped behavior (a grep for the old
+  "No catalog fetching happens here" / "touches no upstream API at all"
+  phrasing turned up zero matches) — the code-writer had already brought both
+  current during implementation, so no further correction was needed there.
+  `backend/README.md`'s "Daily sync" section still described the pre-Phase-9
+  three-step, no-upstream-API job; it was rewritten to include the depth pass
+  as the load-bearing first step, the new exit codes, and the two owner
+  decisions, plus a `CATALOG_PRICE_STALE_DAYS` row added to the config table.
+  A one-line stale code comment above `RARITIES` in
+  `frontend/components/inventory/FilterPanel.tsx` (written before Phase 9
+  shipped, saying the depth pass would start matching "once it ships") was
+  reworded to reflect that the code has shipped but not yet run against live
+  data. No executable logic, signature, or config value was touched in this
+  pass — docs, docstrings, and comments only.
+  FINAL VERIFIED STATE: backend 875 passed / 7 skipped / 0 failed; frontend
+  274 passed; mcp-server 73 passed; `ruff check backend/src` clean; `cd
+  frontend && npm run lint` clean.
+  RELEASE-READINESS NOTE (Council Judge, not a gate, not yet acted on):
+  nothing in this phase has run against live data. The first real signal is
+  `no_usable_price`'s value on the first supervised production run — a
+  figure near ~300 (most of the held set) warrants investigation before
+  trusting the depth pass.
+
+2026-07-30  FIRST LIVE PRODUCTION RUN OF `refresh_held_prices`. The depth
+  pass was run against live `merlins-cards` (us-east-1) via `python
+  scripts/daily_sync.py`. VERBATIM result:
+      cards_updated: 230
+      failures: 0
+      not_found: 0
+      unparsable_card_ids: 0
+      no_usable_price: 36
+      aborted: False
+      graded_points_written: 0
+      sealed_points_written: 0
+      items_refreshed: 40
+      OK: all steps completed.   EXIT CODE: 0
+  *** THIS CLOSES THE COUNCIL'S RELEASE-READINESS ITEM *** recorded on the
+  Phase 9 entry directly above: `no_usable_price` came in at 36/230 (~16%),
+  far below the ~300 "nearly every card" figure the Judge named as the
+  threshold for suspecting a broken price mapping. Zero failures, zero
+  404s (`not_found`), zero `unparsable_card_ids`. Spot-checked cards now
+  carry real data where every one was `null` before: `en:base1-10` -> rarity
+  `Rare`, holofoil `$77.73`; `en:2021swsh-25` -> holofoil `$27.11`, normal
+  `$2.42`.
+  TWO OPERATIONAL FACTS DISCOVERED BY RUNNING IT LIVE, neither a code bug:
+  - THE SCRIPT CANNOT BE RUN LOCALLY WITHOUT `PYTHONPATH=src`. This checkout
+    is a git worktree and a global editable pip install shadows it (see
+    MEMORY.md "Worktree editable-install shadowing", and the same family of
+    trap hit during the live wipe, LOG 2026-07-28) — a bare `python
+    scripts/daily_sync.py` from backend/ fails with `ModuleNotFoundError: No
+    module named 'merlins_collection.services.tcgdex'` because it resolves
+    to the SIBLING repo's backend/src instead of this worktree's. CORRECT
+    INVOCATION, from backend/: `PYTHONPATH=src python scripts/daily_sync.py`.
+    This is a local-environment trap only; it would not affect a container
+    deploy.
+  - NOTHING SCHEDULES THIS JOB YET. No cron, ECS scheduled task, or
+    EventBridge rule exists. It only runs when invoked by hand. Flagged as
+    an OPEN DEPLOYMENT ITEM — someone needs to wire a schedule before this
+    depth pass keeps prices fresh on its own rather than only when a human
+    remembers to run it.
+
+2026-07-30  NOTED, NOT FIXED — LITERAL STRING "None" AS RARITY FOR SEVERAL
+  CARDS. Several cards return the literal string `"None"` (a 4-character
+  string, not a real null) as their `rarity` from TCGdex — confirmed on
+  `en:2012bw-7`, `en:2019sm-3`, `en:2021swsh-25`. This is upstream TCGdex
+  data quality, not a mapping bug on our side, so there is nothing wrong in
+  our own sync code to fix. Left NOTED, NOT FIXED: it will surface as a
+  literal "None" option in the customer-facing Rarity dropdown (the same
+  dropdown flagged as a no-op until Phase 9 shipped — LOG 2026-07-29 "BUG —
+  SET DROPDOWN..." FOLLOW-UP; Phase 9 has since shipped and run live per the
+  entry directly above, so this is now a live, reachable display issue, not
+  a dormant one) and will read as a defect to a customer even though it's
+  accurate upstream data. Needs handling at DISPLAY time (e.g. filter the
+  literal string "None" out of the dropdown's option list, or map it to a
+  friendlier label) whenever someone next touches FilterPanel.tsx or the
+  rarity-list endpoint — not urgent enough to be its own phase, recorded here
+  so it isn't rediscovered from scratch.
+
+2026-07-30  OWNER BUG REPORT — FRONTEND WAS NEVER TESTED AGAINST THE
+  DATABASE REDESIGN. (Third LOG entry this day, after "FIRST LIVE PRODUCTION
+  RUN OF `refresh_held_prices`" and "NOTED, NOT FIXED — LITERAL STRING
+  'None'..." immediately above.) The owner is annoyed that the database
+  redesign proceeded without regard for the frontend, that DB changes broke
+  the frontend, and that NOTHING flagged any of it. Four read-only audits
+  ran this session to scope the complaint (not to fix anything) — this entry
+  records their findings as the justification for seven new phases, PHASE 12
+  through PHASE 18, added to Section 3 immediately after Phase 11 (with a
+  CONCURRENCY subsection ahead of them). See those phases for full
+  PROBLEM/SCOPE/ACCEPTANCE detail; this entry is the evidentiary record.
+
+  THE STRUCTURAL POINT — record this prominently, it is the meta-finding,
+  not just a list of bugs: every test on both sides of this codebase is
+  self-referential. Frontend tests assert the frontend's own query string
+  against constants copied from the frontend itself; backend tests assert
+  filter logic against fixtures the backend test file invents (e.g.
+  set_id="sv1", rarity="Common" — never real TCGdex-shaped data). When the
+  catalog migrated from pokemontcg.io to TCGdex and set_id became a
+  language-prefixed composite (en:base1), BOTH suites stayed 100% green
+  (frontend 274 passed, backend 875 passed) while every set search returned
+  zero in production. The IDENTICAL unfixed failure class sits in the
+  rarity vocabulary RIGHT NOW and the suites are STILL green. Phase 18
+  exists specifically to make this class of bug structurally impossible to
+  repeat.
+
+  DUPLICATION FACTS (each a silent drift channel, closed piecemeal by
+  Phases 12/13/15/16 and swept by Phase 18):
+    - Finish-aware price lookup in THREE places, TWO behaviors:
+      models/inventory.py:205 `_market_price` (CORRECT, has the fallback
+      chain), services/catalog_sync.py:91 (BROKEN, bare exact match),
+      mcp-server/src/dynamodb-repository.ts:205 (BROKEN, bare exact match).
+    - Visible-location allowlist duplicated by hand:
+      routers/inventory.py:45 `_CUSTOMER_VISIBLE_LOCATIONS =
+      frozenset({"glass","toploader"})` and
+      mcp-server/src/dynamodb-repository.ts:45 `PUBLIC_LOCATIONS`.
+    - Image-host allowlist duplicated and ALREADY DRIFTED: routers/public.py:87
+      has `{"assets.tcgdex.net","images.pokemontcg.io"}` but
+      frontend/lib/public.ts:87 has ONLY `images.pokemontcg.io`.
+    - Shard count duplicated: backend `INVENTORY_SHARD_COUNT` (=10,
+      dynamodb.py:54) vs. `dynamodb-repository.ts:30 SHARD_COUNT = 10`.
+    - Condition/Language enums exist in Python (models/inventory.py:28-36,
+      :38-52) AND as hardcoded TS arrays (FilterPanel.tsx:62-68, :72-76)
+      AND as TS unions (frontend/lib/inventory.ts:9, :34).
+
+  THE 13 VERIFIED FINDINGS (measured/read this session, file:line-cited;
+  see Phases 12-18 for the scoped response to each):
+    FINDING 1 (-> Phase 12): one root cause behind three reported symptoms
+      (price filter, $0 Est. value, chat prices) is the finish-mismatch
+      write-path bug catalog_sync.py:87-92 vs. the correct read-path
+      fallback in models/inventory.py:199-233 — 213/253 raw items with a
+      card_id have a null current_market_value, 174 of those from this
+      mismatch, 39 genuinely priceless. Contributing upstream cause:
+      spreadsheet_import.py:474/:746 hardcode finish="normal" on every raw
+      item. listed_price is null on every item by design (D3, Section 1).
+    FINDING 2 (-> Phase 12): the price-range filter's query path is fully
+      correct end to end (FilterPanel.tsx:241-254,
+      normalizePriceRange:80-89, buildSearchQuery
+      frontend/lib/inventory.ts:140-149, routers/inventory.py:112-113); the
+      defect is the `_price()` predicate at routers/inventory.py:74-76 /
+      148-151 preferring the permanently-dead `listed_price` over
+      `current_market_value`, so any price bound wipes the inventory.
+      Currently PINNED by a passing test,
+      backend/tests/routers/test_inventory.py:672-687 — that test encodes
+      the bug and must be rewritten, not preserved.
+    FINDING 3 (-> Phase 13): the set filter is dead — the stored set_id is
+      the `en:`-prefixed TCGdex composite (tcgdex.py:233-239
+      build_card_id) but the dropdown (FilterPanel.tsx:23-38) sends bare
+      pokemontcg.io-era ids. THE FIX EXISTS but is UNCOMMITTED,
+      working-tree-only, held per this file's line ~2960 — HEAD ships
+      zero-match ids; this is UNDEPLOYED, not a regression. Separately, the
+      dropdown is only 14 hardcoded sets; owner wants all ~91 DB-tracked
+      sets, alphabetical, in a type-to-narrow combobox (explicitly not
+      free-text search).
+    FINDING 4 (-> Phase 13): rarity mismatches, three causes — wrong
+      vocabulary (FilterPanel.tsx:45-58 pokemontcg.io spellings vs.
+      TCGdex's actual strings, compared with `==` at
+      routers/inventory.py:171-176, same bug class as the set ids); rarity
+      populated only on the ~230 depth-pass-touched raw catalog rows
+      (catalog_sync.py:141-147), so graded slabs keep rarity: null; literal
+      "None" strings stored verbatim (tcgdex.py:550, already logged
+      2026-07-30 above). The stale FilterPanel.tsx:41-44 comment calling
+      rarity a no-op is now itself out of date.
+    FINDING 5 (-> Phase 13): all four dropdowns are hardcoded; no facets
+      endpoint exists anywhere. Full route table: /auth/me,
+      /inventory/search, /inventory/summary, /chat/, /health,
+      /public/shows, /public/featured-cards. The only distinct-value
+      computation is sets_tracked (a COUNT, routers/inventory.py:226), not
+      a list. repo.iter_catalog_cards() (dynamodb.py:874-886) is a full
+      scan marked import-time-only, so a facets endpoint needs a
+      caching/derivation strategy, not a scan per request. Owner
+      requirement: every rarity/condition/set/language present in the DB
+      must appear, and nothing absent from the data may appear.
+    FINDING 6 (-> Phase 12): Est. value = $0. inventory_summary
+      (routers/inventory.py:196-232) sums the STORED current_market_value
+      ?? listed_price directly and never calls
+      _market_price/CardSummary.from_catalog, unlike _enrich (:264-266) on
+      the search path. Every addend is null -> Decimal(0) -> rendered
+      "$0.00" by formatPrice (frontend/lib/inventory.ts:187), not "Price
+      N/A". ONE THING NOT VERIFIABLE STATICALLY: whether the ~40 items that
+      DO have a current_market_value are outside
+      _CUSTOMER_VISIBLE_LOCATIONS or something else is wrong — flagged as a
+      REQUIRED LIVE VERIFICATION STEP inside Phase 12, not assumed away.
+      map_location() (spreadsheet_import.py:224-249) passes unrecognized
+      location values through silently, a likely candidate.
+    FINDING 7 (-> Phase 15): Bedrock chat sees no prices. The MCP server
+      reads DynamoDB directly (mcp-server/src/dynamodb-repository.ts),
+      sharing none of the Python price helpers. value/marketPrice
+      (repository.ts:9-25); dynamodb-repository.ts:188-189 sets
+      value: asNumber(row.listed_price) -> universally null -> coerced to
+      0. search_inventory's CardResult (tools/search-inventory.ts:23-33,
+      :79-87) has NO market-price field at all, only currentValue=0, so
+      any min_value>0 matches nothing — matches the owner's report
+      directly. get_inventory_summary/calculate_inventory_value both sum
+      value -> 0. flag_underpriced_cards drops every finish-mismatched item
+      and flags the rump at 100% discount / listedPrice 0.
+      get_card_price_history is the only tool with real prices (reads
+      PRICE# rows directly, needs an exact card_id from search_inventory).
+      dynamodb-repository.ts:205 repeats the finish-mismatch bug
+      independently. Tool schemas are pinned by shared/tool-contract.json +
+      backend/tests/test_tool_contract.py — any shape change must go
+      through that contract.
+    FINDING 8 (-> Phase 16): /shows is already DB-backed end to end
+      (page.tsx -> lib/public.ts:40-44 -> GET /public/shows ->
+      routers/public.py:232-238 _compute_shows -> repo.list_shows() ->
+      dynamodb.py:1089-1092), ~28 live SHOWLIST rows, preserved by the
+      wipe. THE GAP: no lower bound on past shows — every past show ever
+      recorded is returned (page.tsx:119-125). Owner wants past limited to
+      the LAST 3 MONTHS. test_public.py:473 seeds a 20-day-old show, so a
+      90-day cutoff leaves it green; a new older-show test is required to
+      actually pin the cutoff.
+    FINDING 9 (-> Phase 16): the home page "Catch us at a card show" widget
+      (ShowsPreview.tsx) is 100% hardcoded JSX (:24-33), zero imports from
+      lib/public, no shared code with /shows (reimplements the date badge
+      instead of reusing showBadge()/formatShowDate(), lib/public.ts:67,77).
+      Its own comment (:6-10) falsely claims it's "sourced from DynamoDB
+      SHOWLIST." No data tests exist. Owner requirement: pull it from the
+      database; if there are no upcoming shows, seed a far-future
+      placeholder show so this is actually verifiable.
+    FINDING 10 (-> Phase 16): the "peek at the collection" BACKEND is
+      already correct (routers/public.py:268-297 — visible items,
+      safe-image filter, price-descending sort, dedupe, top 5). THE BUG IS
+      THE FRONTEND: frontend/lib/public.ts:87's image-host allowlist is
+      {'images.pokemontcg.io'} only, while every live card (4324/5472
+      sampled, zero on pokemontcg.io) is on assets.tcgdex.net.
+      FeaturedFinds.tsx:31-33 re-filters through this stale allowlist,
+      empties the list, and falls back to 4 bundled static images.
+      next.config.ts:10 ALREADY allows assets.tcgdex.net, so lib/public.ts
+      is out of lockstep with both the backend AND its own next.config.
+      next.config.ts is currently modified-uncommitted with disputed
+      attribution (previously blamed on a concurrent RFC 0002 model) —
+      Phase 16/Track C must resolve that before touching it further. No
+      frontend test asserts an assets.tcgdex.net URL survives the frontend
+      filter; the backend has test_featured_cards_accepts_tcgdex_hosted_images
+      (test_public.py:213) with no frontend mirror. FeaturedFinds.tsx:10-11
+      also carries a stale comment blaming null card_ids, contradicted by
+      the orphaned-card_id fix (6685a28).
+    FINDING 11 (-> OPEN DECISION, recorded in Phase 12's text, not
+      independently phased): owner asked whether prices are condition-aware
+      (an LP card should differ from NM; LP+ should average LP and NM).
+      ANSWER: NO, nowhere. TCGdex's pricing block is keyed by FINISH
+      (tcgdex.py:77-81 TCGDEX_FINISH_MAP), not condition, and is
+      effectively a near-mint figure; Condition (models/inventory.py:28-36)
+      never touches price resolution. The owner's literal "average LP and
+      NM" request can't be implemented as stated — there is no LP price to
+      average, only one price per finish. THREE OPTIONS RECORDED, NONE
+      IMPLEMENTED, OWNER SIGN-OFF REQUIRED before any of them touches a
+      money-facing figure: (a) a condition-multiplier table applied to the
+      market figure (NM 1.0 / LP 0.85 / MP 0.7 / HP 0.5 / D 0.35, "+"
+      modifiers at the midpoint between adjacent tiers) — RECOMMENDED as
+      proportionate and matching the owner's averaging intuition, but the
+      actual multiplier values need explicit owner sign-off; (b) source
+      real per-condition prices from a different provider (TCGplayer's own
+      API has per-condition listings; PriceCharting is already
+      contemplated in paused Phase 4 for graded); (c) leave prices
+      condition-blind and display condition alongside so the customer
+      judges.
+    FINDING 12 (-> Phase 14): no sort capability exists anywhere — no
+      `sort` param on /inventory/search, no sort UI in FilterPanel.tsx.
+      Owner wants newest/oldest/most-expensive/least-expensive/
+      alphabetical/etc. Results are assembled from a sharded scan, so
+      ordering is a Python list sort, not a DynamoDB index concern.
+      Flagged: where do the ~39 genuinely priceless cards go when sorting
+      by price? RECOMMENDED: always last, regardless of direction.
+    FINDING 13 (-> Phase 17): the owner's frequent-sign-out complaint,
+      previously recorded at the bottom of Section 7 HANDOFF under
+      "DEFERRED — A SEPARATE TASK, AFTER ALL 7 PHASES," is PROMOTED to a
+      real numbered phase — the owner now wants it addressed, not
+      deferred. A superseding note is left at that old location pointing
+      here. GENUINELY UNDIAGNOSED: no audit has run on it yet. Suspects
+      unchanged from the original note: Cognito token/refresh-token
+      lifetime and rotation, or the frontend not refreshing an expired ID
+      token. Phase 17 begins with investigation, not a fix.
+
+  NEW OWNER DECISIONS THIS SESSION (also recorded in the top-of-file OWNER
+  DECISIONS addendum):
+    1. Live data operations are now AUTHORIZED for the agent to run
+       directly (supervised), reversing the prior "owner runs all live
+       jobs" pattern. The price-refresh/denormalizer jobs (Phase 9's
+       refresh_held_prices, Phase 12's corrected denormalizer) may be run
+       against live merlins-cards once code clears the Council and its
+       tests — no separate per-run go-ahead needed.
+    2. THE SANITY/DICTIONARY CONVERSION IS CANCELLED, NOT DEFERRED. The
+       owner asked for the Collectors Dictionary to become Sanity-managed
+       per-entry pages like Articles, then explicitly retracted it in the
+       same breath: "Actually I changed my mind about sanity, just forget
+       about it." No phase created. For the record: the dictionary is 10
+       hardcoded terms
+       (frontend/components/dictionary/DictionaryExplorer.tsx:8-46);
+       Sanity has exactly one document type (article) with
+       structureTool() registered bare, no desk structure — preserved
+       here so the information isn't lost if this is ever revived.
+
+  SEVEN NEW PHASES ADDED TO SECTION 3, immediately after Phase 11: PHASE 12
+  (inventory price correctness — ABSORBS PHASE 10, now marked SUBSUMED with
+  a pointer, its text kept intact — THE ACTIVE TASK, task 1), PHASE 13
+  (facets endpoint + DB-driven dropdowns + set combobox, runs after 12),
+  PHASE 14 (sort control, runs after 13), PHASE 15 (MCP/Bedrock price
+  visibility, concurrent-safe), PHASE 16 (public site data wiring,
+  concurrent-safe), PHASE 17 (session/sign-out investigation, promoted from
+  the old deferred note, concurrent-safe), PHASE 18 (cross-boundary
+  contract tests — the anti-recurrence phase, runs last / folded piecemeal
+  into 12-17). A CONCURRENCY subsection sits immediately before Phase 12 in
+  Section 3, defining four parallel tracks (A: 12->13->14 sequential; B:
+  15; C: 16; D: 17) and warning explicitly that Track A (Phase 12, Python)
+  and Track B (Phase 15, TypeScript) must implement the SAME canonical
+  finish-price fallback order (models/inventory.py:199-202
+  _MARKET_FINISH_FALLBACK) so two conversations can't invent two different
+  chains, and that Track C must resolve next.config.ts's disputed
+  attribution before touching it. See Section 7 HANDOFF for the current
+  next-action snapshot.
+
+2026-07-30  OWNER DECISION — CONDITION-AWARE PRICING APPROVED (fourth LOG
+  entry this day, following "OWNER BUG REPORT — FRONTEND WAS NEVER TESTED
+  AGAINST THE DATABASE REDESIGN" immediately above). Resolves FINDING 11's
+  OPEN DECISION (recorded above and inside Phase 12's NOT-IN-SCOPE line):
+  the owner DOES want condition-based pricing. Verbatim: "I do want that
+  to be how prices are calculated, I just want to make sure we have the
+  most accurate formula we can get." Recorded as PHASE 19 (Section 3,
+  added immediately after Phase 18, inserted into TRACK A between Phase 12
+  and Phase 13 — see the CONCURRENCY subsection, also updated this entry).
+
+  TWO SPECIFICS THE OWNER ATTACHED:
+    1. Research is MANDATORY before any implementation — not a judgment
+       call for whoever picks up the phase. A `web-browser` agent research
+       pass is REQUIRED as Phase 19's first step, and is ALREADY IN FLIGHT
+       as of this session, dispatched by the orchestrator. It covers:
+       observed price ratios by condition as a % of Near Mint; whether an
+       age/era dimension is evidence-supported; whether card value/rarity
+       changes the penalty; how `+`/intermediate modifiers should be
+       handled (the owner's own proposal — midpoint between adjacent
+       tiers, e.g. LP+ = average of LP and NM — must be checked against
+       whether the real curve is linear enough for that to be correct);
+       how comparable marketplaces implement it; and the Cardmarket
+       (MT/NM/EX/GD/LP/PL/PO) vs TCGplayer (NM/LP/MP/HP/DM) scale
+       mismatch, since we ingest both.
+    2. Card age MAY be a factor — recorded as a HYPOTHESIS the research
+       must confirm, refute, or refine, NOT a settled requirement. The
+       common hobby claim is that vintage cards hold value in played
+       condition far better than modern cards do; the research must test
+       that against real evidence and, if it holds, quantify where the
+       era boundary falls.
+
+  Also recorded: the owner's approval is of the CONCEPT only. The actual
+  multiplier values still require a separate, explicit owner sign-off
+  before implementation (Phase 19 Step 2, a hard gate) — this is a
+  money-facing figure, and the research's confidence ratings/gaps must be
+  surfaced to the owner, not buried in an agent report. See PHASE 19 for
+  full PROBLEM/SCOPE/ACCEPTANCE detail; this entry is the decision record.
+  Also updated: the OWNER DECISIONS addendum near the top of this file,
+  the CONCURRENCY subsection (Track A now reads 12 -> 19 -> 13 -> 14, plus
+  a new cross-track warning about Phase 19 vs Phase 15), and Section 7
+  HANDOFF's WHERE THINGS STAND block.
+
+2026-07-30  CONDITION-PRICING RESEARCH COMPLETE — MULTIPLIERS APPROVED
+  (fifth LOG entry this day, following "OWNER DECISION — CONDITION-AWARE
+  PRICING APPROVED" immediately above). The `web-browser` research
+  dispatched in that entry has returned; the owner reviewed it and closed
+  PHASE 19's Step 2 sign-off gate. Full findings below; the resulting
+  decisions are also recorded in the OWNER DECISIONS addendum near the top
+  of this file (FIFTH UPDATE) and PHASE 19's own text (Section 3), which
+  now carries the approved table as its spec.
+
+  APPROVED TABLE (Condition StrEnum has exactly 5 members — NM/LP/MP/HP/
+  DMG — a 1:1 match for TCGplayer's own 5-tier scale; ConditionModifier has
+  exactly 2 members, PLUS "+" and MINUS "-"; the table below covers every
+  member, no gaps):
+    NM  1.00  (anchor — what TCGdex's marketPrice already represents)
+    LP  0.82
+    MP  0.58
+    HP  0.33
+    DMG 0.15
+  MODIFIER RULE: `+`/`-` takes the midpoint between its own tier and the
+  adjacent tier in that direction — LP+ = midpoint(0.82, 1.00) = 0.91;
+  LP- = midpoint(0.82, 0.58) = 0.70. TWO EDGE CASES RECORDED AS OPEN
+  IMPLEMENTER QUESTIONS, NOT SILENTLY DECIDED: NM+ (no tier above NM) and
+  DMG- (no tier below DMG). RECOMMENDATION: clamp both to their base
+  tier's multiplier (NM+ = 1.00, DMG- = 0.15), but this must be an
+  explicit, tested decision, not a silent default — added to Phase 19's
+  ACCEPTANCE criteria.
+
+  CONFIDENCE: MEDIUM, NOT HIGH. Neither TCGplayer nor Cardmarket publishes
+  an official condition-multiplier rate card. The numbers are triangulated
+  from several independent secondary sources whose ranges converge (LP
+  75-90%, MP 50-70%, HP 25-40%, DMG 10-25%), corroborated by one real
+  shipped buylist formula (Card Kingdom's MTG buylist, whose non-ABU rates
+  fall inside those ranges). These are defensible launch defaults, NOT
+  measured constants — carry this framing into implementation and any
+  customer/owner-facing documentation, do not round it up to "verified."
+
+  AGE/ERA HYPOTHESIS — NOT SUPPORTED, AND THE OWNER DROPPED IT (not
+  deferred-pending-more-data; dropped for now, revisitable only if the
+  owner later observes vintage played stock being systematically
+  mispriced). No source quantifies a vintage-vs-modern condition-
+  multiplier difference. The qualitative scarcity argument (WOTC-era cards
+  were played unsleeved, so raw NM vintage is scarce) is credible but is a
+  scarcity claim, not a price study. Critically, the one REAL SHIPPED
+  FORMULA that treats vintage differently — Card Kingdom's ABU tier —
+  penalizes old cards MORE steeply (80/60/40% for EX/VG/G) than its modern
+  high-value tier (90/80/70% for $100+ cards), the OPPOSITE direction from
+  the hypothesis, likely reflecting authentication risk and buylist-margin
+  conservatism rather than condition economics. A 2026 peer-reviewed study
+  (Heck et al., PLOS ONE, N=300 Pokemon sales) explicitly tested age as an
+  interaction term and found "no evidence that rarity, age, or card type
+  moderated condition's effects on pricing."
+  ALSO RECORD THE IMPLEMENTATION BLOCKER that independently justified
+  dropping it: `CatalogCard` (models/catalog.py) has NO release_date/era
+  field, and `to_catalog_card`/`to_catalog_card_brief` never read a set
+  release date from TCGdex. An era dimension would require either new
+  ingestion or a hand-maintained set_id -> era lookup table. If this is
+  ever revived, the credible next step is a targeted data pull (TCGplayer
+  sold-listing history by condition for a matched basket of WOTC-era vs.
+  Scarlet & Violet-era cards at similar rarity), NOT another literature
+  search.
+
+  VALUE/RARITY HYPOTHESIS — EVIDENCE POINTS THE OPPOSITE WAY FROM THE
+  COMMON CLAIM. The widely-repeated claim that expensive chase cards take
+  steeper condition penalties is contradicted by every real-formula source
+  found: Card Kingdom pays a HIGHER percentage of NM on higher-value cards
+  at every tier; a real retail example (foil Palinchron: HP $480 / MP $589
+  / NM $615) puts HP at 78% of NM, nowhere near the 25-40% bulk figure;
+  and the PLOS ONE study found no significant rarity interaction.
+  Rationale: a chase card has a buyer at every condition, while a $0.25
+  common floors out near zero regardless. RECORD AS A POSSIBLE LATER
+  REFINEMENT (a value-dependent curve that makes discounts SHALLOWER on
+  high-value cards), EXPLICITLY NOT PART OF PHASE 19, and low priority at
+  this store's price points.
+
+  CONTRADICTING DATA POINT WORTH PRESERVING: the same PLOS ONE study found
+  NO statistically significant price difference by condition at all in its
+  sample (median EUR1.95, range EUR1-145, German eBay, 2024-25) — condition
+  affected sale PROBABILITY, not sale PRICE. That sample skews to bulk and
+  does not override the table, but it is a real signal that condition-
+  price sensitivity may be much weaker at low price points. Record it as a
+  reason to watch how the table behaves on cheap inventory specifically.
+
+  CARDMARKET VS TCGPLAYER SCALE MISMATCH — CONFIRMED, UNSOLVABLE FROM
+  STORED DATA, DOCUMENT RATHER THAN FIX. Cardmarket uses 7 tiers (M/NM/EX/
+  GD/LP/PL/PO); ours is TCGplayer's 5. TCGplayer's "Lightly Played" is the
+  landing zone for BOTH Cardmarket's "Excellent" AND "Good" — a genuinely
+  lossy many-to-one mapping, independently documented as a limitation by a
+  real shipped cross-listing tool (MtgCsvHelper's
+  CONVERSION_LIMITATIONS.md). Practical consequence for us: any card
+  priced off the Cardmarket EUR fallback path (`_cardmarket_prices` in
+  services/tcgdex.py) is reporting a price for an unspecified point on a
+  7-tier scale, then having a 5-tier condition multiplier applied to it.
+  We ingest no Cardmarket-condition field at all, so this is not
+  algorithmically resolvable. Record as a KNOWN IMPRECISION to document in
+  `value_note`, not a bug to chase.
+
+  VOLATILITY / REVISIT CADENCE: the table's SHAPE (NM >> LP > MP > HP >
+  DMG, roughly 80/60/35/15) reflects durable structural collector behavior
+  and is stable for years. What moves is the underlying NM base price,
+  which the daily sync already refreshes. RECOMMENDED CADENCE: revisit the
+  multipliers ANNUALLY, or ad hoc if the owner notices systematic under/
+  over-pricing of played inventory. No periodic-recompute pipeline needed.
+
+  IMPLEMENTATION POINTER FROM THE RESEARCH: the condition adjustment
+  belongs as a multiplication step DOWNSTREAM of `_market_price`, not a
+  change to the ingestion layer (`_tcgplayer_prices`/`_cardmarket_prices`
+  in services/tcgdex.py stay as they are).
+
+  PHASE 19 UPDATED to reflect all of the above: Step 1 (research) marked
+  DONE, Step 2 (owner sign-off) marked CLOSED, the approved table recorded
+  inline as the spec, and the NM+/DMG- edge cases added to ACCEPTANCE as
+  cases that must be explicitly tested. Everything else in Phase 19
+  (single shared price helper, cross-track MCP coordination with Phase 15,
+  the denormalize-vs-read-time tradeoff left for the Council to rule on,
+  the `value_note` visibility requirement, Council Loop applies) is
+  UNCHANGED.
+
+2026-07-30  PHASE 12 CLOSED — COUNCIL PASS, LIVE VERIFICATION DONE (sixth
+  LOG entry this day, following "CONDITION-PRICING RESEARCH COMPLETE —
+  MULTIPLIERS APPROVED" immediately above). Full Council convened (all
+  four seats + judge); `.claude/council/verdict.md` reads PASS.
+  Confirmed-major per seat: Contrarian 0, Security 0, Chaos 0, Architect 0.
+  Verified suite state at close: backend 898 passed / 7 skipped / 0 failed
+  (baseline entering the phase was 875 passed: +16 RED tests turned green,
+  +4 new for `hidden_no_price`, +3 from RED-phase controls); frontend 278
+  passed; `python -m ruff check backend/src` clean; frontend lint and
+  `tsc --noEmit` clean.
+
+  WHAT SHIPPED:
+    - The three Python price paths now share ONE implementation.
+      `models/inventory.py::_market_price` was already correct and already
+      carried the canonical `_MARKET_FINISH_FALLBACK` order, so it became
+      the single implementation rather than a new helper being invented.
+      `services/catalog_sync.py` (write path) and
+      `routers/inventory.py::inventory_summary` (summary path) now both
+      call it; `CardSummary.from_catalog` already did. NO NEW ABSTRACTION/
+      MODULE WAS CREATED — the Architect seat ruled this "acceptably
+      simple."
+    - `routers/inventory.py::_price()` now returns `current_market_value`
+      outright. `listed_price` is fully abandoned in the price path — a
+      market-first-with-listed-fallback variant was tried and fails a RED
+      test, so `listed_price` cannot be consulted at all.
+    - `inventory_summary` resolves prices through the shared helper against
+      the catalog batch it already fetched — the fetch moved ABOVE the
+      loop, so there is no new I/O.
+    - New `hidden_no_price` count on the search response, surfaced in the
+      frontend, per the owner's "exclude but show a count" decision. The
+      price filter now runs LAST among filters so the count reflects the
+      cohort every other filter already narrowed (pinned by
+      `test_search_hidden_count_excludes_items_other_filters_already_dropped`).
+    - `test_price_filter_falls_back_to_market_value` was RETITLED to
+      `test_price_filter_matches_on_market_value` with its fixture and
+      original assertion unchanged, plus a strictly-stronger added
+      assertion, so there are no longer two contradictory pins on the same
+      predicate.
+    - Four pre-existing tests had SEED DATA ONLY updated
+      (`test_search_filters_by_min_price`, `..._by_max_price`,
+      `..._price_range_boundary_min_equals_max`,
+      `..._condition_excludes_graded_items_even_when_price_matches`) — they
+      had seeded via `listed_price` and were passing *because of* the bug.
+      THE CONTRARIAN SEAT INDEPENDENTLY VERIFIED against `git diff` that
+      assertions, bounds, and expected ids are byte-identical — recording
+      that this was CHECKED, not merely asserted, because it matters.
+
+  OWNER DECISIONS RATIFIED THIS PHASE (record both as settled, also
+  reflected inline in Phase 12's SCOPE, Section 3):
+    1. Est. value resolves live, falls back to stored. The dashboard
+       resolves each item's price through the shared helper against the
+       catalog, using the stored `current_market_value` only as fallback —
+       so it stays correct even when the nightly denormalizer hasn't run,
+       and cannot disagree with the per-card prices rendered beneath it.
+    2. THE DEVIATION IS RATIFIED BY THE OWNER. The original instruction
+       was "use the stored value ONLY when the item has no catalog card."
+       The implementer instead used "whenever the shared helper yields no
+       price," because graded slabs DO resolve a catalog card but
+       `_market_price` returns `None` for them by design (no finish; the
+       grade premium is not something the raw catalog knows). Under the
+       literal rule every PSA slab with a hand-maintained value would have
+       contributed $0 to Est. value — a NEW money-facing undercount
+       introduced by the fix for one. The owner was asked explicitly and
+       RATIFIED THE DEVIATION. Record it as the settled contract, not as a
+       tolerated exception.
+    3. Priceless items under a price bound: excluded but counted. A card
+       with no resolvable price is not claimed to be under a price bound,
+       but `hidden_no_price` surfaces how many were withheld.
+
+  THE REQUIRED LIVE VERIFICATION (Phase 12 SCOPE) IS DONE — the numbers.
+  A live read-only scan of `merlins-cards` was run this session:
+    - 266 total `inventory_item` rows; 40 carry a `current_market_value`.
+    - 228 items pass the customer-visibility gate; 39 of those are both
+      visible AND priced, summing to $778.49.
+    - Location/status breakdown of PRICED items: toploader/available 23,
+      glass/available 16, None/on_hold 1.
+    - Full breakdown of ALL items: toploader/available 130, glass/available
+      94, None/on_hold 37, None/available 4, None/out_for_grading 1.
+  THE IMPORTANT CONCLUSION: the 40 priced items are NOT hidden by the
+  location gate. The backend logic — verified against the real
+  `customer_visible_items` and `_price` source, not a re-implementation —
+  should therefore have been returning $778.49, not $0, at the time of the
+  owner's report. So the reported "$0" is NOT fully explained by the
+  finish-mismatch bug this phase fixes. THREE CANDIDATE EXPLANATIONS, NONE
+  YET CONFIRMED — OPEN ITEM:
+    (a) the owner observed it before the price depth pass first ran live on
+        2026-07-30;
+    (b) PRODUCTION IS RUNNING OLDER CODE THAN THIS BRANCH — the last
+        deploy was a manual ECS/ECR push outside version control, and
+        several fixes remain uncommitted;
+    (c) a third bug in the frontend rendering path.
+  Note that only 39/228 visible cards being priced at all (17%) is the
+  separate, larger problem this phase fixes, and is not itself in dispute.
+  ALSO NOTED, NOT INVESTIGATED: 37 items sit at `location: None` with
+  status `on_hold`, plus 4 `available` with no location — 41 items
+  invisible to customers regardless of price. May be entirely correct, but
+  nothing documents whether it's intentional, and `map_location` passes
+  unrecognized sheet values straight through.
+
+  COUNCIL OUTCOME — the verdict and all three overruled MAJORs, recorded as
+  live follow-ups, NOT as dismissed. Each was overruled because it
+  identified a PRE-EXISTING mechanism whose EXPOSURE this diff widened,
+  rather than a delta-introduced defect:
+    - FU-1 (Contrarian) — last-resort price disclosure. `_market_price`'s
+      "any priced band" last-resort fallback was previously reachable only
+      by an ephemeral search tile; this diff wires it into the persisted
+      write path, the price-filter predicate, and the Est. value total. A
+      card with no canonical-finish band gets a cross-variant price chosen
+      by Python dict insertion order (e.g. `1stEdition` $120 beating
+      `unlimited` $60) persisted as authoritative. Measured at 7 live
+      items. OVERRULED because RFC 0003 Section 6 (lines 434-442)
+      SPECIFIES this mechanism deliberately — unmapped bands are "not
+      dropped (that is silent data loss)" and "not guessed into a
+      canonical key," and both `_market_price` and `_catalog_price`
+      intentionally end with "any finish that carries a market figure."
+      Overturning it would be an RFC amendment, not a review finding. Also
+      the delta runs the RIGHT way: pre-change those 7 items were `null`,
+      hence invisible to price-bounded search and contributing $0, while
+      the search tile already displayed that same last-resort figure — the
+      diff makes the surfaces AGREE. FOLLOW-UP OWED: disclosure — make it
+      visible (the `value_note` field is the natural carrier) when a price
+      came from a non-matching finish band.
+    - FU-2 (Chaos) — lost-update race, NOW A HARD PHASE 8 PREREQUISITE. The
+      fix converts ~174 previously-silent no-op writes into ~174 real
+      unconditional `put_item` overwrites per nightly run.
+      `put_inventory_item` (`services/dynamodb.py:898-912`) has no
+      version/condition check and no lock. OVERRULED because the second
+      writer does not exist: the judge verified the only mutating HTTP
+      endpoint in the entire backend is `POST /chat`; every other caller
+      is an operator-invoked script; Phase 8 admin tooling is explicitly
+      "FUTURE, NOT STARTED." The Phase 2.0a precedent cuts the other way —
+      it serialized TWO AUTOMATED writers on the catalog path, whereas
+      inventory has one. RECORDED IN THE PHASE 8 SECTION (Section 3,
+      point 7) AS A BLOCKING PREREQUISITE: the day an admin write endpoint
+      lands, this race becomes real and must be closed first
+      (ConditionExpression or a lock, matching the Phase 2.0a shape — and
+      Phase 9 rejected caller-side read-then-merge as check-then-act, so
+      the fix belongs at the repository seam).
+    - FU-3 (Chaos) — throttle-masking on the widened batch-get. The reorder
+      widens `batch_get_catalog_cards`'s key set on the combined name/
+      rarity + price-bound path; that function silently returns partial
+      results on exhausted retries, and a throttled card is
+      indistinguishable downstream from a genuinely orphaned `card_id`.
+      OVERRULED because `inventory_summary` ALREADY batch-gets the entire
+      customer-visible cohort unconditionally on every dashboard request,
+      and that call predates this diff — a full-cohort batch-get under
+      throttle is already routine in this router. FOLLOW-UP OWED in
+      `services/dynamodb.py`: make a partial batch-get result
+      distinguishable from a genuine miss.
+    - FU-4 (Architect, NITPICK) — both new call sites wrap
+      `_market_price(card, finish)` in a redundant `if card else None`
+      guard; the function already degrades a `None` card safely via
+      `getattr(card, "prices", None) or {}`. Two-line cleanup, not gating.
+    - AUTHORIZED BUT NOT REQUIRED: promoting `_market_price` from
+      underscore-private to public (it is now imported across module
+      boundaries). The Architect authorized the rename, including the two
+      mechanical RED-test import edits, but explicitly ruled it must NOT
+      trigger a Revision 2.
+
+  PROCESS NOTE FROM THE JUDGE: all three MAJORs failed the delta test on
+  the SAME axis (exposure-widening of pre-existing, untouched mechanisms).
+  Calibration note: this round was worth convening — the reviews were
+  substantive and empirical (Security tested pydantic's NaN/Infinity
+  rejection directly; Chaos ran a live `TestClient` against the endpoint
+  and confirmed the owner's original max-set/min-unset bug is FIXED and
+  that `hidden_no_price` is exactly correct against hostile data;
+  Contrarian and Architect independently diffed every test edit and found
+  no moved goalposts) — but future advisor briefs should state the delta
+  rule up front, since advisors keep landing on exposure-widening of
+  untouched code.
+
+  KNOWN STALE ITEM LEFT FOR ANOTHER TRACK: `routers/public.py:259` now
+  carries a stale comment describing `_price` as "listed-first," which is
+  no longer true. Deliberately NOT fixed here — that file is Phase 16 /
+  Track C. Owed to Track C; also flagged inline in Phase 16's text,
+  Section 3.
+
+  Also updated: Phase 12's own text (Section 3, status block + inline
+  annotations on the affected SCOPE/ACCEPTANCE bullets), the Phase 8
+  section (Section 3, new point 7 recording FU-2 as a hard prerequisite),
+  Phase 16's text (Section 3, stale-comment note), and Section 7 HANDOFF's
+  WHERE THINGS STAND block.
+
 ========================================================================
 7 — HANDOFF (rewritten 2026-07-27 after Phase 3, for a fresh conversation)
 ========================================================================
 WHERE THINGS STAND
+  *** UPDATED 2026-07-30 (FOURTH UPDATE THIS DAY) — PHASE 12 IS DONE. This
+  supersedes the "THIRD UPDATE THIS DAY" block immediately below, whose
+  "THIS IS THE ACTIVE TASK, task 1" framing of Phase 12 is now stale. Read
+  THIS block first, then treat everything from the THIRD-UPDATE block
+  onward as history (it is still correct background on how Phases 12-19
+  came to exist, just not current status).
+  - PHASE 12 CLOSED, 2026-07-30 — Council PASS
+    (`.claude/council/verdict.md`), zero confirmed-major findings across
+    all four seats. Backend 898 passed / 7 skipped / 0 failed; frontend
+    278 passed; ruff and `tsc --noEmit` clean. Full close-out — what
+    shipped, the two ratified owner decisions, the required live
+    verification's numbers, and all three overruled-but-tracked Council
+    follow-ups (FU-1/FU-2/FU-3) plus one nitpick (FU-4) — is in Section 6
+    LOG, "PHASE 12 CLOSED — COUNCIL PASS, LIVE VERIFICATION DONE," and
+    mirrored inline in Phase 12's own text, Section 3. Do not re-derive
+    any of it; read those first.
+  - NEXT ACTION FOR A FRESH CONVERSATION ON TRACK A IS PHASE 19
+    (condition-aware pricing). Its research is DONE and its multiplier
+    table is OWNER-APPROVED (Section 6 LOG "CONDITION-PRICING RESEARCH
+    COMPLETE — MULTIPLIERS APPROVED") — Phase 19 is unblocked to implement,
+    Track A's order is now PHASE 12 -> PHASE 19 -> PHASE 13 -> PHASE 14
+    (CONCURRENCY subsection, Section 3). Phase 19's own text carries the
+    approved spec inline.
+  - TRACKS B/C/D (Phases 15/16/17) REMAIN AVAILABLE for concurrent
+    conversations, unchanged by Phase 12's close — see the CONCURRENCY
+    subsection for their file boundaries. Phase 16 additionally now owes a
+    small stale-comment fix at `routers/public.py:259`
+    ("listed-first," no longer true post-Phase-12) — folded into Phase
+    16's existing comment-cleanup SCOPE item, Section 3.
+  - OPEN ITEM NEEDING RESOLUTION, NOT YET ASSIGNED TO A TRACK: Phase 12's
+    required live verification found the reported "$0 Est. value" is NOT
+    fully explained by the finish-mismatch bug it fixed — a live scan
+    showed the backend SHOULD have been returning $778.49 (39 visible+
+    priced items) at the time of the owner's report, not $0. Three
+    candidate explanations are recorded (Section 6 LOG, same entry):
+    (a) the owner observed it before the price depth pass first ran live;
+    (b) PRODUCTION IS RUNNING OLDER CODE THAN THIS BRANCH — the last
+    deploy was a manual ECS/ECR push outside version control, and several
+    fixes remain uncommitted; (c) a third, unfound frontend bug.
+    CHECK (b) FIRST — it is the most likely and the cheapest to confirm
+    (compare the deployed image/commit against this branch) before
+    spending time chasing (c).
+  - PHASE 8's admin/Retool placeholder gained a new hard prerequisite from
+    Phase 12's Council follow-up FU-2 (Section 3, point 7): the day any
+    admin write endpoint lands, `put_inventory_item`'s lost-update race
+    must be closed first (no version/condition check today). Phase 8
+    itself remains NOT NEXT — this only changes what its eventual
+    implementer must do before shipping write endpoints.
+  --- prior (2026-07-30, third update) handoff snapshot follows, kept for
+  history ---
+  *** UPDATED 2026-07-30 (THIRD UPDATE THIS DAY) — OWNER BUG REPORT LANDED;
+  SEVEN NEW PHASES (12-18) SCOPED. This supersedes the "SECOND UPDATE THIS
+  DAY" block immediately below, whose "NEXT ACTION FOR A FRESH CONVERSATION
+  IS PHASE 10" line is now stale — Phase 10 is SUBSUMED INTO PHASE 12. Read
+  THIS block first, then treat everything from the SECOND-UPDATE block
+  onward as history. ***
+  - Four read-only audits ran this session in response to an owner bug
+    report: DB changes broke the frontend and nothing flagged it. Full
+    findings are in Section 6 LOG, "2026-07-30 OWNER BUG REPORT — FRONTEND
+    WAS NEVER TESTED AGAINST THE DATABASE REDESIGN" — read it before
+    picking up any of the new phases below; do not re-investigate what it
+    already verified.
+  - SEVEN NEW PHASES were added to Section 3, immediately after Phase 11:
+    PHASE 12 (inventory price correctness — absorbs Phase 10, which is now
+    marked SUBSUMED with a pointer; THIS IS THE ACTIVE TASK, task 1), PHASE
+    13 (facets endpoint + DB-driven dropdowns + set combobox, runs after
+    12), PHASE 14 (sort control, runs after 13), PHASE 15 (MCP/Bedrock
+    price visibility), PHASE 16 (public site data wiring), PHASE 17
+    (session/sign-out investigation, promoted out of the old "DEFERRED — A
+    SEPARATE TASK" note at the bottom of this HANDOFF section — see the
+    superseding note left there), PHASE 18 (cross-boundary contract tests —
+    the anti-recurrence phase, runs last or folded piecemeal into 12-17).
+  - CONCURRENCY: a subsection immediately before Phase 12 in Section 3
+    defines four tracks that can run in separate conversations — TRACK A
+    (Phase 12 -> 13 -> 14, sequential, one conversation, all touch
+    routers/inventory.py + FilterPanel.tsx), TRACK B (Phase 15, confined to
+    mcp-server/ + shared/), TRACK C (Phase 16, confined to
+    routers/public.py + public frontend components), TRACK D (Phase 17,
+    confined to the auth layer). Phase 18 runs last or is folded into each
+    track. *** TRACK A AND TRACK B MUST AGREE ON THE FINISH-PRICE FALLBACK
+    ORDER — both implement the SAME canonical chain from
+    models/inventory.py:199-202 _MARKET_FINISH_FALLBACK independently, in
+    Python and TypeScript; do not let two conversations invent two
+    different chains. TRACK C must resolve frontend/next.config.ts's
+    disputed attribution before touching it further. ***
+  - NEW OWNER DECISIONS: (1) live data operations are now AUTHORIZED for
+    the agent to run directly (supervised) once code clears the Council
+    and its tests — no separate per-run go-ahead needed; (2) THE
+    SANITY/DICTIONARY CONVERSION IS CANCELLED, NOT DEFERRED (owner asked,
+    then explicitly retracted it) — no phase exists for it and none should
+    be created.
+  - UPDATED 2026-07-30 (same day): PHASE 19 (condition-aware pricing) now
+    exists — added to Section 3 immediately after Phase 18, inserted into
+    TRACK A between Phase 12 and Phase 13 (CONCURRENCY subsection updated
+    to match). The owner has decided condition-based pricing IS wanted,
+    resolving Finding 11's open decision; the multiplier VALUES still need
+    a separate owner sign-off and are gated on a `web-browser` research
+    pass that is ALREADY IN FLIGHT as of this session, dispatched by the
+    orchestrator — a fresh conversation picking up Phase 19 should check
+    whether that research has returned before re-dispatching it. This does
+    NOT change the active task below: PHASE 12 is still first in Track A's
+    order, Phase 19 is next after it, not a reason to skip ahead.
+  - NEXT ACTION FOR A FRESH CONVERSATION PICKING UP TRACK A: PHASE 12
+    (Section 3, right after the CONCURRENCY subsection) — read Phase 10
+    first for the root-cause evidence (kept, not deleted, just marked
+    subsumed), then Phase 12 for the actual scope, including the REQUIRED
+    LIVE VERIFICATION STEP for Finding 6 ($0 Est. value) before assuming
+    the denormalizer fix alone repairs the dashboard.
+  - Phase 8 (admin/Retool) remains a deliberately-deferred placeholder, NOT
+    next, and Phase 4 (PSA/PriceCharting) remains paused pending an
+    explicit owner go-ahead. Neither changes because of this update.
+  - THE PR IS STILL DELIBERATELY NOT OPENED — the owner is holding off
+    intentionally and will open it manually later. Do not open one
+    unprompted. (Unchanged from every prior handoff snapshot below.)
+  - UNCOMMITTED WORKING-TREE STATE AT THIS HANDOFF (so a fresh conversation
+    on any track isn't surprised by `git status`): modified —
+    backend/README.md, backend/scripts/daily_sync.py,
+    backend/src/merlins_collection/{config.py,services/catalog_sync.py,
+    services/dynamodb.py,services/tcgdex.py},
+    backend/tests/{scripts/test_daily_sync.py,services/test_catalog_sync.py,
+    services/test_dynamodb.py,services/test_tcgdex.py}, claude-progress.txt,
+    docs/rfcs/0003-tcgdex-catalog-data-layer.md,
+    frontend/components/inventory/FilterPanel.tsx + its test,
+    frontend/next.config.ts (disputed attribution, see above). Untracked:
+    zhcn_sets_list.txt. Branch: Database-Redesign-Second-Round.
+  --- prior (2026-07-30, second update) handoff snapshot follows, kept for
+  history ---
+  *** UPDATED 2026-07-30 (SECOND UPDATE THIS DAY) — PHASE 9 IS DONE AND NOW
+  VERIFIED AGAINST LIVE PRODUCTION DATA. This supersedes the "UPDATED
+  2026-07-30 — PHASE 9 IS NOW DONE" block immediately below, whose "NO PHASE
+  IS CURRENTLY ACTIVE" framing is now stale — read THIS block first, then
+  treat everything from that block onward as history.
+  - Phase 9's `refresh_held_prices` was run live against `merlins-cards` for
+    the first time this session (LOG 2026-07-30 "FIRST LIVE PRODUCTION RUN
+    OF `refresh_held_prices`", Section 6). Result: cards_updated 230,
+    failures 0, not_found 0, unparsable_card_ids 0, no_usable_price 36
+    (~16%, well under the ~300 "nearly every card" figure the Council Judge
+    named as the threshold for suspecting a broken price mapping — see the
+    RELEASE-READINESS NOTE on the Phase 9 entry, Section 3/6). *** THIS
+    CLOSES THAT RELEASE-READINESS ITEM. *** Real data confirmed live (e.g.
+    `en:base1-10` -> rarity `Rare`, holofoil `$77.73`, where it was `null`
+    before). Two operational gaps surfaced by running it, neither a code
+    bug: the script needs `PYTHONPATH=src` locally (a worktree-shadowing
+    trap, same family as the one hit during the live wipe, LOG 2026-07-28),
+    and NOTHING SCHEDULES THIS JOB YET — no cron/ECS-scheduled-task/
+    EventBridge rule exists, so it only runs by hand until someone wires a
+    schedule. See the LOG entry for full detail.
+  - NEXT ACTION FOR A FRESH CONVERSATION IS PHASE 10 (Section 3, right after
+    Phase 9) — small, high-value, and the direct reason the owner "still
+    isn't seeing prices" despite Phase 9 succeeding: 213 of 253 raw items
+    with a card_id have a null `current_market_value`, and 174 of those 213
+    are a finish-mismatch bug in `services/catalog_sync.py`'s
+    `refresh_inventory_market_values` (a bare exact-match lookup) versus the
+    correct fallback chain `models/inventory.py`'s `_market_price` already
+    has on the read path. Fixing it is a small, reversible denormalizer
+    change per Phase 10's own spec — do that before touching anything else.
+  - AFTER PHASE 10, THE NEXT ITEM IS PHASE 11 (Section 3, right after Phase
+    10) — displaying English names for the 9 Japanese cards in inventory
+    that need it today, while keeping them marked JP and keeping the JP
+    image. Three candidate approaches are recorded there, deliberately not
+    chosen yet — pick one (with the owner if it's not obvious) before
+    writing code.
+  - Also recorded this session, not urgent enough to be its own phase: a
+    handful of live cards return the literal string "None" as `rarity` from
+    TCGdex (upstream data quality, not our bug) and will show as a "None"
+    option in the Rarity dropdown — see LOG 2026-07-30 "NOTED, NOT FIXED —
+    LITERAL STRING "None" AS RARITY...". Handle whenever the Rarity dropdown
+    or FilterPanel.tsx is next touched.
+  - Phase 8 (admin/Retool) remains a deliberately-deferred placeholder, NOT
+    next, and Phase 4 (PSA/PriceCharting) remains paused pending an explicit
+    owner go-ahead. Neither changes because of this update.
+  - THE PR IS STILL DELIBERATELY NOT OPENED — the owner is holding off
+    intentionally and will open it manually later. Do not open one
+    unprompted. (Unchanged from every prior handoff snapshot below.)
+  --- prior (2026-07-30, first update) handoff snapshot follows, kept for
+  history ---
+  *** UPDATED 2026-07-30 — PHASE 9 IS NOW DONE. This supersedes the
+  "UPDATED 2026-07-29" block immediately below, whose "NEXT ACTION IS PHASE 9"
+  line is now stale — read THIS block first, then treat everything from that
+  2026-07-29 block onward as history.
+  - Phase 9 (the TCGdex price/rarity depth pass, `refresh_held_prices`) shipped,
+    cleared the Council Loop on revision 2 (`.claude/council/verdict.md` reads
+    PASS; revision 1's FAIL — two gating findings, silent price erasure and a
+    daily job exiting 0 on abort/skip — is preserved in that same file as an
+    appendix), and had its documentation layer (this file, RFC 0003 §7/§8's
+    appendix, and the module docstrings in catalog_sync.py/daily_sync.py)
+    brought back in line with the shipped code on 2026-07-30. See the full
+    Phase 9 entry in Section 3 for what shipped, the two owner decisions
+    (graded slabs excluded from this pass; a TCGdex 404 counts as a skip, not
+    a failure), and the carried-forward N3-N8 follow-ups — N3 in particular is
+    a HARD PREREQUISITE before Phase 2's reseed side is ever wired.
+  - Verified state at this doc-alignment close-out: backend 875 passed / 7
+    skipped / 0 failed; frontend 274 passed; mcp-server 73 passed; `ruff check
+    backend/src` clean; `cd frontend && npm run lint` clean.
+  - RELEASE-READINESS NOTE, carried from the Council Judge: nothing here has
+    run against live data yet. The first real signal is `no_usable_price`'s
+    value on the first supervised production run; a figure near ~300 (most of
+    the held set) warrants investigation before trusting the depth pass.
+  - NEXT ACTION FOR A FRESH CONVERSATION: Phase 9 is closed — do not restart
+    it. Phase 8 (admin/Retool) remains a deliberately-deferred placeholder,
+    NOT next, and Phase 4 (PSA/PriceCharting) remains paused pending an
+    explicit owner go-ahead. No phase is currently active; check with the
+    owner for what comes next.
+  --- prior (2026-07-29) handoff snapshot follows, kept for history ---
+  *** UPDATED 2026-07-29 — PHASE 7 IS NOW DONE; NEXT ACTION IS PHASE 9.
+  Everything from "Phase 1 DONE (a61f0c6)." below through the end of this
+  HANDOFF section is the PRIOR (2026-07-27/28) snapshot, kept for history —
+  but its "Phase 7 NOT STARTED." line specifically is SUPERSEDED by this
+  block. Read this block first. ***
+  - Full suites green at Phase 7 close-out: backend 824 passed / 7 skipped /
+    0 failed, frontend 274 passed, mcp-server 73 passed. `ruff check
+    backend/src` and `cd frontend && npm run lint` both clean.
+  - Two genuine bugs were found and fixed while closing Phase 7 out (both
+    already individually logged in Section 6 LOG under 2026-07-29 — do not
+    re-log them): "BLOCKER — EVERY INVENTORY card_id WAS ORPHANED — NOW FIXED
+    (6685a28)" and "BUG — SET DROPDOWN RETURNED ZERO RESULTS FOR EVERY SET
+    (FIXED)" (frontend/components/inventory/FilterPanel.tsx +
+    FilterPanel.test.tsx). The Set-dropdown fix cleared a full Council round:
+    PASS, zero confirmed-major findings, only non-gating MINOR/NITPICK items.
+  - Separately, during live production verification (a manual ECS/ECR deploy
+    for owner sign-off, OUTSIDE this repo's version control — there is no
+    corresponding app-code commit to look for), the owner fixed three infra
+    issues directly against the live environment: an ALB routing rule that
+    wasn't tracking ECS Express Mode's blue/green swaps; CORS_ORIGINS/
+    AUTH_URL missing the production custom domain; and a live re-run of the
+    Singles-only inventory import (this time needing `--force-replace`,
+    since inventory_item was no longer zero-rows from the earlier live run)
+    to apply the already-committed orphaned-card_id fix (6685a28) to
+    production data. None of this requires or produces a repo commit.
+  - The branch is verification-complete and PR-ready. A PR body was drafted
+    (via the pull-request agent) but the PR is DELIBERATELY NOT OPENED yet —
+    the owner is holding off intentionally and will open it manually later.
+    Do not open one unprompted.
+  - Uncommitted at this handoff, and meant to stay that way until the owner
+    opens the PR: claude-progress.txt (this file), docs/rfcs/
+    0003-tcgdex-catalog-data-layer.md (two new "Resolved" blockquotes marking
+    the orphaned-card_id and Set-dropdown bugs fixed),
+    frontend/components/inventory/FilterPanel.tsx and its test file (the
+    Council-passed Set-dropdown fix). frontend/next.config.ts is ALSO
+    modified-unstaged but belongs to the CONCURRENT RFC 0002 model — still
+    not yours, still leave it alone. zhcn_sets_list.txt is untracked and
+    unrelated — leave it alone too.
+  - NEXT ACTION FOR A FRESH CONVERSATION: Phase 7 is closed — do not restart
+    it. The next active work is PHASE 9 — Price & rarity depth pass
+    (refresh_held_prices), added to Section 3 right after Phase 8. Its
+    design is ALREADY DONE (RFC 0003 §7, "Sync cadence, staleness, and outage
+    behavior") — do not dispatch design-doc again for it. Phase 8
+    (admin/Retool, also in Section 3) remains a deliberately-deferred
+    placeholder, NOT next, and unrelated to Phase 9.
+  --- prior (2026-07-27/28) handoff snapshot follows, kept for history ---
   Phase 1 DONE (a61f0c6). Phase 2 CODE DONE (d2b3de4). Phase 3 DONE (39afd35,
   pushed) — general architecture + Phase 3.1 Stage B (3a69d2a, pushed).
   Phase 4 PAUSED/ON HOLD BY OWNER — skip it, do not treat it as "next" after
@@ -2600,6 +4896,13 @@ THE OWNER'S OPERATING CONSTRAINTS (still in force)
     code, and the wipe-timing section above for the operational consequence.
 
 DEFERRED — A SEPARATE TASK, AFTER ALL 7 PHASES
+  *** SUPERSEDED 2026-07-30 (THIRD UPDATE THIS DAY) — PROMOTED TO PHASE 17.
+  The owner now wants this addressed, not deferred — see PHASE 17 (Section
+  3, right after Phase 16) and Section 6 LOG "OWNER BUG REPORT — FRONTEND
+  WAS NEVER TESTED AGAINST THE DATABASE REDESIGN." The paragraph below is
+  kept for history/context (the suspects it names are still the working
+  theory, now carried into Phase 17's investigation step) but this
+  heading's "NOT part of this rebuild" framing is no longer current. ***
   The owner reports being signed out of their session far more often than
   expected; sessions should last much longer than they do. Likely suspects:
   Cognito token lifetime/refresh-token rotation, or the frontend not

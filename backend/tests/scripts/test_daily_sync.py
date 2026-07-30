@@ -59,3 +59,80 @@ def test_the_daily_job_runs_its_three_steps_from_the_script(dynamo_repo, monkeyp
     assert "sealed_points_written" in summary
     assert "items_refreshed" in summary
     assert dynamo_repo.get_inventory_item(slab.item_id).current_market_value == Decimal("500")
+
+
+# ---------------------------------------------------------------------------
+# Exit-code hygiene.
+#
+# This job runs unattended. Before the depth pass existed, every failure mode of
+# `run_daily_sync` was an exception, so it exited non-zero and any cron MAILTO /
+# ECS Scheduled Task / K8s `backoffLimit` / healthchecks.io ping saw it. The
+# depth pass added the first two ways to finish NORMALLY while doing nothing —
+# an aborted run and a lock-skipped run — and a `return 0` on those is the exact
+# silent-no-op this module's docstring says the script exists to prevent.
+# ---------------------------------------------------------------------------
+
+
+class _NullClient:
+    """Stands in for `TcgdexClient` so no exit-code test can open a socket."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+def _script_returning(monkeypatch, summary):
+    script = _load_script()
+    monkeypatch.setattr(script, "_repository", lambda: object())
+    monkeypatch.setattr(script, "TcgdexClient", _NullClient)
+    monkeypatch.setattr(script, "run_daily_sync", lambda repo, client, today: summary)
+    return script
+
+
+def test_an_aborted_depth_pass_exits_non_zero(monkeypatch, capsys):
+    script = _script_returning(monkeypatch, {
+        "cards_updated": 0, "failures": 25, "not_found": 0,
+        "unparsable_card_ids": 0, "no_usable_price": 0, "aborted": True,
+        "graded_points_written": 1, "sealed_points_written": 1, "items_refreshed": 0,
+    })
+
+    code = script.main()
+
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "ABORTED" in out.upper()   # actionable, not just a dict key in a wall of text
+    assert "failures: 25" in out      # the summary is still printed in full
+
+
+def test_a_lock_skipped_depth_pass_exits_with_a_distinct_non_zero_code(monkeypatch, capsys):
+    """Non-zero: with the reseed side unwired, the only thing that can hold this
+    lock is a dead depth pass, so a skip is always an anomaly — and a week of
+    silent no-ops behind a wedged lock must not look like a week of clean runs.
+    DISTINCT from an abort: the two need different operator responses (chase
+    TCGdex vs. clear a stale lock), and the exit code is the only signal a
+    process-level monitor gets."""
+    script = _script_returning(monkeypatch, {
+        "skipped": "catalog reseed in flight",
+        "graded_points_written": 1, "sealed_points_written": 1, "items_refreshed": 0,
+    })
+
+    code = script.main()
+
+    assert code != 0
+    assert code == 2
+    out = capsys.readouterr().out
+    assert "SKIPPED" in out.upper()
+    assert "catalog reseed in flight" in out
+
+
+def test_a_clean_run_still_exits_zero(monkeypatch, capsys):
+    script = _script_returning(monkeypatch, {
+        "cards_updated": 3, "failures": 0, "not_found": 0,
+        "unparsable_card_ids": 0, "no_usable_price": 0, "aborted": False,
+        "graded_points_written": 1, "sealed_points_written": 1, "items_refreshed": 2,
+    })
+
+    assert script.main() == 0
+    assert "cards_updated: 3" in capsys.readouterr().out

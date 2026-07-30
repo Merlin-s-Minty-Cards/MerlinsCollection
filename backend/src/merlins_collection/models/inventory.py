@@ -196,6 +196,12 @@ InventoryItemAdapter: TypeAdapter[InventoryItem] = TypeAdapter(InventoryItem)
 
 # Catalog finishes to fall back through when the item's own finish carries no
 # market price. Most singles are "normal"; holo-only cards price under a holo key.
+#
+# *** THIS TUPLE IS THE CANONICAL FALLBACK ORDER FOR THE WHOLE PRODUCT, in every
+# language it is implemented in (claude-progress.txt, CONCURRENCY warning). The
+# MCP server re-implements the same walk in TypeScript; if the two orders ever
+# disagree, the website and the Bedrock chat quote different prices for the same
+# card. Change it here and there together, or not at all. ***
 _MARKET_FINISH_FALLBACK = (
     "normal", "holofoil", "reverseHolofoil",
     "1stEditionHolofoil", "1stEditionNormal", "unlimitedHolofoil",
@@ -204,6 +210,17 @@ _MARKET_FINISH_FALLBACK = (
 
 def _market_price(card, finish: str | None) -> Decimal | None:
     """The catalog market price (USD) for a card, preferring the item's finish.
+
+    **THE ONE SHARED FINISH-AWARE PRICE LOOKUP.** All three paths that need a
+    catalog price call exactly this function — the search/read path (via
+    ``CardSummary.from_catalog`` below), the write path that denormalizes
+    ``current_market_value`` onto the stored item
+    (``services.catalog_sync.refresh_inventory_market_values``), and the
+    dashboard summary (``routers.inventory.inventory_summary``). They each used
+    to resolve prices for themselves, and the write path's bare exact match left
+    174 of 213 live items unpriced while the read path priced them fine
+    (claude-progress.txt Phase 12/Phase 10). Do not re-implement this walk in a
+    caller: a second copy is how that divergence happened.
 
     ``card.prices`` is keyed by finish (``normal``/``holofoil``/…); the item's own
     finish is tried first, then a sensible fallback order, then any finish that
@@ -313,3 +330,9 @@ class InventorySearchResult(BaseModel):
 
     items: list[EnrichedInventoryItem]
     total: int
+    # How many otherwise-matching items a price bound excluded purely because
+    # they have no resolvable price (Phase 12, owner decision 2). They stay
+    # excluded — a card with no known price cannot honestly be claimed to be
+    # under $500 — but the UI renders this count ("N cards hidden (no price on
+    # file)") so they are not dropped invisibly. Always 0 when no bound is set.
+    hidden_no_price: int = 0

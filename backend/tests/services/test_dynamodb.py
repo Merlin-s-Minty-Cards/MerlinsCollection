@@ -100,6 +100,75 @@ def test_batch_get_catalog_cards_empty_input_returns_empty(dynamo_repo):
     assert dynamo_repo.batch_get_catalog_cards([]) == {}
 
 
+# ---------------------------------------------------------------------------
+# upsert_catalog_card_preserving_prices — the depth pass's write (RFC 0003 §7)
+#
+# The invariant "a depth-pass write never deletes, zeroes or nulls an existing
+# price" lives HERE, in the storage layer, rather than in an `if` at the caller.
+# These tests are the enforcement: they exercise the repository directly, with
+# no depth pass in sight, so the guarantee survives a future second caller.
+# ---------------------------------------------------------------------------
+
+
+def _priceless(card_id="swsh1-1", set_id="swsh1", *, rarity="Rare Holo V",
+               name="Celebi V"):
+    """An identity-complete card carrying no price band at all.
+
+    This is what ``to_catalog_card`` returns for a perfectly good HTTP 200 whose
+    ``pricing`` block is absent, null, or carries only a ``lowPrice`` with a null
+    ``marketPrice`` — a case ``tcgdex`` documents as routine, not exceptional.
+    """
+    return CatalogCard(
+        card_id=card_id, name=name, set_id=set_id, set_name="S&S", number="1",
+        rarity=rarity, images={"small": "s", "large": "l"}, prices={},
+        detail="full", last_synced_at=datetime(2026, 6, 23, 12, 0, 0),
+    )
+
+
+def test_preserving_upsert_keeps_a_stored_band_when_the_incoming_card_has_none(dynamo_repo):
+    dynamo_repo.batch_upsert_catalog_cards([_card(market="9.25")])
+
+    dynamo_repo.upsert_catalog_card_preserving_prices(_priceless(rarity="Reprint"))
+
+    card = dynamo_repo.get_catalog_card("swsh1-1")
+    assert card.prices["holofoil"].market == Decimal("9.25")  # never nulled
+    assert card.rarity == "Reprint"      # ...and the row IS otherwise updated
+    assert card.detail == "full"
+
+
+def test_preserving_upsert_replaces_the_band_when_the_incoming_card_has_one(dynamo_repo):
+    """Preservation must not curdle into immutability: the very next response
+    that does carry a price has to land, or the price freezes forever."""
+    dynamo_repo.batch_upsert_catalog_cards([_card(market="9.25")])
+
+    dynamo_repo.upsert_catalog_card_preserving_prices(_card(market="2.00"))
+
+    assert dynamo_repo.get_catalog_card("swsh1-1").prices["holofoil"].market == Decimal("2.00")
+
+
+def test_preserving_upsert_creates_a_row_that_does_not_exist_yet(dynamo_repo):
+    """It is an UPSERT: a card the catalog has never seen must still be written,
+    priced or not, or a new holding would never get its identity row."""
+    dynamo_repo.upsert_catalog_card_preserving_prices(_priceless("swsh1-new"))
+
+    card = dynamo_repo.get_catalog_card("swsh1-new")
+    assert card is not None
+    assert card.prices == {}
+    assert card.rarity == "Rare Holo V"
+
+
+def test_preserving_upsert_leaves_other_cards_alone(dynamo_repo):
+    """It writes one row. Also pins that the GSI key is maintained: an
+    `update_item` that skipped `GSI1PK` would leave the row queryable only under
+    the set it used to belong to."""
+    dynamo_repo.batch_upsert_catalog_cards([_card("a-1", "setA"), _card("a-2", "setA")])
+
+    dynamo_repo.upsert_catalog_card_preserving_prices(_priceless("a-1", "setA"))
+
+    assert dynamo_repo.get_catalog_card("a-2").prices["holofoil"].market == Decimal("12.50")
+    assert {c.card_id for c in dynamo_repo.list_cards_by_set("setA")} == {"a-1", "a-2"}
+
+
 def test_batch_get_catalog_cards_bounds_unprocessed_retries(dynamo_repo, monkeypatch):
     """A perpetually-throttled BatchGetItem returns its keys in UnprocessedKeys
     on a *successful* response (no exception), so boto3's own retries never fire.
@@ -486,6 +555,73 @@ def test_R6_import_lock_is_not_import_owned(dynamo_repo):
         held = True
     assert held
     dynamo_repo.release_import_lock("gen-A")
+
+
+# ---- catalog reseed lock (RFC 0003 §8) ----
+# A second, PARALLEL lock domain from the import lock above -- same
+# conditional-write + TTL-expiry semantics, but keyed under its own
+# "CATALOGLOCK"/"LOCK" item so a spreadsheet import and a catalog reseed can
+# never block each other. Phase 9 wires only the depth-pass side
+# (`refresh_held_prices`) to this lock; the reseed side (`seed_catalog.py`)
+# stays unwired this session. These tests pin the LOCK's own behavior so the
+# eventual `_acquire_lock(key, gen, ttl)` extraction (RFC §8) is safe.
+
+
+def test_catalog_lock_is_single_flight(dynamo_repo):
+    from merlins_collection.services.dynamodb import CatalogReseedInProgressError
+    dynamo_repo.acquire_catalog_lock("cgen-A")
+    # A second acquire while the lock is held is refused.
+    try:
+        dynamo_repo.acquire_catalog_lock("cgen-B")
+        raised = False
+    except CatalogReseedInProgressError:
+        raised = True
+    assert raised
+    # After release, a new run can acquire.
+    dynamo_repo.release_catalog_lock("cgen-A")
+    dynamo_repo.acquire_catalog_lock("cgen-B")  # no raise
+    dynamo_repo.release_catalog_lock("cgen-B")
+
+
+def test_catalog_lock_reclaims_an_expired_lock(dynamo_repo):
+    # A negative TTL stamps `expires_at` in the past at write time, so the lock
+    # is already stale for any later acquire attempt -- deterministic, no real
+    # sleep or wall-clock mocking required.
+    dynamo_repo.acquire_catalog_lock("cgen-A", ttl_seconds=-10)
+    dynamo_repo.acquire_catalog_lock("cgen-B")  # reclaims the expired lock; no raise
+    dynamo_repo.release_catalog_lock("cgen-B")
+
+
+def test_catalog_lock_release_is_a_noop_when_the_lock_was_stolen(dynamo_repo):
+    from merlins_collection.services.dynamodb import CatalogReseedInProgressError
+    dynamo_repo.acquire_catalog_lock("cgen-A", ttl_seconds=-10)
+    dynamo_repo.acquire_catalog_lock("cgen-B")  # reclaims; steals the lock from A
+    # Releasing under the OLD (stolen) gen must be a silent no-op, not an error,
+    # and must NOT clear B's now-live lock.
+    dynamo_repo.release_catalog_lock("cgen-A")
+    try:
+        dynamo_repo.acquire_catalog_lock("cgen-C")
+        held = False
+    except CatalogReseedInProgressError:
+        held = True
+    assert held  # B's lock is still in force
+    dynamo_repo.release_catalog_lock("cgen-B")
+
+
+def test_catalog_lock_is_independent_of_the_import_lock(dynamo_repo):
+    # RFC 0003 §8: "a second, parallel generation domain, not an extension of
+    # the first" -- holding one must never block the other.
+    dynamo_repo.acquire_import_lock("igen-A")
+    dynamo_repo.acquire_catalog_lock("cgen-A")  # must not raise
+    dynamo_repo.release_import_lock("igen-A")
+    dynamo_repo.release_catalog_lock("cgen-A")
+
+
+def test_current_catalog_generation_is_none_on_a_fresh_table(dynamo_repo):
+    # No `CATALOGGEN` marker has ever been written (the reseed/`finalize_catalog`
+    # writer stays unwired this session), so reading it back must degrade to
+    # "no generation" rather than raise.
+    assert dynamo_repo.current_catalog_generation() is None
 
 
 # ---- import-owned data probe (re-import guard) ----

@@ -12,27 +12,36 @@ import {
 
 type Status = 'idle' | 'loading' | 'success' | 'error'
 
-// Curated sets, mapped to their pokemontcg.io ids — the backend filters by
-// set_id. A wrong id here silently returns "no cards", so ids are pinned by
+// Curated sets, mapped to their TCGdex composite set ids — the backend filters
+// by set_id, looking the value up verbatim via repo.list_cards_by_set. A
+// catalog row's set_id is build_card_id(language, tcgdex_set_id), so the id is
+// LANGUAGE-PREFIXED ("en:base1"); a bare pokemontcg.io id matches zero rows and
+// the dropdown silently returns "no cards". Two ids also differ from the old
+// pokemontcg.io spelling (sv1 → sv01, sv3pt5 → sv03.5). Verified against a live
+// scan of the DynamoDB catalog table (matched on exact set_name) and pinned by
 // the FilterPanel tests.
 const SETS: Array<{ label: string; id: string }> = [
-  { label: 'Base', id: 'base1' },
-  { label: 'Jungle', id: 'base2' },
-  { label: 'Fossil', id: 'base3' },
-  { label: 'Team Rocket', id: 'base5' },
-  { label: 'Neo Genesis', id: 'neo1' },
-  { label: 'Expedition', id: 'ecard1' },
-  { label: 'Ruby & Sapphire', id: 'ex1' },
-  { label: 'Diamond & Pearl', id: 'dp1' },
-  { label: 'Black & White', id: 'bw1' },
-  { label: 'Evolutions', id: 'xy12' },
-  { label: 'Sword & Shield', id: 'swsh1' },
-  { label: 'Brilliant Stars', id: 'swsh9' },
-  { label: 'Scarlet & Violet', id: 'sv1' },
-  { label: '151', id: 'sv3pt5' },
+  { label: 'Base', id: 'en:base1' },
+  { label: 'Jungle', id: 'en:base2' },
+  { label: 'Fossil', id: 'en:base3' },
+  { label: 'Team Rocket', id: 'en:base5' },
+  { label: 'Neo Genesis', id: 'en:neo1' },
+  { label: 'Expedition', id: 'en:ecard1' },
+  { label: 'Ruby & Sapphire', id: 'en:ex1' },
+  { label: 'Diamond & Pearl', id: 'en:dp1' },
+  { label: 'Black & White', id: 'en:bw1' },
+  { label: 'Evolutions', id: 'en:xy12' },
+  { label: 'Sword & Shield', id: 'en:swsh1' },
+  { label: 'Brilliant Stars', id: 'en:swsh9' },
+  { label: 'Scarlet & Violet', id: 'en:sv01' },
+  { label: '151', id: 'en:sv03.5' },
 ]
 const SET_IDS = new Map(SETS.map((s) => [s.label, s.id]))
 
+// NOTE: this filter is a no-op in production today — every catalog card still
+// has rarity: null. The Tier-2 depth pass (refresh_held_prices, RFC 0003 §7)
+// that populates rarity has landed and is wired into the daily job (Phase 9),
+// but has not yet been run against live data; this starts matching once it has.
 const RARITIES = [
   'Common',
   'Uncommon',
@@ -292,17 +301,36 @@ function Results({
   }
   if (!result || result.items.length === 0) {
     return (
-      <p className="py-10 text-center text-sm text-pine-300">
-        No cards found. Try widening your filters.
-      </p>
+      <div className="space-y-2 py-10 text-center">
+        <p className="text-sm text-pine-300">No cards found. Try widening your filters.</p>
+        <HiddenNoPriceNotice count={result?.hidden_no_price} />
+      </div>
     )
   }
   return (
     <div className="space-y-4">
-      <p className="font-mono text-xs uppercase tracking-[0.12em] text-pine-300">
-        {result.total} result{result.total === 1 ? '' : 's'}
-      </p>
+      <div className="space-y-1">
+        <p className="font-mono text-xs uppercase tracking-[0.12em] text-pine-300">
+          {result.total} result{result.total === 1 ? '' : 's'}
+        </p>
+        <HiddenNoPriceNotice count={result.hidden_no_price} />
+      </div>
       <CardGrid items={result.items} />
     </div>
+  )
+}
+
+/**
+ * Tells the customer that the price range dropped cards we hold but have no
+ * price for, rather than letting them vanish from the grid unexplained (the
+ * owner's "the price filter wipes the inventory" bug report). Renders nothing
+ * when the backend hid none — or when an older backend omits the field.
+ */
+function HiddenNoPriceNotice({ count }: { count?: number }) {
+  if (!count) return null
+  return (
+    <p className="font-mono text-xs uppercase tracking-[0.12em] text-pine-300">
+      {count} card{count === 1 ? '' : 's'} hidden (no price on file)
+    </p>
   )
 }

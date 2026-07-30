@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     # exact rate used is printed into every converted figure's ``value_note``, so
     # correcting it is a config change with no deploy (RFC 0003 §5).
     eur_usd_rate: Decimal = Decimal("1.08")
+    # How old a provider's own `updated` stamp may get before the depth pass
+    # calls the figure stale. A stale price is still STORED and still displayed —
+    # the age is appended to `value_note` instead, so a customer-facing number is
+    # never silently ancient and never silently withheld either (RFC 0003 §7).
+    catalog_price_stale_days: int = 30
     # Comma-separated browser origins allowed to call the API (CORS).
     cors_origins: str = "http://localhost:3000"
     # Dev-only: inject a fake user instead of verifying Cognito JWTs.

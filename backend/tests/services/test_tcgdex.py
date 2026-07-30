@@ -20,6 +20,7 @@ from merlins_collection.models.inventory import Language
 from merlins_collection.services import tcgdex
 from merlins_collection.services.tcgdex import (
     LANGUAGE_API_CODE,
+    LANGUAGE_BY_API_CODE,
     MAX_PLAUSIBLE_PRICE,
     TcgdexClient,
     TcgdexError,
@@ -28,6 +29,7 @@ from merlins_collection.services.tcgdex import (
     _map_finish,
     _tcgdex_set_id,
     build_card_id,
+    parse_card_id,
     to_catalog_card,
     to_catalog_card_brief,
     to_price_points,
@@ -762,3 +764,89 @@ def test_the_default_client_disables_redirects_explicitly():
 
 def test_language_api_codes_are_the_two_supported_languages():
     assert LANGUAGE_API_CODE == {Language.EN: "en", Language.JP: "ja"}
+
+
+# ---------------------------------------------------------------------------
+# parse_card_id / LANGUAGE_BY_API_CODE
+#
+# The inverse of `build_card_id`, and the only place a stored `card_id` is taken
+# apart to rebuild a request path. The depth pass calls it once per held card
+# every morning, so its `None` contract is load-bearing, not decorative.
+# ---------------------------------------------------------------------------
+
+
+def test_language_by_api_code_is_the_exact_inverse_of_language_api_code():
+    assert LANGUAGE_BY_API_CODE == {"en": Language.EN, "ja": Language.JP}
+
+
+def test_parse_card_id_round_trips_build_card_id_for_every_supported_language():
+    for language in LANGUAGE_API_CODE:
+        assert parse_card_id(build_card_id(language, "swsh4-SV1-2")) == (
+            language, "swsh4-SV1-2"
+        )
+
+
+def test_parse_card_id_splits_on_the_first_colon_only():
+    """The language code is the HEAD; a TCGdex id may itself contain a colon."""
+    assert parse_card_id("en:a:b") == (Language.EN, "a:b")
+
+
+@pytest.mark.parametrize("card_id", [
+    "xy7-54",      # a dead pokemontcg.io-era row -- the live hazard this guards
+    "",            # nothing at all
+    ":",           # a separator with neither code nor id
+    "en:",         # a language, no id
+    ":base1-4",    # an id, no language code
+    "fr:xy7-54",   # a real language this build does not speak
+    "EN:base1-4",  # the enum's NAME, not the API code: deliberately not accepted
+])
+def test_parse_card_id_returns_none_for_anything_that_is_not_a_composite_id(card_id):
+    """`None`, never an exception: a pocket of malformed stored ids is a
+    stored-data defect for the caller to count, not a reason to unwind a batch
+    job that is otherwise running perfectly."""
+    assert parse_card_id(card_id) is None
+
+
+# ---------------------------------------------------------------------------
+# `rarity` / `types` cross the same text boundary as `name` / `set_name`
+# ---------------------------------------------------------------------------
+
+
+def test_rarity_and_types_go_through_the_same_text_boundary_as_name():
+    """`_text` is this module's declared normalize-here-and-nowhere-else
+    boundary. `rarity` and `types` are upstream-controlled text exactly like
+    `name`, and this is the first production path that populates `rarity`."""
+    nfd_rarity = unicodedata.normalize("NFD", "  レアプ  ")
+    nfd_type = unicodedata.normalize("NFD", " プサイキック ")
+
+    card = to_catalog_card(
+        {"id": "swsh1-1", "localId": "1", "name": "x",
+         "set": {"id": "swsh1", "name": "S&S"},
+         "rarity": nfd_rarity, "types": [nfd_type]},
+        Language.JP, fx_rate=FX,
+    )
+
+    assert card.rarity == unicodedata.normalize("NFC", "レアプ")
+    assert card.rarity != nfd_rarity  # i.e. it did not pass through untouched
+    assert card.types == [unicodedata.normalize("NFC", "プサイキック")]
+
+
+def test_an_absent_rarity_stays_none_rather_than_becoming_empty_text():
+    card = to_catalog_card(
+        {"id": "swsh1-1", "localId": "1", "name": "x",
+         "set": {"id": "swsh1", "name": "S&S"}},
+        Language.EN, fx_rate=FX,
+    )
+    assert card.rarity is None
+    assert card.types == []
+
+
+def test_a_non_list_types_field_is_refused_rather_than_split_into_characters():
+    """Guard on the normalization itself: iterating a bare string would turn
+    `"Grass"` into five single-character types and validate cleanly."""
+    with pytest.raises(ValueError):
+        to_catalog_card(
+            {"id": "swsh1-1", "localId": "1", "name": "x",
+             "set": {"id": "swsh1", "name": "S&S"}, "types": "Grass"},
+            Language.EN, fx_rate=FX,
+        )

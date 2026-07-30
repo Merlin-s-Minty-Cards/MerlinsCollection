@@ -219,6 +219,13 @@ delimiter.
 > form. The cost is worth paying, but it must be carried here rather than
 > discovered by whoever reseeds.
 
+> **Resolved (2026-07-29, Council-approved fix).** `FilterPanel.tsx`'s hardcoded
+> ids have been corrected to the `en:`-prefixed composite form (e.g. `en:base1`,
+> `en:sv01`, `en:sv03.5` — two ids also differ from the old pokemontcg.io
+> spelling). The dropdown still hardcodes a curated list rather than sourcing
+> ids from the API; see the resolved verification item in "Unchanged contracts"
+> below.
+
 **`set_id` takes the same composite form** — `en:base1`, `ja:M5` — so that
 `card_id == f"{set_id}-{local_id}"` continues to hold structurally, the
 `GSI1PK = SET#{set_id}` partition stays unambiguous across languages, and
@@ -470,6 +477,36 @@ accruing once the last copy sells; if longitudinal analytics on sold stock is
 ever wanted, widen this predicate — the history already written is retained
 either way (see §8 on why `price_point` is never generation-swept).
 
+> **Resolved (2026-07-29, owner decision).** The shipped predicate is narrower
+> than written above: `_held_card_ids` (`catalog_sync.py`) adds `item.kind ==
+> "raw"`, excluding graded slabs from this pass entirely. This is deliberate,
+> permanent policy, not an oversight to "correct" back to the literal predicate.
+> A slab's price **and** its descriptive detail, including `rarity`, come from
+> the PSA cert API + PriceCharting once Phase 4 resumes — that pipeline owns
+> slab data end to end, and TCGdex publishes no graded prices at all. Fetching
+> a slab's raw-card catalog row here would spend a request overwriting a
+> hand-curated identity with figures that do not describe the slab.
+>
+> **Accepted consequence, stated explicitly:** a card held only as a graded
+> slab keeps `rarity: null` until Phase 4 resumes, and renders blank in the
+> Rarity filter. This is not a bug and not a gap in this phase's coverage —
+> it is the deliberate boundary between the raw-card depth pass and the
+> not-yet-built slab pipeline.
+
+**404 handling (not specified above — added here).** §7's outage-behavior
+bullets below cover per-card *errors*; they do not by themselves say what
+happens when TCGdex responds cleanly with `404 Not Found` for a held card
+(`get_card` returns `None`). That is not a per-card error and is not counted as
+one:
+
+> **Resolved (2026-07-29).** A 404 is counted under a distinct `not_found` key
+> and **neither increments nor resets** the consecutive-failure counter — it is
+> neither a success nor an infrastructure failure. Counting a retirement as a
+> failure would let ~25 retired holdings abort the daily job every morning,
+> silently and permanently, on a perfectly healthy endpoint. A 404 on a card
+> with no prior catalog row writes **nothing at all** — no bare identity-only
+> row is created for a card the business has never had data on.
+
 **`pricing.*.updated` handling.** Stored as
 `FinishPrice.source_updated_at` / `PricePoint.source_updated_at`. It is **not**
 used to dedupe: a daily observation of an unchanged figure is a legitimate
@@ -496,6 +533,33 @@ touches the API. Concretely:
   configurable to 0 for tests.
 - A breadth-sync failure leaves the previous catalog generation fully in place
   (§8), so a failed reseed is a no-op, not an outage.
+
+> **Resolved (2026-07-29, Council BLOCKING-1 fix).** The "never deletes,
+> zeroes, or nulls an existing price" promise above has a second failure mode
+> this section did not originally name: an HTTP 200 whose `pricing` block is
+> absent or yields no usable band. That response is a *complete, successful*
+> fetch — it is written, because it may still carry a corrected `rarity` or
+> `name`, and dropping the whole write would trade one data-loss problem for a
+> smaller one — but it must never erase a stored price the way a naive
+> whole-item replace would. This is enforced at the repository seam, not by
+> the caller deciding: `InventoryRepository.upsert_catalog_card_preserving_prices`
+> does one `update_item` that **omits `prices` from the update expression
+> entirely** when the incoming map is empty, so the stored bands are left
+> untouched by construction. It is counted under a new summary key,
+> `no_usable_price` (a subset of `cards_updated`, not a failure) — "fetched
+> fine, nobody prices it" and "fetched fine, priced" are different operational
+> facts, and the first was previously invisible.
+>
+> The policy is deliberate on the other side too: a **non-empty** incoming
+> `prices` map replaces the stored map wholesale, not merged finish by finish.
+> `_prices_from_pricing` already applies its TCGplayer/Cardmarket provider
+> preference at card level so a card is never described by two providers at
+> once; a per-finish merge would reintroduce exactly the mixed bands that rule
+> prevents, and would keep a retired finish alive forever. The honest
+> tradeoff, in the Council Judge's own words: **"we accept per-finish drops as
+> the price of card-level provider preference."** (Carried forward as N7: a
+> same-provider partial drop — TCGplayer nulling one finish while keeping
+> another — is a real, non-gating gap this framing does not fully answer.)
 
 ### 8. The generation swap — and the `_gen()` gap
 
@@ -565,6 +629,33 @@ marker, so its in-place updates survive the next commit.
 `ConsistentRead=True`. At 55k items pre-wipe / ~25k post-seed that is seconds and
 cents — fine for a per-reseed operation, and a reason `finalize_catalog` must
 **not** run daily.
+
+> **Resolved (2026-07-29) — this lock is currently half-built.** The lock and
+> generation-read primitives described above —
+> `acquire_catalog_lock`/`release_catalog_lock`/`current_catalog_generation`,
+> plus `set_catalog_generation` — exist in `dynamodb.py`, and the depth pass
+> (`refresh_held_prices`) takes the lock exactly as specified. **The reseed
+> side is deliberately unwired**: `scripts/seed_catalog.py` is owned by
+> concurrent work outside this phase and was not touched. The practical
+> consequence: `current_catalog_generation()` always returns `None` in
+> production today, because nothing anywhere writes the `CATALOGGEN` marker —
+> so every depth-pass write stamps no generation, which is exactly how catalog
+> writes already behaved before this phase. This is safe only because nothing
+> else takes `_CATALOG_LOCK_KEY` yet; see the N3 prerequisite below for what
+> must be fixed **before** the reseed side is wired.
+>
+> **N3 — hard prerequisite before the reseed side is wired.**
+> `TcgdexClient._get`'s `total_deadline_seconds` bounds only the body-streaming
+> phase of a 200 response (`_read_bounded`); it does not bound the retry loop's
+> non-200 attempts or the backoff sleeps between them. A sufficiently degraded
+> upstream can therefore outrun the lock's 3600s TTL — roughly 25 pathological
+> cards at the retry ceiling, or ~101 minutes — and a reseed could steal the
+> lock mid-run, letting a depth-pass write land with a superseded generation
+> and get silently swept on the next commit. Harmless today only because
+> nothing else takes this lock. **This becomes dangerous the moment the reseed
+> side lands** and must be closed first — either a wall-clock deadline over
+> the whole `_refresh_held_prices` run, or a lock heartbeat that renews the
+> TTL.
 
 ### 9. Migration / wipe (D4) — blast radius and safety rails
 
@@ -791,16 +882,39 @@ value_note="converted from EUR 12.50 (cardmarket trend) at EUR_USD_RATE=1.08")}`
 
 ### Provided — internal Python interfaces (signatures only)
 
+> **Resolved (2026-07-29) — this sketch was stale against the shipped code and
+> has been reconciled below; §7's prose, not this appendix, was authoritative
+> throughout Phase 9.** Three drifts, corrected in place rather than deleted:
+> `refresh_held_prices` ships with `request_delay_seconds: float = 0.1`
+> instead of the `fx_rate: Decimal` parameter this sketch used to show — the FX
+> rate is read from `settings.eur_usd_rate` inside `to_catalog_card`, not
+> threaded through as an argument. `parse_card_id` was **not** deleted as
+> speculative; it shipped (the inverse of `build_card_id`, used by the depth
+> pass to turn a stored composite `card_id` back into a request path) and is
+> listed below. And the `dynamodb.py` block below described three functions
+> that were never built — `finalize_catalog`, `count_by_entity`,
+> `delete_entities` — in favor of what actually exists:
+> `set_catalog_generation`, `current_catalog_generation`,
+> `acquire_catalog_lock`, `release_catalog_lock`, and `purge_card_data` (the
+> swap half of the catalog load-then-swap; see §8's half-built-lock note
+> above for why `finalize_catalog` specifically never materialized).
+
 ```python
 # services/tcgdex.py
 LANGUAGE_API_CODE: dict[Language, str]          # {EN: "en", JP: "ja"}
+LANGUAGE_BY_API_CODE: dict[str, Language]       # inverse of LANGUAGE_API_CODE
 TCGDEX_FINISH_MAP: dict[str, str]
 
 def build_card_id(language: Language, tcgdex_id: str) -> str: ...
+def parse_card_id(card_id: str) -> tuple[Language, str] | None: ...
+    # inverse of build_card_id; None for a dead pokemontcg.io-era id or an
+    # unrecognized language code — a stored-data defect for the caller to
+    # count and report, not an exception to unwind a batch job with.
 
-# `_encode_card_id`, `_map_finish` and `_convert_eur_to_usd` are module-private
-# helpers, not provided interfaces — call them only from within this module.
-# `parse_card_id` was speculative and has been deleted; nothing needed it.
+
+# `_encode_card_id`, `_map_finish`, `_convert_eur_to_usd`, `_optional_text` and
+# `_text_list` are module-private helpers, not provided interfaces — call them
+# only from within this module.
 
 def to_catalog_card_brief(raw: dict, language: Language, *,
                           set_names: dict[str, str] | None = None,
@@ -827,20 +941,19 @@ class StubTcgdexClient(TcgdexClient):
 
 # services/catalog_sync.py
 def sync_catalog_breadth(repo, client, languages: list[Language], *, gen: str) -> dict: ...
-def held_card_ids(repo) -> set[str]: ...
 def refresh_held_prices(repo, client, today: date, *,
-                        fx_rate: Decimal,
+                        request_delay_seconds: float = 0.1,
                         max_consecutive_failures: int = 25) -> dict: ...
-def run_daily_sync(repo, client, today: date) -> dict: ...   # depth + the 3 existing steps
+def run_daily_sync(repo, client, today: date) -> dict: ...   # depth first, then the 3 existing steps
 
 # services/dynamodb.py (InventoryRepository)
 def acquire_catalog_lock(self, gen, *, ttl_seconds: int | None = None) -> None: ...
 def release_catalog_lock(self, gen) -> None: ...
 def set_catalog_generation(self, gen) -> None: ...
-def current_catalog_generation(self) -> str | None: ...
-def finalize_catalog(self, gen, *, committed: bool) -> int: ...
-def count_by_entity(self) -> dict[str, int]: ...             # wipe pre/post census
-def delete_entities(self, entities: set[str], *, dry_run: bool = True) -> dict[str, int]: ...
+def current_catalog_generation(self) -> str | None: ...      # always None until the reseed side is wired
+def upsert_catalog_card_preserving_prices(self, card: CatalogCard) -> None: ...
+def purge_card_data(self, *, keep_catalog_gen, languages=None,
+                    keep_card_ids=None, dry_run: bool = True) -> dict: ...   # the reseed's swap half
 
 # services/card_text.py
 def language_from_set(set_text: str, index: CatalogIndex | None = None) -> Language: ...
@@ -859,6 +972,12 @@ composite form passes through unchanged. **Frontend contract unchanged** —
 `frontend/components/inventory/FilterPanel.tsx` sources its `set_id` values from
 the API rather than hardcoding them, since `set_id` values now carry a language
 prefix.
+
+> **Resolved (2026-07-29, Council-approved fix).** Verified: the dropdown still
+> hardcodes its `set_id` list rather than sourcing it from the API, but the
+> hardcoded ids have been corrected to the language-prefixed composite form, so
+> the Set filter now returns results instead of silently matching zero rows.
+> Sourcing the list from the API remains an open improvement, not yet done.
 
 ---
 
