@@ -14,12 +14,13 @@ interface TradeLeg {
 }
 
 interface TradeBalance {
-  outgoing_total: string
-  incoming_total: string
-  cash_component: string | null
-  cash_direction: string | null
-  balance: string
-  our_margin_pct?: string | null
+  trade_id: string
+  total_out_value: string
+  total_in_value: string
+  total_cost_basis: string
+  cash_delta: string
+  margin_pct: string | null
+  is_balanced: boolean
 }
 
 interface InventoryItem {
@@ -94,7 +95,7 @@ export default function AdminTradePage() {
       await api.post(`/trades/${tradeId}/outgoing`, {
         item_id: item.item_id,
         name: item.display_name || item.product_name || '',
-        value: parseFloat(value),
+        agreed_value: parseFloat(value),
       })
       setOutgoing((prev) => [...prev, { item_id: item.item_id, name: item.display_name || item.product_name || '', value }])
       setOutSearch('')
@@ -106,11 +107,27 @@ export default function AdminTradePage() {
 
   const removeOutgoing = async (idx: number) => {
     if (!tradeId) return
+    const item = outgoing[idx]
+    if (!item?.item_id) return
     try {
-      await api.del(`/trades/${tradeId}/outgoing/${idx}`)
+      await api.del(`/trades/${tradeId}/outgoing/${item.item_id}`)
       setOutgoing((prev) => prev.filter((_, i) => i !== idx))
     } catch (err) {
       alert(err instanceof AdminApiError ? err.detail : 'Failed to remove')
+    }
+  }
+
+  const updateOutgoingValue = async (idx: number, newValue: string) => {
+    if (!tradeId) return
+    const item = outgoing[idx]
+    if (!item?.item_id) return
+    try {
+      await api.patch(`/trades/${tradeId}/outgoing/${item.item_id}`, {
+        agreed_value: parseFloat(newValue),
+      })
+      setOutgoing((prev) => prev.map((leg, i) => i === idx ? { ...leg, value: newValue } : leg))
+    } catch (err) {
+      alert(err instanceof AdminApiError ? err.detail : 'Failed to update')
     }
   }
 
@@ -119,7 +136,7 @@ export default function AdminTradePage() {
     try {
       await api.post(`/trades/${tradeId}/incoming`, {
         name: inForm.name.trim(),
-        value: parseFloat(inForm.value),
+        agreed_value: parseFloat(inForm.value),
       })
       setIncoming((prev) => [...prev, { name: inForm.name.trim(), value: inForm.value }])
       setInForm({ name: '', value: '' })
@@ -141,7 +158,7 @@ export default function AdminTradePage() {
   const updateCash = async () => {
     if (!tradeId || !cashAmount) return
     try {
-      await api.post(`/trades/${tradeId}/cash`, {
+      await api.put(`/trades/${tradeId}/cash`, {
         amount: parseFloat(cashAmount),
         direction: cashDirection,
       })
@@ -235,9 +252,22 @@ export default function AdminTradePage() {
               <div className="divide-y divide-pine-700/25">
                 {outgoing.map((item, idx) => (
                   <div key={idx} className="flex items-center justify-between px-3 py-2">
-                    <span className="text-xs text-pine-200 truncate">{item.name}</span>
+                    <span className="text-xs text-pine-200 truncate flex-1">{item.name}</span>
                     <div className="flex items-center gap-2">
-                      <PriceDisplay value={item.value} className="text-xs text-red-400" />
+                      <span className="text-[10px] text-pine-500">$</span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        defaultValue={parseFloat(String(item.value)).toFixed(2)}
+                        onBlur={(e) => {
+                          const newVal = e.target.value
+                          if (newVal && parseFloat(newVal) !== parseFloat(String(item.value))) {
+                            updateOutgoingValue(idx, newVal)
+                          }
+                        }}
+                        onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+                        className="vault-field w-20 px-1.5 py-0.5 rounded text-xs text-right text-red-400 font-mono"
+                      />
                       <button type="button" onClick={() => removeOutgoing(idx)} className="p-1 text-pine-500 hover:text-red-400"><X size={12} /></button>
                     </div>
                   </div>
@@ -305,8 +335,19 @@ export default function AdminTradePage() {
           <div className="text-center">
             <span className="text-[11px] text-pine-400 uppercase tracking-wider block mb-1">Balance</span>
             <div className="text-2xl font-mono font-semibold text-pine-100">
-              {balance ? `$${parseFloat(balance.balance).toFixed(2)}` : '$0.00'}
+              {balance ? (() => {
+                const out = parseFloat(balance.total_out_value)
+                const inc = parseFloat(balance.total_in_value)
+                const cash = parseFloat(balance.cash_delta)
+                const net = inc + cash - out
+                return `${net >= 0 ? '+' : ''}$${net.toFixed(2)}`
+              })() : '$0.00'}
             </div>
+            {balance && (
+              <span className={`text-[10px] ${balance.is_balanced ? 'text-mint' : 'text-amber-400'}`}>
+                {balance.is_balanced ? 'Balanced' : 'Unbalanced'}
+              </span>
+            )}
           </div>
 
           {/* Margin (admin only) */}
@@ -314,7 +355,7 @@ export default function AdminTradePage() {
             <div className="text-right">
               <span className="text-[11px] text-pine-400 uppercase tracking-wider block mb-1">Our Margin</span>
               <div className="text-lg font-mono text-spriggatito-300">
-                {balance?.our_margin_pct ? `${parseFloat(balance.our_margin_pct).toFixed(1)}%` : '—'}
+                {balance?.margin_pct ? `${parseFloat(balance.margin_pct).toFixed(1)}%` : '—'}
               </div>
             </div>
           )}

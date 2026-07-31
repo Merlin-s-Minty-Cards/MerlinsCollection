@@ -193,6 +193,38 @@ def add_outgoing_leg(
     return session
 
 
+@router.patch("/{trade_id}/outgoing/{item_id}")
+def update_outgoing_leg(
+    trade_id: str,
+    item_id: str,
+    body: dict[str, Any],
+    repo: InventoryRepository = Depends(get_repo),
+) -> dict[str, Any]:
+    """Update fields on an outgoing leg (e.g. agreed_value)."""
+    session = repo.get_trade_session(trade_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Trade session not found")
+    if session.get("status") != "draft":
+        raise HTTPException(status_code=409, detail="Can only modify draft sessions")
+
+    legs = session.get("outgoing_legs", [])
+    found = False
+    for leg in legs:
+        if leg.get("item_id") == item_id:
+            for key in ("agreed_value", "name", "condition", "finish", "language"):
+                if key in body:
+                    leg[key] = body[key]
+            found = True
+            break
+
+    if not found:
+        raise HTTPException(status_code=404, detail=f"Item {item_id} not in outgoing legs")
+
+    session["outgoing_legs"] = legs
+    repo.put_trade_session(session)
+    return session
+
+
 @router.delete("/{trade_id}/outgoing/{item_id}")
 def remove_outgoing_leg(
     trade_id: str,

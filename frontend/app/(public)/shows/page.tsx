@@ -18,7 +18,7 @@ export const revalidate = 300
 
 // Shows come from the business's own records (DynamoDB SHOWLIST). Only name,
 // date, and — for shows added with structured columns — venue/city are stored;
-// nothing is invented. Missing venue/city render as "N/A".
+// nothing is invented. Missing venue/city are simply omitted from the card.
 
 function DateBadge({ month, day, past }: { month: string; day: string; past?: boolean }) {
   return (
@@ -44,8 +44,8 @@ function ShowRow({ show, past }: { show: PublicShow; past?: boolean }) {
       <DateBadge month={month} day={day} past={past} />
       <div className="min-w-[180px] flex-1">
         <h3 className="font-serif text-[20px] font-semibold text-forest-deep">{show.name}</h3>
-        <div className="mt-0.5 text-[15px] text-muted">{show.venue ?? 'N/A'}</div>
-        <div className="text-[14px] text-muted">{show.city ?? 'N/A'}</div>
+        {show.venue && <div className="mt-0.5 text-[15px] text-muted">{show.venue}</div>}
+        {show.city && <div className="text-[14px] text-muted">{show.city}</div>}
       </div>
       <div className="font-sans text-[14px] font-semibold uppercase tracking-[0.06em] text-forest">
         {formatShowDate(show.date)}
