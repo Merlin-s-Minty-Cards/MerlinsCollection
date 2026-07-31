@@ -1,7 +1,7 @@
 'use client'
 
 import { useSession } from 'next-auth/react'
-import { useCallback, useRef } from 'react'
+import { useCallback, useMemo, useRef } from 'react'
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
 
@@ -108,14 +108,11 @@ export function useAdminApi() {
     [request],
   )
 
-  return {
-    get,
-    post,
-    put,
-    patch,
-    del,
-    isLoading: status === 'loading',
-    isAuthenticated: status === 'authenticated' && !!session?.accessToken,
-    session,
-  }
+  const isLoading = status === 'loading'
+  const isAuthenticated = status === 'authenticated' && !!session?.accessToken
+
+  return useMemo(
+    () => ({ get, post, put, patch, del, isLoading, isAuthenticated, session }),
+    [get, post, put, patch, del, isLoading, isAuthenticated, session],
+  )
 }
