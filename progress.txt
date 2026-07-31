@@ -43,12 +43,12 @@ Cognito auth via the existing `require_admin` dependency.
 - [x] 1.9 Tests: auth gate, CRUD lifecycle, filter combinations, validation
 
 ### Phase 2: Market Lookup
-- [ ] 2.1 TCGdex catalog search endpoint (name, set)
-- [ ] 2.2 Card detail + prices endpoint
-- [ ] 2.3 Price trend endpoint (1/7/30d)
-- [ ] 2.4 Watchlist model + DynamoDB storage
-- [ ] 2.5 Watchlist CRUD endpoints
-- [ ] 2.6 Tests: search, watchlist, TCGdex mock
+- [x] 2.1 TCGdex catalog search endpoint (name, set)
+- [x] 2.2 Card detail + prices endpoint
+- [x] 2.3 Price trend endpoint (1/7/30d)
+- [x] 2.4 Watchlist model + DynamoDB storage
+- [x] 2.5 Watchlist CRUD endpoints
+- [x] 2.6 Tests: search, watchlist, TCGdex mock
 
 ### Phase 3: Sell Flow
 - [ ] 3.1 SellSession model + DynamoDB storage
@@ -101,3 +101,6 @@ Cognito auth via the existing `require_admin` dependency.
 - 2025-01-27: Phase 1 COMPLETE. Admin router shell + inventory CRUD implemented.
   26 tests passing (auth gate, search, get, create, update, delete, history).
   Lint clean. Router wired into main.py.
+- 2025-01-27: Phase 2 COMPLETE. Market lookup + watchlist CRUD implemented.
+  12 tests passing (catalog search, card detail, price trend, watchlist CRUD).
+  Added watchlist entity storage to DynamoDB repo.

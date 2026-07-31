@@ -1277,3 +1277,43 @@ class InventoryRepository:
             cond = pk & Key("SK").begins_with(prefix)
         items = self._query_all(KeyConditionExpression=cond)
         return [PricePoint.model_validate(i) for i in items]
+
+    # ---- catalog full list (admin market search) ----
+    def list_all_catalog_cards(self):
+        """Return all catalog cards via filtered scan. Expensive — admin-only."""
+        return list(self.iter_catalog_cards())
+
+    # ---- watchlist (admin feature) ----
+    def put_watchlist_entry(self, entry: dict):
+        """Insert a watchlist entry."""
+        entry_id = entry["entry_id"]
+        record = {
+            "PK": f"WATCHLIST#{entry_id}",
+            "SK": "META",
+            "entity": "watchlist_entry",
+            "GSI1PK": "WATCHLIST#ALL",
+            "GSI1SK": entry.get("added_at", ""),
+            **_serialize(entry),
+        }
+        self._table.put_item(Item=record)
+
+    def get_watchlist_entry(self, entry_id: str) -> dict | None:
+        """Fetch one watchlist entry by id."""
+        item = self._table.get_item(
+            Key={"PK": f"WATCHLIST#{entry_id}", "SK": "META"},
+        ).get("Item")
+        return item if item else None
+
+    def list_watchlist_entries(self) -> list[dict]:
+        """List all watchlist entries via the GSI1 WATCHLIST#ALL partition."""
+        items = self._query_all(
+            IndexName="GSI1",
+            KeyConditionExpression=Key("GSI1PK").eq("WATCHLIST#ALL"),
+        )
+        return items
+
+    def delete_watchlist_entry(self, entry_id: str):
+        """Delete a watchlist entry."""
+        self._table.delete_item(
+            Key={"PK": f"WATCHLIST#{entry_id}", "SK": "META"},
+        )
