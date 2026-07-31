@@ -143,27 +143,49 @@ The frontend runs as a Docker container on ECS Fargate behind the `merlins` clus
 - Docker installed and running
 - ECR repository `merlins-frontend` exists in `us-east-1`
 
-### Build & Deploy
+### Deploy Both Services (full copy-paste)
 
-Run from the **repo root** (the Dockerfile uses repo root as build context):
+Run from the **repo root** (both Dockerfiles use repo root as build context).
+Deploy backend first since the frontend calls it.
 
 ```bash
-# 1. Authenticate Docker with ECR
+# Authenticate Docker with ECR
 aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 560151615792.dkr.ecr.us-east-1.amazonaws.com
 
-# 2. Build the production image
-docker build -f frontend/Dockerfile --build-arg NEXT_PUBLIC_API_URL=https://me-227b5d9d4f6444e9aea830a909f923c8.ecs.us-east-1.on.aws -t 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-frontend:latest .
+# Build & push backend
+docker build -f backend/Dockerfile -t 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-backend:latest .
+docker push 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-backend:latest
 
-# 3. Push to ECR
+# Build & push frontend
+docker build -f frontend/Dockerfile --build-arg NEXT_PUBLIC_API_URL=https://me-227b5d9d4f6444e9aea830a909f923c8.ecs.us-east-1.on.aws -t 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-frontend:latest .
 docker push 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-frontend:latest
 
-# 4. Force ECS to pull the new image
+# Force ECS to pull the new images
+aws ecs update-service --cluster merlins --service merlins-backend --force-new-deployment --region us-east-1
 aws ecs update-service --cluster merlins --service merlins-frontend --force-new-deployment --region us-east-1
+```
+
+### Deploy Frontend Only
+
+```bash
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 560151615792.dkr.ecr.us-east-1.amazonaws.com
+docker build -f frontend/Dockerfile --build-arg NEXT_PUBLIC_API_URL=https://me-227b5d9d4f6444e9aea830a909f923c8.ecs.us-east-1.on.aws -t 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-frontend:latest .
+docker push 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-frontend:latest
+aws ecs update-service --cluster merlins --service merlins-frontend --force-new-deployment --region us-east-1
+```
+
+### Deploy Backend Only
+
+```bash
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 560151615792.dkr.ecr.us-east-1.amazonaws.com
+docker build -f backend/Dockerfile -t 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-backend:latest .
+docker push 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-backend:latest
+aws ecs update-service --cluster merlins --service merlins-backend --force-new-deployment --region us-east-1
 ```
 
 ### Build Args (compile-time)
 
-These are baked into the client bundle at build time:
+These are baked into the client bundle at build time via `--build-arg`:
 
 | Arg | Value |
 |-----|-------|
@@ -179,15 +201,18 @@ Server-side secrets are passed as ECS task definition environment variables — 
 - `AWS_COGNITO_CLIENT_ID` / `AWS_COGNITO_CLIENT_SECRET` / `AWS_COGNITO_ISSUER` — Cognito provider
 - `COGNITO_ADMIN_GROUP` — admin group name (default: `admins`)
 
-### Deploying the backend
+### Infrastructure
 
-Same pattern from the repo root:
-
-```bash
-docker build -f backend/Dockerfile -t 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-backend:latest .
-docker push 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-backend:latest
-aws ecs update-service --cluster merlins --service merlins-backend --force-new-deployment --region us-east-1
-```
+| Resource | Value |
+|----------|-------|
+| AWS Account | `560151615792` |
+| Region | `us-east-1` |
+| ECS Cluster | `merlins` |
+| Frontend Service | `merlins-frontend` |
+| Backend Service | `merlins-backend` |
+| Frontend ECR | `560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-frontend` |
+| Backend ECR | `560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-backend` |
+| Backend URL | `https://me-227b5d9d4f6444e9aea830a909f923c8.ecs.us-east-1.on.aws` |
 
 ## Testing
 
