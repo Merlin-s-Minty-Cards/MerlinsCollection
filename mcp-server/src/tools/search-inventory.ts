@@ -26,8 +26,10 @@ export type CardResult = {
   set: string;
   condition: string;
   quantity: number;
-  /** Per-unit listed value (mirrors `Card.value`). */
+  /** Per-unit market value (condition-adjusted, from current_market_value). */
   currentValue: number;
+  /** Per-unit market price (same as currentValue — kept for backward compat). */
+  marketPrice: number;
   /** Print language (EN/JP) — lets the model distinguish a JP print from its EN twin. */
   language: "EN" | "JP";
 };
@@ -61,10 +63,10 @@ export async function searchInventory(
     ) {
       return false;
     }
-    if (filters.minValue !== undefined && card.value < filters.minValue) {
+    if (filters.minValue !== undefined && card.marketPrice < filters.minValue) {
       return false;
     }
-    if (filters.maxValue !== undefined && card.value > filters.maxValue) {
+    if (filters.maxValue !== undefined && card.marketPrice > filters.maxValue) {
       return false;
     }
     if (
@@ -82,7 +84,8 @@ export async function searchInventory(
     set: card.set,
     condition: card.condition,
     quantity: card.quantity,
-    currentValue: card.value,
+    currentValue: card.marketPrice,
+    marketPrice: card.marketPrice,
     language: card.language,
   }));
 }

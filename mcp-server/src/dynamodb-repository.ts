@@ -152,14 +152,15 @@ export class DynamoDbInventoryRepository implements InventoryRepository {
   private toCard(row: Row, catalog: Map<string, Row>, gradedPrices: Map<string, Row>): Card {
     // Sealed products carry their own name/type and never touch the catalog.
     if (row.kind === "sealed") {
+      const sealedMarket = asNumber(row.current_market_value ?? 0);
       return {
         id: String(row.item_id),
         name: String(row.product_name),
         set: "Sealed",
         condition: SEALED_TYPE_LABELS[String(row.product_type)] ?? "Sealed",
         quantity: 1,
-        value: asNumber(row.listed_price),
-        marketPrice: asNumber(row.current_market_value ?? 0),
+        value: sealedMarket,
+        marketPrice: sealedMarket,
         language: languageOf(row),
       };
     }
@@ -185,7 +186,7 @@ export class DynamoDbInventoryRepository implements InventoryRepository {
           ? `${row.condition}${row.condition_modifier ?? ""}`
           : `${row.company} ${gradeKey(row.grade)}`,
       quantity: 1, // one inventory record = one physical unit
-      value: asNumber(row.listed_price),
+      value: this.marketPrice(row, meta, gradedPrices),
       marketPrice: this.marketPrice(row, meta, gradedPrices),
       language: languageOf(row),
     };
@@ -196,13 +197,39 @@ export class DynamoDbInventoryRepository implements InventoryRepository {
     meta: Row | undefined,
     gradedPrices: Map<string, Row>,
   ): number {
+    // Phase 12/19: current_market_value is the denormalized, condition-adjusted
+    // market figure (baked in by refresh_inventory_market_values). It is the
+    // single source of truth for price on every surface — website and MCP alike.
     if (row.current_market_value != null) return asNumber(row.current_market_value);
     if (row.kind === "graded") {
       const key = `${row.card_id}#${row.company}#${gradeKey(row.grade)}`;
       return asNumber(gradedPrices.get(key)?.market_value ?? 0);
     }
+    // Finish-aware fallback for items whose denormalized value hasn't been
+    // written yet (e.g. just imported, before the daily sync runs). Mirrors
+    // models/inventory.py _MARKET_FINISH_FALLBACK exactly — see the CONCURRENCY
+    // warning in claude-progress.txt.
     const prices = meta?.prices as Record<string, { market?: unknown }> | undefined;
-    return asNumber(prices?.[String(row.finish)]?.market ?? 0);
+    if (!prices) return 0;
+    const finish = String(row.finish ?? "normal");
+    const fallbackOrder = [
+      finish,
+      "normal", "holofoil", "reverseHolofoil",
+      "1stEditionHolofoil", "1stEditionNormal", "unlimitedHolofoil",
+    ];
+    // Try the ordered fallback chain (deduped).
+    const tried = new Set<string>();
+    for (const key of fallbackOrder) {
+      if (tried.has(key)) continue;
+      tried.add(key);
+      const band = prices[key];
+      if (band?.market != null) return asNumber(band.market);
+    }
+    // Last resort: any finish that carries a market figure.
+    for (const band of Object.values(prices)) {
+      if (band?.market != null) return asNumber(band.market);
+    }
+    return 0;
   }
 
   private async queryAll(params: {

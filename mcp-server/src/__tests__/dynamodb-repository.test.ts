@@ -179,7 +179,7 @@ describe("listCards", () => {
         set: "base1",
         condition: "NM",
         quantity: 1, // one record = one physical unit; legacy quantity is ignored
-        value: 250,
+        value: 300,
         marketPrice: 300,
         language: "EN", // no stored language attribute → defaults to EN
       },
