@@ -9,6 +9,7 @@ import {
   ArrowRightLeft,
   AlertTriangle,
   TrendingUp,
+  Lock,
 } from 'lucide-react'
 import { useAdminApi } from '@/lib/admin-api'
 
@@ -68,7 +69,7 @@ export default function AdminDashboardPage() {
       </header>
 
       {/* Quick Actions */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-8">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-8">
         <Link
           href="/admin/sell"
           className="vault-panel flex items-center gap-3 px-4 py-3.5 rounded-xl hover:border-mint/40 transition-colors group"
@@ -103,6 +104,18 @@ export default function AdminDashboardPage() {
           <div>
             <div className="text-sm font-medium text-pine-100">New Trade</div>
             <div className="text-xs text-pine-400">Trade calculator</div>
+          </div>
+        </Link>
+        <Link
+          href="/admin/vault"
+          className="vault-panel flex items-center gap-3 px-4 py-3.5 rounded-xl hover:border-mint/40 transition-colors group"
+        >
+          <div className="p-2 rounded-lg bg-amber-400/10 text-amber-400 group-hover:bg-amber-400/20 transition-colors">
+            <Lock size={20} />
+          </div>
+          <div>
+            <div className="text-sm font-medium text-pine-100">Vault</div>
+            <div className="text-xs text-pine-400">On-hold P&amp;L</div>
           </div>
         </Link>
       </div>

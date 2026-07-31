@@ -19,6 +19,7 @@ interface InventoryItem {
   location?: string
   cost_basis?: string
   current_market_value?: string
+  sticker_price?: string
   finish?: string
   language?: string
   notes?: string
@@ -201,6 +202,39 @@ export default function AdminInventoryPage() {
       render: (item) => (
         <PriceDisplay value={item.current_market_value} className="text-xs text-mint" />
       ),
+    },
+    {
+      key: 'sticker_price',
+      label: 'Sticker',
+      className: 'text-right',
+      render: (item) => {
+        const sticker = item.sticker_price as string | undefined
+        if (editingId === item.item_id && editField === 'sticker_price') {
+          return (
+            <input
+              type="number"
+              step="0.01"
+              value={editValue}
+              onChange={(e) => setEditValue(e.target.value)}
+              onBlur={saveEdit}
+              onKeyDown={(e) => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') { setEditingId(null); setEditField(null); } }}
+              className="vault-field px-1.5 py-0.5 text-xs w-20 rounded text-right"
+              autoFocus
+            />
+          )
+        }
+        return (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); startEdit(item, 'sticker_price') }}
+            className="text-xs text-amber-400/80 hover:text-amber-300 cursor-pointer flex items-center gap-1 group justify-end w-full"
+            title="Click to edit sticker price"
+          >
+            <span className="font-mono">{sticker ? `$${parseFloat(sticker).toFixed(2)}` : '—'}</span>
+            <Pencil size={10} className="opacity-0 group-hover:opacity-100" />
+          </button>
+        )
+      },
     },
     {
       key: '_actions',

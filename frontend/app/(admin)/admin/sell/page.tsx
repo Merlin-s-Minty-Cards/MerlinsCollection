@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { ShoppingCart, Plus, X, CreditCard, Banknote, Check } from 'lucide-react'
+import { ShoppingCart, Plus, X, CreditCard, Banknote, Check, Smartphone, DollarSign } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import SearchInput from '@/components/admin/shared/SearchInput'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
@@ -12,6 +12,8 @@ interface SellItem {
   name: string
   agreed_price: string | number
   original_price?: string | number | null
+  cost_basis?: string | number | null
+  sticker_price?: string | number | null
 }
 
 interface InventoryItem {
@@ -19,10 +21,26 @@ interface InventoryItem {
   display_name?: string
   product_name?: string
   current_market_value?: string
+  cost_basis?: string
+  sticker_price?: string
   condition?: string
   status: string
   [key: string]: unknown
 }
+
+type PaymentMethodOption = {
+  value: string
+  icon: typeof Banknote
+  label: string
+  hasSubMethods?: boolean
+}
+
+const PAYMENT_METHODS: PaymentMethodOption[] = [
+  { value: 'cash', icon: Banknote, label: 'Cash' },
+  { value: 'card', icon: CreditCard, label: 'Card' },
+  { value: 'venmo', icon: Smartphone, label: 'Venmo' },
+  { value: 'zelle', icon: DollarSign, label: 'Zelle' },
+]
 
 export default function AdminSellPage() {
   const api = useAdminApi()
@@ -43,7 +61,18 @@ export default function AdminSellPage() {
   const [showConfirm, setShowConfirm] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const [confirmed, setConfirmed] = useState(false)
-  const [confirmResult, setConfirmResult] = useState<{ items_sold: number; total_revenue: string } | null>(null)
+  const [confirmResult, setConfirmResult] = useState<{
+    items_sold: number
+    total_revenue: string
+    fee: string
+    net_revenue: string
+  } | null>(null)
+
+  // Discount
+  const [bulkDiscount, setBulkDiscount] = useState('')
+
+  // Fee preview
+  const [feePreview, setFeePreview] = useState<{ fee: string; net: string } | null>(null)
 
   // Create session on mount
   useEffect(() => {
@@ -52,6 +81,20 @@ export default function AdminSellPage() {
       setSellId(res.sell_id)
     })
   }, [api.isAuthenticated]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Calculate fee preview when total or payment method changes
+  const total = items.reduce((sum, i) => sum + parseFloat(String(i.agreed_price || 0)), 0)
+
+  useEffect(() => {
+    if (total <= 0 || !api.isAuthenticated) {
+      setFeePreview(null)
+      return
+    }
+    api.get<{ fee: string; net: string }>('/sales/calculate-fee', {
+      amount: total.toFixed(2),
+      payment_method: paymentMethod,
+    }).then(setFeePreview).catch(() => setFeePreview(null))
+  }, [total, paymentMethod, api]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Search inventory
   const searchInventory = useCallback(async (q: string) => {
@@ -75,28 +118,47 @@ export default function AdminSellPage() {
 
   const addItem = async (inv: InventoryItem) => {
     if (!sellId) return
-    const price = parseFloat(inv.current_market_value ?? '0')
-    const agreedPrice = prompt(`Sell price for "${inv.display_name || inv.product_name}"?`, String(price))
-    if (!agreedPrice) return
+    // Default to sticker_price, then market value, then 0
+    const sticker = parseFloat(inv.sticker_price ?? '0')
+    const market = parseFloat(inv.current_market_value ?? '0')
+    const price = sticker > 0 ? sticker : market
 
     try {
       await api.post(`/sales/${sellId}/items`, {
         item_id: inv.item_id,
         name: inv.display_name || inv.product_name || '',
-        agreed_price: parseFloat(agreedPrice),
-        original_price: price || null,
+        agreed_price: price,
+        original_price: market || null,
       })
       setItems((prev) => [...prev, {
         item_id: inv.item_id,
         name: inv.display_name || inv.product_name || '',
-        agreed_price: agreedPrice,
+        agreed_price: String(price),
         original_price: inv.current_market_value,
+        cost_basis: inv.cost_basis,
+        sticker_price: inv.sticker_price,
       }])
       setSearch('')
       setSearchResults([])
     } catch (err) {
       alert(err instanceof AdminApiError ? err.detail : 'Failed to add item')
     }
+  }
+
+  const updateItemPrice = (itemId: string, newPrice: string) => {
+    setItems((prev) => prev.map((i) =>
+      i.item_id === itemId ? { ...i, agreed_price: newPrice } : i
+    ))
+  }
+
+  const applyBulkDiscount = () => {
+    const pct = parseFloat(bulkDiscount)
+    if (!pct || pct <= 0 || pct > 100) return
+    setItems((prev) => prev.map((i) => {
+      const original = parseFloat(String(i.sticker_price || i.original_price || i.agreed_price))
+      const discounted = (original * (1 - pct / 100)).toFixed(2)
+      return { ...i, agreed_price: discounted }
+    }))
   }
 
   const removeItem = async (itemId: string) => {
@@ -113,14 +175,17 @@ export default function AdminSellPage() {
     if (!sellId) return
     setConfirming(true)
     try {
-      // Update session metadata
       await api.patch(`/sales/${sellId}`, {
         payment_method: paymentMethod,
         counterparty: counterparty || null,
         notes: notes || null,
       })
-      // Confirm
-      const result = await api.post<{ items_sold: number; total_revenue: string }>(`/sales/${sellId}/confirm`)
+      const result = await api.post<{
+        items_sold: number
+        total_revenue: string
+        fee: string
+        net_revenue: string
+      }>(`/sales/${sellId}/confirm`)
       setConfirmResult(result)
       setConfirmed(true)
       setShowConfirm(false)
@@ -138,12 +203,14 @@ export default function AdminSellPage() {
     setNotes('')
     setConfirmed(false)
     setConfirmResult(null)
+    setFeePreview(null)
+    setBulkDiscount('')
   }
-
-  const total = items.reduce((sum, i) => sum + parseFloat(String(i.agreed_price || 0)), 0)
 
   // Confirmed state
   if (confirmed && confirmResult) {
+    const fee = parseFloat(confirmResult.fee)
+    const net = parseFloat(confirmResult.net_revenue)
     return (
       <div className="p-6 lg:p-8 max-w-3xl">
         <div className="vault-panel rounded-xl p-8 text-center">
@@ -151,14 +218,20 @@ export default function AdminSellPage() {
             <Check size={28} />
           </div>
           <h2 className="text-lg font-semibold text-pine-100 mb-1">Sale Confirmed</h2>
-          <p className="text-sm text-pine-300 mb-4">
+          <p className="text-sm text-pine-300 mb-2">
             {confirmResult.items_sold} item{confirmResult.items_sold !== 1 ? 's' : ''} sold for{' '}
             <span className="text-mint font-mono">${parseFloat(confirmResult.total_revenue).toFixed(2)}</span>
           </p>
+          {fee > 0 && (
+            <p className="text-xs text-pine-400 mb-1">
+              Fee ({paymentMethod}): <span className="text-red-400 font-mono">-${fee.toFixed(2)}</span>
+              {' · '}Net: <span className="text-mint font-mono">${net.toFixed(2)}</span>
+            </p>
+          )}
           <button
             type="button"
             onClick={startNew}
-            className="px-4 py-2 rounded-lg text-xs font-medium bg-mint/15 text-mint border border-mint/30 hover:bg-mint/25 transition-colors"
+            className="mt-4 px-4 py-2 rounded-lg text-xs font-medium bg-mint/15 text-mint border border-mint/30 hover:bg-mint/25 transition-colors"
           >
             Start New Sale
           </button>
@@ -205,8 +278,12 @@ export default function AdminSellPage() {
                       <div className="text-xs text-pine-100 truncate">
                         {item.display_name || item.product_name}
                       </div>
-                      <div className="text-[10px] text-pine-400">
-                        {item.condition} · <PriceDisplay value={item.current_market_value} className="text-[10px] text-pine-400 inline" />
+                      <div className="text-[10px] text-pine-400 flex items-center gap-2">
+                        <span>{item.condition}</span>
+                        {item.sticker_price && (
+                          <span className="text-amber-400">Sticker: ${parseFloat(item.sticker_price).toFixed(2)}</span>
+                        )}
+                        <span>Market: <PriceDisplay value={item.current_market_value} className="text-[10px] text-pine-400 inline" /></span>
                       </div>
                     </div>
                     <Plus size={14} className="text-mint shrink-0 ml-2" />
@@ -227,13 +304,10 @@ export default function AdminSellPage() {
                 className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs"
               />
             </label>
-            <label className="block">
+            <div>
               <span className="text-[11px] text-pine-400 uppercase tracking-wider">Payment</span>
-              <div className="flex gap-2 mt-1">
-                {[
-                  { value: 'cash', icon: Banknote, label: 'Cash' },
-                  { value: 'card', icon: CreditCard, label: 'Card' },
-                ].map(({ value, icon: Icon, label }) => (
+              <div className="flex flex-wrap gap-2 mt-1">
+                {PAYMENT_METHODS.map(({ value, icon: Icon, label }) => (
                   <button
                     key={value}
                     type="button"
@@ -249,7 +323,12 @@ export default function AdminSellPage() {
                   </button>
                 ))}
               </div>
-            </label>
+              {paymentMethod === 'venmo' && (
+                <p className="text-[10px] text-amber-400/80 mt-1.5">
+                  Venmo fee: 1.9% + $0.10 deducted from profit
+                </p>
+              )}
+            </div>
             <label className="block">
               <span className="text-[11px] text-pine-400 uppercase tracking-wider">Notes</span>
               <textarea
@@ -279,49 +358,108 @@ export default function AdminSellPage() {
               </div>
             ) : (
               <div className="divide-y divide-pine-700/25">
-                {items.map((item) => (
-                  <div key={item.item_id} className="flex items-center justify-between px-4 py-2.5">
-                    <div className="min-w-0 flex-1">
-                      <div className="text-xs text-pine-100 truncate">{item.name}</div>
-                      {item.original_price && (
-                        <div className="text-[10px] text-pine-500">
-                          Market: <PriceDisplay value={item.original_price} className="text-[10px] text-pine-500 inline" />
+                {items.map((item) => {
+                  const cost = parseFloat(String(item.cost_basis || 0))
+                  const agreed = parseFloat(String(item.agreed_price || 0))
+                  const marginPct = cost > 0 ? (((agreed - cost) / cost) * 100).toFixed(0) : null
+                  const marginColor = marginPct && parseFloat(marginPct) >= 0 ? 'text-mint' : 'text-red-400'
+                  return (
+                    <div key={item.item_id} className="flex items-center justify-between px-4 py-2.5">
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs text-pine-100 truncate">{item.name}</div>
+                        <div className="text-[10px] text-pine-500 flex items-center gap-2 flex-wrap">
+                          {item.sticker_price && (
+                            <span className="text-amber-400/80">Sticker: ${parseFloat(String(item.sticker_price)).toFixed(2)}</span>
+                          )}
+                          {item.original_price && (
+                            <span>Market: <PriceDisplay value={item.original_price} className="text-[10px] text-pine-500 inline" /></span>
+                          )}
+                          {item.cost_basis && (
+                            <span>Cost: <PriceDisplay value={item.cost_basis} className="text-[10px] text-pine-500 inline" /></span>
+                          )}
+                          {marginPct && (
+                            <span className={`font-mono ${marginColor}`}>{parseFloat(marginPct) >= 0 ? '+' : ''}{marginPct}%</span>
+                          )}
                         </div>
-                      )}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-pine-500">$</span>
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={item.agreed_price}
+                          onChange={(e) => updateItemPrice(item.item_id, e.target.value)}
+                          className="vault-field w-20 px-1.5 py-0.5 rounded text-sm text-right text-mint font-mono"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => removeItem(item.item_id)}
+                          className="p-1 rounded text-pine-500 hover:text-red-400 transition-colors"
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-3">
-                      <span className="text-sm font-mono text-mint">
-                        ${parseFloat(String(item.agreed_price)).toFixed(2)}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => removeItem(item.item_id)}
-                        className="p-1 rounded text-pine-500 hover:text-red-400 transition-colors"
-                      >
-                        <X size={14} />
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             )}
 
             {/* Total & Confirm */}
             {items.length > 0 && (
-              <div className="px-4 py-3 border-t border-pine-700/40 flex items-center justify-between bg-pine-800/20">
-                <div>
-                  <span className="text-xs text-pine-400">Total</span>
-                  <div className="text-lg font-mono font-semibold text-mint">
-                    ${total.toFixed(2)}
+              <div className="px-4 py-3 border-t border-pine-700/40 bg-pine-800/20 space-y-3">
+                {/* Bulk discount */}
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] text-pine-400 uppercase tracking-wider">Bulk Discount:</span>
+                  <div className="relative">
+                    <input
+                      type="number"
+                      step="1"
+                      min="0"
+                      max="100"
+                      value={bulkDiscount}
+                      onChange={(e) => setBulkDiscount(e.target.value)}
+                      placeholder="0"
+                      className="vault-field w-16 px-2 py-0.5 rounded text-xs text-right pr-5 font-mono"
+                    />
+                    <span className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[10px] text-pine-500">%</span>
                   </div>
+                  <button
+                    type="button"
+                    onClick={applyBulkDiscount}
+                    disabled={!bulkDiscount || parseFloat(bulkDiscount) <= 0}
+                    className="px-2 py-0.5 rounded text-[10px] font-medium bg-mint/10 text-mint border border-mint/20 hover:bg-mint/20 disabled:opacity-40 transition-colors"
+                  >
+                    Apply
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setShowConfirm(true)}
-                  className="px-4 py-2 rounded-lg text-sm font-medium bg-mint/15 text-mint border border-mint/30 hover:bg-mint/25 transition-colors"
-                >
-                  Confirm Sale
-                </button>
+
+                {/* Fee preview for Venmo */}
+                {feePreview && parseFloat(feePreview.fee) > 0 && (
+                  <div className="flex items-center gap-3 text-[10px]">
+                    <span className="text-pine-400">Fee ({paymentMethod}):</span>
+                    <span className="text-red-400 font-mono">-${parseFloat(feePreview.fee).toFixed(2)}</span>
+                    <span className="text-pine-400">Net:</span>
+                    <span className="text-mint font-mono">${parseFloat(feePreview.net).toFixed(2)}</span>
+                  </div>
+                )}
+
+                {/* Total + Confirm */}
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-xs text-pine-400">Total</span>
+                    <div className="text-lg font-mono font-semibold text-mint">
+                      ${total.toFixed(2)}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowConfirm(true)}
+                    className="px-4 py-2 rounded-lg text-sm font-medium bg-mint/15 text-mint border border-mint/30 hover:bg-mint/25 transition-colors"
+                  >
+                    Confirm Sale
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -331,7 +469,11 @@ export default function AdminSellPage() {
       <ConfirmDialog
         open={showConfirm}
         title="Confirm Sale"
-        description={`Sell ${items.length} item${items.length !== 1 ? 's' : ''} for $${total.toFixed(2)} via ${paymentMethod}?`}
+        description={
+          feePreview && parseFloat(feePreview.fee) > 0
+            ? `Sell ${items.length} item${items.length !== 1 ? 's' : ''} for $${total.toFixed(2)} via ${paymentMethod}? Fee: $${parseFloat(feePreview.fee).toFixed(2)}, Net: $${parseFloat(feePreview.net).toFixed(2)}`
+            : `Sell ${items.length} item${items.length !== 1 ? 's' : ''} for $${total.toFixed(2)} via ${paymentMethod}?`
+        }
         confirmLabel="Complete Sale"
         loading={confirming}
         onConfirm={handleConfirm}

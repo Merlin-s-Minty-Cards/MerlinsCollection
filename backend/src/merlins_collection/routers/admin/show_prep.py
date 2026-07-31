@@ -25,13 +25,15 @@ router = APIRouter(prefix="/show-prep", tags=["admin-show-prep"])
 
 @router.get("/mispriced")
 def get_mispriced_cards(
-    threshold: int = Query(10, ge=1, le=100),
+    threshold: int = Query(10, ge=1, le=500),
+    threshold_mode: str = Query("percent"),
     location: str | None = Query(None),
     repo: InventoryRepository = Depends(get_repo),
 ) -> dict[str, Any]:
     """Find cards where current_market_value has drifted from listed/stored value.
 
-    Returns items where the price delta exceeds the threshold percentage.
+    Returns items where the price delta exceeds the threshold.
+    ``threshold_mode`` can be ``percent`` (default) or ``dollar``.
     Only considers AVAILABLE items with a known market value.
     """
     items = repo.list_inventory()
@@ -54,22 +56,37 @@ def get_mispriced_cards(
         if cost == 0:
             continue
 
-        # Calculate margin percentage
+        # Calculate margin percentage and dollar delta
         margin_pct = ((market - cost) / cost * 100).quantize(Decimal("0.1"))
+        dollar_delta = (market - cost).quantize(Decimal("0.01"))
 
-        # Flag items where the margin is notable (we use cost as baseline)
-        # In a real implementation this would compare to last-known market value
-        # For now, we flag items based on the threshold parameter
-        if abs(margin_pct) >= threshold:
-            flagged.append({
-                "item_id": item.item_id,
-                "card_id": getattr(item, "card_id", None),
-                "name": getattr(item, "display_name", None) or getattr(item, "product_name", None) or "",
-                "location": getattr(item, "location", None),
-                "cost_basis": str(cost),
-                "current_market_value": str(market),
-                "delta_pct": str(margin_pct),
-            })
+        # Flag based on mode
+        if threshold_mode == "dollar":
+            if abs(dollar_delta) >= Decimal(str(threshold)):
+                flagged.append({
+                    "item_id": item.item_id,
+                    "card_id": getattr(item, "card_id", None),
+                    "name": getattr(item, "display_name", None) or getattr(item, "product_name", None) or "",
+                    "location": getattr(item, "location", None),
+                    "cost_basis": str(cost),
+                    "current_market_value": str(market),
+                    "sticker_price": str(item.sticker_price) if item.sticker_price is not None else None,
+                    "delta_pct": str(margin_pct),
+                    "delta_dollar": str(dollar_delta),
+                })
+        else:
+            if abs(margin_pct) >= threshold:
+                flagged.append({
+                    "item_id": item.item_id,
+                    "card_id": getattr(item, "card_id", None),
+                    "name": getattr(item, "display_name", None) or getattr(item, "product_name", None) or "",
+                    "location": getattr(item, "location", None),
+                    "cost_basis": str(cost),
+                    "current_market_value": str(market),
+                    "sticker_price": str(item.sticker_price) if item.sticker_price is not None else None,
+                    "delta_pct": str(margin_pct),
+                    "delta_dollar": str(dollar_delta),
+                })
 
     # Sort by absolute delta descending
     flagged.sort(key=lambda x: abs(Decimal(x["delta_pct"])), reverse=True)

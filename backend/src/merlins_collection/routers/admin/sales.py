@@ -7,7 +7,7 @@ item's status is flipped to SOLD and a SALE transaction is recorded atomically.
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -53,6 +53,33 @@ class SellConfirmResult(BaseModel):
     items_sold: int
     total_revenue: Decimal
     fee: Decimal
+    net_revenue: Decimal | None = None
+
+
+# ---------------------------------------------------------------------------
+# Fee calculation
+# ---------------------------------------------------------------------------
+
+# Payment method fee schedules (built-in, no DB lookup needed for these common ones)
+_PAYMENT_FEES: dict[str, tuple[Decimal, Decimal]] = {
+    # method: (percent_rate, fixed_fee)
+    "cash": (Decimal("0"), Decimal("0")),
+    "card": (Decimal("0"), Decimal("0")),
+    "venmo": (Decimal("1.9"), Decimal("0.10")),
+    "zelle": (Decimal("0"), Decimal("0")),
+    "epayment": (Decimal("0"), Decimal("0")),
+}
+
+
+def _calculate_method_fee(amount: Decimal, method: str) -> Decimal:
+    """Calculate fee for a payment method. Venmo: (amount x 1.9%) + $0.10."""
+    pct_rate, fixed = _PAYMENT_FEES.get(method, (Decimal("0"), Decimal("0")))
+    if pct_rate == 0 and fixed == 0:
+        return Decimal("0")
+    pct_fee = (amount * pct_rate / Decimal("100")).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
+    return (pct_fee + fixed).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +108,30 @@ def create_sell_session(
     }
     repo.put_sell_session(session)
     return session
+
+
+@router.get("/calculate-fee")
+def calculate_fee(
+    amount: Decimal = Query(...),
+    payment_method: str = Query("cash"),
+) -> dict[str, Any]:
+    """Calculate the fee for a given amount and payment method.
+
+    Fee schedules:
+    - cash: no fee
+    - card: no fee (handled by card reader hardware)
+    - venmo: (amount x 1.9%) + $0.10
+    - zelle: no fee
+    - epayment: no fee (generic e-payment)
+    """
+    fee = _calculate_method_fee(amount, payment_method)
+    net = amount - fee
+    return {
+        "amount": str(amount),
+        "payment_method": payment_method,
+        "fee": str(fee),
+        "net": str(net),
+    }
 
 
 @router.get("/{sell_id}")
@@ -196,13 +247,20 @@ def confirm_sell_session(
     if not items:
         raise HTTPException(status_code=422, detail="Cannot confirm empty session")
 
-    fee = Decimal(str(session.get("fee") or "0"))
     payment_method = session.get("payment_method") or "cash"
     show_id = session.get("show_id")
     total_revenue = Decimal("0")
     items_sold = 0
 
-    # Process each item
+    # Calculate total first for fee computation
+    for sell_item in items:
+        total_revenue += Decimal(str(sell_item["agreed_price"]))
+
+    # Calculate fee based on payment method
+    fee = _calculate_method_fee(total_revenue, payment_method)
+
+    # Reset and process each item
+    total_revenue = Decimal("0")
     for sell_item in items:
         price = Decimal(str(sell_item["agreed_price"]))
         total_revenue += price
@@ -234,14 +292,17 @@ def confirm_sell_session(
     # Update session status
     session["status"] = "confirmed"
     session["total_revenue"] = str(total_revenue)
+    session["fee"] = str(fee)
     repo.put_sell_session(session)
 
+    net_revenue = total_revenue - fee
     return {
         "sell_id": sell_id,
         "status": "confirmed",
         "items_sold": items_sold,
         "total_revenue": str(total_revenue),
         "fee": str(fee),
+        "net_revenue": str(net_revenue),
     }
 
 

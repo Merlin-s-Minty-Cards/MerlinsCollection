@@ -11,6 +11,7 @@ import {
   ArrowRightLeft,
   TrendingUp,
   MapPin,
+  Lock,
   PanelLeftClose,
   PanelLeft,
   LogOut,
@@ -23,6 +24,7 @@ const navItems = [
   { href: '/admin/sell', label: 'Sell', icon: ShoppingCart },
   { href: '/admin/buy', label: 'Buy', icon: ShoppingBag },
   { href: '/admin/trade', label: 'Trade', icon: ArrowRightLeft },
+  { href: '/admin/vault', label: 'Vault', icon: Lock },
   { href: '/admin/market', label: 'Market', icon: TrendingUp },
   { href: '/admin/show-prep', label: 'Show Prep', icon: MapPin },
 ]

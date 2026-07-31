@@ -13,7 +13,9 @@ interface MispricedItem {
   location?: string
   cost_basis: string
   current_market_value: string
+  sticker_price?: string | null
   delta_pct: string
+  delta_dollar?: string
   [key: string]: unknown
 }
 
@@ -27,6 +29,7 @@ export default function AdminShowPrepPage() {
 
   // Mispriced
   const [threshold, setThreshold] = useState(20)
+  const [thresholdMode, setThresholdMode] = useState<'percent' | 'dollar'>('percent')
   const [mispriced, setMispriced] = useState<MispricedItem[]>([])
   const [loadingMispriced, setLoadingMispriced] = useState(true)
 
@@ -43,11 +46,11 @@ export default function AdminShowPrepPage() {
     if (!api.isAuthenticated) return
     setLoadingMispriced(true)
     try {
-      const res = await api.get<{ items: MispricedItem[]; total_flagged: number }>('/show-prep/mispriced', { threshold })
+      const res = await api.get<{ items: MispricedItem[]; total_flagged: number }>('/show-prep/mispriced', { threshold, threshold_mode: thresholdMode })
       setMispriced(res.items)
     } catch { setMispriced([]) }
     finally { setLoadingMispriced(false) }
-  }, [api, threshold])
+  }, [api, threshold, thresholdMode])
 
   const fetchLocations = useCallback(async () => {
     if (!api.isAuthenticated) return
@@ -120,13 +123,23 @@ export default function AdminShowPrepPage() {
       render: (item) => <PriceDisplay value={item.current_market_value} className="text-xs text-mint" />,
     },
     {
+      key: 'sticker_price',
+      label: 'Sticker',
+      className: 'text-right',
+      render: (item) => item.sticker_price ? <PriceDisplay value={item.sticker_price} className="text-xs text-amber-400" /> : <span className="text-xs text-pine-600">—</span>,
+    },
+    {
       key: 'delta_pct',
       label: 'Delta',
       className: 'text-right',
       render: (item) => {
-        const val = parseFloat(item.delta_pct)
-        const color = val > 0 ? 'text-mint' : 'text-red-400'
-        return <span className={`text-xs font-mono ${color}`}>{val > 0 ? '+' : ''}{val.toFixed(1)}%</span>
+        const pctVal = parseFloat(item.delta_pct)
+        const dollarVal = item.delta_dollar ? parseFloat(item.delta_dollar) : null
+        const color = pctVal > 0 ? 'text-mint' : 'text-red-400'
+        if (thresholdMode === 'dollar' && dollarVal !== null) {
+          return <span className={`text-xs font-mono ${color}`}>{dollarVal > 0 ? '+' : ''}${dollarVal.toFixed(2)} ({pctVal > 0 ? '+' : ''}{pctVal.toFixed(1)}%)</span>
+        }
+        return <span className={`text-xs font-mono ${color}`}>{pctVal > 0 ? '+' : ''}{pctVal.toFixed(1)}%{dollarVal !== null ? ` ($${dollarVal > 0 ? '+' : ''}${dollarVal.toFixed(2)})` : ''}</span>
       },
     },
   ]
@@ -167,17 +180,47 @@ export default function AdminShowPrepPage() {
               Mispriced Cards
             </h2>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
+            {/* Mode toggle */}
+            <div className="flex rounded-lg border border-pine-700/40 overflow-hidden">
+              <button
+                type="button"
+                onClick={() => { setThresholdMode('percent'); setThreshold(20) }}
+                className={`px-2.5 py-1 text-[10px] font-medium transition-colors ${thresholdMode === 'percent' ? 'bg-mint/15 text-mint' : 'text-pine-400 hover:text-pine-200'}`}
+              >
+                %
+              </button>
+              <button
+                type="button"
+                onClick={() => { setThresholdMode('dollar'); setThreshold(5) }}
+                className={`px-2.5 py-1 text-[10px] font-medium border-l border-pine-700/40 transition-colors ${thresholdMode === 'dollar' ? 'bg-mint/15 text-mint' : 'text-pine-400 hover:text-pine-200'}`}
+              >
+                $
+              </button>
+            </div>
+            {/* Slider */}
             <label className="text-[10px] text-pine-400">Threshold:</label>
             <input
               type="range"
-              min={5}
-              max={80}
+              min={thresholdMode === 'percent' ? 5 : 1}
+              max={thresholdMode === 'percent' ? 80 : 50}
               value={threshold}
               onChange={(e) => setThreshold(Number(e.target.value))}
               className="w-24 accent-mint"
             />
-            <span className="text-xs font-mono text-pine-300 w-8">{threshold}%</span>
+            {/* Manual input */}
+            <div className="relative">
+              <input
+                type="number"
+                min={1}
+                value={threshold}
+                onChange={(e) => setThreshold(Number(e.target.value) || 1)}
+                className="vault-field w-16 px-2 py-0.5 rounded text-xs text-right font-mono pr-5"
+              />
+              <span className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[10px] text-pine-500">
+                {thresholdMode === 'percent' ? '%' : '$'}
+              </span>
+            </div>
           </div>
         </div>
 

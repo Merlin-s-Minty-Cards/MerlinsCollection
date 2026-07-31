@@ -94,6 +94,85 @@ Cognito auth via the existing `require_admin` dependency.
 - [ ] 8.3 Inventory velocity metrics
 - [ ] 8.4 Tests: aggregation math, date ranges
 
+========================================================================
+ADMIN PANEL UX OVERHAUL
+========================================================================
+
+## Overview
+16 enhancements to the admin frontend + supporting backend changes.
+Organized into 3 rounds for parallel execution.
+
+## Round 1 — Bug Fixes + Quick Wins (4 parallel streams)
+
+### Stream A: Bug Fixes (trade, inventory sort/filter, trade edit)
+- [x] A.1 Fix trade incoming: frontend sends `value` but backend expects `agreed_value`
+- [x] A.2 Add PATCH endpoint for trade outgoing leg `agreed_value` editing
+- [x] A.3 Frontend: expose edit UI for outgoing leg values in trade page
+- [x] A.4 Fix inventory sort: support all columns (name, status, cost, market, location)
+- [x] A.5 Fix inventory location filter: substring match not exact
+- [ ] A.6 Tests for new sort/filter logic + trade leg patch
+
+### Stream B: Buy Page Improvements
+- [x] B.1 Bidirectional % ↔ buy price calculator (enter % → calc price, or price → calc %)
+- [x] B.2 Flip field order: market value first, then buy price (muscle memory)
+- [x] B.3 Add card number field to buy form for faster DB lookup
+- [x] B.4 Wire card_number through to backend item creation
+
+### Stream C: Show-Prep Improvements
+- [x] C.1 Add percent vs dollar toggle for threshold mode
+- [x] C.2 Backend: accept `threshold_mode=percent|dollar` query param
+- [x] C.3 Add manual numeric input alongside the slider
+- [ ] C.4 Tests for dollar-mode threshold logic
+
+### Stream D: Sell Page Improvements
+- [x] D.1 Editable sell prices inline in cart (no more prompt())
+- [x] D.2 Bulk discount field: enter % discount, applies to all items
+- [x] D.3 Per-card % profit margin display in cart (agreed - cost / cost)
+- [x] D.4 Remove prompt() for price entry, use inline input on add
+
+## Round 2 — Feature Work (3 parallel streams)
+
+### Stream E: Sticker Price + Sell Defaults
+- [x] E.1 Add `sticker_price` field to inventory model (DynamoDB)
+- [x] E.2 Display sticker price in inventory table, sell cart, show-prep
+- [x] E.3 Default sell price popup to sticker value (not market)
+- [x] E.4 Backend: include sticker_price in serialization, allow CRUD
+- [x] E.5 Tests for sticker field
+
+### Stream F: Expanded Payment Methods + Venmo Fee
+- [x] F.1 Backend: extend payment_method to include venmo, zelle, epayment
+- [x] F.2 Frontend: add ePayment button group (Venmo, Zelle) in sell/buy/trade
+- [x] F.3 Venmo fee calculation: (amount × 0.019) + $0.10 on sell
+- [x] F.4 Display fee deduction in sell confirmation + profit summary
+- [x] F.5 Tests for fee calculation
+
+### Stream G: Merlin's Vault Page
+- [x] G.1 Backend endpoint: GET /admin/vault — all on_hold items with P&L calc
+- [x] G.2 Frontend: new /admin/vault page with card list, % gain/loss, $ gain/loss
+- [x] G.3 Per-card: current market vs cost basis, % net, $ net
+- [x] G.4 Portfolio summary: total value held, total gain/loss
+- [x] G.5 Ability to move cards to/from vault (status toggle)
+- [x] G.6 Tests for vault endpoint
+
+## Round 3 — Composite Features (2 parallel streams)
+
+### Stream H: Card Images in All Menus
+- [ ] H.1 Pull card images from TCGdex via card_id
+- [ ] H.2 Per-card image toggle button in all list views
+- [ ] H.3 Global "show all images" toggle per page
+- [ ] H.4 Lazy-load images, fallback placeholder for missing card_id
+- [ ] H.5 Shared ImageToggle component
+
+### Stream I: Editable Detail Modal + Price History Graph
+- [ ] I.1 Backend: daily price snapshot recording (scheduled task setup)
+- [ ] I.2 Backend: GET /admin/inventory/{id}/price-chart — returns time-series
+- [ ] I.3 Shared CardDetailModal component (click any card → opens modal)
+- [ ] I.4 All fields editable with pencil toggle in modal
+- [ ] I.5 Price chart: Chart.js line graph, toggleable timeframes (1mo/3mo/6mo/1yr/2yr)
+- [ ] I.6 Buy price marker on the graph (date + price dot)
+- [ ] I.7 Wire modal into all admin pages (inventory, sell, buy, trade, show-prep, vault)
+- [ ] I.8 Tests for price-chart endpoint
+
 ## Log
 
 - 2025-01-27: Progress file created. RFC 0004 written. Branch created off
@@ -114,3 +193,36 @@ Cognito auth via the existing `require_admin` dependency.
   bulk location move, location summary. 5 tests passing.
 - 2025-01-27: RFC 0005 written: Admin Panel Frontend design doc.
   API key auth added. Next.js admin panel implementation starting next session.
+- Round 1 (Admin UX Overhaul) IMPLEMENTED:
+  Stream A: Fixed trade incoming bug (value→agreed_value), added PATCH endpoint
+  for outgoing leg editing, fixed TradeBalance interface mismatch with backend,
+  fixed cash endpoint (POST→PUT), fixed inventory sort to support all columns
+  (name/status/cost/market/location/kind/condition), fixed location filter to
+  use substring match. Added inline editable values for outgoing trade legs.
+  Stream B: Bidirectional buy %↔price calculator, market value field moved above
+  buy price, card number field added to buy form, per-card buy % shown in list.
+  Stream C: Percent vs dollar threshold toggle, manual numeric input alongside
+  slider, backend accepts threshold_mode param, delta_dollar returned in response.
+  Stream D: Removed prompt() from sell, inline editable prices in cart, bulk
+  discount % field with apply button, per-card profit margin % display with
+  color coding (green=profit, red=loss), cost_basis shown in cart items.
+  REMAINING from Round 1: A.6 (tests for sort/trade patch),
+  C.4 (tests for dollar mode). All B tasks complete.
+- Round 2 (Admin UX Overhaul) IMPLEMENTED:
+  Stream E: Added sticker_price field to _ItemBase (inventory model), flows
+  through DynamoDB CRUD automatically (Optional[Decimal], defaults None).
+  Displayed in inventory table (inline-editable), sell cart, show-prep mispriced
+  table. Sell page defaults price to sticker_price when adding to cart (falls
+  back to market if no sticker). Tests: create/update/search/get/clear sticker.
+  Stream F: Payment method fee schedules defined in sales router (_PAYMENT_FEES
+  dict). Venmo: 1.9% + $0.10, others free. GET /admin/sales/calculate-fee
+  endpoint for real-time preview. Sale confirmation auto-calculates fees from
+  payment_method and returns net_revenue. Frontend: Venmo + Zelle buttons added
+  to sell and buy pages. Fee preview displayed live in sell cart footer. Fee
+  shown in confirmation dialog and post-confirm summary.
+  Stream G: New /admin/vault backend router — GET returns all on_hold items
+  with per-card P&L (dollar_net, percent_net) and portfolio summary (total cost,
+  market, gain/loss). POST /{id}/hold and POST /{id}/release toggle item status.
+  Frontend: full vault page with summary cards, searchable table, release
+  button. Added to AdminShell nav and dashboard quick actions.
+  Tests: 13 vault tests (listing, P&L calc, hold/release), 12 sticker+fee tests.

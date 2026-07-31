@@ -132,6 +132,7 @@ class _ItemBase(BaseModel):
     market_value_at_purchase: Decimal | None = None
     current_market_value: Decimal | None = None
     listed_price: Decimal | None = None
+    sticker_price: Decimal | None = None
     acquired_at: date
     acquired_show_id: str | None = None
     consignment: ConsignmentTerms | None = None
