@@ -10,7 +10,6 @@ Unlike the customer ``/inventory/search``, this surface:
 from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -74,7 +73,8 @@ def admin_search_inventory(
         items = [i for i in items if i.status == status]
 
     if location is not None:
-        items = [i for i in items if getattr(i, "location", None) == location]
+        location_lower = location.lower()
+        items = [i for i in items if (getattr(i, "location", None) or "").lower().find(location_lower) >= 0]
 
     if condition is not None:
         items = [i for i in items if i.kind == "raw" and i.condition == condition]
@@ -260,27 +260,53 @@ def _item_matches_name(item: InventoryItem, name_lower: str) -> bool:
 def _sort_admin_results(
     items: list[InventoryItem], sort: str | None
 ) -> list[InventoryItem]:
-    """Sort items by the requested criteria. Priceless items sort last."""
+    """Sort items by the requested criteria.
+
+    Sort format: ``{field}_{direction}`` e.g. ``name_asc``, ``cost_basis_desc``.
+    Supported fields: price (alias for current_market_value), name, status,
+    cost_basis, current_market_value, location, condition, display_name, kind.
+    """
     if sort is None:
         return items
 
-    if sort in ("price_desc", "price_asc"):
-        reverse = sort == "price_desc"
+    # Parse sort parameter
+    parts = sort.rsplit("_", 1)
+    if len(parts) != 2 or parts[1] not in ("asc", "desc"):
+        return items
 
-        def _key(item):
-            price = item.current_market_value
-            if price is None:
-                # Priceless items always sort last: use a sentinel tuple.
-                # When ascending, (1, 0) > (0, anything) so they sort last.
-                # When descending (reversed), (0, anything) > (1, 0) is false,
-                # so we need a different approach.
-                return (1, Decimal(0))
-            return (0, -price if reverse else price)
+    field, direction = parts
+    reverse = direction == "desc"
 
-        # Always sort ascending — the key handles direction.
-        return sorted(items, key=_key)
+    # Alias
+    if field == "price":
+        field = "current_market_value"
 
-    return items
+    def _get_sort_value(item: InventoryItem):
+        if field in ("current_market_value", "cost_basis"):
+            if field == "current_market_value":
+                val = item.current_market_value
+            else:
+                val = item.cost_basis
+            if val is None:
+                return float("inf") if not reverse else float("-inf")
+            return float(val)
+        elif field in ("name", "display_name"):
+            display = getattr(item, "display_name", None) or getattr(item, "product_name", None) or ""
+            return display.lower()
+        elif field == "status":
+            return str(item.status)
+        elif field == "location":
+            loc = getattr(item, "location", None) or ""
+            return loc.lower()
+        elif field == "condition":
+            cond = getattr(item, "condition", None) or ""
+            return str(cond)
+        elif field == "kind":
+            return str(item.kind)
+        else:
+            return ""
+
+    return sorted(items, key=_get_sort_value, reverse=reverse)
 
 
 def _serialize_item(item: InventoryItem) -> dict[str, Any]:
