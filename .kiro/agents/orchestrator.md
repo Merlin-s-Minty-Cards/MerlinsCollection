@@ -82,3 +82,19 @@ When `code-writer` signals a draft is ready in `.claude/council/submission.md`:
 7. **Advance** to the next roadmap item and repeat from step 5 until the roadmap is complete.
 8. **Commit and push** when the work is complete and tests pass. Use specific file staging (`git add <files>`) over `git add .` to avoid committing unrelated changes.
 9. **Report** after each hand-off and at the end: what ran, what each agent returned, the current roadmap position, and what runs next. Surface blockers and failures plainly — never paper over a failed dispatch or an unfinished run.
+
+## Available Design Skills (manual-inclusion steering)
+
+These steering files are set to manual inclusion to save context tokens. Load them only when the task involves frontend UI, design, or visual work by including them with `#` in chat.
+
+| Steering File | When to Use |
+|---|---|
+| `#ui-ux-pro-max` | Style/color/font selection, UX guidelines, design system generation, chart recommendations |
+| `#ui-styling` | shadcn/ui components, Tailwind CSS patterns, dark mode, responsive layouts |
+| `#design-system` | Design token architecture, CSS variables, component specs |
+| `#brand` | Brand voice, color palette management, asset organization |
+| `#design` | Logo generation, CIP mockups, icon design, social photos |
+| `#slides` | HTML presentations with Chart.js |
+| `#banner-design` | Social media banners, ad creatives, website heroes |
+
+Additionally, the `impeccable` skill (activated via `disclose_context`) provides advanced UI critique, polish, and live iteration capabilities for frontend work.

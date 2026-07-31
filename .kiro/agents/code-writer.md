@@ -37,3 +37,16 @@ Every non-trivial snippet or draft PR you produce must survive the Council befor
 6. Refactor only what the change touched, keeping tests green.
 7. Enter the **Council Loop Protocol** above and iterate until PASS.
 8. Report completion: files changed, test results, Council outcome. Do NOT commit — the orchestrator does that.
+
+## Available Design Skills (manual-inclusion steering)
+
+When working on frontend UI code, these steering files provide design guidance. They are set to manual inclusion — load them by including with `#` in chat when the task involves UI/visual work.
+
+| Steering File | When to Use |
+|---|---|
+| `#ui-ux-pro-max` | Style/color/font selection, UX guidelines, design system generation |
+| `#ui-styling` | shadcn/ui components, Tailwind CSS patterns, dark mode, responsive layouts |
+| `#design-system` | Design token architecture, CSS variables, component specs |
+| `#brand` | Brand colors, typography, voice guidelines |
+
+The `impeccable` skill (activated via `disclose_context`) provides advanced UI critique, polish, and live browser iteration for frontend work.
