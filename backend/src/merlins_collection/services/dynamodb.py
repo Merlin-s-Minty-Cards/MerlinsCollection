@@ -1277,3 +1277,106 @@ class InventoryRepository:
             cond = pk & Key("SK").begins_with(prefix)
         items = self._query_all(KeyConditionExpression=cond)
         return [PricePoint.model_validate(i) for i in items]
+
+    # ---- catalog full list (admin market search) ----
+    def list_all_catalog_cards(self):
+        """Return all catalog cards via filtered scan. Expensive — admin-only."""
+        return list(self.iter_catalog_cards())
+
+    # ---- watchlist (admin feature) ----
+    def put_watchlist_entry(self, entry: dict):
+        """Insert a watchlist entry."""
+        entry_id = entry["entry_id"]
+        record = {
+            "PK": f"WATCHLIST#{entry_id}",
+            "SK": "META",
+            "entity": "watchlist_entry",
+            "GSI1PK": "WATCHLIST#ALL",
+            "GSI1SK": entry.get("added_at", ""),
+            **_serialize(entry),
+        }
+        self._table.put_item(Item=record)
+
+    def get_watchlist_entry(self, entry_id: str) -> dict | None:
+        """Fetch one watchlist entry by id."""
+        item = self._table.get_item(
+            Key={"PK": f"WATCHLIST#{entry_id}", "SK": "META"},
+        ).get("Item")
+        return item if item else None
+
+    def list_watchlist_entries(self) -> list[dict]:
+        """List all watchlist entries via the GSI1 WATCHLIST#ALL partition."""
+        items = self._query_all(
+            IndexName="GSI1",
+            KeyConditionExpression=Key("GSI1PK").eq("WATCHLIST#ALL"),
+        )
+        return items
+
+    def delete_watchlist_entry(self, entry_id: str):
+        """Delete a watchlist entry."""
+        self._table.delete_item(
+            Key={"PK": f"WATCHLIST#{entry_id}", "SK": "META"},
+        )
+
+    # ---- sell sessions (admin feature) ----
+    def put_sell_session(self, session: dict):
+        """Insert or update a sell session."""
+        sell_id = session["sell_id"]
+        record = {
+            "PK": f"SELL#{sell_id}",
+            "SK": "META",
+            "entity": "sell_session",
+            "GSI1PK": f"SELLS#{session.get('status', 'draft')}",
+            "GSI1SK": session.get("created_at", ""),
+            **_serialize(session),
+        }
+        self._table.put_item(Item=record)
+
+    def get_sell_session(self, sell_id: str) -> dict | None:
+        """Fetch one sell session by id."""
+        item = self._table.get_item(
+            Key={"PK": f"SELL#{sell_id}", "SK": "META"},
+        ).get("Item")
+        return item if item else None
+
+    # ---- buy sessions (admin feature) ----
+    def put_buy_session(self, session: dict):
+        """Insert or update a buy session."""
+        buy_id = session["buy_id"]
+        record = {
+            "PK": f"BUY#{buy_id}",
+            "SK": "META",
+            "entity": "buy_session",
+            "GSI1PK": f"BUYS#{session.get('status', 'draft')}",
+            "GSI1SK": session.get("created_at", ""),
+            **_serialize(session),
+        }
+        self._table.put_item(Item=record)
+
+    def get_buy_session(self, buy_id: str) -> dict | None:
+        """Fetch one buy session by id."""
+        item = self._table.get_item(
+            Key={"PK": f"BUY#{buy_id}", "SK": "META"},
+        ).get("Item")
+        return item if item else None
+
+    # ---- trade sessions (admin feature) ----
+    def put_trade_session(self, session: dict):
+        """Insert or update a trade session."""
+        trade_id = session["trade_id"]
+        record = {
+            "PK": f"TRADE#{trade_id}",
+            "SK": "META",
+            "entity": "trade_session",
+            "GSI1PK": f"TRADES#{session.get('status', 'draft')}",
+            "GSI1SK": session.get("created_at", ""),
+            **_serialize(session),
+        }
+        self._table.put_item(Item=record)
+
+    def get_trade_session(self, trade_id: str) -> dict | None:
+        """Fetch one trade session by id."""
+        item = self._table.get_item(
+            Key={"PK": f"TRADE#{trade_id}", "SK": "META"},
+        ).get("Item")
+        return item if item else None

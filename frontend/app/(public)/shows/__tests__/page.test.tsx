@@ -55,7 +55,7 @@ describe('Shows page', () => {
     expect(screen.getByText('Aug 14, 2026')).toBeInTheDocument()
   })
 
-  it('renders "N/A" for a show missing city/venue', async () => {
+  it('omits venue/city lines when a show is missing those details', async () => {
     mockedGetShows.mockResolvedValue({
       upcoming: [{ name: 'Bare Show', date: '2026-08-14', venue: null, city: null }],
       past: [],
@@ -63,7 +63,8 @@ describe('Shows page', () => {
 
     render(await ShowsPage())
 
-    expect(screen.getAllByText('N/A').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByText('Bare Show')).toBeInTheDocument()
+    expect(screen.queryByText('N/A')).not.toBeInTheDocument()
   })
 
   it('shows the empty-state copy when both lists are empty', async () => {

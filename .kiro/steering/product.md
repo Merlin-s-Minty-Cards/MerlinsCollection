@@ -1,44 +1,63 @@
-# Product Context — Merlin's Minty Cards
+# Product: Merlin's Minty Cards
 
-## What It Is
-A Pokemon card business website combining public-facing content pages with an authenticated inventory management and search tool.
+Pokemon card business website. Public content pages + authenticated inventory/trading tool.
 
-## Target Users
-- **Collectors** browsing the public site for show schedules, articles, and the Collectors Dictionary
-- **Business owner** (Merlin) managing inventory, pricing, and card valuations via the authenticated tool
+## Users
+- **Collectors** — browse shows, articles, dictionary
+- **Business owner (Merlin)** — manage inventory, pricing, trades at card shows via Retool admin panel
 
-## Public Pages
-| Route | Purpose |
+## Routes
+
+### Public (route group: `app/(public)/`)
+| Route | Page |
 |---|---|
-| `/` | Home — brand intro, highlights, featured cards |
-| `/shows` | Upcoming and past card show events |
-| `/about` | Business story, team, contact info |
-| `/dictionary` | Collectors Dictionary — reference for card terminology and grading |
-| `/articles` | Article listing from Sanity CMS |
-| `/articles/[slug]` | Individual article (statically generated) |
+| `/` | Home — brand intro, featured cards with 3D flip/tilt effect |
+| `/shows` | Card show schedule |
+| `/about` | Business story |
+| `/dictionary` | Card terminology and grading reference |
+| `/articles` | Articles from Sanity CMS |
+| `/articles/[slug]` | Individual article (static generation) |
 
-## Authenticated Tool — Inventory Search (`/inventory`)
-Two interaction modes behind login:
+### Authenticated (route group: `app/(auth)/`)
+| Route | Page |
+|---|---|
+| `/inventory` | Inventory search — Filter Mode + Chat Mode |
 
-### Filter Mode
-Structured search with dropdowns (set, condition, rarity), price range slider, and name search. Calls `GET /inventory/search`.
+### Admin (route group: `app/(admin)/`)
+| Route | Page |
+|---|---|
+| `/admin/*` | Admin panel pages |
 
-### Chat Mode
-Natural language queries processed by Claude (AWS Bedrock) using MCP tools. User types plain English; AI interprets intent and calls inventory tools. Endpoint: `POST /chat`.
+## Inventory Tool — Two Modes
 
-### MCP Tools Available to Chat
-- `get_inventory_summary` — total count, value, top cards
-- `search_inventory` — filter by name, set, condition, value range
-- `get_card_price_history` — historical price data for a card
-- `calculate_inventory_value` — full portfolio valuation breakdown
-- `flag_underpriced_cards` — cards priced below market threshold
+**Filter Mode:** Dropdowns (set, condition, rarity), price slider, name search → `GET /inventory/search`
 
-## Content Management
-Articles are authored in Sanity CMS and rendered via Next.js static generation.
+**Chat Mode:** Natural language → Claude (Bedrock) → MCP tools → response. Endpoint: `POST /chat`
+
+### MCP Tools (defined in `mcp-server/src/tools/`)
+- `get_inventory_summary` — count, value, top cards
+- `search_inventory` — filter by name/set/condition/value
+- `get_card_price_history` — historical prices
+- `calculate_inventory_value` — portfolio breakdown
+- `flag_underpriced_cards` — below-market detection
+
+## Admin API (Retool Integration)
+Backend router: `backend/src/merlins_collection/routers/admin/`
+- Inventory CRUD (create/read/update/delete items)
+- Market lookup (TCGdex search, prices, watchlist)
+- Sell flow (sessions, fee calc, atomic confirmation)
+- Buy flow (sessions, policy calc, item creation)
+- Trade engine (state machine, balance/margin, multi-directional)
+- Show prep (mispriced detection, bulk location moves)
 
 ## Design Identity
-- Color scheme inspired by Spriggatito (forest greens, cream whites)
-- Business brand images organized under `frontend/public/images/`
+- **Color palette:** Spriggatito-inspired (forest greens + cream)
+- **Fonts:** Fraunces (serif headings) + Inter (sans body)
+- **Key colors:** cream `#f2eede`, forest `#1f6e32`, mint `#a9e0b3`, ink `#241f1b`
+- **Dark inventory theme ("vault"):** pine-950 `#06150b` base with mint accents
+- **Brand images:** `frontend/public/images/` (logo/, brand/, shows/, cards/)
 
 ## Current Focus
-Database redesign supporting multilingual catalog (TCGdex), graded card variants, and condition-aware pricing.
+- Retool admin API (Phases 1-6 done, 7-8 remaining: photo upload + analytics)
+- Database redesign for multilingual catalog (TCGdex), graded variants, condition pricing
+- Active branch: `retool-admin-api` (based on `Polishing-For-Deployment`)

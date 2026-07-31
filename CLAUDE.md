@@ -9,7 +9,7 @@ Never combine phases. Wait for user confirmation after confirming tests fail.
 Custom sub-agents live in `.claude/agents/`. The `orchestrator` agent conducts this whole flow — deciding what's trivial vs. non-trivial and routing each piece to the right specialist. **Reference it into the main chat with `@orchestrator` (or `/`); never spawn it as a sub-agent.** Referencing loads its instructions into the main thread, which is the only thread that can spawn other agents — spawning the orchestrator instead would trap it in a sub-agent that cannot delegate, defeating its purpose.
 
 For **non-trivial feature work** (new functionality, multi-step changes, anything that will touch more than a couple of files), default to this flow without waiting to be asked:
-1. Start with the `initializer` agent to audit the workspace and create/update `claude-progress.txt`, unless one already exists and is current for the active feature.
+1. Start with the `initializer` agent to audit the workspace and create/update `progress.txt`, unless one already exists and is current for the active feature.
 2. Route each roadmap item to the appropriate agent (`design-doc`, `code-writer`, `test-qa`, `doc-writer`, `pull-request`, `web-browser`) based on its own description.
 3. Every `code-writer` submission must clear the Council Loop (`advisor-contrarian`, `advisor-security`, `advisor-chaos`, `advisor-architect` → `council-judge`) before being considered done.
 
@@ -41,6 +41,7 @@ Merlin's Minty Cards — a Pokemon card business website.
 | `/articles`          | No            | Article listing (Cluster Hub)        |
 | `/articles/[slug]`   | No            | Individual article (SSG via Sanity)  |
 | `/inventory`         | Yes           | Inventory search (filter + chat)     |
+| `/admin`             | Yes (admin)   | Admin panel — inventory CRUD, sales, buys, trades, show prep, market |
 
 # Test Commands
 
@@ -52,6 +53,41 @@ Merlin's Minty Cards — a Pokemon card business website.
 | Backend    | `python -m pytest backend/tests -q --tb=short` |
 | Lint (FE)  | `cd frontend && npm run lint`                  |
 | Lint (BE)  | `ruff check backend/src`                       |
+
+## Running Tests in Kiro/Cursor (Agent-Specific)
+
+The shell tool (`execute_pwsh`) has a hard ~10-15s effective timeout. Tests
+take longer than that, so you MUST use **background processes** to capture
+full output.
+
+### Pattern: Start → Wait → Poll
+
+```
+# Backend (runs from workspace root — cwd works here)
+control_pwsh_process start:
+  command: "python -m pytest backend/tests -q --tb=short 2>&1"
+
+# Frontend (use cmd /c wrapper — cwd param is broken for subdirs)
+control_pwsh_process start:
+  command: cmd /c "cd /d c:\Users\ethar\.cursor\projects\MerlinsCollection-Secondary\frontend & npx vitest run --reporter=verbose" 2>&1
+
+# MCP Server
+control_pwsh_process start:
+  command: cmd /c "cd /d c:\Users\ethar\.cursor\projects\MerlinsCollection-Secondary\mcp-server & npx vitest run --reporter=verbose" 2>&1
+```
+
+Then use `get_process_output` (with `terminalId`) to poll for results.
+Wait 30s+ for backend, 15s+ for frontend/mcp before first poll.
+
+### Approximate Runtimes
+- Backend: ~10 minutes (1050+ tests)
+- Frontend: ~25 seconds (41 test files)
+- MCP Server: ~60 seconds
+
+### Quick commands that DO work with execute_pwsh
+- `ruff check backend/src` (lint, ~3s)
+- `npm run lint --workspace=frontend` (~5s)
+- `dir`, `git status`, `type <file>` (instant)
 
 # Inventory Search Tool
 Located at `/inventory` — authenticated customers only.

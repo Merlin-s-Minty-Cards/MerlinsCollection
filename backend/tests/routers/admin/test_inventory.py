@@ -1,0 +1,688 @@
+"""Tests for the admin inventory CRUD router (``/admin/inventory/...``).
+
+TDD RED: covers auth gate (403 for non-admin), full CRUD lifecycle, search
+across all statuses, partial updates, soft/hard deletes, and item history.
+"""
+
+from datetime import date, datetime, timezone
+from decimal import Decimal
+
+import pytest
+from fastapi.testclient import TestClient
+
+from merlins_collection.models.business import Transaction, TransactionType, ItemCategory
+from merlins_collection.models.catalog import CardImages, CatalogCard, FinishPrice
+from merlins_collection.models.inventory import (
+    Condition,
+    ConditionModifier,
+    GradedInventoryItem,
+    GradingCompany,
+    ItemStatus,
+    Language,
+    RawInventoryItem,
+    SealedInventoryItem,
+    SealedProductType,
+)
+
+
+# ---- helpers ----
+
+def _raw(card_id="sv1-1", *, item_id=None, condition=Condition.NM, finish="holofoil",
+         location="glass", status=ItemStatus.AVAILABLE, cost_basis="10.00",
+         current_market_value="50.00", **extra):
+    kw = dict(
+        card_id=card_id,
+        finish=finish,
+        condition=condition,
+        location=location,
+        status=status,
+        cost_basis=Decimal(cost_basis),
+        current_market_value=Decimal(current_market_value),
+        acquired_at=date(2025, 1, 1),
+    )
+    if item_id:
+        kw["item_id"] = item_id
+    kw.update(extra)
+    return RawInventoryItem(**kw)
+
+
+def _graded(card_id="sv1-2", *, item_id=None, status=ItemStatus.AVAILABLE,
+            cost_basis="30.00", current_market_value="100.00", location="glass"):
+    kw = dict(
+        card_id=card_id,
+        status=status,
+        cost_basis=Decimal(cost_basis),
+        current_market_value=Decimal(current_market_value),
+        acquired_at=date(2025, 1, 1),
+        company=GradingCompany.PSA,
+        grade=Decimal("9"),
+        cert_number="12345678",
+        location=location,
+    )
+    if item_id:
+        kw["item_id"] = item_id
+    return GradedInventoryItem(**kw)
+
+
+def _catalog(card_id="sv1-1", name="Pikachu", **extra):
+    defaults = dict(
+        card_id=card_id,
+        name=name,
+        set_id="sv1",
+        set_name="Scarlet & Violet",
+        number="001",
+        rarity="Common",
+        images=CardImages(
+            small="https://example.com/small.webp",
+            large="https://example.com/large.webp",
+        ),
+        last_synced_at=datetime.now(tz=timezone.utc),
+        prices={},
+    )
+    defaults.update(extra)
+    return CatalogCard(**defaults)
+
+
+# ---- fixtures ----
+
+@pytest.fixture
+def admin_client(cognito_config, jwks, dynamo_repo, mint_token):
+    """TestClient + repo + admin token factory for admin endpoint tests."""
+    from merlins_collection.dependencies import get_repo, get_verifier
+    from merlins_collection.main import app
+    from merlins_collection.services.cognito import CognitoJwtVerifier
+
+    verifier = CognitoJwtVerifier(
+        region=cognito_config["region"],
+        user_pool_id=cognito_config["user_pool_id"],
+        client_id=cognito_config["client_id"],
+        jwks=jwks,
+    )
+    app.dependency_overrides[get_verifier] = lambda: verifier
+    app.dependency_overrides[get_repo] = lambda: dynamo_repo
+
+    # Admin token: include cognito:groups with admin group
+    admin_token = mint_token(claims={"cognito:groups": ["admin"]})
+    # Non-admin token: no admin group
+    user_token = mint_token(claims={"cognito:groups": []})
+
+    client = TestClient(app)
+    yield client, dynamo_repo, admin_token, user_token
+    app.dependency_overrides.clear()
+
+
+def _auth_header(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"}
+
+
+# ===========================================================================
+# Auth gate tests
+# ===========================================================================
+
+class TestAdminAuthGate:
+    """Admin endpoints must reject unauthenticated and non-admin users."""
+
+    def test_unauthenticated_returns_401(self, admin_client):
+        client, *_ = admin_client
+        resp = client.get("/admin/health")
+        assert resp.status_code == 401
+
+    def test_non_admin_returns_403(self, admin_client):
+        client, _, _, user_token = admin_client
+        resp = client.get("/admin/health", headers=_auth_header(user_token))
+        assert resp.status_code == 403
+
+    def test_admin_passes(self, admin_client):
+        client, _, admin_token, _ = admin_client
+        resp = client.get("/admin/health", headers=_auth_header(admin_token))
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+
+
+# ===========================================================================
+# Admin Inventory Search
+# ===========================================================================
+
+class TestAdminInventorySearch:
+    """GET /admin/inventory/search — all fields, all statuses, composable filters."""
+
+    def test_returns_empty_when_no_items(self, admin_client):
+        client, _, admin_token, _ = admin_client
+        resp = client.get("/admin/inventory/search", headers=_auth_header(admin_token))
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["items"] == []
+        assert data["total"] == 0
+
+    def test_returns_all_statuses(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="avail-1", status=ItemStatus.AVAILABLE))
+        repo.put_inventory_item(_raw(item_id="sold-1", status=ItemStatus.SOLD))
+        repo.put_inventory_item(_raw(item_id="lost-1", status=ItemStatus.LOST))
+
+        resp = client.get("/admin/inventory/search", headers=_auth_header(admin_token))
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 3
+
+    def test_filter_by_status(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="avail-1", status=ItemStatus.AVAILABLE))
+        repo.put_inventory_item(_raw(item_id="sold-1", status=ItemStatus.SOLD))
+
+        resp = client.get(
+            "/admin/inventory/search?status=sold",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["items"][0]["item_id"] == "sold-1"
+
+    def test_filter_by_name_substring(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        item = _raw(item_id="pika-1", display_name="Pikachu #25")
+        repo.put_inventory_item(item)
+        item2 = _raw(item_id="char-1", card_id="sv1-2", display_name="Charizard #4")
+        repo.put_inventory_item(item2)
+
+        resp = client.get(
+            "/admin/inventory/search?name=pika",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["items"][0]["item_id"] == "pika-1"
+
+    def test_filter_by_location(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="glass-1", location="glass"))
+        repo.put_inventory_item(_raw(item_id="binder-1", location="binder", card_id="sv1-2"))
+
+        resp = client.get(
+            "/admin/inventory/search?location=glass",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["items"][0]["item_id"] == "glass-1"
+
+    def test_includes_cost_basis_in_response(self, admin_client):
+        """Admin search MUST expose internal fields like cost_basis."""
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="item-1", cost_basis="42.50"))
+
+        resp = client.get("/admin/inventory/search", headers=_auth_header(admin_token))
+        assert resp.status_code == 200
+        item = resp.json()["items"][0]
+        assert item["cost_basis"] == "42.50"
+
+    def test_sort_by_price_desc(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(
+            _raw(item_id="cheap", current_market_value="10.00")
+        )
+        repo.put_inventory_item(
+            _raw(item_id="expensive", card_id="sv1-2", current_market_value="100.00")
+        )
+
+        resp = client.get(
+            "/admin/inventory/search?sort=price_desc",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert items[0]["item_id"] == "expensive"
+        assert items[1]["item_id"] == "cheap"
+
+    def test_sort_by_price_asc(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(
+            _raw(item_id="cheap", current_market_value="10.00")
+        )
+        repo.put_inventory_item(
+            _raw(item_id="expensive", card_id="sv1-2", current_market_value="100.00")
+        )
+
+        resp = client.get(
+            "/admin/inventory/search?sort=price_asc",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert items[0]["item_id"] == "cheap"
+        assert items[1]["item_id"] == "expensive"
+
+
+# ===========================================================================
+# Get single item
+# ===========================================================================
+
+class TestAdminGetItem:
+    """GET /admin/inventory/{item_id}"""
+
+    def test_get_existing_item(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="item-42"))
+
+        resp = client.get(
+            "/admin/inventory/item-42", headers=_auth_header(admin_token)
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["item_id"] == "item-42"
+        assert "cost_basis" in data  # admin sees internal fields
+
+    def test_get_nonexistent_returns_404(self, admin_client):
+        client, _, admin_token, _ = admin_client
+        resp = client.get(
+            "/admin/inventory/does-not-exist", headers=_auth_header(admin_token)
+        )
+        assert resp.status_code == 404
+
+
+# ===========================================================================
+# Create item
+# ===========================================================================
+
+class TestAdminCreateItem:
+    """POST /admin/inventory"""
+
+    def test_create_raw_item(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        payload = {
+            "kind": "raw",
+            "card_id": "sv1-1",
+            "finish": "holofoil",
+            "condition": "NM",
+            "cost_basis": "25.00",
+            "acquired_at": "2025-01-15",
+            "location": "toploader",
+        }
+        resp = client.post(
+            "/admin/inventory",
+            json=payload,
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["kind"] == "raw"
+        assert data["card_id"] == "sv1-1"
+        assert "item_id" in data
+
+        # Verify persisted
+        stored = repo.get_inventory_item(data["item_id"])
+        assert stored is not None
+        assert stored.cost_basis == Decimal("25.00")
+
+    def test_create_sealed_item(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        payload = {
+            "kind": "sealed",
+            "product_name": "Scarlet & Violet Booster Box",
+            "product_type": "booster_box",
+            "cost_basis": "120.00",
+            "acquired_at": "2025-01-15",
+            "location": "storage",
+        }
+        resp = client.post(
+            "/admin/inventory",
+            json=payload,
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["kind"] == "sealed"
+        assert data["product_name"] == "Scarlet & Violet Booster Box"
+
+    def test_create_rejects_invalid_kind(self, admin_client):
+        client, _, admin_token, _ = admin_client
+        payload = {
+            "kind": "invalid",
+            "cost_basis": "10.00",
+            "acquired_at": "2025-01-15",
+        }
+        resp = client.post(
+            "/admin/inventory",
+            json=payload,
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 422
+
+
+# ===========================================================================
+# Update item
+# ===========================================================================
+
+class TestAdminUpdateItem:
+    """PUT /admin/inventory/{item_id}"""
+
+    def test_partial_update_location(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="item-1", location="toploader"))
+
+        resp = client.put(
+            "/admin/inventory/item-1",
+            json={"location": "glass"},
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["location"] == "glass"
+
+        # Verify in DB
+        stored = repo.get_inventory_item("item-1")
+        assert stored.location == "glass"
+
+    def test_partial_update_condition(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="item-1", condition=Condition.NM))
+
+        resp = client.put(
+            "/admin/inventory/item-1",
+            json={"condition": "LP", "notes": "Found corner wear"},
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        stored = repo.get_inventory_item("item-1")
+        assert stored.condition == Condition.LP
+        assert stored.notes == "Found corner wear"
+
+    def test_update_nonexistent_returns_404(self, admin_client):
+        client, _, admin_token, _ = admin_client
+        resp = client.put(
+            "/admin/inventory/no-such-id",
+            json={"location": "glass"},
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 404
+
+    def test_update_status(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="item-1", status=ItemStatus.AVAILABLE))
+
+        resp = client.put(
+            "/admin/inventory/item-1",
+            json={"status": "on_hold"},
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        stored = repo.get_inventory_item("item-1")
+        assert stored.status == ItemStatus.ON_HOLD
+
+
+# ===========================================================================
+# Delete item
+# ===========================================================================
+
+class TestAdminDeleteItem:
+    """DELETE /admin/inventory/{item_id}"""
+
+    def test_soft_delete_default(self, admin_client):
+        """Default delete sets status to LOST (soft delete)."""
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="item-1"))
+
+        resp = client.delete(
+            "/admin/inventory/item-1",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        stored = repo.get_inventory_item("item-1")
+        assert stored is not None
+        assert stored.status == ItemStatus.LOST
+
+    def test_hard_delete(self, admin_client):
+        """hard=true permanently removes the item."""
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="item-1"))
+
+        resp = client.delete(
+            "/admin/inventory/item-1?hard=true",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        stored = repo.get_inventory_item("item-1")
+        assert stored is None
+
+    def test_delete_nonexistent_returns_404(self, admin_client):
+        client, _, admin_token, _ = admin_client
+        resp = client.delete(
+            "/admin/inventory/does-not-exist",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 404
+
+
+# ===========================================================================
+# Item history
+# ===========================================================================
+
+class TestAdminItemHistory:
+    """GET /admin/inventory/{item_id}/history"""
+
+    def test_returns_price_history(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="item-1"))
+        # Add price points
+        repo.append_item_price_point("item-1", date(2025, 1, 1), Decimal("40.00"))
+        repo.append_item_price_point("item-1", date(2025, 1, 15), Decimal("55.00"))
+
+        resp = client.get(
+            "/admin/inventory/item-1/history",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "price_history" in data
+        assert len(data["price_history"]) == 2
+
+    def test_returns_transactions(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="item-1"))
+        today = date.today()
+        txn = Transaction(
+            type=TransactionType.SALE,
+            item_id="item-1",
+            category=ItemCategory.RAW,
+            date=today,
+            amount=Decimal("75.00"),
+            payment_method="cash",
+        )
+        repo.put_transaction(txn)
+
+        resp = client.get(
+            "/admin/inventory/item-1/history",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "transactions" in data
+        assert len(data["transactions"]) >= 1
+        assert data["transactions"][0]["item_id"] == "item-1"
+
+    def test_history_nonexistent_item_returns_404(self, admin_client):
+        client, _, admin_token, _ = admin_client
+        resp = client.get(
+            "/admin/inventory/no-item/history",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 404
+
+
+# ===========================================================================
+# Price chart endpoint tests
+# ===========================================================================
+
+class TestAdminPriceChart:
+    """GET /admin/inventory/{item_id}/price-chart"""
+
+    def test_returns_item_level_history_for_sealed(self, admin_client):
+        """Sealed items use item-level price points."""
+        from datetime import timedelta
+
+        client, repo, admin_token, _ = admin_client
+        today = date.today()
+        item = SealedInventoryItem(
+            item_id="sealed-1",
+            product_name="Scarlet & Violet ETB",
+            product_type=SealedProductType.ETB,
+            cost_basis=Decimal("40.00"),
+            acquired_at=date(2025, 1, 1),
+            current_market_value=Decimal("55.00"),
+        )
+        repo.put_inventory_item(item)
+        repo.append_item_price_point(
+            "sealed-1", today - timedelta(days=60), Decimal("45.00")
+        )
+        repo.append_item_price_point(
+            "sealed-1", today - timedelta(days=10), Decimal("55.00")
+        )
+
+        resp = client.get(
+            "/admin/inventory/sealed-1/price-chart?timeframe=1yr",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["item_id"] == "sealed-1"
+        assert data["timeframe"] == "1yr"
+        assert len(data["points"]) == 2
+        assert data["points"][0]["market_value"] == "45.00"
+
+    def test_returns_card_level_history_for_raw(self, admin_client):
+        """Raw items with card_id use card-level price history."""
+        from datetime import timedelta
+        from merlins_collection.models.catalog import PricePoint
+
+        client, repo, admin_token, _ = admin_client
+        today = date.today()
+        repo.put_inventory_item(_raw(item_id="raw-1", card_id="sv1-1"))
+        # Seed card-level price points (recent dates)
+        repo.append_price_points([
+            PricePoint(
+                card_id="sv1-1", date=today - timedelta(days=30),
+                source="tcgplayer",
+                kind="raw", finish="holofoil", market=Decimal("50.00"),
+            ),
+            PricePoint(
+                card_id="sv1-1", date=today - timedelta(days=10),
+                source="tcgplayer",
+                kind="raw", finish="holofoil", market=Decimal("60.00"),
+            ),
+        ])
+
+        resp = client.get(
+            "/admin/inventory/raw-1/price-chart?timeframe=1yr",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["points"]) == 2
+        assert data["points"][0]["market_value"] == "50.00"
+        assert data["points"][1]["market_value"] == "60.00"
+
+    def test_returns_card_level_history_for_graded(self, admin_client):
+        """Graded items with card_id use card-level price history (company+grade)."""
+        from datetime import timedelta
+        from merlins_collection.models.catalog import PricePoint
+
+        client, repo, admin_token, _ = admin_client
+        today = date.today()
+        repo.put_inventory_item(_graded(item_id="graded-1", card_id="sv1-2"))
+        # Seed graded price points (PSA 9, recent dates)
+        repo.append_price_points([
+            PricePoint(
+                card_id="sv1-2", date=today - timedelta(days=30),
+                source="manual",
+                kind="graded", company="PSA", grade=Decimal("9"),
+                market=Decimal("100.00"),
+            ),
+            PricePoint(
+                card_id="sv1-2", date=today - timedelta(days=10),
+                source="manual",
+                kind="graded", company="PSA", grade=Decimal("9"),
+                market=Decimal("120.00"),
+            ),
+        ])
+
+        resp = client.get(
+            "/admin/inventory/graded-1/price-chart?timeframe=1yr",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["points"]) == 2
+        assert data["points"][0]["market_value"] == "100.00"
+
+    def test_buy_marker_included(self, admin_client):
+        """Response includes buy_marker from cost_basis + acquired_at."""
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(
+            item_id="raw-2", cost_basis="15.00",
+        ))
+
+        resp = client.get(
+            "/admin/inventory/raw-2/price-chart?timeframe=2yr",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["buy_marker"] is not None
+        assert data["buy_marker"]["date"] == "2025-01-01"
+        assert data["buy_marker"]["price"] == "15.00"
+
+    def test_timeframe_filters_old_points(self, admin_client):
+        """Points older than the timeframe cutoff are excluded."""
+        from datetime import timedelta
+
+        client, repo, admin_token, _ = admin_client
+        item = SealedInventoryItem(
+            item_id="sealed-2",
+            product_name="Obsidian Flames BB",
+            product_type=SealedProductType.BOOSTER_BOX,
+            cost_basis=Decimal("100.00"),
+            acquired_at=date(2023, 1, 1),
+            current_market_value=Decimal("130.00"),
+        )
+        repo.put_inventory_item(item)
+        today = date.today()
+        # One recent point (within 1mo)
+        repo.append_item_price_point(
+            "sealed-2", today - timedelta(days=10), Decimal("125.00")
+        )
+        # One old point (over 1mo ago)
+        repo.append_item_price_point(
+            "sealed-2", today - timedelta(days=60), Decimal("110.00")
+        )
+
+        resp = client.get(
+            "/admin/inventory/sealed-2/price-chart?timeframe=1mo",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        # Only the recent point should be in range
+        assert len(data["points"]) == 1
+        assert data["points"][0]["market_value"] == "125.00"
+
+    def test_nonexistent_item_returns_404(self, admin_client):
+        client, _, admin_token, _ = admin_client
+        resp = client.get(
+            "/admin/inventory/no-item/price-chart",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 404
+
+    def test_invalid_timeframe_returns_422(self, admin_client):
+        """Invalid timeframe param is rejected by validation."""
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="raw-3"))
+
+        resp = client.get(
+            "/admin/inventory/raw-3/price-chart?timeframe=5yr",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 422

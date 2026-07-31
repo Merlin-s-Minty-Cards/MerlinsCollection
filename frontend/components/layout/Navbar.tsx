@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import { useSession, signIn } from 'next-auth/react'
 import Link from 'next/link'
 import Image from 'next/image'
-import { Menu } from 'lucide-react'
+import { Menu, Shield } from 'lucide-react'
 import Container from '@/components/ui/Container'
 import Button from '@/components/ui/Button'
 
@@ -102,9 +102,20 @@ export default function Navbar() {
               Sign in
             </Button>
           ) : (
-            <Button href="/inventory" className="hidden nav:inline-block px-5 py-2.5 text-sm">
-              Inventory
-            </Button>
+            <div className="hidden nav:flex items-center gap-2">
+              {session?.isAdmin && (
+                <Link
+                  href="/admin"
+                  className="inline-flex items-center gap-1.5 rounded-full border-[1.5px] border-forest text-forest text-[13px] font-semibold px-4 py-2 hover:bg-forest/[0.06] transition-colors"
+                >
+                  <Shield size={14} />
+                  Admin
+                </Link>
+              )}
+              <Button href="/inventory" className="px-5 py-2.5 text-sm">
+                Inventory
+              </Button>
+            </div>
           )}
 
           <button

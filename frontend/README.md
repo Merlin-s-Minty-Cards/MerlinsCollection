@@ -61,6 +61,8 @@ frontend/
 │  │  └─ articles/           #   /articles and /articles/[slug] (SSG)
 │  ├─ (auth)/                # Route group: the inventory tool
 │  │  └─ inventory/          #   /inventory  (dark "vault" theme)
+│  ├─ (admin)/               # Route group: admin panel (gated by admin session)
+│  │  └─ admin/              #   /admin, /admin/inventory, /admin/sell, etc.
 │  └─ api/auth/[...nextauth] # NextAuth route handler (providers TBD)
 ├─ components/
 │  ├─ ui/                    # Reusable primitives (Button, Badge, Container…)
@@ -77,13 +79,12 @@ frontend/
 
 ### Route groups
 
-The parenthesized folders (`(public)`, `(auth)`) are
+The parenthesized folders (`(public)`, `(auth)`, `(admin)`) are
 [Next.js route groups](https://nextjs.org/docs/app/building-your-application/routing/route-groups):
 they organize files and give each group its own `layout.tsx` **without** adding a
 URL segment. `(public)` pages share the brand-green Navbar/Footer; `(auth)` wraps
-the inventory tool. The two layouts are intentionally separate so the inventory
-group can grow a real sign-in gate later (currently deferred — see
-`app/(auth)/layout.tsx`).
+the inventory tool; `(admin)` gates the admin panel behind an admin session check.
+The layouts are intentionally separate so each group can enforce its own auth posture.
 
 ## The data layer (`lib/`)
 
@@ -132,6 +133,56 @@ holographic glare, scroll reveals, hover lifts, the vault background) live in
 
 **Motion is accessible:** every effect checks `prefers-reduced-motion` (in JS via
 `matchMedia` and in CSS via the media query) and falls back to a static state.
+
+## Deploying to AWS ECS
+
+The frontend runs as a Docker container on ECS Fargate behind the `merlins` cluster.
+
+### Prerequisites
+
+- AWS CLI configured with credentials for account `560151615792`
+- Docker installed and running
+- ECR repository `merlins-frontend` exists in `us-east-1`
+
+### Deploy Frontend
+
+Run from the **repo root** (the Dockerfile uses repo root as build context):
+
+```bash
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 560151615792.dkr.ecr.us-east-1.amazonaws.com
+docker build -f frontend/Dockerfile --build-arg NEXT_PUBLIC_API_URL=https://me-227b5d9d4f6444e9aea830a909f923c8.ecs.us-east-1.on.aws -t 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-frontend:latest .
+docker push 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-frontend:latest
+aws ecs update-service --cluster merlins --service merlins-frontend --force-new-deployment --region us-east-1
+```
+
+### Build Args (compile-time)
+
+These are baked into the client bundle at build time via `--build-arg`:
+
+| Arg | Value |
+|-----|-------|
+| `NEXT_PUBLIC_API_URL` | `https://me-227b5d9d4f6444e9aea830a909f923c8.ecs.us-east-1.on.aws` |
+| `NEXT_PUBLIC_SANITY_PROJECT_ID` | Your Sanity project ID (optional) |
+| `NEXT_PUBLIC_SANITY_DATASET` | `production` (default) |
+
+### Runtime Env (on the container)
+
+Server-side secrets are passed as ECS task definition environment variables — they are NOT in the Docker image:
+
+- `AUTH_SECRET` — NextAuth encryption key
+- `AWS_COGNITO_CLIENT_ID` / `AWS_COGNITO_CLIENT_SECRET` / `AWS_COGNITO_ISSUER` — Cognito provider
+- `COGNITO_ADMIN_GROUP` — admin group name (default: `admins`)
+
+### Infrastructure
+
+| Resource | Value |
+|----------|-------|
+| AWS Account | `560151615792` |
+| Region | `us-east-1` |
+| ECS Cluster | `merlins` |
+| Frontend Service | `merlins-frontend` |
+| Frontend ECR | `560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-frontend` |
+| Backend URL | `https://me-227b5d9d4f6444e9aea830a909f923c8.ecs.us-east-1.on.aws` |
 
 ## Testing
 

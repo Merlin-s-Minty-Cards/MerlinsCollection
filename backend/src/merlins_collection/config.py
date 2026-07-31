@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     # NEVER set in production.
     auth_disabled: bool = False
 
+    # --- Admin API key (Retool / external tool access) ---
+    # A static bearer token that bypasses Cognito JWT validation for admin routes.
+    # Set this to a long random string (e.g. `openssl rand -hex 32`) and configure
+    # the same value in Retool's REST API resource as the Authorization header.
+    # When unset (empty), API key auth is disabled and only Cognito JWTs work.
+    admin_api_key: str = ""
+
     # --- App-side rate limiting (DynamoDB-backed & distributed; see rate_limit.py) ---
     # Master switch. Keep ON in production; an ops kill-switch if a limit ever
     # locks legitimate traffic out.
