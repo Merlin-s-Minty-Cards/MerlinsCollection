@@ -54,6 +54,41 @@ Merlin's Minty Cards — a Pokemon card business website.
 | Lint (FE)  | `cd frontend && npm run lint`                  |
 | Lint (BE)  | `ruff check backend/src`                       |
 
+## Running Tests in Kiro/Cursor (Agent-Specific)
+
+The shell tool (`execute_pwsh`) has a hard ~10-15s effective timeout. Tests
+take longer than that, so you MUST use **background processes** to capture
+full output.
+
+### Pattern: Start → Wait → Poll
+
+```
+# Backend (runs from workspace root — cwd works here)
+control_pwsh_process start:
+  command: "python -m pytest backend/tests -q --tb=short 2>&1"
+
+# Frontend (use cmd /c wrapper — cwd param is broken for subdirs)
+control_pwsh_process start:
+  command: cmd /c "cd /d c:\Users\ethar\.cursor\projects\MerlinsCollection-Secondary\frontend & npx vitest run --reporter=verbose" 2>&1
+
+# MCP Server
+control_pwsh_process start:
+  command: cmd /c "cd /d c:\Users\ethar\.cursor\projects\MerlinsCollection-Secondary\mcp-server & npx vitest run --reporter=verbose" 2>&1
+```
+
+Then use `get_process_output` (with `terminalId`) to poll for results.
+Wait 30s+ for backend, 15s+ for frontend/mcp before first poll.
+
+### Approximate Runtimes
+- Backend: ~10 minutes (1050+ tests)
+- Frontend: ~25 seconds (41 test files)
+- MCP Server: ~60 seconds
+
+### Quick commands that DO work with execute_pwsh
+- `ruff check backend/src` (lint, ~3s)
+- `npm run lint --workspace=frontend` (~5s)
+- `dir`, `git status`, `type <file>` (instant)
+
 # Inventory Search Tool
 Located at `/inventory` — authenticated customers only.
 Two distinct modes (user picks one at a time):
