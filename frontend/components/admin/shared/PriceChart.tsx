@@ -180,8 +180,8 @@ export default function PriceChart({ itemId, costBasis, acquiredAt }: PriceChart
           borderWidth: 1,
           padding: 8,
           callbacks: {
-            label: (ctx: { dataset: { label: string }; parsed: { y: number } }) => {
-              return `${ctx.dataset.label}: $${ctx.parsed.y.toFixed(2)}`
+            label: (ctx: { dataset: { label?: string }; parsed: { y: number } }) => {
+              return `${ctx.dataset.label ?? 'Value'}: $${ctx.parsed.y.toFixed(2)}`
             },
           },
         },
