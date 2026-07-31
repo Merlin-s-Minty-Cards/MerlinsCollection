@@ -1317,3 +1317,45 @@ class InventoryRepository:
         self._table.delete_item(
             Key={"PK": f"WATCHLIST#{entry_id}", "SK": "META"},
         )
+
+    # ---- sell sessions (admin feature) ----
+    def put_sell_session(self, session: dict):
+        """Insert or update a sell session."""
+        sell_id = session["sell_id"]
+        record = {
+            "PK": f"SELL#{sell_id}",
+            "SK": "META",
+            "entity": "sell_session",
+            "GSI1PK": f"SELLS#{session.get('status', 'draft')}",
+            "GSI1SK": session.get("created_at", ""),
+            **_serialize(session),
+        }
+        self._table.put_item(Item=record)
+
+    def get_sell_session(self, sell_id: str) -> dict | None:
+        """Fetch one sell session by id."""
+        item = self._table.get_item(
+            Key={"PK": f"SELL#{sell_id}", "SK": "META"},
+        ).get("Item")
+        return item if item else None
+
+    # ---- buy sessions (admin feature) ----
+    def put_buy_session(self, session: dict):
+        """Insert or update a buy session."""
+        buy_id = session["buy_id"]
+        record = {
+            "PK": f"BUY#{buy_id}",
+            "SK": "META",
+            "entity": "buy_session",
+            "GSI1PK": f"BUYS#{session.get('status', 'draft')}",
+            "GSI1SK": session.get("created_at", ""),
+            **_serialize(session),
+        }
+        self._table.put_item(Item=record)
+
+    def get_buy_session(self, buy_id: str) -> dict | None:
+        """Fetch one buy session by id."""
+        item = self._table.get_item(
+            Key={"PK": f"BUY#{buy_id}", "SK": "META"},
+        ).get("Item")
+        return item if item else None

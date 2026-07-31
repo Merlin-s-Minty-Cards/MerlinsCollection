@@ -51,20 +51,20 @@ Cognito auth via the existing `require_admin` dependency.
 - [x] 2.6 Tests: search, watchlist, TCGdex mock
 
 ### Phase 3: Sell Flow
-- [ ] 3.1 SellSession model + DynamoDB storage
-- [ ] 3.2 SellEngine service (lifecycle)
-- [ ] 3.3 Sell endpoints (create, add items, confirm, cancel)
-- [ ] 3.4 Fee calculation + payment method integration
-- [ ] 3.5 Atomic confirmation (status flip + transactions)
-- [ ] 3.6 Tests: full lifecycle, fees, edge cases
+- [x] 3.1 SellSession model + DynamoDB storage
+- [x] 3.2 SellEngine service (lifecycle)
+- [x] 3.3 Sell endpoints (create, add items, confirm, cancel)
+- [x] 3.4 Fee calculation + payment method integration
+- [x] 3.5 Atomic confirmation (status flip + transactions)
+- [x] 3.6 Tests: full lifecycle, fees, edge cases
 
 ### Phase 4: Buy Flow
-- [ ] 4.1 BuySession model + DynamoDB storage
-- [ ] 4.2 PurchaseEngine service (lifecycle)
-- [ ] 4.3 Buy endpoints (create, add items, confirm, cancel)
-- [ ] 4.4 Buy-price policy calculator
-- [ ] 4.5 Atomic confirmation (create items + transactions)
-- [ ] 4.6 Tests: full lifecycle, policy enforcement
+- [x] 4.1 BuySession model + DynamoDB storage
+- [x] 4.2 PurchaseEngine service (lifecycle)
+- [x] 4.3 Buy endpoints (create, add items, confirm, cancel)
+- [x] 4.4 Buy-price policy calculator
+- [x] 4.5 Atomic confirmation (create items + transactions)
+- [x] 4.6 Tests: full lifecycle, policy enforcement
 
 ### Phase 5: Trade Engine
 - [ ] 5.1 TradeSession model + DynamoDB storage
@@ -104,3 +104,6 @@ Cognito auth via the existing `require_admin` dependency.
 - 2025-01-27: Phase 2 COMPLETE. Market lookup + watchlist CRUD implemented.
   12 tests passing (catalog search, card detail, price trend, watchlist CRUD).
   Added watchlist entity storage to DynamoDB repo.
+- 2025-01-27: Phases 3+4 COMPLETE. Sell and Buy session flows implemented.
+  24 tests passing (12 sales + 12 purchases). Full lifecycle: create, add items,
+  confirm (atomic status flip + transactions), cancel. DynamoDB session storage added.

@@ -11,6 +11,8 @@ from merlins_collection.dependencies import require_admin
 from .inventory import router as inventory_router
 from .market import router as market_router
 from .market import watchlist_router
+from .purchases import router as purchases_router
+from .sales import router as sales_router
 
 admin_router = APIRouter(
     prefix="/admin",
@@ -21,6 +23,8 @@ admin_router = APIRouter(
 admin_router.include_router(inventory_router)
 admin_router.include_router(market_router)
 admin_router.include_router(watchlist_router)
+admin_router.include_router(sales_router)
+admin_router.include_router(purchases_router)
 
 
 @admin_router.get("/health")
