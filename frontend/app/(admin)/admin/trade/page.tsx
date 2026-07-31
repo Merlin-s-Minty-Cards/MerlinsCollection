@@ -6,6 +6,8 @@ import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import SearchInput from '@/components/admin/shared/SearchInput'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
+import ImageToggle from '@/components/admin/shared/ImageToggle'
+import CardImage from '@/components/admin/shared/CardImage'
 
 interface TradeLeg {
   item_id?: string

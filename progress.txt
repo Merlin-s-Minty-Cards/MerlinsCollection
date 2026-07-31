@@ -157,21 +157,21 @@ Organized into 3 rounds for parallel execution.
 ## Round 3 — Composite Features (2 parallel streams)
 
 ### Stream H: Card Images in All Menus
-- [ ] H.1 Pull card images from TCGdex via card_id
-- [ ] H.2 Per-card image toggle button in all list views
-- [ ] H.3 Global "show all images" toggle per page
-- [ ] H.4 Lazy-load images, fallback placeholder for missing card_id
-- [ ] H.5 Shared ImageToggle component
+- [x] H.1 Pull card images from TCGdex via card_id
+- [x] H.2 Per-card image toggle button in all list views
+- [x] H.3 Global "show all images" toggle per page
+- [x] H.4 Lazy-load images, fallback placeholder for missing card_id
+- [x] H.5 Shared ImageToggle component
 
 ### Stream I: Editable Detail Modal + Price History Graph
-- [ ] I.1 Backend: daily price snapshot recording (scheduled task setup)
-- [ ] I.2 Backend: GET /admin/inventory/{id}/price-chart — returns time-series
-- [ ] I.3 Shared CardDetailModal component (click any card → opens modal)
-- [ ] I.4 All fields editable with pencil toggle in modal
-- [ ] I.5 Price chart: Chart.js line graph, toggleable timeframes (1mo/3mo/6mo/1yr/2yr)
-- [ ] I.6 Buy price marker on the graph (date + price dot)
-- [ ] I.7 Wire modal into all admin pages (inventory, sell, buy, trade, show-prep, vault)
-- [ ] I.8 Tests for price-chart endpoint
+- [x] I.1 Backend: daily price snapshot recording (scheduled task setup)
+- [x] I.2 Backend: GET /admin/inventory/{id}/price-chart — returns time-series
+- [x] I.3 Shared CardDetailModal component (click any card → opens modal)
+- [x] I.4 All fields editable with pencil toggle in modal
+- [x] I.5 Price chart: Chart.js line graph, toggleable timeframes (1mo/3mo/6mo/1yr/2yr)
+- [x] I.6 Buy price marker on the graph (date + price dot)
+- [x] I.7 Wire modal into all admin pages (inventory, sell, buy, trade, show-prep, vault)
+- [x] I.8 Tests for price-chart endpoint
 
 ## Log
 
@@ -226,3 +226,24 @@ Organized into 3 rounds for parallel execution.
   Frontend: full vault page with summary cards, searchable table, release
   button. Added to AdminShell nav and dashboard quick actions.
   Tests: 13 vault tests (listing, P&L calc, hold/release), 12 sticker+fee tests.
+- Round 3 (Admin UX Overhaul) IMPLEMENTED:
+  Stream H: Card images in all admin menus. New shared components: CardImage
+  (lazy-loading with fallback placeholder), ImageToggle (global show/hide per
+  page). Bulk card image resolution via POST /admin/inventory/card-images
+  endpoint (batch card_id→image URL lookup from catalog). useCardImages hook
+  for frontend batch resolution. Wired into inventory, sell, show-prep, and
+  vault pages with per-page toggle and card thumbnails in table rows.
+  Stream I: Editable detail modal + price history graph. Backend: new
+  GET /admin/inventory/{id}/price-chart endpoint — returns time-series price
+  data with timeframe filtering (1mo/3mo/6mo/1yr/2yr). Uses card-level history
+  for raw/graded items, item-level for sealed/bulk. Buy price marker from
+  cost_basis + acquired_at. Frontend: PriceChart component (Chart.js line
+  graph with mint color scheme, timeframe toggles, buy marker as amber dot).
+  CardDetailModal: shared modal with all fields editable via pencil toggle,
+  price history chart, item metadata. Wired into inventory, sell, show-prep,
+  vault pages via onRowClick. Dependencies added: chart.js@4.4.7,
+  react-chartjs-2@5.3.0. Tests: 7 price-chart endpoint tests (sealed/raw/
+  graded history, buy marker, timeframe filtering, 404, invalid timeframe).
+  Daily price snapshot infrastructure: already complete — existing daily_sync
+  handles raw (via refresh_held_prices), graded (snapshot_graded_prices), and
+  sealed (snapshot_sealed_prices) items.

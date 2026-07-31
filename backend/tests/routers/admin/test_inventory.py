@@ -510,3 +510,179 @@ class TestAdminItemHistory:
             headers=_auth_header(admin_token),
         )
         assert resp.status_code == 404
+
+
+# ===========================================================================
+# Price chart endpoint tests
+# ===========================================================================
+
+class TestAdminPriceChart:
+    """GET /admin/inventory/{item_id}/price-chart"""
+
+    def test_returns_item_level_history_for_sealed(self, admin_client):
+        """Sealed items use item-level price points."""
+        from datetime import timedelta
+
+        client, repo, admin_token, _ = admin_client
+        today = date.today()
+        item = SealedInventoryItem(
+            item_id="sealed-1",
+            product_name="Scarlet & Violet ETB",
+            product_type=SealedProductType.ETB,
+            cost_basis=Decimal("40.00"),
+            acquired_at=date(2025, 1, 1),
+            current_market_value=Decimal("55.00"),
+        )
+        repo.put_inventory_item(item)
+        repo.append_item_price_point(
+            "sealed-1", today - timedelta(days=60), Decimal("45.00")
+        )
+        repo.append_item_price_point(
+            "sealed-1", today - timedelta(days=10), Decimal("55.00")
+        )
+
+        resp = client.get(
+            "/admin/inventory/sealed-1/price-chart?timeframe=1yr",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["item_id"] == "sealed-1"
+        assert data["timeframe"] == "1yr"
+        assert len(data["points"]) == 2
+        assert data["points"][0]["market_value"] == "45.00"
+
+    def test_returns_card_level_history_for_raw(self, admin_client):
+        """Raw items with card_id use card-level price history."""
+        from datetime import timedelta
+        from merlins_collection.models.catalog import PricePoint
+
+        client, repo, admin_token, _ = admin_client
+        today = date.today()
+        repo.put_inventory_item(_raw(item_id="raw-1", card_id="sv1-1"))
+        # Seed card-level price points (recent dates)
+        repo.append_price_points([
+            PricePoint(
+                card_id="sv1-1", date=today - timedelta(days=30),
+                source="tcgplayer",
+                kind="raw", finish="holofoil", market=Decimal("50.00"),
+            ),
+            PricePoint(
+                card_id="sv1-1", date=today - timedelta(days=10),
+                source="tcgplayer",
+                kind="raw", finish="holofoil", market=Decimal("60.00"),
+            ),
+        ])
+
+        resp = client.get(
+            "/admin/inventory/raw-1/price-chart?timeframe=1yr",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["points"]) == 2
+        assert data["points"][0]["market_value"] == "50.00"
+        assert data["points"][1]["market_value"] == "60.00"
+
+    def test_returns_card_level_history_for_graded(self, admin_client):
+        """Graded items with card_id use card-level price history (company+grade)."""
+        from datetime import timedelta
+        from merlins_collection.models.catalog import PricePoint
+
+        client, repo, admin_token, _ = admin_client
+        today = date.today()
+        repo.put_inventory_item(_graded(item_id="graded-1", card_id="sv1-2"))
+        # Seed graded price points (PSA 9, recent dates)
+        repo.append_price_points([
+            PricePoint(
+                card_id="sv1-2", date=today - timedelta(days=30),
+                source="manual",
+                kind="graded", company="PSA", grade=Decimal("9"),
+                market=Decimal("100.00"),
+            ),
+            PricePoint(
+                card_id="sv1-2", date=today - timedelta(days=10),
+                source="manual",
+                kind="graded", company="PSA", grade=Decimal("9"),
+                market=Decimal("120.00"),
+            ),
+        ])
+
+        resp = client.get(
+            "/admin/inventory/graded-1/price-chart?timeframe=1yr",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["points"]) == 2
+        assert data["points"][0]["market_value"] == "100.00"
+
+    def test_buy_marker_included(self, admin_client):
+        """Response includes buy_marker from cost_basis + acquired_at."""
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(
+            item_id="raw-2", cost_basis="15.00",
+        ))
+
+        resp = client.get(
+            "/admin/inventory/raw-2/price-chart?timeframe=2yr",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["buy_marker"] is not None
+        assert data["buy_marker"]["date"] == "2025-01-01"
+        assert data["buy_marker"]["price"] == "15.00"
+
+    def test_timeframe_filters_old_points(self, admin_client):
+        """Points older than the timeframe cutoff are excluded."""
+        from datetime import timedelta
+
+        client, repo, admin_token, _ = admin_client
+        item = SealedInventoryItem(
+            item_id="sealed-2",
+            product_name="Obsidian Flames BB",
+            product_type=SealedProductType.BOOSTER_BOX,
+            cost_basis=Decimal("100.00"),
+            acquired_at=date(2023, 1, 1),
+            current_market_value=Decimal("130.00"),
+        )
+        repo.put_inventory_item(item)
+        today = date.today()
+        # One recent point (within 1mo)
+        repo.append_item_price_point(
+            "sealed-2", today - timedelta(days=10), Decimal("125.00")
+        )
+        # One old point (over 1mo ago)
+        repo.append_item_price_point(
+            "sealed-2", today - timedelta(days=60), Decimal("110.00")
+        )
+
+        resp = client.get(
+            "/admin/inventory/sealed-2/price-chart?timeframe=1mo",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        # Only the recent point should be in range
+        assert len(data["points"]) == 1
+        assert data["points"][0]["market_value"] == "125.00"
+
+    def test_nonexistent_item_returns_404(self, admin_client):
+        client, _, admin_token, _ = admin_client
+        resp = client.get(
+            "/admin/inventory/no-item/price-chart",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 404
+
+    def test_invalid_timeframe_returns_422(self, admin_client):
+        """Invalid timeframe param is rejected by validation."""
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="raw-3"))
+
+        resp = client.get(
+            "/admin/inventory/raw-3/price-chart?timeframe=5yr",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 422

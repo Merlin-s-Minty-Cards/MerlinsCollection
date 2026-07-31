@@ -9,7 +9,7 @@ Unlike the customer ``/inventory/search``, this surface:
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -44,6 +44,29 @@ class AdminItemHistoryResponse(BaseModel):
 
     price_history: list[dict[str, Any]]
     transactions: list[dict[str, Any]]
+
+
+class PriceChartPoint(BaseModel):
+    """One data point for the price chart time-series."""
+
+    date: str
+    market_value: str
+
+
+class BuyPriceMarker(BaseModel):
+    """The purchase price dot for the chart overlay."""
+
+    date: str
+    price: str
+
+
+class PriceChartResponse(BaseModel):
+    """Time-series price data for Chart.js rendering."""
+
+    points: list[PriceChartPoint]
+    buy_marker: BuyPriceMarker | None = None
+    timeframe: str
+    item_id: str
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +254,130 @@ def admin_item_history(
         price_history=price_history,
         transactions=[t.model_dump(mode="json") for t in item_txns],
     )
+
+
+# ---------------------------------------------------------------------------
+# Price chart
+# ---------------------------------------------------------------------------
+
+_TIMEFRAME_DAYS: dict[str, int] = {
+    "1mo": 30,
+    "3mo": 90,
+    "6mo": 180,
+    "1yr": 365,
+    "2yr": 730,
+}
+
+
+@router.get("/{item_id}/price-chart", response_model=PriceChartResponse)
+def admin_item_price_chart(
+    item_id: str,
+    timeframe: str = Query("1yr", pattern="^(1mo|3mo|6mo|1yr|2yr)$"),
+    repo: InventoryRepository = Depends(get_repo),
+) -> PriceChartResponse:
+    """Return time-series price data for rendering a price chart.
+
+    For raw/graded items with a card_id, uses the card-level price history
+    (per-finish or per-grade). For sealed/bulk items (or items without a
+    card link), uses item-level price points.
+
+    Includes a buy_marker with cost_basis + acquired_at for chart overlay.
+    """
+    item = repo.get_inventory_item(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+
+    days = _TIMEFRAME_DAYS.get(timeframe, 365)
+    cutoff = date.today() - timedelta(days=days)
+
+    points: list[PriceChartPoint] = []
+
+    card_id = getattr(item, "card_id", None)
+
+    if card_id and item.kind == "raw":
+        # Card-level history filtered by finish
+        finish = getattr(item, "finish", None)
+        history = repo.get_price_history(
+            card_id, finish=finish, start=cutoff,
+        )
+        for pp in history:
+            if pp.market is not None:
+                points.append(PriceChartPoint(
+                    date=pp.date.isoformat(),
+                    market_value=str(pp.market),
+                ))
+    elif card_id and item.kind == "graded":
+        # Card-level history filtered by company + grade
+        company = getattr(item, "company", None)
+        grade = getattr(item, "grade", None)
+        if company and grade is not None:
+            history = repo.get_price_history(
+                card_id, company=str(company), grade=grade, start=cutoff,
+            )
+            for pp in history:
+                if pp.market is not None:
+                    points.append(PriceChartPoint(
+                        date=pp.date.isoformat(),
+                        market_value=str(pp.market),
+                    ))
+    else:
+        # Item-level history (sealed, bulk, or items without card_id)
+        raw_history = repo.get_item_price_history(item_id)
+        for rec in raw_history:
+            rec_date = rec.get("date", "")
+            rec_value = rec.get("market_value")
+            if rec_date >= cutoff.isoformat() and rec_value is not None:
+                points.append(PriceChartPoint(
+                    date=rec_date,
+                    market_value=str(rec_value),
+                ))
+
+    # Buy price marker
+    buy_marker: BuyPriceMarker | None = None
+    if item.cost_basis is not None and item.acquired_at is not None:
+        buy_marker = BuyPriceMarker(
+            date=item.acquired_at.isoformat(),
+            price=str(item.cost_basis),
+        )
+
+    return PriceChartResponse(
+        points=points,
+        buy_marker=buy_marker,
+        timeframe=timeframe,
+        item_id=item_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Card images (bulk resolve)
+# ---------------------------------------------------------------------------
+
+@router.post("/card-images")
+def admin_resolve_card_images(
+    body: dict[str, Any],
+    repo: InventoryRepository = Depends(get_repo),
+) -> dict[str, str | None]:
+    """Resolve card_ids to image URLs from the catalog.
+
+    Accepts ``{"card_ids": ["sv1-1", "sv1-2", ...]}``.
+    Returns a mapping of card_id → small image URL (or null if not found).
+    Capped at 100 card_ids per request.
+    """
+    card_ids = body.get("card_ids", [])
+    if not isinstance(card_ids, list):
+        raise HTTPException(status_code=422, detail="card_ids must be a list")
+    card_ids = card_ids[:100]  # cap to prevent abuse
+
+    result: dict[str, str | None] = {}
+    for card_id in card_ids:
+        if not isinstance(card_id, str):
+            continue
+        card = repo.get_catalog_card(card_id)
+        if card and card.images.small:
+            result[card_id] = card.images.small
+        else:
+            result[card_id] = None
+    return result
 
 
 # ---------------------------------------------------------------------------

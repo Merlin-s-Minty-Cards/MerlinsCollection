@@ -5,6 +5,8 @@ import { ShoppingBag, Plus, X, Check, Banknote, CreditCard, Smartphone, DollarSi
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
+import ImageToggle from '@/components/admin/shared/ImageToggle'
+import CardImage from '@/components/admin/shared/CardImage'
 
 interface BuyItem {
   name: string

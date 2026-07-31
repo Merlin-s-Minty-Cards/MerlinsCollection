@@ -1,18 +1,23 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { Plus, Trash2, History, Pencil } from 'lucide-react'
+import { Plus, Trash2, Pencil } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
+import { useCardImages } from '@/lib/use-card-images'
 import DataTable, { Column } from '@/components/admin/shared/DataTable'
 import SearchInput from '@/components/admin/shared/SearchInput'
 import StatusBadge from '@/components/admin/shared/StatusBadge'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
+import CardImage from '@/components/admin/shared/CardImage'
+import ImageToggle from '@/components/admin/shared/ImageToggle'
+import CardDetailModal from '@/components/admin/shared/CardDetailModal'
 
 interface InventoryItem {
   item_id: string
   kind: string
   status: string
+  card_id?: string
   display_name?: string
   product_name?: string
   condition?: string
@@ -23,6 +28,7 @@ interface InventoryItem {
   finish?: string
   language?: string
   notes?: string
+  acquired_at?: string
   [key: string]: unknown
 }
 
@@ -54,6 +60,16 @@ export default function AdminInventoryPage() {
 
   // Create form
   const [showCreate, setShowCreate] = useState(false)
+
+  // Image toggle
+  const [showImages, setShowImages] = useState(false)
+
+  // Detail modal
+  const [detailItem, setDetailItem] = useState<InventoryItem | null>(null)
+
+  // Resolve card images
+  const cardIds = items.map((i) => i.card_id as string | undefined)
+  const { getImageUrl } = useCardImages(showImages ? cardIds : [])
 
   const fetchItems = useCallback(async () => {
     if (!api.isAuthenticated) return
@@ -123,6 +139,23 @@ export default function AdminInventoryPage() {
   }
 
   const columns: Column<InventoryItem>[] = [
+    // Image column (conditionally shown)
+    ...(showImages
+      ? [
+          {
+            key: '_image',
+            label: '',
+            className: 'w-12',
+            render: (item: InventoryItem) => (
+              <CardImage
+                imageUrl={getImageUrl(item.card_id)}
+                alt={item.display_name || item.product_name || 'card'}
+                size="sm"
+              />
+            ),
+          },
+        ]
+      : []),
     {
       key: 'display_name',
       label: 'Name',
@@ -296,6 +329,9 @@ export default function AdminInventoryPage() {
           placeholder="Location"
           className="vault-field px-2.5 py-1.5 rounded-lg text-xs w-28"
         />
+        <div className="ml-auto">
+          <ImageToggle showImages={showImages} onToggle={() => setShowImages(!showImages)} label="Images" />
+        </div>
       </div>
 
       {/* Table */}
@@ -306,6 +342,7 @@ export default function AdminInventoryPage() {
         sortKey={sortKey}
         sortDir={sortDir}
         onSort={handleSort}
+        onRowClick={(item) => setDetailItem(item)}
         loading={loading}
         emptyMessage="No inventory items match your filters"
       />
@@ -329,6 +366,14 @@ export default function AdminInventoryPage() {
           onCreated={() => { setShowCreate(false); fetchItems() }}
         />
       )}
+
+      {/* Detail modal */}
+      <CardDetailModal
+        item={detailItem}
+        onClose={() => setDetailItem(null)}
+        onUpdated={fetchItems}
+        imageUrl={detailItem?.card_id ? getImageUrl(detailItem.card_id) : null}
+      />
     </div>
   )
 }

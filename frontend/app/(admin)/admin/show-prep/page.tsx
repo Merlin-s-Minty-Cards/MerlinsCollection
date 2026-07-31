@@ -3,8 +3,12 @@
 import { useCallback, useEffect, useState } from 'react'
 import { MapPin, AlertTriangle, ArrowRight, Check } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
+import { useCardImages } from '@/lib/use-card-images'
 import DataTable, { Column } from '@/components/admin/shared/DataTable'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
+import CardImage from '@/components/admin/shared/CardImage'
+import ImageToggle from '@/components/admin/shared/ImageToggle'
+import CardDetailModal from '@/components/admin/shared/CardDetailModal'
 
 interface MispricedItem {
   item_id: string
@@ -41,6 +45,12 @@ export default function AdminShowPrepPage() {
   const [moveTarget, setMoveTarget] = useState('')
   const [moving, setMoving] = useState(false)
   const [moveResult, setMoveResult] = useState<string | null>(null)
+
+  // Image toggle and detail modal
+  const [showImages, setShowImages] = useState(false)
+  const [detailItem, setDetailItem] = useState<MispricedItem | null>(null)
+  const cardIds = mispriced.map((i) => i.card_id)
+  const { getImageUrl } = useCardImages(showImages ? cardIds : [])
 
   const fetchMispriced = useCallback(async () => {
     if (!api.isAuthenticated) return
@@ -99,6 +109,22 @@ export default function AdminShowPrepPage() {
   }
 
   const columns: Column<MispricedItem>[] = [
+    ...(showImages
+      ? [
+          {
+            key: '_image',
+            label: '',
+            className: 'w-12',
+            render: (item: MispricedItem) => (
+              <CardImage
+                imageUrl={getImageUrl(item.card_id)}
+                alt={item.name || 'card'}
+                size="sm"
+              />
+            ),
+          },
+        ]
+      : []),
     {
       key: 'name',
       label: 'Name',
@@ -265,8 +291,20 @@ export default function AdminShowPrepPage() {
           selectedIds={selectedIds}
           onSelect={handleSelect}
           onSelectAll={handleSelectAll}
+          onRowClick={(item) => setDetailItem(item)}
         />
+
+        <div className="mt-3">
+          <ImageToggle showImages={showImages} onToggle={() => setShowImages(!showImages)} label="Images" />
+        </div>
       </section>
+
+      <CardDetailModal
+        item={detailItem as Record<string, unknown> | null}
+        onClose={() => setDetailItem(null)}
+        onUpdated={fetchMispriced}
+        imageUrl={detailItem?.card_id ? getImageUrl(detailItem.card_id) : null}
+      />
     </div>
   )
 }

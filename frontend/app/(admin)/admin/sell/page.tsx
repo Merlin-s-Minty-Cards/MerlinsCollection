@@ -3,9 +3,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import { ShoppingCart, Plus, X, CreditCard, Banknote, Check, Smartphone, DollarSign } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
+import { useCardImages } from '@/lib/use-card-images'
 import SearchInput from '@/components/admin/shared/SearchInput'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
+import CardImage from '@/components/admin/shared/CardImage'
+import ImageToggle from '@/components/admin/shared/ImageToggle'
+import CardDetailModal from '@/components/admin/shared/CardDetailModal'
 
 interface SellItem {
   item_id: string
@@ -18,6 +22,7 @@ interface SellItem {
 
 interface InventoryItem {
   item_id: string
+  card_id?: string
   display_name?: string
   product_name?: string
   current_market_value?: string
@@ -73,6 +78,12 @@ export default function AdminSellPage() {
 
   // Fee preview
   const [feePreview, setFeePreview] = useState<{ fee: string; net: string } | null>(null)
+
+  // Image toggle and detail modal
+  const [showImages, setShowImages] = useState(false)
+  const [detailItem, setDetailItem] = useState<InventoryItem | null>(null)
+  const cardIds = searchResults.map((i) => i.card_id)
+  const { getImageUrl } = useCardImages(showImages ? cardIds : [])
 
   // Create session on mount
   useEffect(() => {
@@ -253,11 +264,14 @@ export default function AdminSellPage() {
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
         {/* Left: Search & Add */}
         <div className="lg:col-span-2 space-y-4">
-          <SearchInput
-            value={search}
-            onChange={setSearch}
-            placeholder="Search available inventory…"
-          />
+          <div className="flex items-center gap-3">
+            <SearchInput
+              value={search}
+              onChange={setSearch}
+              placeholder="Search available inventory…"
+            />
+            <ImageToggle showImages={showImages} onToggle={() => setShowImages(!showImages)} size="sm" />
+          </div>
 
           {/* Search results */}
           {search && (
@@ -274,16 +288,21 @@ export default function AdminSellPage() {
                     onClick={() => addItem(item)}
                     className="w-full flex items-center justify-between px-3 py-2.5 hover:bg-pine-800/50 transition-colors text-left"
                   >
-                    <div className="min-w-0">
-                      <div className="text-xs text-pine-100 truncate">
-                        {item.display_name || item.product_name}
-                      </div>
-                      <div className="text-[10px] text-pine-400 flex items-center gap-2">
-                        <span>{item.condition}</span>
-                        {item.sticker_price && (
-                          <span className="text-amber-400">Sticker: ${parseFloat(item.sticker_price).toFixed(2)}</span>
-                        )}
-                        <span>Market: <PriceDisplay value={item.current_market_value} className="text-[10px] text-pine-400 inline" /></span>
+                    <div className="flex items-center gap-2 min-w-0">
+                      {showImages && (
+                        <CardImage imageUrl={getImageUrl(item.card_id)} alt={item.display_name || 'card'} size="sm" />
+                      )}
+                      <div className="min-w-0">
+                        <div className="text-xs text-pine-100 truncate">
+                          {item.display_name || item.product_name}
+                        </div>
+                        <div className="text-[10px] text-pine-400 flex items-center gap-2">
+                          <span>{item.condition}</span>
+                          {item.sticker_price && (
+                            <span className="text-amber-400">Sticker: ${parseFloat(item.sticker_price).toFixed(2)}</span>
+                          )}
+                          <span>Market: <PriceDisplay value={item.current_market_value} className="text-[10px] text-pine-400 inline" /></span>
+                        </div>
                       </div>
                     </div>
                     <Plus size={14} className="text-mint shrink-0 ml-2" />
@@ -478,6 +497,13 @@ export default function AdminSellPage() {
         loading={confirming}
         onConfirm={handleConfirm}
         onCancel={() => setShowConfirm(false)}
+      />
+
+      <CardDetailModal
+        item={detailItem as Record<string, unknown> | null}
+        onClose={() => setDetailItem(null)}
+        onUpdated={() => {}}
+        imageUrl={detailItem?.card_id ? getImageUrl(detailItem.card_id) : null}
       />
     </div>
   )
