@@ -495,7 +495,10 @@ def test_shows_show_on_today_is_upcoming(pub_client):
 def test_shows_past_limited_to_90_days(pub_client):
     """A show older than 90 days is excluded from the past list (Phase 16)."""
     client, repo = pub_client
-    today = date.today()
+    # Use the same business-timezone "today" the router uses so the test is not
+    # sensitive to UTC vs Pacific clock skew in CI.
+    from merlins_collection.routers.public import _business_today
+    today = _business_today()
     _seed_show(repo, "Recent", today - timedelta(days=30))
     _seed_show(repo, "Old", today - timedelta(days=89))
     _seed_show(repo, "Too Old", today - timedelta(days=91))

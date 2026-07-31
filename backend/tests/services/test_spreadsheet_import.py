@@ -1295,8 +1295,8 @@ def test_daily_sync_never_writes_an_english_price_onto_a_japanese_item(dynamo_re
     [card] = index.by_name_number[("seismitoad", "38", Language.EN)]
     dynamo_repo.batch_upsert_catalog_cards([card])
     ctx = ImportContext(repo=dynamo_repo, catalog_index=index)
-    import_singles([_singles_row(Name="Seismitoad (jp)", **{"Card #": "38"}),
-                    _singles_row(Name="Seismitoad", **{"Card #": "38"})], ctx)
+    import_singles([_singles_row(Name="Seismitoad (jp)", **{"Card #": "38", "Condition": "NM"}),
+                    _singles_row(Name="Seismitoad", **{"Card #": "38", "Condition": "NM"})], ctx)
 
     refresh_inventory_market_values(dynamo_repo)
 
