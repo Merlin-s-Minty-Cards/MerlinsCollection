@@ -1,0 +1,103 @@
+========================================================================
+PROGRESS — RETOOL ADMIN API
+Branch: retool-admin-api (based on Polishing-For-Deployment)
+Date: 2025-01-27
+RFC: docs/rfcs/0004-retool-admin-api.md
+========================================================================
+
+## Feature Goal
+
+Implement a comprehensive admin API surface (`/admin/...`) for Retool integration,
+enabling live database management during card shows. Covers trades, buys, sells,
+show prep, inventory CRUD, and market lookups. All endpoints gated behind admin
+Cognito auth via the existing `require_admin` dependency.
+
+## Workspace Snapshot
+
+- Branch: retool-admin-api
+- Base: Polishing-For-Deployment
+- Backend: Python 3.12 / FastAPI / DynamoDB (single-table)
+- Frontend: Next.js 14 / TypeScript (not touched by this feature)
+- Existing admin auth: `dependencies.py:require_admin` — tested, ready to use
+- Existing repo layer: `services/dynamodb.py:InventoryRepository` — full CRUD
+- Existing models: inventory.py, business.py, catalog.py (Transaction, Show, etc.)
+
+## Verification Commands
+
+| Layer   | Command                                        |
+|---------|------------------------------------------------|
+| Backend | `python -m pytest backend/tests -q --tb=short` |
+| Lint    | `ruff check backend/src`                        |
+
+## Roadmap
+
+### Phase 1: Admin Auth & Router Shell + Inventory CRUD
+- [x] 1.1 Create `/admin` router shell with `require_admin` gate
+- [x] 1.2 Admin health check endpoint
+- [x] 1.3 Admin inventory search (all fields, all statuses, composable filters)
+- [x] 1.4 Get single inventory item (full admin view)
+- [x] 1.5 Update inventory item (partial update, any field)
+- [x] 1.6 Create inventory item manually
+- [x] 1.7 Delete inventory item (soft-delete to LOST or hard-delete)
+- [x] 1.8 Item history (price + transaction history)
+- [x] 1.9 Tests: auth gate, CRUD lifecycle, filter combinations, validation
+
+### Phase 2: Market Lookup
+- [ ] 2.1 TCGdex catalog search endpoint (name, set)
+- [ ] 2.2 Card detail + prices endpoint
+- [ ] 2.3 Price trend endpoint (1/7/30d)
+- [ ] 2.4 Watchlist model + DynamoDB storage
+- [ ] 2.5 Watchlist CRUD endpoints
+- [ ] 2.6 Tests: search, watchlist, TCGdex mock
+
+### Phase 3: Sell Flow
+- [ ] 3.1 SellSession model + DynamoDB storage
+- [ ] 3.2 SellEngine service (lifecycle)
+- [ ] 3.3 Sell endpoints (create, add items, confirm, cancel)
+- [ ] 3.4 Fee calculation + payment method integration
+- [ ] 3.5 Atomic confirmation (status flip + transactions)
+- [ ] 3.6 Tests: full lifecycle, fees, edge cases
+
+### Phase 4: Buy Flow
+- [ ] 4.1 BuySession model + DynamoDB storage
+- [ ] 4.2 PurchaseEngine service (lifecycle)
+- [ ] 4.3 Buy endpoints (create, add items, confirm, cancel)
+- [ ] 4.4 Buy-price policy calculator
+- [ ] 4.5 Atomic confirmation (create items + transactions)
+- [ ] 4.6 Tests: full lifecycle, policy enforcement
+
+### Phase 5: Trade Engine
+- [ ] 5.1 TradeSession model + DynamoDB storage
+- [ ] 5.2 TradeEngine service (state machine)
+- [ ] 5.3 Trade endpoints (create, add legs, cash, confirm, cancel)
+- [ ] 5.4 Balance calculator + margin tracking
+- [ ] 5.5 Customer view projection (sanitized)
+- [ ] 5.6 Vendor-to-vendor mode (margin transfer)
+- [ ] 5.7 Atomic confirmation (multi-directional)
+- [ ] 5.8 Tests: balance math, margin transfer, atomicity, sanitization
+
+### Phase 6: Show Prep
+- [ ] 6.1 Mispriced card detection (threshold-based)
+- [ ] 6.2 Price update endpoint
+- [ ] 6.3 Bulk location move
+- [ ] 6.4 Location summary
+- [ ] 6.5 Tests: flagging logic, bulk moves, thresholds
+
+### Phase 7: Photo Upload
+- [ ] 7.1 S3 presigned URL generation endpoint
+- [ ] 7.2 Photo key storage on item metadata
+- [ ] 7.3 Tests: URL generation, auth gate
+
+### Phase 8: Analytics/Reporting
+- [ ] 8.1 Show P&L aggregation
+- [ ] 8.2 Trade margin reporting
+- [ ] 8.3 Inventory velocity metrics
+- [ ] 8.4 Tests: aggregation math, date ranges
+
+## Log
+
+- 2025-01-27: Progress file created. RFC 0004 written. Branch created off
+  Polishing-For-Deployment. Phase 1 implementation started.
+- 2025-01-27: Phase 1 COMPLETE. Admin router shell + inventory CRUD implemented.
+  26 tests passing (auth gate, search, get, create, update, delete, history).
+  Lint clean. Router wired into main.py.
