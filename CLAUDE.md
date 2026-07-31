@@ -9,7 +9,7 @@ Never combine phases. Wait for user confirmation after confirming tests fail.
 Custom sub-agents live in `.claude/agents/`. The `orchestrator` agent conducts this whole flow — deciding what's trivial vs. non-trivial and routing each piece to the right specialist. **Reference it into the main chat with `@orchestrator` (or `/`); never spawn it as a sub-agent.** Referencing loads its instructions into the main thread, which is the only thread that can spawn other agents — spawning the orchestrator instead would trap it in a sub-agent that cannot delegate, defeating its purpose.
 
 For **non-trivial feature work** (new functionality, multi-step changes, anything that will touch more than a couple of files), default to this flow without waiting to be asked:
-1. Start with the `initializer` agent to audit the workspace and create/update `claude-progress.txt`, unless one already exists and is current for the active feature.
+1. Start with the `initializer` agent to audit the workspace and create/update `progress.txt`, unless one already exists and is current for the active feature.
 2. Route each roadmap item to the appropriate agent (`design-doc`, `code-writer`, `test-qa`, `doc-writer`, `pull-request`, `web-browser`) based on its own description.
 3. Every `code-writer` submission must clear the Council Loop (`advisor-contrarian`, `advisor-security`, `advisor-chaos`, `advisor-architect` → `council-judge`) before being considered done.
 
