@@ -133,6 +133,62 @@ holographic glare, scroll reveals, hover lifts, the vault background) live in
 **Motion is accessible:** every effect checks `prefers-reduced-motion` (in JS via
 `matchMedia` and in CSS via the media query) and falls back to a static state.
 
+## Deploying to AWS ECS
+
+The frontend runs as a Docker container on ECS Fargate behind the `merlins` cluster.
+
+### Prerequisites
+
+- AWS CLI configured with credentials for account `560151615792`
+- Docker installed and running
+- ECR repository `merlins-frontend` exists in `us-east-1`
+
+### Build & Deploy
+
+Run from the **repo root** (the Dockerfile uses repo root as build context):
+
+```bash
+# 1. Authenticate Docker with ECR
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 560151615792.dkr.ecr.us-east-1.amazonaws.com
+
+# 2. Build the production image
+docker build -f frontend/Dockerfile --build-arg NEXT_PUBLIC_API_URL=https://me-227b5d9d4f6444e9aea830a909f923c8.ecs.us-east-1.on.aws -t 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-frontend:latest .
+
+# 3. Push to ECR
+docker push 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-frontend:latest
+
+# 4. Force ECS to pull the new image
+aws ecs update-service --cluster merlins --service merlins-frontend --force-new-deployment --region us-east-1
+```
+
+### Build Args (compile-time)
+
+These are baked into the client bundle at build time:
+
+| Arg | Value |
+|-----|-------|
+| `NEXT_PUBLIC_API_URL` | `https://me-227b5d9d4f6444e9aea830a909f923c8.ecs.us-east-1.on.aws` |
+| `NEXT_PUBLIC_SANITY_PROJECT_ID` | Your Sanity project ID (optional) |
+| `NEXT_PUBLIC_SANITY_DATASET` | `production` (default) |
+
+### Runtime Env (on the container)
+
+Server-side secrets are passed as ECS task definition environment variables — they are NOT in the Docker image:
+
+- `AUTH_SECRET` — NextAuth encryption key
+- `AWS_COGNITO_CLIENT_ID` / `AWS_COGNITO_CLIENT_SECRET` / `AWS_COGNITO_ISSUER` — Cognito provider
+- `COGNITO_ADMIN_GROUP` — admin group name (default: `admins`)
+
+### Deploying the backend
+
+Same pattern from the repo root:
+
+```bash
+docker build -f backend/Dockerfile -t 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-backend:latest .
+docker push 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-backend:latest
+aws ecs update-service --cluster merlins --service merlins-backend --force-new-deployment --region us-east-1
+```
+
 ## Testing
 
 - **Runner:** Vitest in a `jsdom` environment; tests live in `__tests__/` folders
