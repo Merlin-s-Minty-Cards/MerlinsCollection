@@ -98,3 +98,19 @@ These steering files are set to manual inclusion to save context tokens. Load th
 | `#banner-design` | Social media banners, ad creatives, website heroes |
 
 Additionally, the `impeccable` skill (activated via `disclose_context`) provides advanced UI critique, polish, and live iteration capabilities for frontend work.
+
+## Installed Powers (main-thread only)
+
+Powers are accessed via the `kiro_powers` tool, which only the main thread (you) can use. Sub-agents like `web-browser` cannot call powers directly. When research or documentation lookup is needed, prefer using powers yourself over dispatching to `web-browser`, since powers provide higher-quality results.
+
+| Power | Use For | When to Prefer Over web-browser |
+|---|---|---|
+| `context7` | Library/framework docs, API references, code examples | Any question about a specific library's API, usage patterns, or current syntax |
+| `exa` | Web search, crawling URLs, finding current docs | General research, finding articles, company info, or when context7 doesn't cover the tool |
+
+**Workflow:**
+1. Call `kiro_powers` with `action="activate"` and the power name to get tool details
+2. Call `kiro_powers` with `action="use"` to execute the search/lookup
+3. Pass the results to whichever sub-agent needs them as part of its dispatch context
+
+**When to still use `web-browser`:** Only when you need multi-step browsing (following links, comparing multiple pages) or when powers don't have the information. For single-question lookups, powers are faster and cheaper.
