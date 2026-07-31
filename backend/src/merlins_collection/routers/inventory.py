@@ -393,11 +393,33 @@ _ALLOWED_SORTS = frozenset({
 _PRICE_SENTINEL_HIGH = Decimal("999999999")  # priceless items sort LAST in both directions
 
 
+def _display_price(item) -> Decimal | None:
+    """The price the customer actually sees on the tile.
+
+    Mirrors the frontend ``CardTile`` logic: for raw cards, use the live catalog
+    ``card.market_price`` (computed fresh via ``CardSummary.from_catalog``); for
+    graded slabs, skip the catalog price (it's ungraded and inapplicable). Falls
+    back to ``listed_price`` when no market price is available.
+
+    This MUST stay in sync with the frontend derivation
+    (``frontend/components/inventory/CardTile.tsx``) so that the sort order
+    matches what the user sees rendered on screen.
+    """
+    market = item.card.market_price if item.kind == "raw" and item.card else None
+    return market if market is not None else item.listed_price
+
+
 def _sort_results(items: list, sort: str | None) -> list:
     """Sort enriched items in place. Priceless items always sort last.
 
     ``sort=None`` or an unrecognized value defaults to ``newest`` (most recently
     acquired first), which is the natural order for a collector browsing new stock.
+
+    Price sorts use the DISPLAY price — the same derivation the frontend tile
+    renders — so the visual order matches the numbers on screen. Previously this
+    used ``current_market_value`` (a nightly-denormalized field) which diverges
+    from the live ``card.market_price`` computed at response time, causing items
+    to appear out of order.
     """
     if sort is None or sort not in _ALLOWED_SORTS:
         sort = "newest"
@@ -408,13 +430,13 @@ def _sort_results(items: list, sort: str | None) -> list:
         items.sort(key=lambda i: i.acquired_at)
     elif sort == "price_desc":
         items.sort(key=lambda i: (
-            0 if i.current_market_value is not None else 1,
-            -(i.current_market_value or Decimal(0)),
+            0 if _display_price(i) is not None else 1,
+            -(_display_price(i) or Decimal(0)),
         ))
     elif sort == "price_asc":
         items.sort(key=lambda i: (
-            0 if i.current_market_value is not None else 1,
-            i.current_market_value or _PRICE_SENTINEL_HIGH,
+            0 if _display_price(i) is not None else 1,
+            _display_price(i) or _PRICE_SENTINEL_HIGH,
         ))
     elif sort == "name_asc":
         items.sort(key=lambda i: (i.card.name if i.card else i.display_name or "").lower())

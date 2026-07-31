@@ -1347,17 +1347,18 @@ def test_facets_excludes_non_visible_items(inv_client, mint_token):
 # ---- GET /inventory/search?sort= (Phase 14 — Sort control) ----
 
 def test_sort_by_price_desc(inv_client, mint_token):
-    """price_desc sorts by current_market_value descending, priceless last."""
+    """price_desc sorts by the DISPLAY price (card.market_price for raw items),
+    with priceless items (no display price) last."""
     client, repo = inv_client
     repo.batch_upsert_catalog_cards([
-        _catalog("sv1-1", "Cheap"),
-        _catalog("sv1-2", "Expensive"),
-        _catalog("sv1-3", "Priceless"),
+        _catalog("sv1-1", "Cheap", prices={"holofoil": FinishPrice(market=Decimal("10"))}),
+        _catalog("sv1-2", "Expensive", prices={"holofoil": FinishPrice(market=Decimal("100"))}),
+        _catalog("sv1-3", "Priceless"),  # no catalog prices → card.market_price = None
     ])
-    repo.put_inventory_item(_raw("sv1-1", price="0", current_market_value=Decimal("10")))
-    repo.put_inventory_item(_raw("sv1-2", price="0", current_market_value=Decimal("100")))
+    repo.put_inventory_item(_raw("sv1-1", price="0"))
+    repo.put_inventory_item(_raw("sv1-2", price="0"))
     priceless = _raw("sv1-3", price="0")
-    priceless.current_market_value = None
+    priceless.listed_price = None  # no listed_price fallback either
     repo.put_inventory_item(priceless)
 
     resp = client.get(
@@ -1370,17 +1371,17 @@ def test_sort_by_price_desc(inv_client, mint_token):
 
 
 def test_sort_by_price_asc(inv_client, mint_token):
-    """price_asc sorts by current_market_value ascending, priceless last."""
+    """price_asc sorts by the DISPLAY price ascending, priceless last."""
     client, repo = inv_client
     repo.batch_upsert_catalog_cards([
-        _catalog("sv1-1", "Cheap"),
-        _catalog("sv1-2", "Expensive"),
-        _catalog("sv1-3", "Priceless"),
+        _catalog("sv1-1", "Cheap", prices={"holofoil": FinishPrice(market=Decimal("10"))}),
+        _catalog("sv1-2", "Expensive", prices={"holofoil": FinishPrice(market=Decimal("100"))}),
+        _catalog("sv1-3", "Priceless"),  # no catalog prices
     ])
-    repo.put_inventory_item(_raw("sv1-1", price="0", current_market_value=Decimal("10")))
-    repo.put_inventory_item(_raw("sv1-2", price="0", current_market_value=Decimal("100")))
+    repo.put_inventory_item(_raw("sv1-1", price="0"))
+    repo.put_inventory_item(_raw("sv1-2", price="0"))
     priceless = _raw("sv1-3", price="0")
-    priceless.current_market_value = None
+    priceless.listed_price = None
     repo.put_inventory_item(priceless)
 
     resp = client.get(
