@@ -492,6 +492,23 @@ def test_shows_show_on_today_is_upcoming(pub_client):
     assert body["past"] == []
 
 
+def test_shows_past_limited_to_90_days(pub_client):
+    """A show older than 90 days is excluded from the past list (Phase 16)."""
+    client, repo = pub_client
+    today = date.today()
+    _seed_show(repo, "Recent", today - timedelta(days=30))
+    _seed_show(repo, "Old", today - timedelta(days=89))
+    _seed_show(repo, "Too Old", today - timedelta(days=91))
+    _seed_show(repo, "Ancient", today - timedelta(days=180))
+
+    body = client.get("/public/shows").json()
+    past_names = [s["name"] for s in body["past"]]
+    assert "Recent" in past_names
+    assert "Old" in past_names
+    assert "Too Old" not in past_names
+    assert "Ancient" not in past_names
+
+
 def test_shows_exposes_only_safe_fields(pub_client):
     client, repo = pub_client
     repo.put_show(Show(

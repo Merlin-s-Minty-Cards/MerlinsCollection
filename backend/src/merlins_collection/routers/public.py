@@ -25,7 +25,7 @@ timeout so a hung scan can never wedge callers indefinitely.
 from __future__ import annotations
 
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from threading import Lock
 from typing import Callable, TypeVar
@@ -217,13 +217,19 @@ class PublicShowsResponse(BaseModel):
 
 def _compute_shows(repo: InventoryRepository) -> PublicShowsResponse:
     today = _business_today()
+    # Past shows are limited to the last 90 days (Phase 16, owner requirement).
+    past_cutoff = today - timedelta(days=90)
     upcoming: list[PublicShow] = []
     past: list[PublicShow] = []
     for show in repo.list_shows():
         entry = PublicShow(name=show.name, date=show.date,
                            venue=show.venue, city=show.city)
         # A show dated today counts as upcoming (boundary decision, RFC 0002).
-        (upcoming if show.date >= today else past).append(entry)
+        if show.date >= today:
+            upcoming.append(entry)
+        elif show.date >= past_cutoff:
+            past.append(entry)
+        # Shows older than 90 days are dropped entirely.
     upcoming.sort(key=lambda s: s.date)              # ascending: next show first
     past.sort(key=lambda s: s.date, reverse=True)    # descending: most recent first
     return PublicShowsResponse(upcoming=upcoming, past=past)
@@ -255,8 +261,9 @@ def _market_first(item) -> Decimal:
     """Ranking value: current market value, else listed price, else 0.
 
     Null-coalescing (not falsy-``or``) so a genuine 0.00 market value is honoured
-    rather than skipped. This is market-FIRST by design (RFC 0002) — the opposite
-    of the customer search's listed-first ``_price`` helper; do not "correct" it.
+    rather than skipped. This is market-FIRST by design (RFC 0002) — the customer
+    search's ``_price`` helper also returns ``current_market_value`` outright
+    (Phase 12), so both surfaces now agree on market-first ordering.
     """
     if item.current_market_value is not None:
         return item.current_market_value
