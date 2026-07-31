@@ -1359,3 +1359,24 @@ class InventoryRepository:
             Key={"PK": f"BUY#{buy_id}", "SK": "META"},
         ).get("Item")
         return item if item else None
+
+    # ---- trade sessions (admin feature) ----
+    def put_trade_session(self, session: dict):
+        """Insert or update a trade session."""
+        trade_id = session["trade_id"]
+        record = {
+            "PK": f"TRADE#{trade_id}",
+            "SK": "META",
+            "entity": "trade_session",
+            "GSI1PK": f"TRADES#{session.get('status', 'draft')}",
+            "GSI1SK": session.get("created_at", ""),
+            **_serialize(session),
+        }
+        self._table.put_item(Item=record)
+
+    def get_trade_session(self, trade_id: str) -> dict | None:
+        """Fetch one trade session by id."""
+        item = self._table.get_item(
+            Key={"PK": f"TRADE#{trade_id}", "SK": "META"},
+        ).get("Item")
+        return item if item else None

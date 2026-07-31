@@ -13,6 +13,7 @@ from .market import router as market_router
 from .market import watchlist_router
 from .purchases import router as purchases_router
 from .sales import router as sales_router
+from .trades import router as trades_router
 
 admin_router = APIRouter(
     prefix="/admin",
@@ -25,6 +26,7 @@ admin_router.include_router(market_router)
 admin_router.include_router(watchlist_router)
 admin_router.include_router(sales_router)
 admin_router.include_router(purchases_router)
+admin_router.include_router(trades_router)
 
 
 @admin_router.get("/health")

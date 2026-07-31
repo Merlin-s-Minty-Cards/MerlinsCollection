@@ -67,14 +67,14 @@ Cognito auth via the existing `require_admin` dependency.
 - [x] 4.6 Tests: full lifecycle, policy enforcement
 
 ### Phase 5: Trade Engine
-- [ ] 5.1 TradeSession model + DynamoDB storage
-- [ ] 5.2 TradeEngine service (state machine)
-- [ ] 5.3 Trade endpoints (create, add legs, cash, confirm, cancel)
-- [ ] 5.4 Balance calculator + margin tracking
-- [ ] 5.5 Customer view projection (sanitized)
-- [ ] 5.6 Vendor-to-vendor mode (margin transfer)
-- [ ] 5.7 Atomic confirmation (multi-directional)
-- [ ] 5.8 Tests: balance math, margin transfer, atomicity, sanitization
+- [x] 5.1 TradeSession model + DynamoDB storage
+- [x] 5.2 TradeEngine service (state machine)
+- [x] 5.3 Trade endpoints (create, add legs, cash, confirm, cancel)
+- [x] 5.4 Balance calculator + margin tracking
+- [x] 5.5 Customer view projection (sanitized)
+- [x] 5.6 Vendor-to-vendor mode (margin transfer)
+- [x] 5.7 Atomic confirmation (multi-directional)
+- [x] 5.8 Tests: balance math, margin transfer, atomicity, sanitization
 
 ### Phase 6: Show Prep
 - [ ] 6.1 Mispriced card detection (threshold-based)
@@ -107,3 +107,6 @@ Cognito auth via the existing `require_admin` dependency.
 - 2025-01-27: Phases 3+4 COMPLETE. Sell and Buy session flows implemented.
   24 tests passing (12 sales + 12 purchases). Full lifecycle: create, add items,
   confirm (atomic status flip + transactions), cancel. DynamoDB session storage added.
+- 2025-01-27: Phase 5 COMPLETE. Trade engine implemented with full lifecycle.
+  17 tests passing. Multi-directional trades: outgoing legs (sell), incoming legs
+  (buy), cash balancing, margin calculation, customer view sanitization.
