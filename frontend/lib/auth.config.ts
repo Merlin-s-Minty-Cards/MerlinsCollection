@@ -25,6 +25,16 @@ export const authConfig: NextAuthConfig = {
       issuer: process.env.AWS_COGNITO_ISSUER,
     }),
   ],
+  // Phase 17: explicit session configuration so the session lifetime is visible
+  // and not reliant on undocumented NextAuth defaults.
+  session: {
+    strategy: 'jwt',
+    // How long the encrypted session cookie lives. Set to 30 days (Cognito
+    // refresh token default). The access token inside refreshes silently via
+    // the jwt callback; this outer lifetime is when the user must fully
+    // re-authenticate regardless.
+    maxAge: 30 * 24 * 60 * 60, // 30 days in seconds
+  },
   callbacks: {
     async jwt({ token, account, profile }) {
       // `account` is present only on the initial sign-in callback: capture the
@@ -48,13 +58,21 @@ export const authConfig: NextAuthConfig = {
       // request in flight near the boundary — or a backend clock running ahead —
       // doesn't reach Cognito with an already-expired token.
       const expires = token.accessTokenExpires
-      if (typeof expires === 'number' && Date.now() < expires - REFRESH_BUFFER_MS) {
+      if (typeof expires === 'number' && expires > 0 && Date.now() < expires - REFRESH_BUFFER_MS) {
         return token
       }
 
-      // Expired but nothing to refresh with — leave the token untouched.
-      if (!token.refreshToken) {
+      // If accessTokenExpires was never set (legacy token from before refresh
+      // logic existed), leave the token alone — we can't know if it's expired.
+      if (typeof expires !== 'number' || expires === 0) {
         return token
+      }
+
+      // Token is expired. If we have no refresh token, flag the error so the
+      // session degrades cleanly rather than letting stale access tokens silently
+      // fail on every backend call (Phase 17 fix).
+      if (!token.refreshToken) {
+        return { ...token, error: 'RefreshAccessTokenError' }
       }
 
       // Expired: exchange the refresh token for a fresh access token.
