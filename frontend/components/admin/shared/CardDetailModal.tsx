@@ -242,15 +242,15 @@ export default function CardDetailModal({
 
           {/* Quick Info */}
           <section className="flex flex-wrap gap-3 text-[10px] text-pine-500 border-t border-pine-700/30 pt-3">
-            {item.card_id && (
+            {item.card_id ? (
               <span>Card: <span className="text-pine-300 font-mono">{String(item.card_id)}</span></span>
-            )}
-            {item.acquired_at && (
+            ) : null}
+            {item.acquired_at ? (
               <span>Acquired: <span className="text-pine-300">{String(item.acquired_at)}</span></span>
-            )}
-            {item.company && (
+            ) : null}
+            {item.company ? (
               <span>Grade: <span className="text-pine-300">{String(item.company)} {String(item.grade ?? '')}</span></span>
-            )}
+            ) : null}
           </section>
         </div>
       </div>
