@@ -113,6 +113,34 @@ docker build -f frontend/Dockerfile -t merlins-frontend .
 
 Build context must be the repo root (the npm workspaces lockfile lives there). The backend image contains Node 20 alongside Python because the MCP server runs as a stdio subprocess of the backend. `NEXT_PUBLIC_*` values are build args on the frontend image; all server-side secrets are runtime environment variables — never baked into images.
 
+## Deploying to AWS ECS
+
+Both services run as Docker containers on ECS Fargate in the `merlins` cluster.
+Deploy backend first since the frontend calls it.
+
+### Full Deploy (both services)
+
+Run from the **repo root** (both Dockerfiles use repo root as build context):
+
+```bash
+# Authenticate Docker with ECR
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 560151615792.dkr.ecr.us-east-1.amazonaws.com
+
+# Build & push backend
+docker build -f backend/Dockerfile -t 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-backend:latest .
+docker push 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-backend:latest
+
+# Build & push frontend
+docker build -f frontend/Dockerfile --build-arg NEXT_PUBLIC_API_URL=https://me-227b5d9d4f6444e9aea830a909f923c8.ecs.us-east-1.on.aws -t 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-frontend:latest .
+docker push 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-frontend:latest
+
+# Force ECS to pull the new images
+aws ecs update-service --cluster merlins --service merlins-backend --force-new-deployment --region us-east-1
+aws ecs update-service --cluster merlins --service merlins-frontend --force-new-deployment --region us-east-1
+```
+
+See `frontend/README.md` and `backend/README.md` for single-service deploy commands and environment variable details.
+
 ## Contributing
 
 All PRs require review. See CLAUDE.md for TDD guidelines and branch protection requirements.

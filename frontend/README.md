@@ -61,6 +61,8 @@ frontend/
 │  │  └─ articles/           #   /articles and /articles/[slug] (SSG)
 │  ├─ (auth)/                # Route group: the inventory tool
 │  │  └─ inventory/          #   /inventory  (dark "vault" theme)
+│  ├─ (admin)/               # Route group: admin panel (gated by admin session)
+│  │  └─ admin/              #   /admin, /admin/inventory, /admin/sell, etc.
 │  └─ api/auth/[...nextauth] # NextAuth route handler (providers TBD)
 ├─ components/
 │  ├─ ui/                    # Reusable primitives (Button, Badge, Container…)
@@ -77,13 +79,12 @@ frontend/
 
 ### Route groups
 
-The parenthesized folders (`(public)`, `(auth)`) are
+The parenthesized folders (`(public)`, `(auth)`, `(admin)`) are
 [Next.js route groups](https://nextjs.org/docs/app/building-your-application/routing/route-groups):
 they organize files and give each group its own `layout.tsx` **without** adding a
 URL segment. `(public)` pages share the brand-green Navbar/Footer; `(auth)` wraps
-the inventory tool. The two layouts are intentionally separate so the inventory
-group can grow a real sign-in gate later (currently deferred — see
-`app/(auth)/layout.tsx`).
+the inventory tool; `(admin)` gates the admin panel behind an admin session check.
+The layouts are intentionally separate so each group can enforce its own auth posture.
 
 ## The data layer (`lib/`)
 
@@ -143,44 +144,15 @@ The frontend runs as a Docker container on ECS Fargate behind the `merlins` clus
 - Docker installed and running
 - ECR repository `merlins-frontend` exists in `us-east-1`
 
-### Deploy Both Services (full copy-paste)
+### Deploy Frontend
 
-Run from the **repo root** (both Dockerfiles use repo root as build context).
-Deploy backend first since the frontend calls it.
-
-```bash
-# Authenticate Docker with ECR
-aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 560151615792.dkr.ecr.us-east-1.amazonaws.com
-
-# Build & push backend
-docker build -f backend/Dockerfile -t 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-backend:latest .
-docker push 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-backend:latest
-
-# Build & push frontend
-docker build -f frontend/Dockerfile --build-arg NEXT_PUBLIC_API_URL=https://me-227b5d9d4f6444e9aea830a909f923c8.ecs.us-east-1.on.aws -t 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-frontend:latest .
-docker push 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-frontend:latest
-
-# Force ECS to pull the new images
-aws ecs update-service --cluster merlins --service merlins-backend --force-new-deployment --region us-east-1
-aws ecs update-service --cluster merlins --service merlins-frontend --force-new-deployment --region us-east-1
-```
-
-### Deploy Frontend Only
+Run from the **repo root** (the Dockerfile uses repo root as build context):
 
 ```bash
 aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 560151615792.dkr.ecr.us-east-1.amazonaws.com
 docker build -f frontend/Dockerfile --build-arg NEXT_PUBLIC_API_URL=https://me-227b5d9d4f6444e9aea830a909f923c8.ecs.us-east-1.on.aws -t 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-frontend:latest .
 docker push 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-frontend:latest
 aws ecs update-service --cluster merlins --service merlins-frontend --force-new-deployment --region us-east-1
-```
-
-### Deploy Backend Only
-
-```bash
-aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 560151615792.dkr.ecr.us-east-1.amazonaws.com
-docker build -f backend/Dockerfile -t 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-backend:latest .
-docker push 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-backend:latest
-aws ecs update-service --cluster merlins --service merlins-backend --force-new-deployment --region us-east-1
 ```
 
 ### Build Args (compile-time)
@@ -209,9 +181,7 @@ Server-side secrets are passed as ECS task definition environment variables — 
 | Region | `us-east-1` |
 | ECS Cluster | `merlins` |
 | Frontend Service | `merlins-frontend` |
-| Backend Service | `merlins-backend` |
 | Frontend ECR | `560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-frontend` |
-| Backend ECR | `560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-backend` |
 | Backend URL | `https://me-227b5d9d4f6444e9aea830a909f923c8.ecs.us-east-1.on.aws` |
 
 ## Testing

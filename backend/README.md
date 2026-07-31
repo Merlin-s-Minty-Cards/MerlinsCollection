@@ -18,10 +18,11 @@ src/merlins_collection/
     chat.py          #   ChatRequest / ChatResponse
   routers/           # HTTP layer — thin, delegates to services
     auth.py          #   GET /auth/me
-    inventory.py     #   GET /inventory/search, GET /inventory/summary
+    inventory.py     #   GET /inventory/search, GET /inventory/summary, GET /inventory/facets
     chat.py          #   POST /chat/
     public.py        #   GET /public/shows, GET /public/featured-cards (unauthenticated)
     health.py        #   GET /health
+    admin/           #   /admin/* — Retool admin panel (inventory, sales, buys, trades, show prep, market)
   services/          # Business logic / integrations (no FastAPI imports)
     cognito.py       #   Cognito JWT verification
     dynamodb.py      #   Single-table DynamoDB repository
@@ -93,9 +94,11 @@ The status codes are deliberate and distinguish *whose* problem it is:
 | `GET /auth/me` | Bearer | Identity + role of the caller |
 | `GET /inventory/search` | Bearer | Filter inventory by name/set/rarity/condition/price |
 | `GET /inventory/summary` | Bearer | Dashboard header stats (`cards_in_vault`, `est_value`, `sets_tracked`) |
+| `GET /inventory/facets` | Bearer | Distinct sets/rarities/conditions/languages for filter dropdowns |
 | `POST /chat/` | Bearer | Natural-language inventory chat via Bedrock |
 | `GET /public/shows` | **None** | All shows split into `upcoming`/`past` by the business's Pacific "today" |
 | `GET /public/featured-cards` | **None** | Up to 5 homepage cards (`name` + `image_url` only) |
+| `GET /admin/*` | Admin | Retool admin panel (inventory CRUD, sales, buys, trades, show prep, market) |
 
 `/inventory/search` loads inventory and filters in-process; `cost_basis`
 (our purchase price) is stripped from the response and never reaches customers.
@@ -249,3 +252,49 @@ Catalog data arrives through two separate passes, because TCGdex serves pricing
   are excluded permanently, by owner decision — their price and detail come
   from the PSA cert API + PriceCharting once Phase 4 resumes, so a card held
   only as a slab keeps `rarity: null` until then.
+
+## Deploying to AWS ECS
+
+The backend runs as a Docker container on ECS Fargate behind the `merlins` cluster.
+It bundles the MCP server (Node.js) as a subprocess inside the same image.
+
+### Prerequisites
+
+- AWS CLI configured with credentials for account `560151615792`
+- Docker installed and running
+- ECR repository `merlins-backend` exists in `us-east-1`
+
+### Deploy Backend
+
+Run from the **repo root** (the Dockerfile uses repo root as build context because
+the MCP server workspace and the lockfile live there):
+
+```bash
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 560151615792.dkr.ecr.us-east-1.amazonaws.com
+docker build -f backend/Dockerfile -t 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-backend:latest .
+docker push 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-backend:latest
+aws ecs update-service --cluster merlins --service merlins-backend --force-new-deployment --region us-east-1
+```
+
+### Runtime Env (on the container)
+
+All settings are ECS task definition environment variables (never baked into the image).
+See `.env.example` for the complete list. Critical production settings:
+
+- `COGNITO_USER_POOL_ID` / `COGNITO_CLIENT_ID` — Cognito pool for JWT verification
+- `DYNAMODB_TABLE_NAME` — inventory table (default: `merlins-cards`)
+- `RATE_LIMIT_TABLE_NAME` — rate-limit counters (default: `merlins-rate-limits`)
+- `CORS_ORIGINS` — frontend origin(s) allowed by CORS
+- `ADMIN_API_KEY` — static bearer token for Retool admin access
+- `FORWARDED_ALLOW_IPS` — proxy trust boundary (see Dockerfile comments)
+
+### Infrastructure
+
+| Resource | Value |
+|----------|-------|
+| AWS Account | `560151615792` |
+| Region | `us-east-1` |
+| ECS Cluster | `merlins` |
+| Backend Service | `merlins-backend` |
+| Backend ECR | `560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-backend` |
+| Backend URL | `https://me-227b5d9d4f6444e9aea830a909f923c8.ecs.us-east-1.on.aws` |

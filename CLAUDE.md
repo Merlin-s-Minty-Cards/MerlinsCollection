@@ -41,6 +41,7 @@ Merlin's Minty Cards — a Pokemon card business website.
 | `/articles`          | No            | Article listing (Cluster Hub)        |
 | `/articles/[slug]`   | No            | Individual article (SSG via Sanity)  |
 | `/inventory`         | Yes           | Inventory search (filter + chat)     |
+| `/admin`             | Yes (admin)   | Admin panel — inventory CRUD, sales, buys, trades, show prep, market |
 
 # Test Commands
 
