@@ -77,11 +77,11 @@ Cognito auth via the existing `require_admin` dependency.
 - [x] 5.8 Tests: balance math, margin transfer, atomicity, sanitization
 
 ### Phase 6: Show Prep
-- [ ] 6.1 Mispriced card detection (threshold-based)
-- [ ] 6.2 Price update endpoint
-- [ ] 6.3 Bulk location move
-- [ ] 6.4 Location summary
-- [ ] 6.5 Tests: flagging logic, bulk moves, thresholds
+- [x] 6.1 Mispriced card detection (threshold-based)
+- [x] 6.2 Price update endpoint
+- [x] 6.3 Bulk location move
+- [x] 6.4 Location summary
+- [x] 6.5 Tests: flagging logic, bulk moves, thresholds
 
 ### Phase 7: Photo Upload
 - [ ] 7.1 S3 presigned URL generation endpoint
@@ -110,3 +110,5 @@ Cognito auth via the existing `require_admin` dependency.
 - 2025-01-27: Phase 5 COMPLETE. Trade engine implemented with full lifecycle.
   17 tests passing. Multi-directional trades: outgoing legs (sell), incoming legs
   (buy), cash balancing, margin calculation, customer view sanitization.
+- 2025-01-27: Phase 6 COMPLETE. Show prep endpoints: mispriced card detection,
+  bulk location move, location summary. 5 tests passing.

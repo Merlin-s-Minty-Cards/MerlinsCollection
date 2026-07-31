@@ -52,7 +52,7 @@ app = FastAPI(title="Merlin's Collection API", version="0.1.0", lifespan=_lifesp
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
     # Expose Retry-After so the cross-origin browser frontend can actually read
     # the back-off hint on a 429 (it is not a CORS-safelisted response header).
