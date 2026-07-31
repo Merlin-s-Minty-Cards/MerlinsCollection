@@ -111,6 +111,20 @@ export interface InventoryFilters {
   language?: string
 }
 
+/** A set option from the facets endpoint. */
+export interface FacetSet {
+  id: string
+  name: string
+}
+
+/** Distinct filterable values present among customer-visible inventory. */
+export interface InventoryFacets {
+  sets: FacetSet[]
+  rarities: string[]
+  conditions: string[]
+  languages: string[]
+}
+
 /** Dashboard header stats over the customer-visible cohort. `est_value` is a
  *  backend Decimal serialized as a string (format it with {@link formatPrice}). */
 export interface InventorySummary {
@@ -170,6 +184,13 @@ export async function getInventorySummary(
   opts: RequestOptions = {},
 ): Promise<InventorySummary> {
   return apiFetch<InventorySummary>('/inventory/summary', { token: opts.token })
+}
+
+/** Fetch distinct filter options from the DB (Phase 13 — no hardcoded values). */
+export async function getInventoryFacets(
+  opts: RequestOptions = {},
+): Promise<InventoryFacets> {
+  return apiFetch<InventoryFacets>('/inventory/facets', { token: opts.token })
 }
 
 /** Send a chat message (with prior turns) to the Bedrock-backed endpoint. */

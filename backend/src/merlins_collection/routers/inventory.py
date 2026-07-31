@@ -308,6 +308,76 @@ def inventory_summary(
     )
 
 
+# ---- /inventory/facets ----
+
+class FacetSet(BaseModel):
+    """A set option for the filter dropdown: id + human label."""
+    id: str
+    name: str
+
+
+class InventoryFacets(BaseModel):
+    """Distinct filterable values present among customer-visible inventory.
+
+    Every dropdown in the filter panel sources its options from this endpoint
+    rather than hardcoded constants (Phase 13). Values that appear in the DB
+    but shouldn't be selectable (e.g. the literal string "None" as a rarity)
+    are excluded at this layer.
+    """
+    sets: list[FacetSet]
+    rarities: list[str]
+    conditions: list[str]
+    languages: list[str]
+
+
+@router.get("/facets", response_model=InventoryFacets)
+def inventory_facets(
+    _user: AuthenticatedUser = Depends(rate_limit_search),
+    repo: InventoryRepository = Depends(get_repo),
+) -> InventoryFacets:
+    """Distinct sets/rarities/conditions/languages among customer-visible items.
+
+    Computed live from the inventory + catalog (same scan weight as /summary).
+    The set dropdown needs both the id (for filtering) and a human label (the
+    set name from the catalog), sorted alphabetically by name.
+    """
+    items = customer_visible_items(repo)
+
+    # Collect distinct facet values from the items themselves.
+    conditions: set[str] = set()
+    languages: set[str] = set()
+    card_ids: set[str] = set()
+    for item in items:
+        if hasattr(item, "condition"):
+            conditions.add(item.condition.value)
+        languages.add(item.language.value)
+        cid = getattr(item, "card_id", None)
+        if cid is not None:
+            card_ids.add(cid)
+
+    # Fetch catalog rows to get set names and rarities.
+    catalog = repo.batch_get_catalog_cards(card_ids) if card_ids else {}
+    sets_map: dict[str, str] = {}  # set_id -> set_name
+    rarities: set[str] = set()
+    for card in catalog.values():
+        sets_map[card.set_id] = card.set_name
+        if card.rarity and card.rarity != "None":
+            rarities.add(card.rarity)
+
+    # Sort sets alphabetically by name.
+    sorted_sets = sorted(
+        [FacetSet(id=sid, name=sname) for sid, sname in sets_map.items()],
+        key=lambda s: s.name.lower(),
+    )
+
+    return InventoryFacets(
+        sets=sorted_sets,
+        rarities=sorted(rarities),
+        conditions=sorted(conditions),
+        languages=sorted(languages),
+    )
+
+
 def _load_catalog(
     repo: InventoryRepository,
     items: list[InventoryItem],

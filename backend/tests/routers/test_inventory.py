@@ -1264,3 +1264,81 @@ def test_search_hidden_count_excludes_items_other_filters_already_dropped(
     body = resp.json()
     assert body["total"] == 0
     assert body["hidden_no_price"] == 1
+
+
+# ---- GET /inventory/facets (Phase 13 — DB-driven dropdown options) ----
+
+def test_facets_requires_authentication(inv_client):
+    client, _ = inv_client
+    resp = client.get("/inventory/facets")
+    assert resp.status_code == 401
+
+
+def test_facets_returns_distinct_values_from_inventory(inv_client, mint_token):
+    """The facets endpoint returns only values present in the DB, not hardcoded."""
+    client, repo = inv_client
+    repo.batch_upsert_catalog_cards([
+        _catalog("sv1-1", "Sprigatito", set_id="en:sv01", set_name="Scarlet & Violet", rarity="Common"),
+        _catalog("base1-4", "Charizard", set_id="en:base1", set_name="Base", rarity="Rare Holo"),
+    ])
+    repo.put_inventory_item(_raw("sv1-1", condition=Condition.NM))
+    repo.put_inventory_item(_raw("base1-4", condition=Condition.LP))
+
+    resp = client.get(
+        "/inventory/facets",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+
+    # Sets: alphabetically sorted by name.
+    set_names = [s["name"] for s in body["sets"]]
+    assert "Base" in set_names
+    assert "Scarlet & Violet" in set_names
+    assert set_names == sorted(set_names, key=str.lower)
+
+    # Rarities: only what's in the catalog for held cards.
+    assert "Common" in body["rarities"]
+    assert "Rare Holo" in body["rarities"]
+
+    # Conditions: only what's on the items.
+    assert "NM" in body["conditions"]
+    assert "LP" in body["conditions"]
+    assert "HP" not in body["conditions"]
+
+    # Languages: default EN.
+    assert "EN" in body["languages"]
+
+
+def test_facets_excludes_literal_none_rarity(inv_client, mint_token):
+    """The literal string 'None' from TCGdex must not appear as a facet option."""
+    client, repo = inv_client
+    repo.batch_upsert_catalog_cards([
+        _catalog("sv1-1", "Card", rarity="None"),
+    ])
+    repo.put_inventory_item(_raw("sv1-1"))
+
+    resp = client.get(
+        "/inventory/facets",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    body = resp.json()
+    assert "None" not in body["rarities"]
+
+
+def test_facets_excludes_non_visible_items(inv_client, mint_token):
+    """Items in non-customer-visible locations don't contribute facet values."""
+    client, repo = inv_client
+    repo.batch_upsert_catalog_cards([
+        _catalog("sv1-1", "Hidden Card", set_id="en:hidden", set_name="Hidden Set", rarity="Ultra Rare"),
+    ])
+    # Item in binder (non-visible location) — should not contribute.
+    repo.put_inventory_item(_raw("sv1-1", location="binder"))
+
+    resp = client.get(
+        "/inventory/facets",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    body = resp.json()
+    assert body["sets"] == []
+    assert body["rarities"] == []

@@ -1,79 +1,19 @@
 'use client'
 
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useSession } from 'next-auth/react'
 import { Search } from 'lucide-react'
 import CardGrid from './CardGrid'
 import {
   searchInventory,
+  getInventoryFacets,
   type InventorySearchResult,
   type InventoryFilters,
+  type InventoryFacets,
+  type FacetSet,
 } from '@/lib/inventory'
 
 type Status = 'idle' | 'loading' | 'success' | 'error'
-
-// Curated sets, mapped to their TCGdex composite set ids — the backend filters
-// by set_id, looking the value up verbatim via repo.list_cards_by_set. A
-// catalog row's set_id is build_card_id(language, tcgdex_set_id), so the id is
-// LANGUAGE-PREFIXED ("en:base1"); a bare pokemontcg.io id matches zero rows and
-// the dropdown silently returns "no cards". Two ids also differ from the old
-// pokemontcg.io spelling (sv1 → sv01, sv3pt5 → sv03.5). Verified against a live
-// scan of the DynamoDB catalog table (matched on exact set_name) and pinned by
-// the FilterPanel tests.
-const SETS: Array<{ label: string; id: string }> = [
-  { label: 'Base', id: 'en:base1' },
-  { label: 'Jungle', id: 'en:base2' },
-  { label: 'Fossil', id: 'en:base3' },
-  { label: 'Team Rocket', id: 'en:base5' },
-  { label: 'Neo Genesis', id: 'en:neo1' },
-  { label: 'Expedition', id: 'en:ecard1' },
-  { label: 'Ruby & Sapphire', id: 'en:ex1' },
-  { label: 'Diamond & Pearl', id: 'en:dp1' },
-  { label: 'Black & White', id: 'en:bw1' },
-  { label: 'Evolutions', id: 'en:xy12' },
-  { label: 'Sword & Shield', id: 'en:swsh1' },
-  { label: 'Brilliant Stars', id: 'en:swsh9' },
-  { label: 'Scarlet & Violet', id: 'en:sv01' },
-  { label: '151', id: 'en:sv03.5' },
-]
-const SET_IDS = new Map(SETS.map((s) => [s.label, s.id]))
-
-// NOTE: this filter is a no-op in production today — every catalog card still
-// has rarity: null. The Tier-2 depth pass (refresh_held_prices, RFC 0003 §7)
-// that populates rarity has landed and is wired into the daily job (Phase 9),
-// but has not yet been run against live data; this starts matching once it has.
-const RARITIES = [
-  'Common',
-  'Uncommon',
-  'Rare',
-  'Rare Holo',
-  'Rare Holo EX',
-  'Rare Holo GX',
-  'Rare Holo V',
-  'Rare Holo VMAX',
-  'Rare Ultra',
-  'Rare Secret',
-  'Rare Rainbow',
-  'Promo',
-]
-
-// Raw-card grades the backend accepts. Filtering by condition intentionally
-// excludes graded slabs (backend behavior) — hence the label note.
-const CONDITIONS: Array<{ value: string; label: string }> = [
-  { value: 'NM', label: 'NM — Near Mint' },
-  { value: 'LP', label: 'LP — Lightly Played' },
-  { value: 'MP', label: 'MP — Moderately Played' },
-  { value: 'HP', label: 'HP — Heavily Played' },
-  { value: 'DMG', label: 'DMG — Damaged' },
-]
-
-// Print language. The empty value ("All languages") sends no param; the backend
-// treats a JP print as a distinct, differently-priced card (Language enum EN/JP).
-const LANGUAGES: Array<{ value: string; label: string }> = [
-  { value: '', label: 'All languages' },
-  { value: 'EN', label: 'English' },
-  { value: 'JP', label: 'Japanese' },
-]
 
 // Guard against an inverted price range reaching the API — swap if min > max
 // (the backend rejects an inverted range with 422).
@@ -95,12 +35,19 @@ const labelClass =
 export default function FilterPanel() {
   const { data: session } = useSession()
   const [filters, setFilters] = useState<InventoryFilters>({})
-  // The select shows the display label; the query sends the mapped set_id.
-  const [setLabel, setSetLabel] = useState('')
   const [status, setStatus] = useState<Status>('idle')
   const [result, setResult] = useState<InventorySearchResult | null>(null)
+  const [facets, setFacets] = useState<InventoryFacets | null>(null)
   // Monotonic id so a slow earlier request can't overwrite a newer one.
   const requestId = useRef(0)
+
+  // Load facets once on mount (requires auth token).
+  useEffect(() => {
+    if (!session?.accessToken) return
+    getInventoryFacets({ token: session.accessToken })
+      .then(setFacets)
+      .catch(() => {}) // Facets load failure is non-fatal; dropdowns stay empty.
+  }, [session?.accessToken])
 
   function update<K extends keyof InventoryFilters>(key: K, value: string) {
     setFilters((prev) => ({ ...prev, [key]: value }))
@@ -149,22 +96,11 @@ export default function FilterPanel() {
             <label htmlFor="flt-set" className={labelClass}>
               Set
             </label>
-            <select
-              id="flt-set"
-              value={setLabel}
-              onChange={(e) => {
-                setSetLabel(e.target.value)
-                update('set_id', SET_IDS.get(e.target.value) ?? '')
-              }}
-              className={fieldClass}
-            >
-              <option value="">Any set</option>
-              {SETS.map((s) => (
-                <option key={s.id} value={s.label}>
-                  {s.label}
-                </option>
-              ))}
-            </select>
+            <SetCombobox
+              sets={facets?.sets ?? []}
+              value={filters.set_id ?? ''}
+              onChange={(id) => update('set_id', id)}
+            />
           </div>
 
           <div>
@@ -178,7 +114,7 @@ export default function FilterPanel() {
               className={fieldClass}
             >
               <option value="">Any rarity</option>
-              {RARITIES.map((r) => (
+              {(facets?.rarities ?? []).map((r) => (
                 <option key={r} value={r}>
                   {r}
                 </option>
@@ -197,9 +133,9 @@ export default function FilterPanel() {
               className={fieldClass}
             >
               <option value="">Any condition</option>
-              {CONDITIONS.map((c) => (
-                <option key={c.value} value={c.value}>
-                  {c.label}
+              {(facets?.conditions ?? []).map((c) => (
+                <option key={c} value={c}>
+                  {c}
                 </option>
               ))}
             </select>
@@ -215,9 +151,10 @@ export default function FilterPanel() {
               onChange={(e) => update('language', e.target.value)}
               className={fieldClass}
             >
-              {LANGUAGES.map((l) => (
-                <option key={l.value} value={l.value}>
-                  {l.label}
+              <option value="">All languages</option>
+              {(facets?.languages ?? []).map((l) => (
+                <option key={l} value={l}>
+                  {l}
                 </option>
               ))}
             </select>
@@ -272,6 +209,109 @@ export default function FilterPanel() {
     </div>
   )
 }
+
+// ---- Set Combobox (type-to-narrow) ----
+
+function SetCombobox({
+  sets,
+  value,
+  onChange,
+}: {
+  sets: FacetSet[]
+  value: string
+  onChange: (id: string) => void
+}) {
+  const [query, setQuery] = useState('')
+  const [open, setOpen] = useState(false)
+  const wrapperRef = useRef<HTMLDivElement>(null)
+
+  // Resolve the current value to a display name.
+  const selected = sets.find((s) => s.id === value)
+
+  const filtered = query
+    ? sets.filter((s) => s.name.toLowerCase().includes(query.toLowerCase()))
+    : sets
+
+  // Close on outside click.
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [])
+
+  return (
+    <div ref={wrapperRef} className="relative">
+      <input
+        id="flt-set"
+        type="text"
+        role="combobox"
+        aria-expanded={open}
+        aria-autocomplete="list"
+        aria-controls="set-listbox"
+        value={open ? query : selected?.name ?? ''}
+        placeholder="Any set"
+        className={fieldClass}
+        onFocus={() => {
+          setOpen(true)
+          setQuery('')
+        }}
+        onChange={(e) => {
+          setQuery(e.target.value)
+          setOpen(true)
+          if (e.target.value === '') {
+            onChange('')
+          }
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') {
+            setOpen(false)
+          }
+        }}
+      />
+      {open && filtered.length > 0 && (
+        <ul
+          id="set-listbox"
+          role="listbox"
+          className="absolute z-50 mt-1 max-h-60 w-full overflow-auto rounded-lg vault-panel border border-pine-700 py-1"
+        >
+          <li
+            role="option"
+            aria-selected={value === ''}
+            className="cursor-pointer px-3 py-2 text-sm hover:bg-pine-700/40"
+            onMouseDown={(e) => {
+              e.preventDefault()
+              onChange('')
+              setOpen(false)
+            }}
+          >
+            Any set
+          </li>
+          {filtered.map((s) => (
+            <li
+              key={s.id}
+              role="option"
+              aria-selected={value === s.id}
+              className="cursor-pointer px-3 py-2 text-sm hover:bg-pine-700/40"
+              onMouseDown={(e) => {
+                e.preventDefault()
+                onChange(s.id)
+                setOpen(false)
+              }}
+            >
+              {s.name}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+// ---- Results display ----
 
 function Results({
   status,
