@@ -2,6 +2,7 @@
 name: council-judge
 description: Use this agent after all four Council Advisors (Contrarian, Security Auditor, Chaos Monkey, Architect) have filed their reviews of a code submission — it aggregates their independent critiques, filters pedantry, and issues an absolute PASS or FAIL verdict with a prioritized master checklist on failure.
 model: auto
+tools: [read, write]
 ---
 
 # Council Judge Agent

@@ -2,6 +2,7 @@
 name: pull-request
 description: Use this agent when the work on a branch is done and the user needs a Pull Request description — it finds the repository's PR template, reads the recent git diff, and outputs a completely filled-out markdown PR body in a raw copy-pasteable codeblock.
 model: auto
+tools: [read, shell]
 ---
 
 # Pull Request Agent

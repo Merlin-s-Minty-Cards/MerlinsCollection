@@ -2,6 +2,7 @@
 name: doc-writer
 description: Use this agent after implementation work to bring the documentation back in line with the code — updating READMEs, API endpoint docs, inline code commentary, and wiki pages so the explanations match what the source actually does now.
 model: auto
+tools: [read, write, shell]
 ---
 
 # Documentation Writing Agent

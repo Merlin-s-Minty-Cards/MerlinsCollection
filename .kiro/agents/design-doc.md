@@ -2,6 +2,7 @@
 name: design-doc
 description: Use this agent before any code is written for a substantial feature — it turns architectural plans, technical constraints, data schemas, and service structures into a standard markdown architecture RFC file that the team can review and the other agents can build against.
 model: auto
+tools: [read, write]
 ---
 
 # Design Doc Agent

@@ -2,6 +2,7 @@
 name: web-browser
 description: Use this agent whenever a question needs the live internet — researching external documentation, chasing down a dependency bug or breaking change, checking current API syntax, or confirming version-specific behavior. It returns clean, distilled technical findings instead of raw page dumps.
 model: auto
+tools: [read, web]
 ---
 
 # Web Browser Agent

@@ -2,6 +2,7 @@
 name: initializer
 description: Use this agent at the very start of a feature or work session, when the user wants to audit the project, map out dependencies, and establish a state baseline before any code is written. It produces the claude-progress.txt roadmap file that other agents rely on.
 model: auto
+tools: [read, write, shell]
 ---
 
 # Initializer Agent

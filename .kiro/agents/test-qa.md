@@ -2,6 +2,7 @@
 name: test-qa
 description: Use this agent to evaluate the existing test suites, write missing unit or integration tests for recent code changes, and run the project's native test commands to prove there are no regressions. Reach for it after code edits land or when coverage feels thin.
 model: auto
+tools: [read, write, shell]
 ---
 
 # Test Quality Assurance Agent
