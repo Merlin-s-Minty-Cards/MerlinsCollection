@@ -167,6 +167,7 @@ def search_inventory(
     min_price: Decimal | None = Query(None),
     max_price: Decimal | None = Query(None),
     language: Language | None = Query(None),
+    sort: str | None = Query(None),
     _user: AuthenticatedUser = Depends(rate_limit_search),
     repo: InventoryRepository = Depends(get_repo),
 ) -> InventorySearchResult:
@@ -239,6 +240,10 @@ def search_inventory(
     enriched = [
         _enrich(item, catalog.get(getattr(item, "card_id", None))) for item in items
     ]
+
+    # Sort (Phase 14). Priceless items always sort last regardless of direction.
+    enriched = _sort_results(enriched, sort)
+
     return InventorySearchResult(
         items=enriched, total=len(enriched), hidden_no_price=hidden_no_price,
     )
@@ -376,6 +381,50 @@ def inventory_facets(
         conditions=sorted(conditions),
         languages=sorted(languages),
     )
+
+
+# ---- Sorting (Phase 14) ----
+
+# Allowed sort values. An unrecognized value falls back to the default (newest).
+_ALLOWED_SORTS = frozenset({
+    "newest", "oldest", "price_desc", "price_asc", "name_asc", "name_desc",
+})
+
+_PRICE_SENTINEL_HIGH = Decimal("999999999")  # priceless items sort LAST in both directions
+
+
+def _sort_results(items: list, sort: str | None) -> list:
+    """Sort enriched items in place. Priceless items always sort last.
+
+    ``sort=None`` or an unrecognized value defaults to ``newest`` (most recently
+    acquired first), which is the natural order for a collector browsing new stock.
+    """
+    if sort is None or sort not in _ALLOWED_SORTS:
+        sort = "newest"
+
+    if sort == "newest":
+        items.sort(key=lambda i: i.acquired_at, reverse=True)
+    elif sort == "oldest":
+        items.sort(key=lambda i: i.acquired_at)
+    elif sort == "price_desc":
+        items.sort(key=lambda i: (
+            0 if i.current_market_value is not None else 1,
+            -(i.current_market_value or Decimal(0)),
+        ))
+    elif sort == "price_asc":
+        items.sort(key=lambda i: (
+            0 if i.current_market_value is not None else 1,
+            i.current_market_value or _PRICE_SENTINEL_HIGH,
+        ))
+    elif sort == "name_asc":
+        items.sort(key=lambda i: (i.card.name if i.card else i.display_name or "").lower())
+    elif sort == "name_desc":
+        items.sort(
+            key=lambda i: (i.card.name if i.card else i.display_name or "").lower(),
+            reverse=True,
+        )
+
+    return items
 
 
 def _load_catalog(

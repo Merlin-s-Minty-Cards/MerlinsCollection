@@ -1342,3 +1342,82 @@ def test_facets_excludes_non_visible_items(inv_client, mint_token):
     body = resp.json()
     assert body["sets"] == []
     assert body["rarities"] == []
+
+
+# ---- GET /inventory/search?sort= (Phase 14 — Sort control) ----
+
+def test_sort_by_price_desc(inv_client, mint_token):
+    """price_desc sorts by current_market_value descending, priceless last."""
+    client, repo = inv_client
+    repo.batch_upsert_catalog_cards([
+        _catalog("sv1-1", "Cheap"),
+        _catalog("sv1-2", "Expensive"),
+        _catalog("sv1-3", "Priceless"),
+    ])
+    repo.put_inventory_item(_raw("sv1-1", price="0", current_market_value=Decimal("10")))
+    repo.put_inventory_item(_raw("sv1-2", price="0", current_market_value=Decimal("100")))
+    priceless = _raw("sv1-3", price="0")
+    priceless.current_market_value = None
+    repo.put_inventory_item(priceless)
+
+    resp = client.get(
+        "/inventory/search?sort=price_desc",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    body = resp.json()
+    names = [i["card"]["name"] for i in body["items"]]
+    assert names == ["Expensive", "Cheap", "Priceless"]
+
+
+def test_sort_by_price_asc(inv_client, mint_token):
+    """price_asc sorts by current_market_value ascending, priceless last."""
+    client, repo = inv_client
+    repo.batch_upsert_catalog_cards([
+        _catalog("sv1-1", "Cheap"),
+        _catalog("sv1-2", "Expensive"),
+        _catalog("sv1-3", "Priceless"),
+    ])
+    repo.put_inventory_item(_raw("sv1-1", price="0", current_market_value=Decimal("10")))
+    repo.put_inventory_item(_raw("sv1-2", price="0", current_market_value=Decimal("100")))
+    priceless = _raw("sv1-3", price="0")
+    priceless.current_market_value = None
+    repo.put_inventory_item(priceless)
+
+    resp = client.get(
+        "/inventory/search?sort=price_asc",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    body = resp.json()
+    names = [i["card"]["name"] for i in body["items"]]
+    assert names == ["Cheap", "Expensive", "Priceless"]
+
+
+def test_sort_by_name_asc(inv_client, mint_token):
+    """name_asc sorts alphabetically by catalog name."""
+    client, repo = inv_client
+    repo.batch_upsert_catalog_cards([
+        _catalog("sv1-1", "Zebra"),
+        _catalog("sv1-2", "Apple"),
+    ])
+    repo.put_inventory_item(_raw("sv1-1"))
+    repo.put_inventory_item(_raw("sv1-2"))
+
+    resp = client.get(
+        "/inventory/search?sort=name_asc",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    body = resp.json()
+    names = [i["card"]["name"] for i in body["items"]]
+    assert names == ["Apple", "Zebra"]
+
+
+def test_sort_invalid_falls_back_to_newest(inv_client, mint_token):
+    """An unrecognized sort value falls back to newest (no 422)."""
+    client, repo = inv_client
+    repo.put_inventory_item(_raw("sv1-1"))
+
+    resp = client.get(
+        "/inventory/search?sort=invalid_sort_value",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    assert resp.status_code == 200

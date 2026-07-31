@@ -15,6 +15,15 @@ import {
 
 type Status = 'idle' | 'loading' | 'success' | 'error'
 
+const SORT_OPTIONS = [
+  { value: 'newest', label: 'Newest first' },
+  { value: 'oldest', label: 'Oldest first' },
+  { value: 'price_desc', label: 'Price: high to low' },
+  { value: 'price_asc', label: 'Price: low to high' },
+  { value: 'name_asc', label: 'Name: A–Z' },
+  { value: 'name_desc', label: 'Name: Z–A' },
+]
+
 // Guard against an inverted price range reaching the API — swap if min > max
 // (the backend rejects an inverted range with 422).
 function normalizePriceRange(filters: InventoryFilters): InventoryFilters {
@@ -155,6 +164,24 @@ export default function FilterPanel() {
               {(facets?.languages ?? []).map((l) => (
                 <option key={l} value={l}>
                   {l}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label htmlFor="flt-sort" className={labelClass}>
+              Sort by
+            </label>
+            <select
+              id="flt-sort"
+              value={filters.sort ?? 'newest'}
+              onChange={(e) => update('sort', e.target.value)}
+              className={fieldClass}
+            >
+              {SORT_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
                 </option>
               ))}
             </select>

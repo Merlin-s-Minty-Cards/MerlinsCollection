@@ -109,6 +109,8 @@ export interface InventoryFilters {
   max_price?: string
   /** 'EN' | 'JP'; omitted (or '') means "all languages" (no filter). */
   language?: string
+  /** Sort order: newest, oldest, price_desc, price_asc, name_asc, name_desc. */
+  sort?: string
 }
 
 /** A set option from the facets endpoint. */
@@ -155,6 +157,7 @@ const FILTER_KEYS: (keyof InventoryFilters)[] = [
   'min_price',
   'max_price',
   'language',
+  'sort',
 ]
 
 /** Build a flat, URL-encoded query string from filters, omitting empty fields. */
