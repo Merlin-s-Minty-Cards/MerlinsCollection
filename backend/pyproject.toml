@@ -13,7 +13,7 @@ dependencies = [
     "pydantic-settings>=2.3.0",
     "python-jose[cryptography]>=3.3.0",
     "httpx>=0.27.0",
-    "mcp>=1.9.0",
+    "mcp>=1.9.0,<2.0",
     "python-ulid>=2.2",
     # IANA timezone database for zoneinfo. Required so ``ZoneInfo("America/
     # Los_Angeles")`` (the Pacific business-day split in routers/public.py)

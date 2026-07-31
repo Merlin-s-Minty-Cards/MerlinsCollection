@@ -1,0 +1,16 @@
+[
+  {
+    "id": "base1-4",
+    "localId": "4",
+    "name": "Charizard",
+    "image": "https://assets.tcgdex.net/en/base/base1/4"
+  },
+  { "id": "exu-!", "localId": "!", "name": "Energy Search" },
+  { "id": "exu-%3F", "localId": "%3F", "name": "Potion" },
+  {
+    "id": "sv09-045",
+    "localId": "045",
+    "name": "Volcanion",
+    "image": "https://assets.tcgdex.net/en/sv/sv09/045"
+  }
+]

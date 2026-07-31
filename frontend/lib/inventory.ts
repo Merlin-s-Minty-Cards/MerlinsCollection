@@ -90,6 +90,13 @@ export type InventoryItem =
 export interface InventorySearchResult {
   items: InventoryItem[]
   total: number
+  /**
+   * How many otherwise-matching cards the price range excluded purely because
+   * they have no price on file. They stay excluded — a card with no known price
+   * cannot honestly be claimed to be under $500 — but the UI surfaces the count
+   * so they are not dropped invisibly. Always 0 when no price bound was sent.
+   */
+  hidden_no_price: number
 }
 
 /** Flat filter params the FastAPI `/inventory/search` endpoint accepts. */
@@ -102,6 +109,22 @@ export interface InventoryFilters {
   max_price?: string
   /** 'EN' | 'JP'; omitted (or '') means "all languages" (no filter). */
   language?: string
+  /** Sort order: newest, oldest, price_desc, price_asc, name_asc, name_desc. */
+  sort?: string
+}
+
+/** A set option from the facets endpoint. */
+export interface FacetSet {
+  id: string
+  name: string
+}
+
+/** Distinct filterable values present among customer-visible inventory. */
+export interface InventoryFacets {
+  sets: FacetSet[]
+  rarities: string[]
+  conditions: string[]
+  languages: string[]
 }
 
 /** Dashboard header stats over the customer-visible cohort. `est_value` is a
@@ -134,6 +157,7 @@ const FILTER_KEYS: (keyof InventoryFilters)[] = [
   'min_price',
   'max_price',
   'language',
+  'sort',
 ]
 
 /** Build a flat, URL-encoded query string from filters, omitting empty fields. */
@@ -163,6 +187,13 @@ export async function getInventorySummary(
   opts: RequestOptions = {},
 ): Promise<InventorySummary> {
   return apiFetch<InventorySummary>('/inventory/summary', { token: opts.token })
+}
+
+/** Fetch distinct filter options from the DB (Phase 13 — no hardcoded values). */
+export async function getInventoryFacets(
+  opts: RequestOptions = {},
+): Promise<InventoryFacets> {
+  return apiFetch<InventoryFacets>('/inventory/facets', { token: opts.token })
 }
 
 /** Send a chat message (with prior turns) to the Bedrock-backed endpoint. */

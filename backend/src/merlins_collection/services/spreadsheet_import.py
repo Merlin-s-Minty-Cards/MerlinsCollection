@@ -11,10 +11,11 @@ entities (shows, consignors) key on their business identity. Ambiguity never
 guesses silently: unmappable rows are skipped-and-counted, uncertain mappings set
 ``needs_review=True``.
 
-Print language is read out of the card-name text (``"Seismitoad (jp)"``) and
-stored as a field, because it is part of a card's identity: the catalog is
-English-only, so a non-English item is never matched against it and keeps the
-sheet's own money figures instead of an English price.
+Print language is read out of the card-name text (``"Seismitoad (jp)"``), the TCG
+link (its ``pokemon-japan`` slug or ``Language=`` filter) and, failing both, the
+set itself, and is stored as a field — because it is part of a card's identity.
+The catalog is multilingual, so a Japanese row resolves to the JAPANESE catalog
+printing (a separate row at its own price), never to its English twin.
 """
 
 from __future__ import annotations
@@ -65,8 +66,10 @@ from merlins_collection.services.card_text import (
     _QUALIFIER_TOKENS,
     CatalogIndex,
     build_catalog_index,
+    coerce_language,
     core_name,
     format_display_name,
+    language_from_set,
     language_from_url,
     normalize_name,
     normalize_number,
@@ -75,6 +78,11 @@ from merlins_collection.services.card_text import (
     set_hint_from_url,
     sets_agree,
 )
+
+# The catalog keys cards on a LANGUAGE-COMPOSITE id ("en:base1-25"); the enriched
+# CSV carries the bare TCGdex id ("base1-25"). One shared constructor keeps the
+# importer's key and the seeder's key from drifting apart.
+from merlins_collection.services.tcgdex import build_card_id
 
 logger = logging.getLogger(__name__)
 
@@ -121,10 +129,20 @@ def parse_money(text) -> Decimal | None:
 
 
 def parse_date(text) -> date | None:
+    """A sheet date cell as a ``date``, or ``None`` when it is blank/unparseable.
+
+    The midnight-suffixed forms are not decoration: the real workbook's own CSV
+    export writes EVERY date as ``"2026-04-18 00:00:00"``. Without them 44 of the
+    137 Bulk rows parsed their ``Date Sold`` as ``None`` and so could never be
+    classified SOLD however plainly the ``Sold`` cell said otherwise — the item
+    stayed AVAILABLE and its sale was never recorded. A dropped time component is
+    correct here: these are calendar dates, and the time is always midnight.
+    """
     if not text or not str(text).strip():
         return None
     cleaned = str(text).strip()
-    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m/%d/%y"):
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m/%d/%y",
+                "%Y-%m-%d %H:%M:%S", "%m/%d/%Y %H:%M:%S"):
         try:
             return datetime.strptime(cleaned, fmt).date()
         except ValueError:
@@ -265,10 +283,15 @@ class ImportContext:
     catalog_index: CatalogIndex = field(default_factory=CatalogIndex)
 
 
-def _first_hit(table: dict, key_name: str, keys: list[str]) -> list:
-    """The first non-empty hit list across the number forms, most literal first."""
+def _first_hit(table: dict, key_name: str, keys: list[str],
+               language: Language) -> list:
+    """The first non-empty hit list across the number forms, most literal first.
+
+    ``language`` is part of the key (see ``build_catalog_index``), so a lookup can
+    only ever see printings in the language asked for.
+    """
     for key in keys:
-        hits = table.get((key_name, key))
+        hits = table.get((key_name, key, language))
         if hits:
             return hits
     return []
@@ -276,16 +299,17 @@ def _first_hit(table: dict, key_name: str, keys: list[str]) -> list:
 
 def _match_card(ctx: ImportContext, name: str, number: str, *,
                 language: Language = Language.EN, set_text: str = ""):
-    """Conservative catalog match on normalized (name, number); a UNIQUE hit
-    returns its card_id, everything ambiguous returns ``None`` for human review.
+    """Conservative catalog match on normalized (name, number, language); a UNIQUE
+    hit returns its card_id, everything ambiguous returns ``None`` for human review.
 
-    The catalog holds ENGLISH cards only, so a non-English item is refused
-    outright — before any lookup — no matter how exactly its name and number line
-    up with an English entry. A Japanese Seismitoad #38 is not the English
-    Seismitoad #38: linking them would hang an English price on a card that
-    trades at a different one. ``card_id is None`` is the correct, final answer
-    for such an item, not a failed match to retry later. The gate lives here, in
-    the single place a catalog lookup can happen, so every caller inherits it.
+    The catalog is multilingual, so ``language`` is part of the LOOKUP KEY rather
+    than a gate that refuses non-English rows outright: a Japanese Seismitoad #38
+    resolves to the Japanese catalog printing and never to the English one, which
+    trades at a different price. A language with no catalog printing of that card
+    simply misses and returns ``None`` — the same conservative answer as before,
+    reached by finding nothing rather than by refusing to look. Scoping by key
+    (not by filtering hits afterwards) is what keeps the ENGLISH lookup unaffected
+    when a same-name-and-number JP twin is seeded beside it.
 
     Both sides are normalized identically (``build_catalog_index`` on the catalog,
     ``normalize_name``/``number_keys`` on the sheet row) so an Excel float artifact
@@ -296,18 +320,17 @@ def _match_card(ctx: ImportContext, name: str, number: str, *,
     stays ``None``; there is deliberately no fuzzy auto-linking here (that, and its
     human confirm, belongs to the review toolchain).
     """
-    if language is not Language.EN:
-        return None
     index = ctx.catalog_index
     n_full = normalize_name(name)
     if not n_full:  # a fully non-ASCII name is "no evidence", never a match
         return None
     keys = number_keys(normalize_number(number))
+    language = coerce_language(language)
 
-    hits = _first_hit(index.by_name_number, n_full, keys)
+    hits = _first_hit(index.by_name_number, n_full, keys, language)
     core_tier = False
     if not hits:
-        hits = _first_hit(index.by_core_number, core_name(name), keys)
+        hits = _first_hit(index.by_core_number, core_name(name), keys, language)
         core_tier = True
 
     if len(hits) == 1:
@@ -372,6 +395,7 @@ def _record_sheet_sale(ctx, item, *, sold, date_sold, venmo, venmo_fees, categor
 
 def import_singles(rows: list[dict], ctx: ImportContext) -> dict:
     summary = {"imported": 0, "sales": 0, "skipped": 0, "needs_review": 0}
+    _LANG_MAP = {"EN": Language.EN, "JP": Language.JP}
     for row in rows:
         try:
             raw_condition = str(row.get("Condition") or "").strip()
@@ -382,23 +406,58 @@ def import_singles(rows: list[dict], ctx: ImportContext) -> dict:
                 # A card with no condition: default NM but flag it rather than drop.
                 condition, modifier, blank_condition = Condition.NM, None, True
             loc = map_location(row.get("Location"))
-            # Language is read FIRST: it decides whether the English catalog may
-            # be consulted at all, and the cleaned name is what gets matched and
-            # preserved. Three live rows carry no marker in the name and are
-            # identifiable only from their TCGplayer link, so that is consulted
-            # as a fallback.
-            tcg_url = str(row.get("TCG Link") or "").strip() or None
-            language, name = parse_language(row["Name"])
-            if language is Language.EN:
-                language = language_from_url(tcg_url)
-            # The Singles tab has no Set column, so a name+number shared across
-            # several sets can't be resolved from the row alone. The TCGplayer
-            # link does carry the set in its slug, so derive a set hint from it
-            # to narrow those ties (``_match_card`` already narrows a multi-hit by
-            # set text; singles simply never had any to pass).
-            card_id = _match_card(ctx, name, row.get("Card #", ""), language=language,
-                                  set_text=set_hint_from_url(tcg_url))
-            needs_review = card_id is None or blank_condition
+
+            enriched = "match_confidence" in row
+
+            if enriched:
+                # --- Enriched path (Stage B): language, card_id, and
+                # confidence come from the pre-resolved enrichment columns.
+                # parse_language is called only to strip markers from the
+                # display name; its language return value is ignored.
+                _ignored_lang, name = parse_language(row["Name"])
+                lang_code = str(row.get("language") or "").strip().upper()
+                language = _LANG_MAP.get(lang_code, Language.EN)
+
+                # Stage A resolved a BARE TCGdex id ("base1-25"); the catalog
+                # keys on the language composite ("en:base1-25"). Build the
+                # composite, then require it to actually exist in the catalog
+                # before storing it: TCGdex advertises sets it holds zero
+                # card-level data for, so a live Stage-A hit is no guarantee the
+                # reseed ever got that card. An id that resolves nowhere is
+                # worse than no id — it hangs inventory off a phantom card — so
+                # a validation miss drops to None and routes to human review,
+                # whatever the confidence column claims.
+                raw_card_id = str(row.get("matched_card_id") or "").strip()
+                if raw_card_id:
+                    composite = build_card_id(language, raw_card_id)
+                    card_id = (composite
+                               if composite in ctx.catalog_index.by_card_id
+                               else None)
+                else:
+                    card_id = None
+
+                confidence = str(row.get("match_confidence") or "").strip().lower()
+                if confidence == "high" and card_id is not None:
+                    needs_review = blank_condition
+                else:
+                    # medium, low, empty, or card_id is None
+                    needs_review = True
+
+                tcg_url = None
+                listed_price = None
+            else:
+                # --- Legacy path: URL-param parsing + live _match_card.
+                tcg_url = str(row.get("TCG Link") or "").strip() or None
+                language, name = parse_language(row["Name"])
+                if language is Language.EN:
+                    language = language_from_url(tcg_url)
+                card_id = _match_card(
+                    ctx, name, row.get("Card #", ""), language=language,
+                    set_text=set_hint_from_url(tcg_url),
+                )
+                needs_review = card_id is None or blank_condition
+                listed_price = parse_money(_find(row, "Sticker"))
+
             notes = " — ".join(x for x in (
                 f"{name} #{row.get('Card #', '')}".strip(" #"),
                 str(row.get("Notes") or "").strip() or None,
@@ -420,7 +479,7 @@ def import_singles(rows: list[dict], ctx: ImportContext) -> dict:
                 location=loc["location"],
                 cost_basis=parse_money(row.get("Amount Paid")) or Decimal("0"),
                 market_value_at_purchase=parse_money(row.get("Market @ purchase")),
-                listed_price=parse_money(_find(row, "Sticker")),
+                listed_price=listed_price,
                 acquired_at=parse_date(row.get("Date")) or date(2026, 1, 1),
                 notes=notes or None,
                 tcg_url=tcg_url,
@@ -456,6 +515,11 @@ def import_slabs(rows: list[dict], ctx: ImportContext) -> dict:
             set_language, set_name = parse_language(row.get("Set", ""))
             if language is Language.EN:
                 language = set_language
+            # Two real rows (Seismitoad / SV11B, Bubble Mew EX / Shiny Treasure
+            # EX) carry no marker in EITHER column and are Japanese only by which
+            # set they are from, so the set itself is the last language signal.
+            if language is Language.EN:
+                language = language_from_set(set_name)
             # A slab has a Set column, so pass it: it narrows a name+number that
             # hits the same card printed in several sets down to the right one.
             card_id = _match_card(ctx, name, row.get("card#", ""),
@@ -1082,13 +1146,25 @@ def _empty_tabs(summaries: dict, allow_empty) -> list[str]:
     return sorted(
         tab for tab, s in summaries.items()
         if isinstance(s, dict) and not tab.startswith("_")
-        and "failed" not in s and not s.get("preserved")
+        and "failed" not in s and not s.get("preserved") and not s.get("deferred")
         and s.get("imported") == 0 and tab not in allow_empty
     )
 
 
+# Tabs that are present in the export but deliberately NOT imported yet. Slabs is
+# on hold until PSA cert scanning exists (owner directive): a slab's identity IS
+# its cert number, and importing 17 rows now would only manufacture rows a human
+# has to re-verify later. Schema support for graded items stays; the IMPORT is
+# off. This is a separate knob from ``allow_empty`` on purpose — ``allow_empty``
+# forgives a tab that imported zero rows, it does not stop a populated tab from
+# running, and stretching it to mean both would make "this ledger is genuinely
+# empty" and "do not read this tab" indistinguishable.
+DEFERRED_TABS = frozenset({"Slabs"})
+
+
 def run_import(csv_dir, repo, *, require_complete: bool = True,
-               allow_empty=frozenset(), force_replace: bool = False) -> dict:
+               allow_empty=frozenset(), force_replace: bool = False,
+               skip_tabs=DEFERRED_TABS) -> dict:
     """Import the workbook's tab CSVs from ``csv_dir`` with SAFE REPLACE semantics.
 
     Five guarantees protect the live money table:
@@ -1115,6 +1191,11 @@ def run_import(csv_dir, repo, *, require_complete: bool = True,
     * **Per-tab truncation guard**: a present tab that imports zero records fails
       the run unless its name is listed in ``allow_empty`` (the operator's explicit
       "this ledger is genuinely empty" acknowledgement).
+
+    ``skip_tabs`` (default ``DEFERRED_TABS``) names tabs that are NOT read at all,
+    even when their CSV is present and full — currently Slabs, pending PSA cert
+    scanning. A skipped tab reports ``deferred`` and is exempt from the truncation
+    guard, since its zero count is intended rather than evidence of a bad export.
 
     Returns per-tab summaries plus ``_committed`` (bool), ``_removed`` (count) and,
     when the truncation guard fires, ``_empty_tabs``.
@@ -1164,6 +1245,12 @@ def run_import(csv_dir, repo, *, require_complete: bool = True,
             path = csv_dir / f"{tab}.csv"
             if not path.exists():
                 continue
+            if tab in skip_tabs:
+                logger.info("Tab %r is deferred — present but deliberately not "
+                            "imported this run.", tab)
+                summaries[tab] = {"imported": 0, "sales": 0, "skipped": 0,
+                                  "needs_review": 0, "deferred": True}
+                continue
             try:
                 rows = _read_tab_rows(path, csv)
                 summaries[tab] = importer(rows, ctx)
@@ -1182,6 +1269,163 @@ def run_import(csv_dir, repo, *, require_complete: bool = True,
                 summaries["_empty_tabs"] = empty
                 committed = False
         summaries["_removed"] = repo.finalize_import(gen, committed=committed)
+        summaries["_committed"] = committed
+    finally:
+        repo.set_import_generation(None)
+        repo.release_import_lock(gen)
+    return summaries
+
+
+# ============================ Singles-only import ============================
+# The ONE file a Singles-only run reads, hardcoded by exact name on purpose: the
+# same directory also holds `Singles.csv` (the raw, un-enriched export) and four
+# superseded scratch copies from the Stage A review (`Singles_enriched.csv`,
+# `_edited`, `_final`, `_final_information_added`). Only this one is the reviewed
+# artifact. No glob, no bare stem.
+SINGLES_ONLY_CSV_NAME = "Singles_enriched_v3.csv"
+
+# The entity types a Singles-only run writes — and therefore the ONLY ones its
+# existing-data guard probes and its commit sweep is allowed to delete.
+SINGLES_ONLY_ENTITIES = frozenset({"inventory_item", "transaction"})
+
+
+def run_singles_only_import(csv_dir, repo, *, force_replace: bool = False) -> dict:
+    """Import ONLY ``Singles_enriched_v3.csv``, leaving every other import-owned
+    entity's existing rows alone — not probed, not swept, not at risk.
+
+    ``run_import`` cannot express this. Its guard refuses the run over ANY
+    import-owned data, and its commit sweep deletes every import-owned record not
+    stamped with this generation — it cannot tell "this entity type was
+    deliberately not touched this run" from "this entity type's old generation is
+    stale". Against the live table (28 shows, 104 debts, 33 payouts, 3 consignors,
+    2 balance sheets, 25 config rows, all still authoritative and all with no
+    backup) that leaves only two bad options: refuse, or ``--force-replace`` all 17
+    non-Slabs tabs over real financial records. This is the third door.
+
+    What it does, and only this:
+
+    * reads exactly one CSV — the other 17 tabs are never opened, so the two
+      documented dormant bugs in ``import_sealed``/``import_consignments``
+      (see claude-progress.txt "DEFERRED — OTHER TABS") stay dormant;
+    * checks for pre-existing data with the guard scoped to
+      ``SINGLES_ONLY_ENTITIES``, so shows/debts/payouts cannot refuse it;
+    * writes under a fresh generation, exactly like a full run;
+    * on commit, sweeps the prior generation of ``SINGLES_ONLY_ENTITIES`` ONLY.
+
+    A Singles row is resolved here EXACTLY as the Singles tab resolves it inside a
+    full run — same ``import_singles``, same catalog index, same show list. The
+    only differences are which tabs run and how wide the guard and sweep reach.
+    (The catalog index is load-bearing on this path: the enriched path validates
+    each row's composite ``card_id`` against it before storing the reference. An
+    empty or stale catalog therefore does not mislink anything — every row simply
+    lands with ``card_id=None`` and ``needs_review=True``.)
+
+    Shows are read back from the TABLE rather than re-imported from ``Vending
+    Net.csv``, so a sold single still links to the show it was sold at. That
+    read is the only contact this run makes with an out-of-scope entity, and it
+    is read-only.
+
+    ``seed_payment_methods`` is deliberately NOT called: ``payment_method`` is
+    outside the sweep scope, and config sort keys are generation-scoped
+    (``_gen_sk``), so re-seeding would strand a duplicate copy under the new
+    generation that nothing ever cleans up. Nothing on the Singles path needs it
+    — ``record_sale`` stores the method as a plain string — and the live table's
+    payment methods are already there from the first import.
+
+    *** KNOWN LIMITATION — READ BEFORE REUSING THIS FOR A SECOND TAB. ***
+    The sweep is scoped by ENTITY TYPE, which is coarser than "the rows this tab
+    wrote". Sealed, Bulk and Consignments all write the SAME ``inventory_item``
+    entity that Singles does. Today that is not merely acceptable, it is exactly
+    correct: the 2026-07-28 wipe left ``inventory_item`` and ``transaction`` at
+    ZERO rows, Singles is the only tab in scope for this rebuild, and so "delete
+    every inventory_item/transaction not of this generation" has nothing to
+    delete but this path's own prior attempts.
+    It is NOT future-proof. Once Sealed/Bulk/Consignments are turned back on — a
+    FUTURE phase (claude-progress.txt "DEFERRED — OTHER TABS"), NOT now, and
+    nothing here should be built for it in advance — a Singles-only re-run would
+    delete THEIR inventory rows too, because it cannot see the difference. Before
+    that happens the scope has to get finer than entity type: filter the sweep by
+    the tab-origin already carried on each item (the ``kind`` discriminator, or a
+    new explicit source tag) instead of by entity name alone. That boundary is a
+    deliberate YAGNI call for a one-tab rebuild, not an oversight — do not read
+    ``entity_scope`` as general multi-tab safety.
+
+    Returns ``{"Singles": <summary>, "_committed": bool, "_removed": int}``.
+    """
+    import csv
+    from pathlib import Path
+
+    path = Path(csv_dir) / SINGLES_ONLY_CSV_NAME
+    if not path.exists():
+        raise ImportError(
+            f"refusing to import: {SINGLES_ONLY_CSV_NAME} not found at {path}. "
+            f"A Singles-only run reads that exact file — the reviewed Stage A "
+            f"enrichment artifact — and nothing else.")
+
+    with path.open(newline="", encoding="utf-8-sig") as f:
+        try:
+            header = _dedupe_headers(next(csv.reader(f)))
+        except StopIteration:
+            header = []
+    if "match_confidence" not in header:
+        # Guards against the likeliest operator slip: copying the raw
+        # `Singles.csv` over this name. `import_singles` switches to its LEGACY
+        # live-fuzzy-match path per row when the enrichment columns are absent,
+        # so such a file would import quietly and resolve card identities a
+        # different way than the reviewed artifact does.
+        raise ImportError(
+            f"refusing to import: {path} has no 'match_confidence' column, so it "
+            f"is not the Stage A enrichment artifact. Importing it would silently "
+            f"fall back to the legacy fuzzy-match identity path.")
+
+    rows = _read_tab_rows(path, csv)
+
+    # Same outermost guard as `run_import`, narrowed to what this run writes.
+    if not force_replace:
+        existing = repo.find_import_owned_entity(entities=SINGLES_ONLY_ENTITIES)
+        if existing is not None:
+            raise ExistingBusinessDataError(
+                f"refusing to import: this table already contains imported "
+                f"inventory data (found an existing {existing!r} record). A "
+                f"Singles-only run REPLACES every inventory_item and transaction "
+                f"with this file's contents, discarding anything written or "
+                f"corrected since. Other business data (shows, debts, payouts, "
+                f"consignors, cash accounts, buying policies, payment methods, "
+                f"balance sheets) is NOT touched either way. If replacing the "
+                f"inventory is genuinely what you want, re-run deliberately with "
+                f"--force-replace (run_singles_only_import(..., "
+                f"force_replace=True))."
+            )
+
+    gen = new_ulid()
+    repo.acquire_import_lock(gen)  # raises ImportInProgressError if one is running
+    summaries: dict = {}
+    try:
+        repo.set_import_generation(gen)
+        ctx = ImportContext(
+            repo=repo,
+            shows=repo.list_shows(),
+            catalog_index=build_catalog_index(repo.iter_catalog_cards()),
+        )
+        try:
+            summary = import_singles(rows, ctx)
+        except Exception as exc:  # isolate the failure exactly as run_import does
+            logger.exception("Singles-only import failed")
+            summary = {"failed": repr(exc)}
+        summaries["Singles"] = summary
+        committed = "failed" not in summary
+        if committed and not summary.get("imported"):
+            # Same fail-closed rule as `_empty_tabs`, with no allow_empty escape:
+            # a Singles-only run exists to load 266 rows, so zero rows is a
+            # truncated/wrong file every time. Committing it would sweep the prior
+            # inventory generation and reload nothing.
+            logger.error(
+                "refusing to commit: %s imported zero records (truncated or wrong "
+                "file?) — the prior inventory generation is left in place.",
+                SINGLES_ONLY_CSV_NAME)
+            committed = False
+        summaries["_removed"] = repo.finalize_import(
+            gen, committed=committed, entity_scope=SINGLES_ONLY_ENTITIES)
         summaries["_committed"] = committed
     finally:
         repo.set_import_generation(None)

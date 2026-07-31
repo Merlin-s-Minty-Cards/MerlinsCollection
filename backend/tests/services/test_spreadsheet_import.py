@@ -3,9 +3,10 @@ from decimal import Decimal
 
 import pytest
 
-from merlins_collection.models.business import Show
+from merlins_collection.models.business import Consignor, Show
 from merlins_collection.models.inventory import Condition, ConditionModifier, Language
 from merlins_collection.services.spreadsheet_import import (
+    SINGLES_ONLY_CSV_NAME,
     ExistingBusinessDataError,
     ImportContext,
     _match_card,
@@ -26,6 +27,7 @@ from merlins_collection.services.spreadsheet_import import (
     parse_language,
     parse_money,
     run_import,
+    run_singles_only_import,
     seed_payment_methods,
 )
 
@@ -1113,7 +1115,7 @@ def test_first_import_into_catalog_only_table_needs_no_flag(tmp_path, dynamo_rep
         prices={"holofoil": {"market": Decimal("12.50")}},
         last_synced_at=datetime(2026, 6, 22, 12, 0, 0))])
     dynamo_repo.append_price_points([PricePoint(
-        card_id="swsh1-1", date=date(2026, 6, 20), source="pokemontcg.io",
+        card_id="swsh1-1", date=date(2026, 6, 20), source="tcgplayer",
         kind="raw", finish="holofoil", market=Decimal("10"))])
 
     _seed_workbook(tmp_path)
@@ -1290,11 +1292,11 @@ def test_daily_sync_never_writes_an_english_price_onto_a_japanese_item(dynamo_re
     from merlins_collection.services.catalog_sync import refresh_inventory_market_values
 
     index = _english_catalog_index()
-    [card] = index.by_name_number[("seismitoad", "38")]
+    [card] = index.by_name_number[("seismitoad", "38", Language.EN)]
     dynamo_repo.batch_upsert_catalog_cards([card])
     ctx = ImportContext(repo=dynamo_repo, catalog_index=index)
-    import_singles([_singles_row(Name="Seismitoad (jp)", **{"Card #": "38"}),
-                    _singles_row(Name="Seismitoad", **{"Card #": "38"})], ctx)
+    import_singles([_singles_row(Name="Seismitoad (jp)", **{"Card #": "38", "Condition": "NM"}),
+                    _singles_row(Name="Seismitoad", **{"Card #": "38", "Condition": "NM"})], ctx)
 
     refresh_inventory_market_values(dynamo_repo)
 
@@ -1410,9 +1412,20 @@ def test_build_catalog_index_keys_are_normalized(dynamo_repo):
     by_name_number = getattr(index, "by_name_number", None)
     if by_name_number is None and isinstance(index, dict):
         by_name_number = index.get("by_name_number", index)
-    hits = by_name_number.get(("dragonair", "181"), [])
+    hits = by_name_number.get(("dragonair", "181", Language.EN), [])
     assert len(hits) == 1
     assert hits[0].card_id == "swsh6-181"
+
+
+def test_build_catalog_index_exposes_a_card_id_lookup(dynamo_repo):
+    """The enriched-path validation needs a direct card_id -> card lookup, not
+    just the name/number indexes _match_card uses."""
+    from merlins_collection.services.spreadsheet_import import build_catalog_index
+
+    card = _catalog_card(card_id="en:base1-4", name="Charizard", number="4")
+    index = build_catalog_index([card])
+    assert index.by_card_id["en:base1-4"].card_id == "en:base1-4"
+    assert index.by_card_id.get("en:nonexistent") is None
 
 
 # ===== Council revision-2 MUST-FIX 2 & 3: conservative single-hit auto-link =====
@@ -1560,3 +1573,821 @@ def test_import_consignments_materializes_display_name(dynamo_repo):
     import_consignments([row], ctx)
     [item] = dynamo_repo.list_inventory()
     assert item.display_name == "Umbreon VMAX #215"
+
+
+# =============================================================================
+# PHASE 3 (RFC 0003 §3 / claude-progress.txt Section 3, Phase 3.1-3.3): store
+# EVERYTHING, show only unsold; multilingual matching; needs_review round trip.
+# Everything above this banner pins the PRE-Phase-3 shape (English-only single
+# hit matching); everything below is new coverage for the Phase 3 rewrite.
+# =============================================================================
+
+import csv as _csv
+from pathlib import Path as _Path
+
+_REAL_CSV_DIR = _Path(__file__).resolve().parents[3] / "data" / "spreadsheet" / "csv"
+
+
+def _real_rows(tab: str) -> list[dict]:
+    path = _REAL_CSV_DIR / f"{tab}.csv"
+    if not path.exists():
+        pytest.skip(f"real workbook export not present (gitignored): {path}")
+    with path.open(newline="", encoding="utf-8-sig") as f:
+        return list(_csv.DictReader(f))
+
+
+# ---- D3: store EVERY row, sold or not, with its full money/date fields -------
+
+def test_parse_date_reads_the_real_sheets_datetime_with_time_suffix():
+    """The 7-25 workbook's own CSV export writes every date as a full
+    ``YYYY-MM-DD HH:MM:SS`` timestamp ("2026-04-18 00:00:00"), not the
+    "%m/%d/%Y" the fixtures elsewhere in this file use. ``parse_date`` does not
+    try that format today, so a real acquired/sold date silently falls through
+    to ``None`` — which, for a Sold row, means it can never be classified SOLD
+    no matter what the Sold cell says (see the real-Bulk-csv test below, which
+    catches this against production data: 44 rows misclassified)."""
+    assert parse_date("2026-04-18 00:00:00") == date(2026, 4, 18)
+    assert parse_date("2026-01-03 00:00:00") == date(2026, 1, 3)
+
+
+def test_import_bulk_sold_row_using_the_real_datetime_format_is_recognized_as_sold(
+        dynamo_repo):
+    """A synthetic row shaped exactly like the real Bulk tab: today this silently
+    fails to record a sale because ``Date Sold`` never parses."""
+    ctx = ImportContext(repo=dynamo_repo)
+    row = {"Name": "Bulk Sale 1", "Amount Paid": "0.0", "Sold": "8.0",
+           "Date Sold": "2026-01-03 00:00:00", "Venmo?": "False", "Net": "8",
+           "Venmo Fees": "0"}
+    summary = import_bulk([row], ctx)
+    assert summary["sales"] == 1
+    [item] = dynamo_repo.list_inventory()
+    assert item.status.value == "sold"
+
+
+def test_real_bulk_csv_recognizes_every_row_carrying_both_sold_and_date_sold(
+        dynamo_repo):
+    """Regression pin against the SAME datetime-format bug, run against the
+    actual 2026-07-25 workbook export: 44 of the 137 Bulk rows carry a Sold
+    amount AND a Date Sold (measured directly off the CSV this session) and each
+    must produce a sale transaction — not the 0 today's ``parse_date`` manages."""
+    rows = _real_rows("Bulk")
+    ctx = ImportContext(repo=dynamo_repo)
+    summary = import_bulk(rows, ctx)
+    assert summary["imported"] == len(rows)
+    assert summary["sales"] == 44
+    assert len(dynamo_repo.list_transactions(date(2026, 1, 1), date(2026, 12, 31))) == 44
+
+
+def test_real_singles_csv_stores_every_row_and_shows_only_the_unsold(dynamo_repo):
+    """Section 2's measurement this session: the owner pruned every sold Singles
+    row before saving the 7-25 workbook, so 0 of its rows carry both a Sold
+    amount and a Date Sold. D3 requires every row to be STORED regardless — and,
+    since none of them are sold, every stored row's status must be something
+    other than 'sold' (available/on_hold/lost/out_for_grading are all fine)."""
+    rows = _real_rows("Singles")
+    ctx = ImportContext(repo=dynamo_repo)
+    summary = import_singles(rows, ctx)
+    assert summary["imported"] + summary["skipped"] == len(rows)
+    items = dynamo_repo.list_inventory()
+    assert len(items) == summary["imported"]
+    assert summary["sales"] == 0
+    assert all(i.status.value != "sold" for i in items)
+    assert all(i.cost_basis is not None for i in items)  # nothing dropped in translation
+
+
+def test_import_singles_sold_row_stores_the_full_d3_field_set(dynamo_repo):
+    """D3 names six facts a sold row must keep: location, cost_basis,
+    market_value_at_purchase, listed/sticker, sold price, and both dates. The
+    pre-Phase-3 sold-row test only checked the transaction; this pins the ITEM
+    fields too, on both sides of the sale."""
+    ctx = ImportContext(repo=dynamo_repo)
+    row = _singles_row(Sold="$40.00", **{"Date Sold": "3/7/2026"})
+    import_singles([row], ctx)
+    [item] = dynamo_repo.list_inventory()
+    assert item.status.value == "sold"
+    assert item.location == "glass"                            # Location
+    assert item.cost_basis == Decimal("8.00")                  # Amount Paid
+    assert item.market_value_at_purchase == Decimal("12.00")   # Market @ purchase
+    assert item.listed_price == Decimal("15.00")               # Sticker
+    assert item.acquired_at == date(2026, 1, 5)                 # Date
+    [txn] = dynamo_repo.list_transactions(date(2026, 3, 1), date(2026, 3, 31))
+    assert txn.amount == Decimal("40.00")                       # Sold
+    assert txn.date == date(2026, 3, 7)                         # Date Sold
+
+
+def test_a_sold_amount_without_a_sold_date_is_not_classified_sold(dynamo_repo):
+    """D3's rule is an AND, not an OR: a Sold cell with no Date Sold must not
+    flip the item or create a phantom sale."""
+    ctx = ImportContext(repo=dynamo_repo)
+    row = _singles_row(Sold="$40.00")  # Date Sold left blank
+    summary = import_singles([row], ctx)
+    assert summary["sales"] == 0
+    [item] = dynamo_repo.list_inventory()
+    assert item.status.value == "available"
+    assert dynamo_repo.list_transactions(date(2026, 1, 1), date(2026, 12, 31)) == []
+
+
+def test_a_sold_date_without_a_sold_amount_is_not_classified_sold(dynamo_repo):
+    ctx = ImportContext(repo=dynamo_repo)
+    row = _singles_row(**{"Date Sold": "3/7/2026"})  # Sold left blank
+    summary = import_singles([row], ctx)
+    assert summary["sales"] == 0
+    [item] = dynamo_repo.list_inventory()
+    assert item.status.value == "available"
+
+
+# ---- Slabs deferred: schema support YES, import NO (Section 7 HANDOFF) -------
+
+def test_run_import_defers_slabs_entirely_via_allow_empty(tmp_path, dynamo_repo):
+    """The owner is holding slab import until PSA cert lookup exists (Section 7
+    HANDOFF: "Defer the tab via the existing allow_empty knob"). But as
+    ``allow_empty`` stands today it only forgives a tab that imports ZERO
+    records — it does NOT stop the tab from running. A Slabs.csv carrying real
+    rows is fully imported today even when "Slabs" is passed in ``allow_empty``,
+    which is the opposite of "deferred". This pins the INTENDED behavior: no
+    GradedInventoryItem may be created from the Slabs tab while it is deferred.
+    (If ``allow_empty`` genuinely cannot be stretched to mean "skip this tab
+    outright", that is the gap to report back — see the QA report.)"""
+    (tmp_path / "Vending Net.csv").write_text(
+        "Day,Show,Goal\n3/8/2026,Mint City,$500\n", encoding="utf-8")
+    (tmp_path / "Slabs.csv").write_text(
+        "Date Recieved,Name,Set,card#,Grade,Cert #,Amount Paid\n"
+        "1/5/2026,Charizard,Base,4,9.5,12345678,250\n", encoding="utf-8")
+    summaries = run_import(tmp_path, dynamo_repo, require_complete=False,
+                           allow_empty={"Slabs"})
+    assert summaries["_committed"] is True
+    assert dynamo_repo.list_inventory() == []          # the Slabs row never landed
+    assert summaries["Slabs"]["imported"] == 0
+
+
+# ---- 3.2: multilingual matching — a JP row resolves to a JP catalog row ------
+# RFC 0003 §3 gives card_id the composite form "{lang}:{tcgdex_id}" precisely so
+# a JP printing and its EN twin are separate catalog rows with separate prices.
+# The catalog index built here must therefore key on language too — today's
+# ``build_catalog_index``/``_match_card`` key on (name, number) alone, so adding
+# a same-name-and-number JP row to the index does not merely fail to help a JP
+# lookup, it actively BREAKS the EN one (a unique EN hit becomes an ambiguous
+# same-key pair the moment a JP twin is added).
+
+def test_build_catalog_index_keys_include_language(dynamo_repo):
+    en = _catalog_card(card_id="swsh6-38", name="Seismitoad", number="38",
+                       language=Language.EN)
+    jp = _catalog_card(card_id="ja:swsh6-38", name="Seismitoad", number="38",
+                       language=Language.JP)
+    index = _normalized_index([en, jp])
+    en_hits = index.by_name_number.get(("seismitoad", "38", Language.EN), [])
+    jp_hits = index.by_name_number.get(("seismitoad", "38", Language.JP), [])
+    assert [c.card_id for c in en_hits] == ["swsh6-38"]
+    assert [c.card_id for c in jp_hits] == ["ja:swsh6-38"]
+
+
+def test_match_card_links_a_japanese_single_to_its_japanese_catalog_row(dynamo_repo):
+    """THE Phase 3.2 acceptance test: a JP item must resolve to the JP printing,
+    not be refused outright the way the pre-Phase-3 English-only gate did."""
+    en = _catalog_card(card_id="swsh6-38", name="Seismitoad", number="38",
+                       language=Language.EN)
+    jp = _catalog_card(card_id="ja:swsh6-38", name="Seismitoad", number="38",
+                       language=Language.JP)
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_normalized_index([en, jp]))
+    assert _match_card(ctx, "Seismitoad", "38", language=Language.JP) == "ja:swsh6-38"
+
+
+def test_match_card_english_lookup_is_unaffected_by_a_same_key_japanese_twin(
+        dynamo_repo):
+    """The flip side, and the reason language MUST be part of the key rather
+    than a post-hoc filter: adding the JP twin above must not turn the EN
+    lookup into an ambiguous multi-hit that routes to review by accident."""
+    en = _catalog_card(card_id="swsh6-38", name="Seismitoad", number="38",
+                       language=Language.EN)
+    jp = _catalog_card(card_id="ja:swsh6-38", name="Seismitoad", number="38",
+                       language=Language.JP)
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_normalized_index([en, jp]))
+    assert _match_card(ctx, "Seismitoad", "38", language=Language.EN) == "swsh6-38"
+
+
+def test_import_singles_links_a_japanese_row_to_its_japanese_catalog_card(dynamo_repo):
+    en = _catalog_card(card_id="swsh6-38", name="Seismitoad", number="38",
+                       language=Language.EN)
+    jp = _catalog_card(card_id="ja:swsh6-38", name="Seismitoad", number="38",
+                       language=Language.JP)
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_normalized_index([en, jp]))
+    row = _singles_row(Name="Seismitoad (jp)", **{"Card #": "38"})
+    import_singles([row], ctx)
+    [item] = dynamo_repo.list_inventory()
+    assert item.language is Language.JP
+    assert item.card_id == "ja:swsh6-38"
+    assert item.needs_review is False
+
+
+def test_import_slabs_links_a_set_only_japanese_row_to_its_japanese_catalog_card(
+        dynamo_repo):
+    """The real Slabs.csv row 18 (Seismitoad / Set "SV11B"): no name marker
+    anywhere. Once language detection covers the set-code fallback (see the
+    card_text tests) AND matching is language-aware, this slab should link
+    instead of going unmatched.
+
+    IMPORTANT LATENT-BUG NOTE for the code-writer: today, with the language
+    gate mis-detecting this row as EN (no set fallback yet) and the catalog
+    index NOT yet scoped by language, this test's card_id assertion can
+    ACCIDENTALLY already equal "ja:sv11b-109" — the item silently borrows a
+    Japanese-only catalog card's identity while still labeled EN, with
+    needs_review left False. That is the real Phase-3.2 hazard: fixing only
+    ONE of (set-based language detection, language-scoped indexing) leaves the
+    other free to mislink silently rather than merely fail to link. Both must
+    land together. The ``language is Language.JP`` assertion below is what
+    actually catches today's mislabeling; do not consider this test passing
+    unless BOTH assertions hold for the right reason."""
+    jp = _catalog_card(card_id="ja:sv11b-109", name="Seismitoad",
+                       set_name="SV11B", number="109", language=Language.JP)
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_normalized_index([jp]))
+    row = {"Date Recieved": "7/25/2026", "Name": "Seismitoad", "Set": "SV11B",
+           "card#": "109.0", "Grade": "10.0", "Cert #": "150656224.0",
+           "Amount Paid": "127.0"}
+    import_slabs([row], ctx)
+    [item] = dynamo_repo.list_inventory()
+    assert item.language is Language.JP
+    assert item.card_id == "ja:sv11b-109"
+    assert item.needs_review is False
+
+
+# ---- 3.3: needs_review round trip survives the Phase 3 rewrite (regression) --
+# Not a NEW behavior request — Phase 3.3 asks that this mechanic be PRESERVED
+# while 3.1/3.2 rewrite the matcher underneath it. Kept to English-only data on
+# purpose: build_review.py / apply_review_decisions.py's OWN multilingual
+# banding (NA/CONTRADICTION for any non-EN item) is explicitly Phase 6 scope
+# (claude-progress.txt §3, Phase 6.1) and must not be pre-empted here.
+
+def test_an_unmatched_singles_row_surfaces_in_build_review_and_is_relinked(
+        dynamo_repo):
+    import importlib.util
+    import sys as _sys
+
+    def _load(name, path):
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        _sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    scripts_dir = _Path(__file__).resolve().parents[2] / "scripts"
+    br = _load("br_roundtrip_phase3", scripts_dir / "build_review.py")
+    ard = _load("ard_roundtrip_phase3", scripts_dir / "apply_review_decisions.py")
+
+    card = _catalog_card(card_id="base1-4", name="Charizard", set_name="Base Set",
+                         number="4")
+    # ambiguous ON PURPOSE: Singles has no Set column, and a second printing
+    # shares the same name+number, so the importer cannot pick one on its own
+    # -> needs_review stays True, exactly as it did before the Phase 3 rewrite.
+    twin = _catalog_card(card_id="base2-4", name="Charizard",
+                         set_name="Base Set 2", number="4")
+    dynamo_repo.batch_upsert_catalog_cards([card, twin])
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_normalized_index([card, twin]))
+    import_singles([_singles_row(Name="Charizard", **{"Card #": "4"})], ctx)
+    [item] = dynamo_repo.list_inventory()
+    assert item.card_id is None and item.needs_review is True
+
+    data = br.collect(br.scan_records("merlins-cards-test", "us-east-1"))
+    rows = br.build_card_rows(data["inventory"], br.CatalogIndex.build(data["catalog"]),
+                              data["prices"])
+    assert item.item_id in [r["item_id"] for r in rows]
+
+    text = ("# MERLIN-REVIEW-V1\n"
+            f"CARD {item.item_id} ACCEPT card_id=base1-4; name=Charizard; "
+            f"set=Base Set; number=4\n")
+    report = ard.DecisionApplier(dynamo_repo, apply=True).run(ard.parse_block(text))
+    assert report.exit_code == 0
+    relinked = dynamo_repo.get_inventory_item(item.item_id)
+    assert relinked.card_id == "base1-4"
+    assert relinked.needs_review is False
+
+
+# =============================================================================
+# PHASE 3.1 STAGE B: import_singles consumes Singles_enriched_v3.csv columns
+# deterministically. Language + card_id come from the enriched file, not from
+# URL-param parsing or live _match_card. Confidence tiers drive needs_review.
+# =============================================================================
+
+_ENRICHED_CSV = "Singles_enriched_v3"
+
+
+def _enriched_singles_row(**over):
+    """A row shaped like Singles_enriched_v3.csv (Stage B input)."""
+    row = {
+        "Date": "1/5/2026", "Location": "Glass", "Name": "Pikachu",
+        "Card #": "25", "Condition": "LP +",
+        "Market @ purchase": "$12.00", "Amount Paid": "$8.00",
+        "Sold": "", "Date Sold": "", "Venmo?": "",
+        # Enrichment columns (Stage A output):
+        "language": "EN",
+        "matched_set_id": "base1",
+        "matched_set_name": "Base Set",
+        "matched_number": "25",
+        "matched_card_id": "base1-25",
+        "match_confidence": "high",
+        "match_notes": "",
+    }
+    row.update(over)
+    return row
+
+
+def test_enriched_high_confidence_row_imports_with_resolved_card_id(dynamo_repo):
+    """HIGH confidence: card_id comes from the enriched matched_card_id column
+    deterministically, language from the enriched language column. No _match_card
+    call, no URL-param parsing. The stored card_id is the composite
+    ``{language}:{tcgdex_id}`` form the catalog actually keys on, validated
+    against a real catalog_index — not the bare id straight off the CSV."""
+    card = _catalog_card(card_id="en:base1-25", name="Pikachu", number="25")
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_normalized_index([card]))
+    row = _enriched_singles_row(
+        Name="Pikachu", **{"Card #": "25"},
+        language="EN", matched_card_id="base1-25", match_confidence="high",
+    )
+    summary = import_singles([row], ctx)
+    assert summary["imported"] == 1
+    [item] = dynamo_repo.list_inventory()
+    assert item.card_id == "en:base1-25"
+    assert item.language is Language.EN
+    assert item.needs_review is False
+
+
+def test_enriched_medium_confidence_row_imports_with_card_id_and_needs_review(
+        dynamo_repo):
+    """MEDIUM confidence: card_id IS populated from the enriched file (as the
+    composite ``{language}:{tcgdex_id}`` form, validated against the catalog),
+    but the row is always flagged needs_review=True so a human can verify."""
+    card = _catalog_card(card_id="en:me02-106", name="Meowth", number="106")
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_normalized_index([card]))
+    row = _enriched_singles_row(
+        Name="Meowth", **{"Card #": "106"},
+        language="EN", matched_card_id="me02-106", match_confidence="medium",
+    )
+    summary = import_singles([row], ctx)
+    assert summary["imported"] == 1
+    assert summary["needs_review"] == 1
+    [item] = dynamo_repo.list_inventory()
+    assert item.card_id == "en:me02-106"
+    assert item.needs_review is True
+
+
+def test_enriched_low_confidence_row_imports_with_no_card_id_and_needs_review(
+        dynamo_repo):
+    """LOW confidence / no match: card_id is None, needs_review is True, but the
+    row IS stored (not skipped). display_name uses format_display_name output."""
+    ctx = ImportContext(repo=dynamo_repo)
+    row = _enriched_singles_row(
+        Name="Ultra Ball", **{"Card #": "68a"},
+        language="EN", matched_card_id="", match_confidence="low",
+    )
+    summary = import_singles([row], ctx)
+    assert summary["imported"] == 1
+    assert summary["skipped"] == 0
+    [item] = dynamo_repo.list_inventory()
+    assert item.card_id is None
+    assert item.needs_review is True
+    # display_name from format_display_name(name, card_number):
+    assert item.display_name == "Ultra Ball #68a"
+
+
+def test_enriched_high_confidence_row_with_a_dangling_card_id_is_not_trusted(
+        dynamo_repo):
+    """A HIGH-confidence matched_card_id that does not resolve against the
+    catalog (TCGdex sometimes advertises a set it holds zero card data for —
+    Stage A resolved the id live, but the reseed's catalog never got the card)
+    must not be trusted just because confidence says 'high'. It must import
+    with card_id=None + needs_review=True, exactly like the no-match tier —
+    never store a reference to a card that does not exist."""
+    ctx = ImportContext(repo=dynamo_repo)  # no catalog card seeded — empty index
+    row = _enriched_singles_row(
+        Name="Meloetta ex", **{"Card #": "170"},
+        language="JP", matched_card_id="SV11B-170", match_confidence="high",
+    )
+    summary = import_singles([row], ctx)
+    assert summary["imported"] == 1
+    assert summary["needs_review"] == 1
+    [item] = dynamo_repo.list_inventory()
+    assert item.card_id is None
+    assert item.needs_review is True
+
+
+def test_enriched_high_confidence_japanese_row_gets_the_ja_composite_prefix(
+        dynamo_repo):
+    """The composite scheme is per-language: a JP row's matched_card_id must be
+    prefixed 'ja:', never 'en:' — verified against a real JP catalog card."""
+    card = _catalog_card(card_id="ja:sv11b-1", name="Pikachu", number="1")
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_normalized_index([card]))
+    row = _enriched_singles_row(
+        Name="Pikachu", **{"Card #": "1"},
+        language="JP", matched_card_id="sv11b-1", match_confidence="high",
+    )
+    summary = import_singles([row], ctx)
+    [item] = dynamo_repo.list_inventory()
+    assert item.card_id == "ja:sv11b-1"
+    assert item.language is Language.JP
+
+
+def test_enriched_row_does_not_populate_listed_price(dynamo_repo):
+    """The enriched CSV has no Sticker column. listed_price must be None —
+    it is out of scope entirely (LISTED_PRICE DROPPED decision)."""
+    ctx = ImportContext(repo=dynamo_repo)
+    row = _enriched_singles_row()
+    summary = import_singles([row], ctx)
+    assert summary["imported"] == 1
+    [item] = dynamo_repo.list_inventory()
+    assert item.listed_price is None
+
+
+def test_enriched_row_does_not_store_tcg_url(dynamo_repo):
+    """The enriched CSV has no TCG Link column. tcg_url must be None."""
+    ctx = ImportContext(repo=dynamo_repo)
+    row = _enriched_singles_row()
+    summary = import_singles([row], ctx)
+    assert summary["imported"] == 1
+    [item] = dynamo_repo.list_inventory()
+    assert item.tcg_url is None
+
+
+def test_enriched_japanese_row_maps_language_correctly(dynamo_repo):
+    """Language comes from the enriched 'language' column, not from
+    parse_language / language_from_url. Using a name WITHOUT a '(jp)' marker
+    to prove the enrichment column is the source — parse_language alone would
+    return EN for this name."""
+    card = _catalog_card(card_id="ja:cp3-16", name="Espurr", number="16",
+                         language=Language.JP)
+    ctx = ImportContext(repo=dynamo_repo, catalog_index=_normalized_index([card]))
+    row = _enriched_singles_row(
+        Name="Espurr", **{"Card #": "16"},
+        language="JP", matched_card_id="cp3-16", match_confidence="high",
+    )
+    summary = import_singles([row], ctx)
+    assert summary["imported"] == 1
+    [item] = dynamo_repo.list_inventory()
+    assert item.language is Language.JP
+    assert item.card_id == "ja:cp3-16"
+
+
+def test_enriched_sold_row_records_sale_transaction(dynamo_repo):
+    """Sold/available logic is unchanged: SOLD when BOTH Sold amount AND
+    Date Sold are present."""
+    show = Show(show_id="s1", name="Show", date=date(2026, 3, 8))
+    ctx = ImportContext(repo=dynamo_repo, shows=[show])
+    row = _enriched_singles_row(
+        Sold="$40.00", **{"Date Sold": "3/7/2026", "Venmo?": "Yes"},
+    )
+    summary = import_singles([row], ctx)
+    assert summary["sales"] == 1
+    [item] = dynamo_repo.list_inventory()
+    assert item.status.value == "sold"
+    txns = dynamo_repo.list_transactions(date(2026, 3, 1), date(2026, 3, 31))
+    assert len(txns) == 1
+    assert txns[0].amount == Decimal("40.00")
+
+
+def test_enriched_row_stores_cost_basis_and_market_value(dynamo_repo):
+    """cost_basis and market_value_at_purchase come from Amount Paid and
+    Market @ purchase, same as before."""
+    ctx = ImportContext(repo=dynamo_repo)
+    row = _enriched_singles_row()
+    import_singles([row], ctx)
+    [item] = dynamo_repo.list_inventory()
+    assert item.cost_basis == Decimal("8.00")
+    assert item.market_value_at_purchase == Decimal("12.00")
+
+
+def test_enriched_blank_matched_card_id_treated_as_no_match(dynamo_repo):
+    """An empty matched_card_id string means no match, even if confidence
+    says 'high'. card_id=None and needs_review=True."""
+    ctx = ImportContext(repo=dynamo_repo)
+    row = _enriched_singles_row(
+        matched_card_id="", match_confidence="high",
+    )
+    summary = import_singles([row], ctx)
+    assert summary["imported"] == 1
+    [item] = dynamo_repo.list_inventory()
+    assert item.card_id is None
+    assert item.needs_review is True
+
+
+def test_enriched_row_blank_condition_still_defaults_nm_needs_review(dynamo_repo):
+    """A high-confidence row with a blank Condition still defaults to NM
+    but forces needs_review=True (blank condition overrides confidence)."""
+    ctx = ImportContext(repo=dynamo_repo)
+    row = _enriched_singles_row(Condition="", match_confidence="high")
+    summary = import_singles([row], ctx)
+    assert summary["imported"] == 1
+    [item] = dynamo_repo.list_inventory()
+    assert item.condition is Condition.NM
+    assert item.needs_review is True
+
+
+def test_real_enriched_csv_stores_every_row(dynamo_repo):
+    """Read the actual Singles_enriched_v3.csv and confirm every row is
+    accounted for. None are silently dropped. listed_price and tcg_url
+    are never set."""
+    rows = _real_rows(_ENRICHED_CSV)
+    ctx = ImportContext(repo=dynamo_repo)
+    summary = import_singles(rows, ctx)
+    # All 266 rows accounted for (imported + skipped = total):
+    assert summary["imported"] + summary["skipped"] == 266
+    # At minimum 19 need review (13 low + 6 medium):
+    assert summary["needs_review"] >= 19
+    # Every stored item: no listed_price, no tcg_url
+    items = dynamo_repo.list_inventory()
+    assert len(items) == summary["imported"]
+    for item in items:
+        assert item.listed_price is None, (
+            f"listed_price must be None, got {item.listed_price} on {item.item_id}")
+        assert item.tcg_url is None, (
+            f"tcg_url must be None, got {item.tcg_url} on {item.item_id}")
+
+
+# =============================================================================
+# SINGLES-ONLY IMPORT (scoped guard + scoped sweep)
+# The live table holds real shows/debts/payouts/consignors/config that this
+# rebuild never re-imports. A Singles-only run must land Singles' inventory and
+# transactions under a fresh generation and leave all of that alone — neither
+# refused over by the re-import guard nor deleted by the commit sweep.
+# =============================================================================
+
+_ENRICHED_HEADER = (
+    "Date,Location,Name,Card #,Condition,Market @ purchase,Amount Paid,Sold,"
+    "Date Sold,Venmo?,language,matched_set_id,matched_set_name,matched_number,"
+    "matched_card_id,match_confidence,match_notes\n"
+)
+
+_ENRICHED_ROW = (
+    "1/5/2026,Glass,Pikachu,25,LP +,$12.00,$8.00,,,,"
+    "EN,base1,Base Set,25,base1-25,high,\n"
+)
+
+
+def _write_enriched(tmp_path, body=_ENRICHED_ROW, header=_ENRICHED_HEADER):
+    (tmp_path / SINGLES_ONLY_CSV_NAME).write_text(header + body, encoding="utf-8")
+
+
+def _seed_default_enriched_catalog_card(repo):
+    """Seed the catalog card that ``_ENRICHED_ROW`` references so
+    ``run_singles_only_import`` can validate the composite card_id against the
+    catalog index it builds from the repo."""
+    from datetime import datetime, timezone
+
+    from merlins_collection.models.catalog import CatalogCard
+    repo.batch_upsert_catalog_cards([CatalogCard(
+        card_id="en:base1-25", name="Pikachu", set_id="base1",
+        set_name="Base Set", number="25",
+        images={"small": "s", "large": "l"},
+        last_synced_at=datetime.now(tz=timezone.utc),
+    )])
+
+
+def _seed_untouchable_business_data(repo):
+    """The live post-wipe survivors: every import-owned entity EXCEPT
+    inventory_item / transaction. Written under a committed prior generation,
+    exactly like the real table's rows."""
+    from merlins_collection.models.business import (
+        BalanceSheetLine,
+        BalanceSheetSection,
+        BalanceSheetSnapshot,
+        BuyingPolicy,
+        CashAccount,
+        Debt,
+        DebtDirection,
+        PaymentMethod,
+        Payout,
+    )
+    repo.set_import_generation("gen-prior")
+    repo.put_show(Show(show_id="s1", name="Mint City", date=date(2026, 3, 8)))
+    repo.put_debt(Debt(direction=DebtDirection.OWED_TO_US, date=date(2026, 1, 1),
+                       amount=Decimal("10"), counterparty="Colin"))
+    repo.put_payout(Payout(event="E1", partner="Casey", amount=Decimal("40")))
+    repo.put_consignor(Consignor(consignor_id="c1", name="Rylan"))
+    repo.put_cash_account(CashAccount(account="venmo", balance=Decimal("10")))
+    repo.put_payment_method(PaymentMethod(method="cash"))
+    repo.put_buying_policy(BuyingPolicy(product_type="raw",
+                                        cash_pct_min=Decimal("60")))
+    repo.put_balance_sheet(BalanceSheetSnapshot(
+        snapshot_id="beginning", label="beginning", frozen=True,
+        lines=[BalanceSheetLine(section=BalanceSheetSection.ASSET,
+                                label="Inventory", amount=Decimal("100"))]))
+    repo.set_import_generation(None)
+
+
+_SINGLES_SCOPE = frozenset({"inventory_item", "transaction"})
+
+
+def _out_of_scope_snapshot(repo) -> list:
+    """Every stored row that is NOT inventory/transaction, fully materialized,
+    so "untouched" can be proven byte-for-byte rather than by a count."""
+    items, kwargs = [], {"ConsistentRead": True}
+    while True:
+        resp = repo._table.scan(**kwargs)
+        items.extend(resp.get("Items", []))
+        last = resp.get("LastEvaluatedKey")
+        if not last:
+            break
+        kwargs["ExclusiveStartKey"] = last
+    return sorted((i["PK"], i["SK"], repr(sorted(i.items()))) for i in items
+                  if i.get("entity") not in _SINGLES_SCOPE)
+
+
+def test_singles_only_import_runs_despite_other_business_data(tmp_path, dynamo_repo):
+    """The whole point: 28 shows / 104 debts / 33 payouts on the live table must
+    not refuse a Singles-only run that never touches them. No --force-replace."""
+    _seed_untouchable_business_data(dynamo_repo)
+    _seed_default_enriched_catalog_card(dynamo_repo)
+    _write_enriched(tmp_path)
+
+    summaries = run_singles_only_import(tmp_path, dynamo_repo)
+
+    assert summaries["_committed"] is True
+    assert summaries["Singles"]["imported"] == 1
+    [item] = dynamo_repo.list_inventory()
+    assert item.card_id == "en:base1-25"
+
+
+def test_singles_only_import_leaves_other_business_data_byte_identical(
+        tmp_path, dynamo_repo):
+    _seed_untouchable_business_data(dynamo_repo)
+    _write_enriched(tmp_path)
+    before = _out_of_scope_snapshot(dynamo_repo)
+    assert before  # the fixture really did land data
+
+    assert run_singles_only_import(tmp_path, dynamo_repo)["_committed"] is True
+
+    assert _out_of_scope_snapshot(dynamo_repo) == before
+    # And spelled out per entity, so a future reader sees WHAT survived:
+    assert len(dynamo_repo.list_shows()) == 1
+    assert len(dynamo_repo.list_debts()) == 1
+    assert len(dynamo_repo.list_payouts()) == 1
+    assert len(dynamo_repo.list_consignors()) == 1
+    assert len(dynamo_repo.list_cash_accounts()) == 1
+    assert len(dynamo_repo.list_payment_methods()) == 1
+    assert len(dynamo_repo.list_buying_policies()) == 1
+    assert len(dynamo_repo.list_balance_sheets()) == 1
+
+
+def test_singles_only_import_does_not_reseed_payment_methods(tmp_path, dynamo_repo):
+    """payment_method is OUT of the sweep scope, so re-seeding it would strand a
+    duplicate copy under the new generation that nothing ever cleans up."""
+    _seed_untouchable_business_data(dynamo_repo)
+    _write_enriched(tmp_path)
+    run_singles_only_import(tmp_path, dynamo_repo)
+    assert [m.method for m in dynamo_repo.list_payment_methods()] == ["cash"]
+
+
+def test_singles_only_import_is_refused_when_inventory_already_exists(
+        tmp_path, dynamo_repo, monkeypatch):
+    from merlins_collection.models.inventory import RawInventoryItem
+    dynamo_repo.put_inventory_item(RawInventoryItem(
+        card_id="swsh1-1", cost_basis=Decimal("1"), acquired_at=date(2026, 1, 1),
+        finish="normal", condition=Condition.NM))
+    _write_enriched(tmp_path)
+
+    def _forbidden(*a, **k):
+        raise AssertionError("mutating call reached past the scoped guard")
+
+    monkeypatch.setattr(dynamo_repo, "acquire_import_lock", _forbidden)
+    monkeypatch.setattr(dynamo_repo, "set_import_generation", _forbidden)
+    monkeypatch.setattr(dynamo_repo, "finalize_import", _forbidden)
+    with pytest.raises(ExistingBusinessDataError, match="force-replace"):
+        run_singles_only_import(tmp_path, dynamo_repo)
+    assert dynamo_repo._import_gen is None
+
+
+def test_singles_only_import_force_replace_proceeds(tmp_path, dynamo_repo):
+    from merlins_collection.models.inventory import RawInventoryItem
+    dynamo_repo.put_inventory_item(RawInventoryItem(
+        card_id="stale-1", cost_basis=Decimal("1"), acquired_at=date(2026, 1, 1),
+        finish="normal", condition=Condition.NM))
+    _seed_default_enriched_catalog_card(dynamo_repo)
+    _write_enriched(tmp_path)
+    summaries = run_singles_only_import(tmp_path, dynamo_repo, force_replace=True)
+    assert summaries["_committed"] is True
+    assert [i.card_id for i in dynamo_repo.list_inventory()] == ["en:base1-25"]
+
+
+def test_singles_only_import_sweeps_prior_inventory_but_nothing_else(
+        tmp_path, dynamo_repo):
+    """KNOWN LIMITATION, asserted rather than merely commented: the sweep is
+    scoped by ENTITY TYPE, so it removes EVERY prior-generation inventory row —
+    including one a future Sealed/Bulk run would have written. Correct today
+    (inventory is empty post-wipe and Singles is the only tab in scope); it is
+    exactly what must change before a second tab is turned back on."""
+    _seed_untouchable_business_data(dynamo_repo)
+    from merlins_collection.models.inventory import BulkInventoryItem
+    dynamo_repo.set_import_generation("gen-prior")
+    dynamo_repo.put_inventory_item(BulkInventoryItem(
+        description="lot A", cost_basis=Decimal("10"),
+        acquired_at=date(2026, 1, 1)))
+    dynamo_repo.set_import_generation(None)
+    _write_enriched(tmp_path)
+
+    summaries = run_singles_only_import(tmp_path, dynamo_repo, force_replace=True)
+
+    assert summaries["_committed"] is True
+    assert summaries["_removed"] == 1                       # the prior bulk lot
+    assert [i.display_name for i in dynamo_repo.list_inventory()] == ["Pikachu #25"]
+    assert len(dynamo_repo.list_shows()) == 1               # still untouched
+
+
+def test_singles_only_import_links_sales_to_shows_already_in_the_table(
+        tmp_path, dynamo_repo):
+    """The Vending Net tab is not read, so the shows a sale links to come from
+    the table. Without this the 28 live shows would silently lose every new
+    sale's linkage."""
+    _seed_untouchable_business_data(dynamo_repo)
+    _write_enriched(tmp_path, body=(
+        "1/5/2026,Glass,Pikachu,25,LP +,$12.00,$8.00,$20.00,3/9/2026,,"
+        "EN,base1,Base Set,25,base1-25,high,\n"))
+
+    summaries = run_singles_only_import(tmp_path, dynamo_repo)
+
+    assert summaries["Singles"]["sales"] == 1
+    [txn] = dynamo_repo.list_transactions(date(2026, 3, 1), date(2026, 3, 31))
+    assert txn.show_id == "s1"
+
+
+def test_singles_only_import_reads_no_other_tab(tmp_path, dynamo_repo):
+    _seed_untouchable_business_data(dynamo_repo)
+    _write_enriched(tmp_path)
+    # Poison every other tab: if any of them is read, the assertions below break.
+    _write(tmp_path, "Singles.csv",
+           "Date,Location,Name,Card #,Condition\n1/1/2026,Glass,Charizard,4,NM\n")
+    _write_bulk_csv(tmp_path, "lot Z,10,25,3/7/2026,No,,\n")
+    _write(tmp_path, "Vending Net.csv", "Day,Show,Goal\n3/8/2026,Ghost Show,$500\n")
+    _write(tmp_path, "Debts.csv", "Date,Amount,Who,Reason\n1/1/2026,99,Ghost,x\n")
+
+    assert run_singles_only_import(tmp_path, dynamo_repo)["_committed"] is True
+
+    names = [i.display_name for i in dynamo_repo.list_inventory()]
+    assert names == ["Pikachu #25"]                       # no Charizard, no lot Z
+    assert [s.name for s in dynamo_repo.list_shows()] == ["Mint City"]
+    assert [d.counterparty for d in dynamo_repo.list_debts()] == ["Colin"]
+
+
+def test_singles_only_import_requires_the_enriched_csv(tmp_path, dynamo_repo):
+    with pytest.raises(ImportError, match=SINGLES_ONLY_CSV_NAME):
+        run_singles_only_import(tmp_path, dynamo_repo)
+
+
+def test_singles_only_import_rejects_a_non_enriched_csv(tmp_path, dynamo_repo):
+    """The plain Singles.csv columns produce the LEGACY fuzzy-match path. Under
+    that name it would import silently and wrongly, so the header is checked."""
+    (tmp_path / SINGLES_ONLY_CSV_NAME).write_text(
+        "Date,Location,Name,Card #,Condition\n1/1/2026,Glass,Pikachu,25,NM\n",
+        encoding="utf-8")
+    with pytest.raises(ImportError, match="match_confidence"):
+        run_singles_only_import(tmp_path, dynamo_repo)
+
+
+def test_singles_only_import_fails_closed_on_zero_rows(tmp_path, dynamo_repo):
+    """A truncated export must not commit — that would sweep the prior
+    inventory generation and reload nothing."""
+    _seed_untouchable_business_data(dynamo_repo)
+    from merlins_collection.models.inventory import RawInventoryItem
+    dynamo_repo.set_import_generation("gen-prior")
+    dynamo_repo.put_inventory_item(RawInventoryItem(
+        card_id="survivor-1", cost_basis=Decimal("1"), acquired_at=date(2026, 1, 1),
+        finish="normal", condition=Condition.NM))
+    dynamo_repo.set_import_generation(None)
+    _write_enriched(tmp_path, body="")
+
+    summaries = run_singles_only_import(tmp_path, dynamo_repo, force_replace=True)
+
+    assert summaries["_committed"] is False
+    assert [i.card_id for i in dynamo_repo.list_inventory()] == ["survivor-1"]
+    assert len(dynamo_repo.list_shows()) == 1
+
+
+def test_singles_only_import_releases_the_lock(tmp_path, dynamo_repo):
+    _write_enriched(tmp_path)
+    run_singles_only_import(tmp_path, dynamo_repo)
+    dynamo_repo.acquire_import_lock("gen-after")  # no ImportInProgressError
+    dynamo_repo.release_import_lock("gen-after")
+
+
+# ---- regression guards: the full-import path is scoped by NOBODY ------------
+
+def test_full_import_still_probes_and_sweeps_every_entity(tmp_path, dynamo_repo,
+                                                          monkeypatch):
+    """The existing CLI path must be byte-identical in behavior: an UNSCOPED
+    guard and an UNSCOPED sweep. Same spirit as the seed_catalog fix's "English
+    keeps its stricter floor" test — this fails if the new scoping leaks in."""
+    _seed_workbook(tmp_path)
+    probe_kwargs, finalize_kwargs = [], []
+    real_probe = dynamo_repo.find_import_owned_entity
+    real_finalize = dynamo_repo.finalize_import
+
+    def _probe(**kwargs):
+        probe_kwargs.append(kwargs)
+        return real_probe(**kwargs)
+
+    def _finalize(gen, **kwargs):
+        finalize_kwargs.append(kwargs)
+        return real_finalize(gen, **kwargs)
+
+    monkeypatch.setattr(dynamo_repo, "find_import_owned_entity", _probe)
+    monkeypatch.setattr(dynamo_repo, "finalize_import", _finalize)
+    assert run_import(tmp_path, dynamo_repo, require_complete=False)["_committed"]
+
+    assert probe_kwargs == [{}]                       # no entities= narrowing
+    assert finalize_kwargs == [{"committed": True}]   # no entity_scope= narrowing

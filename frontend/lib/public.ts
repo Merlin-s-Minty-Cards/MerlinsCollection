@@ -84,7 +84,7 @@ export function formatShowDate(iso: string): string {
 // that allowlist here so a bad catalog URL (non-allowlisted host, non-https, or
 // malformed) is dropped BEFORE it reaches next/image and throws during SSR —
 // belt-and-suspenders with the backend's own host filter.
-const ALLOWED_IMAGE_HOSTS = new Set(['images.pokemontcg.io'])
+const ALLOWED_IMAGE_HOSTS = new Set(['assets.tcgdex.net', 'images.pokemontcg.io'])
 
 /** True only for an https URL on an allowlisted image host. */
 export function isSafeImageUrl(url: string): boolean {

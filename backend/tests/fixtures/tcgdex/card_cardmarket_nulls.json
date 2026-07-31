@@ -1,0 +1,45 @@
+{
+  "category": "Pokemon",
+  "id": "sv09-045",
+  "illustrator": "Sowsow",
+  "image": "https://assets.tcgdex.net/en/sv/sv09/045",
+  "localId": "045",
+  "name": "Volcanion",
+  "rarity": "Rare",
+  "set": {
+    "id": "sv09",
+    "name": "Journey Together",
+    "cardCount": { "official": 159, "total": 190 }
+  },
+  "variants": {
+    "firstEdition": false,
+    "holo": true,
+    "normal": true,
+    "reverse": true,
+    "wPromo": false
+  },
+  "hp": 130,
+  "types": ["Fire"],
+  "stage": "Basic",
+  "updated": "2026-07-18T07:44:00.190Z",
+  "pricing": {
+    "cardmarket": {
+      "updated": "2026-07-26T08:02:24.858Z",
+      "unit": "EUR",
+      "idProduct": 777001,
+      "avg": 9.5,
+      "low": 7.25,
+      "trend": null,
+      "avg1": null,
+      "avg7": 10.0,
+      "avg30": 9.75,
+      "avg-holo": 22.0,
+      "low-holo": 18.5,
+      "trend-holo": 24.5,
+      "avg1-holo": null,
+      "avg7-holo": 23.0,
+      "avg30-holo": 21.5
+    },
+    "tcgplayer": null
+  }
+}

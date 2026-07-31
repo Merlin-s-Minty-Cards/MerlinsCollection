@@ -655,6 +655,50 @@ def test_a_stamped_japanese_item_is_refused_too(dynamo_repo, spy):
     assert spy.writes == []
 
 
+def make_jp_card(card_id="sv4a-123", name="Pikachu", set_name="Shiny Treasure EX",
+                 number="123", set_id="sv4a"):
+    """A JP catalog card — TCGdex now seeds these alongside the EN ones."""
+    return CatalogCard(
+        card_id=card_id, name=name, set_id=set_id, set_name=set_name, number=number,
+        rarity="Rare", types=["Electric"], language=ard.Language.JP,
+        images=CardImages(small=f"https://img/{card_id}.png",
+                          large=f"https://img/{card_id}_hires.png"),
+        prices={}, last_synced_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+
+
+def test_a_japanese_item_accepts_a_matching_japanese_catalog_card(dynamo_repo, spy):
+    """Phase 6.1: the catalog is no longer English-only (TCGdex adds JP cards),
+    so a JP item linking to a JP catalog card is the CORRECT match and must be
+    applied, not refused outright by the old English-only gate."""
+    dynamo_repo.batch_upsert_catalog_cards([make_jp_card()])
+    dynamo_repo.put_inventory_item(
+        make_raw_item(language="JP", notes="Pikachu #123"))
+    spy.writes.clear()
+    report = run(dynamo_repo, HEADER + (
+        "CARD 01ITEM0000000000000000RAW1 ACCEPT card_id=sv4a-123; "
+        "name=Pikachu; set=Shiny Treasure EX; number=123\n"), apply=True)
+
+    assert report.results[0].action == ard.UPDATE
+    assert dynamo_repo.get_inventory_item(
+        "01ITEM0000000000000000RAW1").card_id == "sv4a-123"
+
+
+def test_a_japanese_item_still_refuses_an_english_catalog_card(dynamo_repo, spy):
+    """Regression guard: a cross-language mismatch (JP item, EN card) must
+    still be refused — only a matching JP card_id is now accepted."""
+    dynamo_repo.batch_upsert_catalog_cards([make_card()])  # default language EN
+    dynamo_repo.put_inventory_item(
+        make_raw_item(language="JP", notes="Snorlax #SWSH068"))
+    spy.writes.clear()
+    report = run(dynamo_repo, HEADER + (
+        "CARD 01ITEM0000000000000000RAW1 ACCEPT card_id=swshp-SWSH068; "
+        "name=Snorlax; set=SWSH Black Star Promos; number=SWSH068\n"), apply=True)
+
+    assert report.results[0].action == ard.REFUSED
+    assert spy.writes == []
+
+
 def test_an_english_item_is_unaffected_by_the_language_gate(dynamo_repo):
     dynamo_repo.batch_upsert_catalog_cards([make_card()])
     dynamo_repo.put_inventory_item(make_raw_item())

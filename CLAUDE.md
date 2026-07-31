@@ -78,6 +78,24 @@ Two distinct modes (user picks one at a time):
 | Rekognition     | Image analysis (future: identify cards from photos)  |
 | Bedrock         | Claude AI integration for chat mode queries          |
 
+# Third-Party APIs (Planned)
+Both currently UNBUILT and ON HOLD pending owner-provided API keys (see
+claude-progress.txt Phase 4, PAUSED as of 2026-07-27 — this is not the active
+phase; do not resume it without the owner's go-ahead).
+- **PSA cert API** — slab identity verification for graded PSA cards. Cert
+  number -> verified name/set/year/card#/grade/grade label/population/official
+  images. The cert number IS the identity for a PSA slab (no fuzzy matching).
+  When Phase 4 resumes, PSA-graded slabs go through this automated cert
+  lookup.
+- **PriceCharting API** — per-grade graded-card market values (the raw
+  TCGplayer/Cardmarket price feed does not price slabs). Sheet
+  Sticker/Current Market is the fallback when no key/budget or no coverage.
+- **Non-PSA slabs (CGC/BGS/SGC) are handled differently, by design** — they
+  arrive too rarely to justify their own automated cert-lookup pipeline.
+  Instead, an admin-only manual-entry flow (staff keys in the slab's info
+  directly, including grading company) is planned for the future. This is
+  also on hold; see claude-progress.txt Section 4 Q3.
+
 # Design System
 - Color scheme based on Spriggatito (forest greens, cream whites)
 - Business/brand images stored in `frontend/public/images/` organized by:

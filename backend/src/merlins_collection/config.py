@@ -7,6 +7,8 @@ via the environment, and AWS credentials normally come from the ambient
 credential chain rather than the (empty-by-default) fields here.
 """
 
+from decimal import Decimal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,7 +23,19 @@ class Settings(BaseSettings):
     dynamodb_table_name: str = "merlins-cards"
     bedrock_model_id: str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
     mcp_server_path: str = "../mcp-server/dist/index.js"
-    pokemontcg_api_key: str = ""
+    # EUR->USD rate used when a card is priced only by Cardmarket (Japanese stock
+    # mostly is). Prices are DISPLAYED in USD, so a converted figure needs a rate;
+    # a constant rather than a live feed because the alternative is a new external
+    # dependency, key and outage mode for a few percent of accuracy on a figure
+    # that is already a second-choice fallback inside a wide low/high spread. The
+    # exact rate used is printed into every converted figure's ``value_note``, so
+    # correcting it is a config change with no deploy (RFC 0003 §5).
+    eur_usd_rate: Decimal = Decimal("1.08")
+    # How old a provider's own `updated` stamp may get before the depth pass
+    # calls the figure stale. A stale price is still STORED and still displayed —
+    # the age is appended to `value_note` instead, so a customer-facing number is
+    # never silently ancient and never silently withheld either (RFC 0003 §7).
+    catalog_price_stale_days: int = 30
     # Comma-separated browser origins allowed to call the API (CORS).
     cors_origins: str = "http://localhost:3000"
     # Dev-only: inject a fake user instead of verifying Cognito JWTs.

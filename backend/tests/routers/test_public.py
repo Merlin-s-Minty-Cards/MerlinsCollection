@@ -51,6 +51,7 @@ def _raw(card_id, *, market=None, listed="10.00", status=ItemStatus.AVAILABLE):
         acquired_at=date.today(),
         finish="holofoil",
         condition=Condition.NM,
+        location="glass",
     )
 
 
@@ -64,6 +65,7 @@ def _graded(card_id, *, market=None, listed="50.00"):
         company=GradingCompany.PSA,
         grade=Decimal("9"),
         cert_number="12345678",
+        location="glass",
     )
 
 
@@ -206,6 +208,24 @@ def test_featured_cards_excludes_non_allowlisted_or_insecure_image_hosts(pub_cli
     resp = client.get("/public/featured-cards")
     names = [c["name"] for c in resp.json()["cards"]]
     assert names == ["Good"]
+
+
+def test_featured_cards_accepts_tcgdex_hosted_images(pub_client):
+    """The catalog is now seeded from TCGdex, which serves every card image from
+    ``assets.tcgdex.net`` (see ``services/tcgdex.py`` ALLOWED_IMAGE_HOSTS, which
+    DROPS an image on any other host). With the old pokemontcg.io-only allowlist
+    here, no reseeded card could ever qualify and the home page's featured strip
+    went silently empty. ``next.config.ts`` already allows this host; this keeps
+    the backend in the lockstep its own comment demands."""
+    client, repo = pub_client
+    repo.batch_upsert_catalog_cards([
+        _catalog("c1", "Tcgdex", small="https://assets.tcgdex.net/en/sv/sv01/1/high.png"),
+    ])
+    repo.put_inventory_item(_raw("c1", market="10.00"))
+
+    resp = client.get("/public/featured-cards")
+    names = [c["name"] for c in resp.json()["cards"]]
+    assert names == ["Tcgdex"]
 
 
 def test_featured_cards_dedupes_by_card_id_keeping_highest_ranked(pub_client):
@@ -470,6 +490,26 @@ def test_shows_show_on_today_is_upcoming(pub_client):
     body = client.get("/public/shows").json()
     assert [s["name"] for s in body["upcoming"]] == ["Today Show"]
     assert body["past"] == []
+
+
+def test_shows_past_limited_to_90_days(pub_client):
+    """A show older than 90 days is excluded from the past list (Phase 16)."""
+    client, repo = pub_client
+    # Use the same business-timezone "today" the router uses so the test is not
+    # sensitive to UTC vs Pacific clock skew in CI.
+    from merlins_collection.routers.public import _business_today
+    today = _business_today()
+    _seed_show(repo, "Recent", today - timedelta(days=30))
+    _seed_show(repo, "Old", today - timedelta(days=89))
+    _seed_show(repo, "Too Old", today - timedelta(days=91))
+    _seed_show(repo, "Ancient", today - timedelta(days=180))
+
+    body = client.get("/public/shows").json()
+    past_names = [s["name"] for s in body["past"]]
+    assert "Recent" in past_names
+    assert "Old" in past_names
+    assert "Too Old" not in past_names
+    assert "Ancient" not in past_names
 
 
 def test_shows_exposes_only_safe_fields(pub_client):

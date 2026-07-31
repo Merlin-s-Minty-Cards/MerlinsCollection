@@ -205,4 +205,17 @@ describe('auth config — access token refresh', () => {
     expect((session as { accessToken?: string }).accessToken).toBeUndefined()
     expect((session as { error?: string }).error).toBe('RefreshAccessTokenError')
   })
+
+  it('flags error when expired with no refresh token (Phase 17 — no silent stale session)', async () => {
+    const token = await config.callbacks!.jwt!({
+      token: {
+        accessToken: 'stale-access-token',
+        accessTokenExpires: Date.now() - 1000, // expired
+        // No refreshToken — can't recover.
+      },
+      account: null,
+    } as never)
+
+    expect((token as { error?: string }).error).toBe('RefreshAccessTokenError')
+  })
 })

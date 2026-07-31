@@ -138,7 +138,7 @@ describe('buildSearchQuery', () => {
 })
 
 describe('searchInventory', () => {
-  const empty: InventorySearchResult = { items: [], total: 0 }
+  const empty: InventorySearchResult = { items: [], total: 0, hidden_no_price: 0 }
 
   it('calls GET /inventory/search with the built query string', async () => {
     mockedApiFetch.mockResolvedValue(empty)
@@ -152,8 +152,16 @@ describe('searchInventory', () => {
     expect(mockedApiFetch.mock.calls[0][0]).toBe('/inventory/search')
   })
 
-  it('returns the backend result untouched ({items, total})', async () => {
-    const result: InventorySearchResult = { items: [makeRawItem()], total: 1 }
+  it('returns the backend result untouched ({items, total, hidden_no_price})', async () => {
+    // hidden_no_price (Phase 12, owner decision 2) is part of the wire
+    // contract: a price-bounded search excludes items with no resolvable
+    // price and reports how many, so the UI can surface them rather than
+    // dropping them invisibly. It must survive the client untouched.
+    const result: InventorySearchResult = {
+      items: [makeRawItem()],
+      total: 1,
+      hidden_no_price: 3,
+    }
     mockedApiFetch.mockResolvedValue(result)
     await expect(searchInventory({})).resolves.toEqual(result)
   })

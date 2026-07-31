@@ -1,69 +1,27 @@
 'use client'
 
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useSession } from 'next-auth/react'
 import { Search } from 'lucide-react'
 import CardGrid from './CardGrid'
 import {
   searchInventory,
+  getInventoryFacets,
   type InventorySearchResult,
   type InventoryFilters,
+  type InventoryFacets,
+  type FacetSet,
 } from '@/lib/inventory'
 
 type Status = 'idle' | 'loading' | 'success' | 'error'
 
-// Curated sets, mapped to their pokemontcg.io ids — the backend filters by
-// set_id. A wrong id here silently returns "no cards", so ids are pinned by
-// the FilterPanel tests.
-const SETS: Array<{ label: string; id: string }> = [
-  { label: 'Base', id: 'base1' },
-  { label: 'Jungle', id: 'base2' },
-  { label: 'Fossil', id: 'base3' },
-  { label: 'Team Rocket', id: 'base5' },
-  { label: 'Neo Genesis', id: 'neo1' },
-  { label: 'Expedition', id: 'ecard1' },
-  { label: 'Ruby & Sapphire', id: 'ex1' },
-  { label: 'Diamond & Pearl', id: 'dp1' },
-  { label: 'Black & White', id: 'bw1' },
-  { label: 'Evolutions', id: 'xy12' },
-  { label: 'Sword & Shield', id: 'swsh1' },
-  { label: 'Brilliant Stars', id: 'swsh9' },
-  { label: 'Scarlet & Violet', id: 'sv1' },
-  { label: '151', id: 'sv3pt5' },
-]
-const SET_IDS = new Map(SETS.map((s) => [s.label, s.id]))
-
-const RARITIES = [
-  'Common',
-  'Uncommon',
-  'Rare',
-  'Rare Holo',
-  'Rare Holo EX',
-  'Rare Holo GX',
-  'Rare Holo V',
-  'Rare Holo VMAX',
-  'Rare Ultra',
-  'Rare Secret',
-  'Rare Rainbow',
-  'Promo',
-]
-
-// Raw-card grades the backend accepts. Filtering by condition intentionally
-// excludes graded slabs (backend behavior) — hence the label note.
-const CONDITIONS: Array<{ value: string; label: string }> = [
-  { value: 'NM', label: 'NM — Near Mint' },
-  { value: 'LP', label: 'LP — Lightly Played' },
-  { value: 'MP', label: 'MP — Moderately Played' },
-  { value: 'HP', label: 'HP — Heavily Played' },
-  { value: 'DMG', label: 'DMG — Damaged' },
-]
-
-// Print language. The empty value ("All languages") sends no param; the backend
-// treats a JP print as a distinct, differently-priced card (Language enum EN/JP).
-const LANGUAGES: Array<{ value: string; label: string }> = [
-  { value: '', label: 'All languages' },
-  { value: 'EN', label: 'English' },
-  { value: 'JP', label: 'Japanese' },
+const SORT_OPTIONS = [
+  { value: 'newest', label: 'Newest first' },
+  { value: 'oldest', label: 'Oldest first' },
+  { value: 'price_desc', label: 'Price: high to low' },
+  { value: 'price_asc', label: 'Price: low to high' },
+  { value: 'name_asc', label: 'Name: A–Z' },
+  { value: 'name_desc', label: 'Name: Z–A' },
 ]
 
 // Guard against an inverted price range reaching the API — swap if min > max
@@ -86,12 +44,19 @@ const labelClass =
 export default function FilterPanel() {
   const { data: session } = useSession()
   const [filters, setFilters] = useState<InventoryFilters>({})
-  // The select shows the display label; the query sends the mapped set_id.
-  const [setLabel, setSetLabel] = useState('')
   const [status, setStatus] = useState<Status>('idle')
   const [result, setResult] = useState<InventorySearchResult | null>(null)
+  const [facets, setFacets] = useState<InventoryFacets | null>(null)
   // Monotonic id so a slow earlier request can't overwrite a newer one.
   const requestId = useRef(0)
+
+  // Load facets once on mount (requires auth token).
+  useEffect(() => {
+    if (!session?.accessToken) return
+    getInventoryFacets({ token: session.accessToken })
+      .then(setFacets)
+      .catch(() => {}) // Facets load failure is non-fatal; dropdowns stay empty.
+  }, [session?.accessToken])
 
   function update<K extends keyof InventoryFilters>(key: K, value: string) {
     setFilters((prev) => ({ ...prev, [key]: value }))
@@ -140,22 +105,11 @@ export default function FilterPanel() {
             <label htmlFor="flt-set" className={labelClass}>
               Set
             </label>
-            <select
-              id="flt-set"
-              value={setLabel}
-              onChange={(e) => {
-                setSetLabel(e.target.value)
-                update('set_id', SET_IDS.get(e.target.value) ?? '')
-              }}
-              className={fieldClass}
-            >
-              <option value="">Any set</option>
-              {SETS.map((s) => (
-                <option key={s.id} value={s.label}>
-                  {s.label}
-                </option>
-              ))}
-            </select>
+            <SetCombobox
+              sets={facets?.sets ?? []}
+              value={filters.set_id ?? ''}
+              onChange={(id) => update('set_id', id)}
+            />
           </div>
 
           <div>
@@ -169,7 +123,7 @@ export default function FilterPanel() {
               className={fieldClass}
             >
               <option value="">Any rarity</option>
-              {RARITIES.map((r) => (
+              {(facets?.rarities ?? []).map((r) => (
                 <option key={r} value={r}>
                   {r}
                 </option>
@@ -188,9 +142,9 @@ export default function FilterPanel() {
               className={fieldClass}
             >
               <option value="">Any condition</option>
-              {CONDITIONS.map((c) => (
-                <option key={c.value} value={c.value}>
-                  {c.label}
+              {(facets?.conditions ?? []).map((c) => (
+                <option key={c} value={c}>
+                  {c}
                 </option>
               ))}
             </select>
@@ -206,9 +160,28 @@ export default function FilterPanel() {
               onChange={(e) => update('language', e.target.value)}
               className={fieldClass}
             >
-              {LANGUAGES.map((l) => (
-                <option key={l.value} value={l.value}>
-                  {l.label}
+              <option value="">All languages</option>
+              {(facets?.languages ?? []).map((l) => (
+                <option key={l} value={l}>
+                  {l}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label htmlFor="flt-sort" className={labelClass}>
+              Sort by
+            </label>
+            <select
+              id="flt-sort"
+              value={filters.sort ?? 'newest'}
+              onChange={(e) => update('sort', e.target.value)}
+              className={fieldClass}
+            >
+              {SORT_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
                 </option>
               ))}
             </select>
@@ -264,6 +237,109 @@ export default function FilterPanel() {
   )
 }
 
+// ---- Set Combobox (type-to-narrow) ----
+
+function SetCombobox({
+  sets,
+  value,
+  onChange,
+}: {
+  sets: FacetSet[]
+  value: string
+  onChange: (id: string) => void
+}) {
+  const [query, setQuery] = useState('')
+  const [open, setOpen] = useState(false)
+  const wrapperRef = useRef<HTMLDivElement>(null)
+
+  // Resolve the current value to a display name.
+  const selected = sets.find((s) => s.id === value)
+
+  const filtered = query
+    ? sets.filter((s) => s.name.toLowerCase().includes(query.toLowerCase()))
+    : sets
+
+  // Close on outside click.
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [])
+
+  return (
+    <div ref={wrapperRef} className="relative">
+      <input
+        id="flt-set"
+        type="text"
+        role="combobox"
+        aria-expanded={open}
+        aria-autocomplete="list"
+        aria-controls="set-listbox"
+        value={open ? query : selected?.name ?? ''}
+        placeholder="Any set"
+        className={fieldClass}
+        onFocus={() => {
+          setOpen(true)
+          setQuery('')
+        }}
+        onChange={(e) => {
+          setQuery(e.target.value)
+          setOpen(true)
+          if (e.target.value === '') {
+            onChange('')
+          }
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') {
+            setOpen(false)
+          }
+        }}
+      />
+      {open && filtered.length > 0 && (
+        <ul
+          id="set-listbox"
+          role="listbox"
+          className="absolute z-50 mt-1 max-h-60 w-full overflow-auto rounded-lg vault-panel border border-pine-700 py-1"
+        >
+          <li
+            role="option"
+            aria-selected={value === ''}
+            className="cursor-pointer px-3 py-2 text-sm hover:bg-pine-700/40"
+            onMouseDown={(e) => {
+              e.preventDefault()
+              onChange('')
+              setOpen(false)
+            }}
+          >
+            Any set
+          </li>
+          {filtered.map((s) => (
+            <li
+              key={s.id}
+              role="option"
+              aria-selected={value === s.id}
+              className="cursor-pointer px-3 py-2 text-sm hover:bg-pine-700/40"
+              onMouseDown={(e) => {
+                e.preventDefault()
+                onChange(s.id)
+                setOpen(false)
+              }}
+            >
+              {s.name}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+// ---- Results display ----
+
 function Results({
   status,
   result,
@@ -292,17 +368,36 @@ function Results({
   }
   if (!result || result.items.length === 0) {
     return (
-      <p className="py-10 text-center text-sm text-pine-300">
-        No cards found. Try widening your filters.
-      </p>
+      <div className="space-y-2 py-10 text-center">
+        <p className="text-sm text-pine-300">No cards found. Try widening your filters.</p>
+        <HiddenNoPriceNotice count={result?.hidden_no_price} />
+      </div>
     )
   }
   return (
     <div className="space-y-4">
-      <p className="font-mono text-xs uppercase tracking-[0.12em] text-pine-300">
-        {result.total} result{result.total === 1 ? '' : 's'}
-      </p>
+      <div className="space-y-1">
+        <p className="font-mono text-xs uppercase tracking-[0.12em] text-pine-300">
+          {result.total} result{result.total === 1 ? '' : 's'}
+        </p>
+        <HiddenNoPriceNotice count={result.hidden_no_price} />
+      </div>
       <CardGrid items={result.items} />
     </div>
+  )
+}
+
+/**
+ * Tells the customer that the price range dropped cards we hold but have no
+ * price for, rather than letting them vanish from the grid unexplained (the
+ * owner's "the price filter wipes the inventory" bug report). Renders nothing
+ * when the backend hid none — or when an older backend omits the field.
+ */
+function HiddenNoPriceNotice({ count }: { count?: number }) {
+  if (!count) return null
+  return (
+    <p className="font-mono text-xs uppercase tracking-[0.12em] text-pine-300">
+      {count} card{count === 1 ? '' : 's'} hidden (no price on file)
+    </p>
   )
 }

@@ -117,22 +117,34 @@ it (each new window uses a new item), it just stops the table growing forever.
    failing with `ResourceNotFoundException: ... reached the end of its
    life`), so if chat mode 502s, this is the first thing to check.
 2. Seed some data. Two options:
-   - **Real catalog data**: get a free API key at https://dev.pokemontcg.io,
-     set `POKEMONTCG_API_KEY` in `backend/.env`, then run:
+   - **Real catalog data**: TCGdex needs no API key. From `backend/`:
 
-     ```python
-     from datetime import date
-     from merlins_collection.services.catalog_sync import run_daily_sync
-     from merlins_collection.services.dynamodb import InventoryRepository
-     from merlins_collection.services.pokemontcg import PokemonTcgClient
-
-     repo = InventoryRepository("merlins-cards", region_name="us-east-1")
-     client = PokemonTcgClient(api_key="<your POKEMONTCG_API_KEY>")
-     run_daily_sync(repo, client, date.today())
+     ```bash
+     python scripts/seed_catalog.py                     # DRY RUN, both languages
+     python scripts/seed_catalog.py --language en       # DRY RUN, English only
+     # actually write (the table name must be repeated back):
+     python scripts/seed_catalog.py --execute --confirm-table merlins-cards
      ```
 
-     This fills catalog cards + price points, then runs
-     `refresh_inventory_market_values`.
+     That is the identity-only pass (one request per language). TCGdex serves
+     prices only from its per-card detail endpoint, so prices are fetched
+     separately for the cards actually held.
+
+     **The seed is a dry run unless you pass both `--execute` and a
+     `--confirm-table` that matches the configured target.** The target defaults
+     to the live table that serves `/inventory`, and the seed writes ~23,444 rows
+     into it. It will not overwrite a row a depth pass has already priced
+     (`detail="full"`), and it exits non-zero rather than reporting success if
+     the catalog comes back implausibly short or most rows fail to map.
+   - **Daily job** (price snapshots + market-value denormalization):
+
+     ```bash
+     python scripts/daily_sync.py
+     ```
+
+     Runs the graded-slab snapshot, the sealed snapshot, and
+     `refresh_inventory_market_values`. Read-only against TCGdex — it works off
+     data already in DynamoDB. This is what a scheduler should invoke.
    - **Manual**: `put_inventory_item` / `batch_upsert_catalog_cards` from a
      Python shell for a handful of cards (see `backend/tests/routers/test_inventory.py`
      for exact model construction).
@@ -251,7 +263,7 @@ remaining frontend task — see "What's not done yet" below).
    **Origin Access Control** (CloudFront creates the bucket policy for you).
 3. Put `NEXT_PUBLIC_CLOUDFRONT_URL=https://dxxxxxxxx.cloudfront.net` in
    `frontend/.env.local`, and add that hostname to `images.remotePatterns` in
-   `frontend/next.config.ts` (pokemontcg.io images already work without this).
+   `frontend/next.config.ts` (TCGdex images already work without this).
 
 ## Phase 6 — Hosting (when ready to go live)
 
@@ -398,7 +410,7 @@ Also rotate the Phase 1 access key once production runs on IAM roles.
 
 Backend (`backend/.env`): `AWS_REGION`, `DYNAMODB_TABLE_NAME`, `BEDROCK_MODEL_ID`,
 `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`, `MCP_SERVER_PATH`, `CORS_ORIGINS`,
-`AUTH_DISABLED`, `POKEMONTCG_API_KEY`. AWS credentials are **not** read from
+`AUTH_DISABLED`, `EUR_USD_RATE`. AWS credentials are **not** read from
 this file — see Phase 1 (`aws configure` / an IAM role in production).
 
 Frontend (`frontend/.env.local`): `NEXT_PUBLIC_API_URL` (backend base URL),

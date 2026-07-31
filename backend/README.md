@@ -14,7 +14,7 @@ src/merlins_collection/
   models/            # Pydantic DTOs (request/response + domain shapes)
     auth.py          #   AuthenticatedUser
     inventory.py     #   Raw/Graded inventory items (discriminated union)
-    catalog.py       #   CatalogCard + PricePoint (pokemontcg.io-derived)
+    catalog.py       #   CatalogCard + PricePoint (TCGdex-derived, USD)
     chat.py          #   ChatRequest / ChatResponse
   routers/           # HTTP layer — thin, delegates to services
     auth.py          #   GET /auth/me
@@ -25,7 +25,7 @@ src/merlins_collection/
   services/          # Business logic / integrations (no FastAPI imports)
     cognito.py       #   Cognito JWT verification
     dynamodb.py      #   Single-table DynamoDB repository
-    pokemontcg.py    #   pokemontcg.io v2 HTTP client + mapping
+    tcgdex.py        #   TCGdex v2 HTTP client + mapping
     catalog_sync.py  #   Daily catalog/price sync orchestration
     bedrock.py       #   Bedrock Converse chat loop with MCP tools
 tests/               # Pytest suite mirroring the src/ tree
@@ -65,7 +65,8 @@ credentials are normally supplied by the ambient credential chain (IAM role,
 | DynamoDB table | `DYNAMODB_TABLE_NAME` | `merlins-cards` |
 | Bedrock model id | `BEDROCK_MODEL_ID` | Claude 3.5 Sonnet |
 | MCP server path | `MCP_SERVER_PATH` | `../mcp-server/dist/index.js` |
-| pokemontcg.io key | `POKEMONTCG_API_KEY` | `""` |
+| EUR->USD rate | `EUR_USD_RATE` | `1.08` |
+| Catalog price staleness threshold | `CATALOG_PRICE_STALE_DAYS` | `30` |
 
 ## Authentication
 
@@ -98,6 +99,15 @@ The status codes are deliberate and distinguish *whose* problem it is:
 
 `/inventory/search` loads inventory and filters in-process; `cost_basis`
 (our purchase price) is stripped from the response and never reaches customers.
+Filters run cheapest-first, with one deliberate exception: a `min_price`/
+`max_price` bound is applied **last**, after every other filter. The response
+carries `hidden_no_price` — the count of otherwise-matching items excluded
+purely because they have no resolvable price (an unpriced item can't honestly
+be claimed to fall inside a price range). Running the price bound last is what
+makes that count meaningful: it reflects only what the price bound itself hid,
+not items some earlier filter had already ruled out. `hidden_no_price` is
+always `0` when no price bound is set. See the `search_inventory` module
+docstring in `routers/inventory.py` for the full ordering rationale.
 
 ### The customer-visible cohort
 
@@ -138,10 +148,14 @@ because production runs on UTC and a same-day show would otherwise misfile as
 counts as upcoming. `venue`/`city` are optional on `Show` and may be `null`.
 
 `/public/featured-cards` ranks the customer-visible cohort by
-`current_market_value ?? listed_price ?? 0` (market-value-first, the opposite
-of search's listed-price-first ordering), keeps only items whose catalog image
+`current_market_value ?? listed_price ?? 0` (market-value-first; unpriced items
+rank last rather than being excluded), keeps only items whose catalog image
 is an `https://images.pokemontcg.io/...` URL, de-duplicates by `card_id`, and
-returns the top 5.
+returns the top 5. This ranking helper (`_market_first`) is intentionally
+separate from `/inventory/search`'s price filter (`_price`, which since Phase
+12 returns `current_market_value` outright with no `listed_price` fallback,
+since `listed_price` is null on every item by owner decision) — one ranks for
+display, the other excludes for a price bound, and they are allowed to diverge.
 
 ## DynamoDB single-table design
 
@@ -179,9 +193,13 @@ stable regardless of how a grade was spelled, `_grade_key` normalizes them
 
 ## External integrations
 
-- **pokemontcg.io** (`pokemontcg.py`) — read-only HTTP client for card metadata
-  and TCGplayer prices. Retries 429/5xx with exponential backoff; treats other
-  4xx as hard failures and maps 404 to `None`.
+- **TCGdex** (`tcgdex.py`) — read-only, unauthenticated HTTP client for
+  multilingual card metadata and prices (TCGplayer USD + Cardmarket EUR).
+  Retries 429/5xx with exponential backoff; treats other 4xx as hard failures
+  and maps 404 to `None`. Card ids are language-qualified (`en:base1-4`,
+  `ja:M5-001`) so a Japanese card and its English twin are distinct rows, and
+  every stored price is USD — Cardmarket figures are converted at `EUR_USD_RATE`
+  with the conversion recorded in `value_note`.
 - **Bedrock** (`bedrock.py`) — chat mode runs a bounded Converse tool-use loop
   (max 5 tool turns) with the MCP inventory tools. Errors map to typed
   exceptions (`BedrockThrottledError`, `BedrockLoopError`, …) that the chat
@@ -192,11 +210,42 @@ stable regardless of how a grade was spelled, `_grade_key` normalizes them
 
 ## Daily sync
 
-`catalog_sync.run_daily_sync` is the batch job (intended to run on a schedule):
+`catalog_sync.run_daily_sync(repo, client, today)` is the batch job, run on a
+schedule via **`python scripts/daily_sync.py`**. The depth pass runs FIRST —
+the order is load-bearing, since step 4 denormalizes whatever prices step 1
+just wrote:
 
-1. `sync_catalog` — pull every card from pokemontcg.io, upsert catalog rows, and
-   append one raw price point per finish for the day.
+1. `refresh_held_prices` — the Tier 2 DEPTH pass, and the only step here that
+   talks to an upstream API. Fetches per-card rarity + prices from TCGdex for
+   every held *raw* Singles card (graded slabs are excluded by design — see
+   below). Never deletes, zeroes, or nulls an existing price on failure or on
+   a priceless response; aborts after 25 consecutive per-card failures rather
+   than burning the whole run against a dead endpoint (RFC 0003 §7).
 2. `snapshot_graded_prices` — record a daily history point for each owned graded
    slab that has a manual market value.
-3. `refresh_inventory_market_values` — denormalize the latest market value onto
+3. `snapshot_sealed_prices` — the same for sealed products, whose history hangs
+   off the item rather than a catalog card.
+4. `refresh_inventory_market_values` — denormalize the latest market value onto
    each inventory item so search/list reads don't need a second lookup.
+
+Steps 2-4 touch no upstream API — only step 1 does, and only for cards the
+business actually holds (~300 requests/day, paced). The site itself never
+reads from TCGdex; every customer-facing read comes from DynamoDB, so a TCGdex
+outage delays a refresh without taking the site down.
+
+`scripts/daily_sync.py` exits `0` on a completed run, `1` if the depth pass
+aborted on consecutive failures, or `2` if it was skipped because a catalog
+reseed held the lock — see that script's own module docstring for the full
+exit-code table.
+
+Catalog data arrives through two separate passes, because TCGdex serves pricing
+**only** from its per-card detail endpoint:
+
+- **Tier 1, breadth** — `scripts/seed_catalog.py`, one cheap request per
+  language for the whole catalog, identity only, no prices. Dry run by default;
+  see `docs/aws-setup.md` for the `--execute` / `--confirm-table` rails.
+- **Tier 2, depth** — `refresh_held_prices` (above), one request per *held raw*
+  card, which is where prices and rarity come from (RFC 0003 §7). Graded slabs
+  are excluded permanently, by owner decision — their price and detail come
+  from the PSA cert API + PriceCharting once Phase 4 resumes, so a card held
+  only as a slab keeps `rarity: null` until then.

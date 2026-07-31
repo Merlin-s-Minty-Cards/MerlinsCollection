@@ -2,8 +2,12 @@
 
 Loads the full inventory and applies the requested filters in-process (the
 collection is small enough that this is simpler than per-filter queries).
-Filters are applied cheapest-first: in-item fields (condition, price) before
-filters that require a catalog lookup (set, name, rarity).
+Filters are applied cheapest-first — in-item fields (language, condition) before
+filters that require a catalog lookup (set, name, rarity) — with ONE deliberate
+exception: the price bound runs LAST. It is the only filter that reports what it
+excluded (``hidden_no_price``), and that count is only honest when it is taken
+against the cohort every other filter has already agreed on (Phase 12, owner
+decision 2).
 """
 
 from decimal import Decimal
@@ -26,6 +30,7 @@ from merlins_collection.models.inventory import (
     InventorySearchResult,
     ItemStatus,
     Language,
+    _market_price,
 )
 from merlins_collection.rate_limit import rate_limit_search
 from merlins_collection.services.dynamodb import InventoryRepository
@@ -37,26 +42,86 @@ router = APIRouter(prefix="/inventory", tags=["inventory"])
 # cards, not booster packs. Only available raw/graded items reach a customer.
 _CUSTOMER_KINDS = {"raw", "graded"}
 
+# Phase 5 (D3, display scoping): only items physically stored in a
+# customer-facing location (the glass display case or a toploader binder page)
+# are shown. ``factory_sealed`` items (still in original plastic wrap — a
+# condition premium, not a physical location) are also visible regardless of
+# location. Items in storage, binders, or with no recorded location stay hidden.
+_CUSTOMER_VISIBLE_LOCATIONS = frozenset({"glass", "toploader"})
+
 
 def customer_visible_items(repo: InventoryRepository) -> list[InventoryItem]:
     """The ONE cohort every customer surface is allowed to show: available items
-    of a customer-visible kind.
+    of a customer-visible kind stored in a customer-visible location.
 
     This is a security boundary (leaking sold/held or bulk/sealed stock is the
     failure mode), so the predicate lives in exactly one place. Search, the authed
     dashboard summary, and the ANONYMOUS public featured endpoint all call this —
     a future exclusion (a ``needs_review`` gate, a new ``RESERVED`` status) is then
     made once here and can never drift on the public endpoint.
+
+    The location gate (Phase 5, D3) ensures that only items in a display-ready
+    location (glass case, toploader) or marked ``factory_sealed`` are surfaced.
+    ``getattr`` is used because ``factory_sealed`` exists only on
+    ``RawInventoryItem``; graded slabs must have a visible location.
     """
     return [
         i for i in repo.list_inventory()
-        if i.kind in _CUSTOMER_KINDS and i.status == ItemStatus.AVAILABLE
+        if i.kind in _CUSTOMER_KINDS
+        and i.status == ItemStatus.AVAILABLE
+        and (
+            getattr(i, "location", None) in _CUSTOMER_VISIBLE_LOCATIONS
+            or getattr(i, "factory_sealed", False)
+        )
     ]
 
 
 def _price(item) -> Decimal | None:
-    """The price a filter compares against: sticker first, market as fallback."""
-    return item.listed_price if item.listed_price is not None else item.current_market_value
+    """The price a price-range filter compares an item against, or ``None`` when
+    the item has no known price at all.
+
+    This is ``current_market_value`` outright — the denormalized projection of
+    the ONE shared finish-aware helper (``models.inventory._market_price``),
+    rewritten nightly by ``services.catalog_sync.refresh_inventory_market_values``.
+    It used to prefer ``listed_price``, which is null on EVERY item by owner
+    decision (Section 1/D3 — the sheet has no sticker prices and never will), so
+    the preference was pure dead weight in front of the only field that carries a
+    figure (claude-progress.txt Phase 12, Problem 2).
+
+    ``None`` is NOT treated as zero and never matches a bound: a card whose price
+    nobody knows cannot honestly be claimed to be under $500. The search counts
+    those exclusions instead and reports them as ``hidden_no_price`` so they are
+    surfaced rather than dropped invisibly (Phase 12, owner decision 2).
+    """
+    return item.current_market_value
+
+
+def _apply_price_bounds(
+    items: list[InventoryItem],
+    min_price: Decimal | None,
+    max_price: Decimal | None,
+) -> tuple[list[InventoryItem], int]:
+    """Filter ``items`` to those priced within the bounds; also return how many
+    were dropped purely for having no resolvable price.
+
+    With no bound set nothing is excluded and the count is 0 — a priceless item
+    is perfectly displayable, it just cannot answer a question about its price.
+    """
+    if min_price is None and max_price is None:
+        return items, 0
+    kept: list[InventoryItem] = []
+    hidden_no_price = 0
+    for item in items:
+        price = _price(item)
+        if price is None:
+            hidden_no_price += 1
+            continue
+        if min_price is not None and price < min_price:
+            continue
+        if max_price is not None and price > max_price:
+            continue
+        kept.append(item)
+    return kept, hidden_no_price
 
 
 # Allowlist of the ONLY fields a customer may see on a search result (mirrors the
@@ -79,13 +144,20 @@ _CUSTOMER_ITEM_FIELDS = {
     # row, and read verbatim here — never re-parsed from the free-text notes — so
     # it carries only name+number and no cost/location/free-text (see _enrich).
     "display_name",
+    # value_note carries condition-adjustment and FX-conversion explanations
+    # visible to the customer (Phase 19 visibility requirement).
+    "value_note",
 }
 
 
 @router.get(
     "/search",
     response_model=InventorySearchResult,
-    response_model_include={"total": True, "items": {"__all__": _CUSTOMER_ITEM_FIELDS}},
+    response_model_include={
+        "total": True,
+        "hidden_no_price": True,
+        "items": {"__all__": _CUSTOMER_ITEM_FIELDS},
+    },
 )
 def search_inventory(
     name: str | None = Query(None, max_length=200),
@@ -95,6 +167,7 @@ def search_inventory(
     min_price: Decimal | None = Query(None),
     max_price: Decimal | None = Query(None),
     language: Language | None = Query(None),
+    sort: str | None = Query(None),
     _user: AuthenticatedUser = Depends(rate_limit_search),
     repo: InventoryRepository = Depends(get_repo),
 ) -> InventorySearchResult:
@@ -104,6 +177,10 @@ def search_inventory(
     set). An inverted price range (``min_price > max_price``) is rejected with
     422. ``cost_basis`` (and every other internal field) is stripped from the
     response by the ``_CUSTOMER_ITEM_FIELDS`` allowlist via ``response_model_include``.
+
+    A price bound excludes items with no known price and reports how many under
+    ``hidden_no_price`` (Phase 12, owner decision 2), so the UI can say "N cards
+    hidden (no price on file)" instead of an unexplained empty grid.
     """
     if min_price is not None and max_price is not None and min_price > max_price:
         raise HTTPException(
@@ -127,11 +204,6 @@ def search_inventory(
     # The tier alone is compared, so LP matches LP+ / LP / LP-.
     if condition is not None:
         items = [i for i in items if i.kind == "raw" and i.condition == condition]
-
-    if min_price is not None:
-        items = [i for i in items if _price(i) is not None and _price(i) >= min_price]
-    if max_price is not None:
-        items = [i for i in items if _price(i) is not None and _price(i) <= max_price]
 
     # set_id: use the catalog GSI to get valid card_ids for the set
     if set_id is not None:
@@ -158,13 +230,23 @@ def search_inventory(
                 and catalog[i.card_id].rarity == rarity
             ]
 
+    # Price LAST, so `hidden_no_price` counts only what the bound itself hid —
+    # not items some other filter had already ruled out (see the module docstring).
+    items, hidden_no_price = _apply_price_bounds(items, min_price, max_price)
+
     # Enrich the surviving items with the catalog summary the UI renders.
     _load_catalog(repo, items, catalog)
 
     enriched = [
         _enrich(item, catalog.get(getattr(item, "card_id", None))) for item in items
     ]
-    return InventorySearchResult(items=enriched, total=len(enriched))
+
+    # Sort (Phase 14). Priceless items always sort last regardless of direction.
+    enriched = _sort_results(enriched, sort)
+
+    return InventorySearchResult(
+        items=enriched, total=len(enriched), hidden_no_price=hidden_no_price,
+    )
 
 
 class InventorySummary(BaseModel):
@@ -184,9 +266,21 @@ def inventory_summary(
     """Header stats for the authenticated dashboard, over the SAME cohort as
     ``/inventory/search`` (available raw/graded items).
 
-    ``est_value`` sums ``current_market_value ?? listed_price`` — **market-first**,
-    the intentional OPPOSITE of the search ``_price`` helper (listed-first); do not
-    reuse ``_price`` here. Items with both prices ``None`` are skipped.
+    ``est_value`` resolves each item's price LIVE, through the same shared
+    finish-aware helper the search results are rendered with
+    (``models.inventory._market_price``), against the catalog batch this endpoint
+    already fetches for ``sets_tracked``. Two reasons, both from the owner's bug
+    report (Phase 12, Problem 3 / owner decision 1): the dashboard stays correct
+    even when the nightly denormalizer has not run yet, and the header total can
+    never disagree with the per-card prices rendered beneath it.
+
+    The STORED ``current_market_value ?? listed_price`` is the fallback, used
+    whenever the helper yields nothing — an item with no catalog card at all, and
+    equally a graded slab, which by design gets NO catalog price (it has no finish
+    and carries a grade premium the catalog does not know) and must keep its own
+    manually-maintained figure. Items with no price from either source are
+    skipped rather than counted as zero.
+
     ``sets_tracked`` counts the distinct catalog ``set_id`` among items whose
     ``card_id`` resolves in the catalog (NULL-``card_id`` items contribute none).
 
@@ -198,21 +292,161 @@ def inventory_summary(
     """
     items = customer_visible_items(repo)
 
-    est_value = Decimal(0)
-    for i in items:
-        value = i.current_market_value if i.current_market_value is not None else i.listed_price
-        if value is not None:
-            est_value += value
-
     card_ids = {i.card_id for i in items if getattr(i, "card_id", None)}
     catalog = repo.batch_get_catalog_cards(card_ids) if card_ids else {}
     sets_tracked = len({card.set_id for card in catalog.values()})
+
+    est_value = Decimal(0)
+    for i in items:
+        card = catalog.get(getattr(i, "card_id", None))
+        value = _market_price(card, getattr(i, "finish", None)) if card is not None else None
+        if value is None:
+            value = (i.current_market_value if i.current_market_value is not None
+                     else i.listed_price)
+        if value is not None:
+            est_value += value
 
     return InventorySummary(
         cards_in_vault=len(items),
         est_value=est_value,
         sets_tracked=sets_tracked,
     )
+
+
+# ---- /inventory/facets ----
+
+class FacetSet(BaseModel):
+    """A set option for the filter dropdown: id + human label."""
+    id: str
+    name: str
+
+
+class InventoryFacets(BaseModel):
+    """Distinct filterable values present among customer-visible inventory.
+
+    Every dropdown in the filter panel sources its options from this endpoint
+    rather than hardcoded constants (Phase 13). Values that appear in the DB
+    but shouldn't be selectable (e.g. the literal string "None" as a rarity)
+    are excluded at this layer.
+    """
+    sets: list[FacetSet]
+    rarities: list[str]
+    conditions: list[str]
+    languages: list[str]
+
+
+@router.get("/facets", response_model=InventoryFacets)
+def inventory_facets(
+    _user: AuthenticatedUser = Depends(rate_limit_search),
+    repo: InventoryRepository = Depends(get_repo),
+) -> InventoryFacets:
+    """Distinct sets/rarities/conditions/languages among customer-visible items.
+
+    Computed live from the inventory + catalog (same scan weight as /summary).
+    The set dropdown needs both the id (for filtering) and a human label (the
+    set name from the catalog), sorted alphabetically by name.
+    """
+    items = customer_visible_items(repo)
+
+    # Collect distinct facet values from the items themselves.
+    conditions: set[str] = set()
+    languages: set[str] = set()
+    card_ids: set[str] = set()
+    for item in items:
+        if hasattr(item, "condition"):
+            conditions.add(item.condition.value)
+        languages.add(item.language.value)
+        cid = getattr(item, "card_id", None)
+        if cid is not None:
+            card_ids.add(cid)
+
+    # Fetch catalog rows to get set names and rarities.
+    catalog = repo.batch_get_catalog_cards(card_ids) if card_ids else {}
+    sets_map: dict[str, str] = {}  # set_id -> set_name
+    rarities: set[str] = set()
+    for card in catalog.values():
+        sets_map[card.set_id] = card.set_name
+        if card.rarity and card.rarity != "None":
+            rarities.add(card.rarity)
+
+    # Sort sets alphabetically by name.
+    sorted_sets = sorted(
+        [FacetSet(id=sid, name=sname) for sid, sname in sets_map.items()],
+        key=lambda s: s.name.lower(),
+    )
+
+    return InventoryFacets(
+        sets=sorted_sets,
+        rarities=sorted(rarities),
+        conditions=sorted(conditions),
+        languages=sorted(languages),
+    )
+
+
+# ---- Sorting (Phase 14) ----
+
+# Allowed sort values. An unrecognized value falls back to the default (newest).
+_ALLOWED_SORTS = frozenset({
+    "newest", "oldest", "price_desc", "price_asc", "name_asc", "name_desc",
+})
+
+_PRICE_SENTINEL_HIGH = Decimal("999999999")  # priceless items sort LAST in both directions
+
+
+def _display_price(item) -> Decimal | None:
+    """The price the customer actually sees on the tile.
+
+    Mirrors the frontend ``CardTile`` logic: for raw cards, use the live catalog
+    ``card.market_price`` (computed fresh via ``CardSummary.from_catalog``); for
+    graded slabs, skip the catalog price (it's ungraded and inapplicable). Falls
+    back to ``listed_price`` when no market price is available.
+
+    This MUST stay in sync with the frontend derivation
+    (``frontend/components/inventory/CardTile.tsx``) so that the sort order
+    matches what the user sees rendered on screen.
+    """
+    market = item.card.market_price if item.kind == "raw" and item.card else None
+    return market if market is not None else item.listed_price
+
+
+def _sort_results(items: list, sort: str | None) -> list:
+    """Sort enriched items in place. Priceless items always sort last.
+
+    ``sort=None`` or an unrecognized value defaults to ``newest`` (most recently
+    acquired first), which is the natural order for a collector browsing new stock.
+
+    Price sorts use the DISPLAY price — the same derivation the frontend tile
+    renders — so the visual order matches the numbers on screen. Previously this
+    used ``current_market_value`` (a nightly-denormalized field) which diverges
+    from the live ``card.market_price`` computed at response time, causing items
+    to appear out of order.
+    """
+    if sort is None or sort not in _ALLOWED_SORTS:
+        sort = "newest"
+
+    if sort == "newest":
+        items.sort(key=lambda i: i.acquired_at, reverse=True)
+    elif sort == "oldest":
+        items.sort(key=lambda i: i.acquired_at)
+    elif sort == "price_desc":
+        items.sort(key=lambda i: (
+            0 if _display_price(i) is not None else 1,
+            -(_display_price(i) or Decimal(0)),
+        ))
+    elif sort == "price_asc":
+        items.sort(key=lambda i: (
+            0 if _display_price(i) is not None else 1,
+            _display_price(i) or _PRICE_SENTINEL_HIGH,
+        ))
+    elif sort == "name_asc":
+        items.sort(key=lambda i: (i.card.name if i.card else i.display_name or "").lower())
+    elif sort == "name_desc":
+        items.sort(
+            key=lambda i: (i.card.name if i.card else i.display_name or "").lower(),
+            reverse=True,
+        )
+
+    return items
 
 
 def _load_catalog(

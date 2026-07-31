@@ -25,10 +25,11 @@ What it produces, per flagged inventory item:
 * an honest HIGH/MEDIUM/LOW confidence band with the reason in plain English,
 * the divergence between the predicted value and what the sheet recorded.
 
-A non-English card gets a fourth band, ``N/A``: the catalog is English-only, so
-no match is possible and none is offered — a Japanese card is a different card at
-a different price, and its value comes from the sheet's own figures. Those rows
-are settled, not uncertain, so they rank below every LOW row.
+A non-English card gets a fourth band, ``N/A``, when the catalog has no cards in
+that language — a Japanese card whose language is present in the catalog is
+matched normally against same-language candidates, but a Japanese card in a
+catalog with no Japanese entries gets N/A because no match is possible. Those
+rows are settled, not uncertain, so they rank below every LOW row.
 
 The page accumulates your decisions into a compact paste-back block you copy
 back into the chat; nothing is applied from here.
@@ -83,21 +84,32 @@ FUZZY_CUTOFF = 0.72
 
 # Two bands beyond HIGH/MEDIUM/LOW.
 #
-# ``NA`` sits below HIGH: the row has no catalog identity to find and never will
-# (a non-English printing). It is a settled answer, not a weak guess, so it ranks
-# last — these rows are not "most likely wrong", they are done.
+# ``NA`` sits below HIGH: the catalog has no cards in this item's language, so
+# no match is possible and none is offered. It is a settled answer, not a weak
+# guess, so it ranks last — these rows are not "most likely wrong", they are done.
 #
-# ``CONTRADICTION`` sits above everything: a non-English item that nevertheless
-# carries a catalog ``card_id``. That state should be unreachable — the importer
-# refuses it and the applier now refuses it — so an item in it was linked by
-# something that predates or bypasses those gates, and it is being priced from
-# the wrong card right now. It is shown even when ``needs_review`` is False,
-# because "resolved" is exactly the lie that hides it.
+# ``CONTRADICTION`` sits above everything: a non-English item linked to a catalog
+# card of a DIFFERENT language (e.g. a JP item holding an EN card_id). A JP item
+# linked to a JP card_id is now the correct state (TCGdex seeds JP cards too).
+# A cross-language link should be unreachable — the importer refuses it and the
+# applier now refuses it — so an item in it was linked by something that predates
+# or bypasses those gates, and it is being priced from the wrong card right now.
+# It is shown even when ``needs_review`` is False, because "resolved" is exactly
+# the lie that hides it.
+#
+# ``DANGLING`` sits just under CONTRADICTION: the item carries a ``card_id`` that
+# is not in the catalog AT ALL. TCGdex advertises many JA sets in set metadata
+# while holding zero card-level data for them (108 of 177 as measured
+# 2026-07-28), so Stage A resolved real-looking ids the reseed then never
+# created. Such a row can never be priced, and — like CONTRADICTION — it is shown
+# even when ``needs_review`` is False, because 9 of the 11 live cases were
+# already "resolved" and would otherwise be invisible forever.
 NO_MATCH_BAND = "NA"
 CONTRADICTION_BAND = "CONTRADICTION"
+DANGLING_BAND = "DANGLING"
 
-CONFIDENCE_RANK = {CONTRADICTION_BAND: 4, "LOW": 3, "MEDIUM": 2, "HIGH": 1,
-                   NO_MATCH_BAND: 0}
+CONFIDENCE_RANK = {CONTRADICTION_BAND: 5, DANGLING_BAND: 4, "LOW": 3,
+                   "MEDIUM": 2, "HIGH": 1, NO_MATCH_BAND: 0}
 
 # --- identifier + name normalization ------------------------------------
 # ``strip_float_artifact`` / ``normalize_name`` / ``normalize_number`` /
@@ -124,12 +136,19 @@ class CatalogIndex:
     by_name: dict = field(default_factory=lambda: defaultdict(list))
     by_core: dict = field(default_factory=lambda: defaultdict(list))
     by_prefix: dict = field(default_factory=lambda: defaultdict(list))
+    by_card_id: dict = field(default_factory=dict)
+    languages: frozenset = field(default_factory=frozenset)
 
     @classmethod
     def build(cls, cards) -> CatalogIndex:
         index = cls()
+        langs: set[str] = set()
         for card in cards:
             index.cards.append(card)
+            card_id = card.get("card_id")
+            if card_id:
+                index.by_card_id[card_id] = card
+            langs.add(card.get("language", Language.EN.value))
             name, core = normalize_name(card.get("name")), core_name(card.get("name"))
             number = normalize_number(card.get("number"))
             index.by_name[name].append(card)
@@ -140,6 +159,7 @@ class CatalogIndex:
         for core in set(index.by_core) | set(index.by_name):
             if core:
                 index.by_prefix[core[:3]].append(core)
+        index.languages = frozenset(langs)
         return index
 
     def cards_for(self, name: str) -> list[dict]:
@@ -195,11 +215,13 @@ def predict_card(source: SourceText, index: CatalogIndex, *, kind: str = "raw",
     # Language gate FIRST, above the kind check: ``language`` lives on the shared
     # item base precisely because every kind can be a non-English printing, so a
     # Japanese sealed box must not be filed under "sealed, look by hand" when the
-    # sharper and more permanent answer is "non-English, no catalog exists".
-    if source.language != Language.EN.value:
+    # sharper and more permanent answer is "no catalog cards in that language".
+    # Since TCGdex seeds JP cards alongside EN ones, this gate only fires when
+    # the catalog genuinely has NO cards in the item's language.
+    if source.language not in index.languages:
         label = LANGUAGE_LABELS.get(Language(source.language), source.language)
         return CardPrediction([], NO_MATCH_BAND, (
-            f"{label} printing — the catalog holds English cards only, so no "
+            f"{label} printing — the catalog has no {label} cards, so no "
             f"catalog match is possible for this card and none is offered. This "
             f"is the correct final answer, not a failed lookup: its value comes "
             f"from your sheet (cost, sticker, market at purchase), shown on the "
@@ -242,6 +264,17 @@ def predict_card(source: SourceText, index: CatalogIndex, *, kind: str = "raw",
         else:
             band, reason, hits = _from_name_only(name, core, number, index, stripped)
             undetermined = len(hits) > 1
+
+    # For non-EN items, only same-language catalog cards are valid candidates.
+    if source.language != Language.EN.value and hits:
+        same_lang = [c for c in hits
+                     if c.get("language", Language.EN.value) == source.language]
+        if not same_lang:
+            label = LANGUAGE_LABELS.get(Language(source.language), source.language)
+            return CardPrediction([], NO_MATCH_BAND, (
+                f"{label} printing — the catalog name matched but no {label} "
+                f"printing of this card exists; its value comes from your sheet"))
+        hits = same_lang
 
     if not hits:
         return CardPrediction([], "LOW", reason)
@@ -602,24 +635,51 @@ def _order_by_price_fit(prediction: CardPrediction, item, price_points_by_card,
         f"only, not identity evidence"), prediction.undetermined)
 
 
-def _contradiction(source: SourceText, item) -> CardPrediction | None:
-    """A non-English item that nevertheless carries a catalog ``card_id``.
+def _contradiction(source: SourceText, item, index: CatalogIndex) -> CardPrediction | None:
+    """A stored ``card_id`` that cannot be right: dangling, or cross-language.
 
-    Nothing should be able to produce this state, which is exactly why it has to
-    be shown: it means something linked the item before the gates existed, or
-    around them. The item is being valued from an English card right now, and
-    because whatever linked it also cleared ``needs_review``, the ordinary filter
-    would hide it forever (Council R7 BLOCKER-1(d)).
+    Two distinct broken states, deliberately NOT conflated:
+
+    * the id is not in the catalog at all -> ``DANGLING`` (it has no language to
+      disagree with, so no language claim is made about it);
+    * the id resolves, but to a card of another language -> ``CONTRADICTION``.
+
+    A JP item holding a JP card_id is the correct state (the catalog now carries
+    JP cards via TCGdex); a JP item holding an EN card_id is still a
+    contradiction. The card's language is looked up in the index; if the card_id
+    is not in the index at all, it is treated as a mismatch (the linked identity
+    is unverifiable).
+
+    This state should be unreachable — the importer and the applier both refuse
+    cross-language links — so an item in it was linked by something that predates
+    or bypasses those gates. It is shown even when ``needs_review`` is False,
+    because "resolved" is exactly the lie that hides it (Council R7 BLOCKER-1(d)).
     """
     card_id = item.get("card_id")
-    if source.language == Language.EN.value or not card_id:
+    if not card_id:
+        return None
+    card = index.by_card_id.get(card_id)
+    if card is None:
+        # The id resolves to NOTHING. Do not guess at the absent card's language
+        # — saying "linked to an English card" here is simply false, and it
+        # buries the genuinely mislinked rows under a wrong diagnosis.
+        return CardPrediction([], DANGLING_BAND, (
+            f"DANGLING LINK — this item is linked to card_id '{card_id}', which "
+            f"is not in the catalog at all, so it can never be priced. TCGdex "
+            f"lists some sets whose cards it holds no data for; a link resolved "
+            f"against one of those does not survive a reseed. Re-match it below "
+            f"or unlink it (REJECT) and take the value from your sheet"))
+    if source.language == Language.EN.value:
+        return None
+    card_language = card.get("language", Language.EN.value)
+    if card_language == source.language:
         return None
     label = LANGUAGE_LABELS.get(Language(source.language), source.language)
     return CardPrediction([], CONTRADICTION_BAND, (
-        f"CONTRADICTION — this is a {label} printing but it is linked to English "
-        f"catalog card '{card_id}', so any market value on it comes from the "
-        f"wrong card. Nothing in the current code can create this state; unlink "
-        f"it (REJECT) and take the value from your sheet"))
+        f"CONTRADICTION — this is a {label} printing but it is linked to "
+        f"catalog card '{card_id}' ({card_language}), so any market value on it "
+        f"comes from the wrong card. Nothing in the current code can create "
+        f"this state; unlink it (REJECT) and take the value from your sheet"))
 
 
 def _finish_caveat(reason: str, finish: str, item, best, value: ValuePrediction) -> str:
@@ -655,7 +715,7 @@ def build_card_rows(items, index: CatalogIndex, price_points_by_card) -> list[di
     rows = []
     for item in items:
         source = parse_source_text(item)
-        contradiction = _contradiction(source, item)
+        contradiction = _contradiction(source, item, index)
         if not item.get("needs_review") and contradiction is None:
             continue
         kind = str(item.get("kind") or "raw")
@@ -806,6 +866,7 @@ font-weight:700;letter-spacing:.04em}
 .LOW{background:var(--low);color:#180a05}
 .NA{background:var(--panel2);color:var(--dim);border:1px solid var(--line)}
 .CONTRADICTION{background:var(--warn);color:#180a05}
+.DANGLING{background:var(--low);color:#180a05;border:1px solid var(--warn)}
 .k{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
 .name{font-weight:600}
 .dim{color:var(--dim)}
@@ -852,8 +913,10 @@ border-radius:5px;padding:4px 10px;cursor:pointer;font:inherit;font-size:11px}
   </div>
   <div class="bar" id="bar">
     <span class="conf-filter">confidence
-      <label title="non-English item linked to an English card — fix these first"><input
+      <label title="non-English item linked to a card of another language — fix these first"><input
         type="checkbox" class="f-conf" value="CONTRADICTION" checked> CONTRADICTION</label>
+      <label title="linked to a card_id that is not in the catalog — cannot be priced"><input
+        type="checkbox" class="f-conf" value="DANGLING" checked> DANGLING</label>
       <label><input type="checkbox" class="f-conf" value="LOW" checked> LOW</label>
       <label><input type="checkbox" class="f-conf" value="MEDIUM" checked> MEDIUM</label>
       <label><input type="checkbox" class="f-conf" value="HIGH"> HIGH</label>

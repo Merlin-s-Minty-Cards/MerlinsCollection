@@ -30,8 +30,9 @@ What each verb means (confirmed with the business owner):
     be overwritten within a day and would, on a re-run, put a stale review-page
     figure back over a fresher synced one.
 
-    A **non-English** item is refused outright: the catalog holds English cards
-    only, so no English ``card_id`` is a correct answer for one.
+    A **cross-language** link is refused: a non-English item must link to a
+    catalog card in the same language; linking a JP item to an EN card (or vice
+    versa) is a mismatch and is refused.
 
 ``CARD <item_id> REJECT`` / ``TXN <txn_id> REJECT`` / ``TXN <txn_id> NOCHANGE``
     NO WRITE AT ALL. "Leave it flagged" and "it is already fine" are both
@@ -431,25 +432,27 @@ class DecisionApplier:
             return _refuse(decision, f"a '{item.kind}' item has no card_id field - "
                                      f"the catalog holds single cards only")
 
-        # LANGUAGE GATE. The catalog is English-only, so no English card_id is
-        # ever the right answer for a non-English item. This is the last gate
-        # before a live write and it deliberately does NOT trust the stored
-        # `language` attribute alone: production items predate that field, so the
-        # item's own text and TCGplayer link are read too, exactly as the review
-        # page reads them.
         language = item_language(item)
-        if language is not Language.EN:
-            label = LANGUAGE_LABELS.get(language, language.value)
-            return _refuse(decision, (
-                f"this item is a {label} printing, so no English catalog card is "
-                f"a correct match for it - card_id '{card_id}' would price it "
-                f"from the wrong card. Its value comes from the sheet's own "
-                f"figures; leave card_id unset (REJECT)"))
 
         card = self._repo.get_catalog_card(card_id)
         if card is None:
             return _refuse(decision, f"card_id '{card_id}' does not resolve to a "
                                      f"catalog card")
+
+        # LANGUAGE GATE. Now that the catalog carries cards in multiple languages
+        # (TCGdex seeds JP alongside EN), the check is a cross-language MISMATCH,
+        # not a blanket non-EN refusal: a JP item linking to a JP catalog card is
+        # correct; a JP item linking to an EN card is still wrong. This
+        # deliberately does NOT trust the stored `language` attribute alone:
+        # production items predate that field, so the item's own text and
+        # TCGplayer link are read too, exactly as the review page reads them.
+        if language != Language(card.language):
+            label = LANGUAGE_LABELS.get(language, language.value)
+            return _refuse(decision, (
+                f"this item is a {label} printing but card_id '{card_id}' is "
+                f"{card.language.value} - a cross-language mismatch would price "
+                f"it from the wrong card. Its value comes from the sheet's own "
+                f"figures; leave card_id unset (REJECT)"))
         mismatch = self._identity_mismatch(values, card)
         if mismatch:
             return _refuse(decision, f"card_id '{card_id}' does not match the block: "

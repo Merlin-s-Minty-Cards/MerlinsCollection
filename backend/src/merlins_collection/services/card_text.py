@@ -11,7 +11,11 @@ ends import it (Council R7 BLOCKER-9).
 
 The language half is here for the same reason: an item's language must be decided
 identically by the importer, the review page, the applier and the backfill, or
-they disagree about which cards the English catalog may be matched against.
+they disagree about which catalog cards an item may be matched against. Since the
+catalog moved to TCGdex it holds Japanese printings alongside English ones, so
+language is no longer a gate that rules the catalog out entirely — it is part of
+a card's identity, and a match is valid only when item and catalog card agree on
+it (a JP item belongs to a JP card, never its English twin).
 """
 
 from __future__ import annotations
@@ -25,10 +29,11 @@ from merlins_collection.models.inventory import ITEM_TEXT_FIELD, Language
 
 __all__ = [
     "ITEM_TEXT_FIELD", "LANGUAGE_MARKER_RE", "CatalogIndex", "SourceText",
-    "build_catalog_index", "core_name", "format_display_name", "item_language",
-    "language_from_url", "normalize_name", "normalize_number", "number_keys",
-    "parse_language", "parse_source_text", "set_hint_from_url", "sets_agree",
-    "strip_float_artifact",
+    "build_catalog_index", "coerce_language", "core_name", "format_display_name",
+    "item_language", "language_from_set", "language_from_url", "normalize_name",
+    "normalize_number", "number_keys", "parse_language", "parse_source_text",
+    "set_hint_from_url",
+    "sets_agree", "strip_float_artifact",
 ]
 
 
@@ -169,33 +174,67 @@ class CatalogIndex:
     """Normalized lookup structures over catalog cards, keyed identically to the
     review page's index so the importer and the review page normalize the same.
 
-    ``by_name_number[(normalize_name, num_key)] -> [card]`` and
-    ``by_core_number[(core_name, num_key)] -> [card]`` for each ``number_keys``
-    form. Both maps are plain dicts, so ``.get(key, [])`` is a safe miss.
+    ``by_name_number[(normalize_name, num_key, language)] -> [card]`` and
+    ``by_core_number[(core_name, num_key, language)] -> [card]`` for each
+    ``number_keys`` form. Both maps are plain dicts, so ``.get(key, [])`` is a
+    safe miss.
+
+    ``by_card_id[card_id] -> card`` is the direct identity lookup (one card, not
+    a list — ``card_id`` is the catalog's primary key). It exists so a caller
+    holding an ALREADY-RESOLVED id (the enriched importer path) can prove that id
+    actually exists in the catalog before storing a reference to it.
+
+    Language is part of the KEY, not a post-hoc filter over the hits. Since the
+    catalog became multilingual a JP printing and its EN twin share a name and a
+    number, so filtering afterwards would turn a previously unique EN hit into an
+    ambiguous pair the moment the JP twin was seeded — and a JP row would silently
+    borrow the EN card's identity (and its price). Keying on language keeps the
+    two lookups completely independent.
     """
 
     by_name_number: dict = field(default_factory=dict)
     by_core_number: dict = field(default_factory=dict)
+    by_card_id: dict = field(default_factory=dict)
+
+
+def coerce_language(value) -> Language:
+    """Read a language off a catalog card / sheet value, defaulting to ``EN``.
+
+    Records written before the field existed, and raw DynamoDB dicts holding the
+    plain string ``"JP"``, both have to land on the same ``Language`` member as a
+    pydantic model's enum — otherwise a stored card and a lookup key stringify
+    differently and the index misses.
+    """
+    if isinstance(value, Language):
+        return value
+    try:
+        return Language(str(value or Language.EN.value).upper())
+    except ValueError:
+        return Language.EN
 
 
 def build_catalog_index(cards) -> CatalogIndex:
     """Build the normalized catalog index the importer's ``_match_card`` reads.
 
     Single source of truth: keying every catalog card through ``normalize_name``,
-    ``core_name`` and ``number_keys`` here is what lets an Excel float artifact
-    (``"181.0"``), a slash form (``"182/167"``) or name-punctuation drift resolve
-    to the catalog's stored ``"181"`` / ``"Dragonair"`` at lookup time.
+    ``core_name``, ``number_keys`` and its print ``language`` here is what lets an
+    Excel float artifact (``"181.0"``), a slash form (``"182/167"``) or
+    name-punctuation drift resolve to the catalog's stored ``"181"`` /
+    ``"Dragonair"`` at lookup time — in the right language.
     """
     by_name_number: dict = defaultdict(list)
     by_core_number: dict = defaultdict(list)
+    by_card_id: dict = {}
     for card in cards:
         name = normalize_name(_field(card, "name"))
         core = core_name(_field(card, "name"))
         number = normalize_number(_field(card, "number"))
+        language = coerce_language(_field(card, "language"))
+        by_card_id[_field(card, "card_id")] = card
         for key in number_keys(number):
-            by_name_number[(name, key)].append(card)
-            by_core_number[(core, key)].append(card)
-    return CatalogIndex(dict(by_name_number), dict(by_core_number))
+            by_name_number[(name, key, language)].append(card)
+            by_core_number[(core, key, language)].append(card)
+    return CatalogIndex(dict(by_name_number), dict(by_core_number), by_card_id)
 
 
 # --- print language ------------------------------------------------------
@@ -216,6 +255,24 @@ _TOKEN_LANGUAGE = {
 # is what makes it usable to check the text parser rather than merely restate it
 # (Council R7 BLOCKER-8).
 _URL_LANGUAGE = {"pokemon-japan": Language.JP}
+
+# The same links also carry an explicit ``?Language=`` filter. It resolves the one
+# case the path slug cannot: a bare ``/product/<id>`` with no set/name slug at all.
+# Its values in the real sheet are only "English", "Japanese" and "all" — and
+# "all" is NOT a language, it is TCGplayer saying "every language of this product
+# is listed under one id". The real row "Giovanni's Exile" is an ENGLISH card
+# filed under ``Language=all``, so anything not naming a language reads as EN and
+# only the slug may promote a card to JP.
+_QUERY_LANGUAGE_RE = re.compile(r"[?&]language=([a-z]+)", re.IGNORECASE)
+
+# Sets that exist ONLY as a Japanese printing. Some slab rows carry no marker in
+# either the name or the set cell and are identifiable as Japanese by their SET
+# alone (real 7-25 rows: "Seismitoad"/SV11B, "Bubble Mew EX"/"Shiny Treasure EX").
+# This is a deliberately small, data-driven allowlist over sets the sheet actually
+# uses — not a general JP-set database. Extend it when a new JP-only set appears;
+# an unknown set stays EN rather than guessing.
+_JP_SET_CODES = frozenset({"sv11b"})
+_JP_SET_NAMES = ("shiny treasure ex",)
 
 _TOKENS = "|".join(sorted(_TOKEN_LANGUAGE, key=len, reverse=True))
 
@@ -261,15 +318,41 @@ def parse_language(text) -> tuple[Language, str]:
 
 
 def language_from_url(url) -> Language:
-    """The language implied by a product URL's category slug, else ``EN``.
+    """The language implied by a product URL, else ``EN``.
 
-    Only the slug counts, so a product whose *name* happens to contain "japanese"
-    is not mistaken for a Japanese printing.
+    Two signals, slug first: the category slug (``pokemon-japan``), then the
+    explicit ``?Language=`` filter. Only these two count, so a product whose
+    *name* happens to contain "japanese" is not mistaken for a Japanese printing,
+    and a slug-identified JP card is not demoted by an ambiguous
+    ``Language=all`` sitting in the same query string.
     """
     lowered = str(url or "").lower()
     for slug, language in _URL_LANGUAGE.items():
         if slug in lowered:
             return language
+    match = _QUERY_LANGUAGE_RE.search(lowered)
+    if match:
+        return _TOKEN_LANGUAGE.get(match.group(1), Language.EN)
+    return Language.EN
+
+
+def language_from_set(set_text) -> Language:
+    """The language implied by a set name/code alone, else ``EN``.
+
+    The last resort, for rows carrying no marker and no URL: two real slab rows
+    are Japanese only by set. Matching is token-wise over ``normalize_name``, so
+    it works equally on a bare set cell ("SV11B") and on the whole stored text a
+    slab's ``notes`` becomes ("Seismitoad — SV11B #109.0"). An unrecognized set
+    is ``EN`` — the allowlist never guesses.
+    """
+    normalized = normalize_name(set_text)
+    if not normalized:
+        return Language.EN
+    if _JP_SET_CODES & set(normalized.split()):
+        return Language.JP
+    padded = f" {normalized} "
+    if any(f" {name} " in padded for name in _JP_SET_NAMES):
+        return Language.JP
     return Language.EN
 
 
@@ -290,7 +373,9 @@ def item_language(record) -> Language:
        ``"<name> — <set> #<number>"``, and the marker is often in the *set* half
        (``"Pikachu — jp 151 #173.0"``), which is precisely the case R7 missed;
     3. the TCGplayer URL, which identifies three live rows carrying no marker at
-       all.
+       all;
+    4. the SET named inside that same text, for the slab rows that carry no
+       marker and no URL and are Japanese only by which set they are from.
 
     Deciding it here, from the record, means the review page, the applier and the
     backfill cannot disagree — and it works on records written before the
@@ -307,7 +392,10 @@ def item_language(record) -> Language:
     language, _ = parse_language(text)
     if language is not Language.EN:
         return language
-    return language_from_url(_field(record, "tcg_url"))
+    url_language = language_from_url(_field(record, "tcg_url"))
+    if url_language is not Language.EN:
+        return url_language
+    return language_from_set(text)
 
 
 # --- recovering the sheet's own text from a stored record ----------------

@@ -39,10 +39,13 @@ class Language(StrEnum):
     """The print language of a physical item — part of its IDENTITY, not a label.
 
     A Japanese Seismitoad is a DIFFERENT card from the English one and carries a
-    different market value, so this field decides whether the (English-only)
-    catalog may be consulted for an item at all. Adding a member needs no data
-    migration: records written before the field existed simply validate as
-    ``EN``, the default.
+    different market value, so this field is part of the catalog lookup key: a
+    JP item resolves to a JP catalog row, never to its English twin. Records
+    written before the field existed simply validate as ``EN``, the default.
+
+    ``EN`` and ``JP`` are the only members and that is deliberate — the source
+    spreadsheet contains no other language, and every added member is another
+    axis of matcher ambiguity for data that does not exist (RFC 0003 §4).
     """
 
     EN = "EN"
@@ -135,6 +138,7 @@ class _ItemBase(BaseModel):
     notes: str | None = None
     tcg_url: str | None = None
     needs_review: bool = False
+    value_note: str | None = None
 
 
 # A sanitized, customer-safe fallback name (e.g. "Dragonair #181") materialized at
@@ -193,6 +197,12 @@ InventoryItemAdapter: TypeAdapter[InventoryItem] = TypeAdapter(InventoryItem)
 
 # Catalog finishes to fall back through when the item's own finish carries no
 # market price. Most singles are "normal"; holo-only cards price under a holo key.
+#
+# *** THIS TUPLE IS THE CANONICAL FALLBACK ORDER FOR THE WHOLE PRODUCT, in every
+# language it is implemented in (claude-progress.txt, CONCURRENCY warning). The
+# MCP server re-implements the same walk in TypeScript; if the two orders ever
+# disagree, the website and the Bedrock chat quote different prices for the same
+# card. Change it here and there together, or not at all. ***
 _MARKET_FINISH_FALLBACK = (
     "normal", "holofoil", "reverseHolofoil",
     "1stEditionHolofoil", "1stEditionNormal", "unlimitedHolofoil",
@@ -200,13 +210,26 @@ _MARKET_FINISH_FALLBACK = (
 
 
 def _market_price(card, finish: str | None) -> Decimal | None:
-    """The pokemontcg.io market price for a card, preferring the item's finish.
+    """The catalog market price (USD) for a card, preferring the item's finish.
+
+    **THE ONE SHARED FINISH-AWARE PRICE LOOKUP.** All three paths that need a
+    catalog price call exactly this function — the search/read path (via
+    ``CardSummary.from_catalog`` below), the write path that denormalizes
+    ``current_market_value`` onto the stored item
+    (``services.catalog_sync.refresh_inventory_market_values``), and the
+    dashboard summary (``routers.inventory.inventory_summary``). They each used
+    to resolve prices for themselves, and the write path's bare exact match left
+    174 of 213 live items unpriced while the read path priced them fine
+    (claude-progress.txt Phase 12/Phase 10). Do not re-implement this walk in a
+    caller: a second copy is how that divergence happened.
 
     ``card.prices`` is keyed by finish (``normal``/``holofoil``/…); the item's own
     finish is tried first, then a sensible fallback order, then any finish that
     carries a market figure. ``None`` when the card has no market price at all.
+    Every band is USD regardless of which provider supplied it, so no currency
+    check is needed here (see ``models.catalog.FinishPrice``).
 
-    Requires a ``finish``: the TCGplayer figures are UNGRADED prices, so they are
+    Requires a ``finish``: the catalog figures are UNGRADED prices, so they are
     surfaced only for raw items (which always carry a finish). A graded slab has
     no finish and commands a grade premium the catalog does not know, so it gets
     no market price here and the caller keeps the slab's own figure.
@@ -238,7 +261,7 @@ class CardSummary(BaseModel):
     number: str
     rarity: str | None = None
     image_small: str | None = None
-    # Live pokemontcg.io market price (per finish) — the customer-facing price for
+    # Live catalog market price in USD (per finish) — the customer-facing price for
     # a matched card. ``None`` when the catalog has no market figure; the caller
     # then falls back to the sheet's listed price.
     market_price: Decimal | None = None
@@ -308,3 +331,9 @@ class InventorySearchResult(BaseModel):
 
     items: list[EnrichedInventoryItem]
     total: int
+    # How many otherwise-matching items a price bound excluded purely because
+    # they have no resolvable price (Phase 12, owner decision 2). They stay
+    # excluded — a card with no known price cannot honestly be claimed to be
+    # under $500 — but the UI renders this count ("N cards hidden (no price on
+    # file)") so they are not dropped invisibly. Always 0 when no bound is set.
+    hidden_no_price: int = 0

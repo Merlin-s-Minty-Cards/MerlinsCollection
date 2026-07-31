@@ -74,6 +74,10 @@ describe('isSafeImageUrl', () => {
     expect(isSafeImageUrl('https://images.pokemontcg.io/neo3/9.png')).toBe(true)
   })
 
+  it('accepts https on the allowlisted tcgdex host', () => {
+    expect(isSafeImageUrl('https://assets.tcgdex.net/en/swsh/swsh1/1/high.webp')).toBe(true)
+  })
+
   it('rejects non-allowlisted hosts, non-https, and malformed URLs', () => {
     expect(isSafeImageUrl('https://evil.example.com/x.png')).toBe(false)
     expect(isSafeImageUrl('http://images.pokemontcg.io/x.png')).toBe(false)
