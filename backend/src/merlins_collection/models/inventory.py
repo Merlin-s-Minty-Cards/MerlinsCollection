@@ -138,6 +138,7 @@ class _ItemBase(BaseModel):
     notes: str | None = None
     tcg_url: str | None = None
     needs_review: bool = False
+    value_note: str | None = None
 
 
 # A sanitized, customer-safe fallback name (e.g. "Dragonair #181") materialized at

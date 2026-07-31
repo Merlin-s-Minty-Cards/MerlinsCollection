@@ -34,6 +34,7 @@ from datetime import date
 from merlins_collection.config import settings
 from merlins_collection.models.catalog import PricePoint
 from merlins_collection.models.inventory import ItemStatus, _market_price, new_ulid
+from merlins_collection.services.condition_pricing import apply_condition_adjustment
 from merlins_collection.services.dynamodb import CatalogReseedInProgressError
 from merlins_collection.services.tcgdex import (
     parse_card_id,
@@ -101,6 +102,17 @@ def refresh_inventory_market_values(repo) -> int:
                 catalog_cache[item.card_id] = repo.get_catalog_card(item.card_id)
             card = catalog_cache[item.card_id]
             value = _market_price(card, item.finish) if card else None
+            # Phase 19: apply condition-based multiplier to the raw NM market
+            # price. The adjustment is baked into current_market_value so both
+            # the website and the MCP server (which reads this field directly)
+            # see the same condition-adjusted figure without reimplementing the
+            # multiplier logic independently.
+            if value is not None:
+                value, value_note = apply_condition_adjustment(
+                    value, item.condition, item.condition_modifier,
+                )
+            else:
+                value_note = None
         else:
             ckey = (item.card_id, item.company, item.grade)
             if ckey not in graded_cache:
@@ -108,8 +120,12 @@ def refresh_inventory_market_values(repo) -> int:
                     item.card_id, item.company, item.grade
                 )
             value = graded_cache[ckey]
+            value_note = None
         if value is not None and value != item.current_market_value:
-            repo.put_inventory_item(item.model_copy(update={"current_market_value": value}))
+            update_fields: dict = {"current_market_value": value}
+            if value_note is not None:
+                update_fields["value_note"] = value_note
+            repo.put_inventory_item(item.model_copy(update=update_fields))
             updated += 1
     return updated
 

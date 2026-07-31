@@ -151,6 +151,51 @@ def test_refresh_sets_current_market_value_from_catalog(dynamo_repo):
     assert dynamo_repo.get_inventory_item(item.item_id).current_market_value == Decimal("9.25")
 
 
+def test_refresh_applies_condition_adjustment_for_lp(dynamo_repo):
+    """An LP card's denormalized price is the NM market price * 0.82 (Phase 19)."""
+    _seed_catalog(dynamo_repo)
+    item = RawInventoryItem(
+        card_id=CARD_ID, cost_basis=Decimal("4"), acquired_at=date(2026, 1, 1),
+        finish="holofoil", condition=Condition.LP,
+    )
+    dynamo_repo.put_inventory_item(item)
+    refresh_inventory_market_values(dynamo_repo)
+    stored = dynamo_repo.get_inventory_item(item.item_id)
+    # 9.25 * 0.82 = 7.585 -> 7.59
+    assert stored.current_market_value == Decimal("7.59")
+    assert stored.value_note is not None
+    assert "LP" in stored.value_note
+    assert "0.82" in stored.value_note
+
+
+def test_refresh_applies_condition_adjustment_for_lp_plus(dynamo_repo):
+    """LP+ uses midpoint(0.82, 1.00) = 0.91 (Phase 19)."""
+    _seed_catalog(dynamo_repo)
+    from merlins_collection.models.inventory import ConditionModifier
+    item = RawInventoryItem(
+        card_id=CARD_ID, cost_basis=Decimal("4"), acquired_at=date(2026, 1, 1),
+        finish="holofoil", condition=Condition.LP,
+        condition_modifier=ConditionModifier.PLUS,
+    )
+    dynamo_repo.put_inventory_item(item)
+    refresh_inventory_market_values(dynamo_repo)
+    stored = dynamo_repo.get_inventory_item(item.item_id)
+    # 9.25 * 0.91 = 8.4175 -> 8.42
+    assert stored.current_market_value == Decimal("8.42")
+    assert "LP+" in stored.value_note
+
+
+def test_refresh_nm_gets_no_condition_note(dynamo_repo):
+    """NM items get no value_note since 1.00x multiplier means no adjustment."""
+    _seed_catalog(dynamo_repo)
+    item = _raw_item()  # NM by default
+    dynamo_repo.put_inventory_item(item)
+    refresh_inventory_market_values(dynamo_repo)
+    stored = dynamo_repo.get_inventory_item(item.item_id)
+    assert stored.current_market_value == Decimal("9.25")
+    assert stored.value_note is None
+
+
 def test_snapshot_graded_prices_writes_history_for_owned_slabs(dynamo_repo):
     dynamo_repo.set_graded_market_value(
         CARD_ID, GradingCompany.PSA, Decimal("10"), Decimal("500")

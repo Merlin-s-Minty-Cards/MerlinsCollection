@@ -144,6 +144,9 @@ _CUSTOMER_ITEM_FIELDS = {
     # row, and read verbatim here — never re-parsed from the free-text notes — so
     # it carries only name+number and no cost/location/free-text (see _enrich).
     "display_name",
+    # value_note carries condition-adjustment and FX-conversion explanations
+    # visible to the customer (Phase 19 visibility requirement).
+    "value_note",
 }
 
 
