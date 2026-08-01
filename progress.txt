@@ -247,3 +247,53 @@ Organized into 3 rounds for parallel execution.
   Daily price snapshot infrastructure: already complete — existing daily_sync
   handles raw (via refresh_held_prices), graded (snapshot_graded_prices), and
   sealed (snapshot_sealed_prices) items.
+
+========================================================================
+ADMIN PANEL UX — ROUND 4 (13 Enhancements)
+RFC: docs/rfcs/0006-admin-panel-ux-round4.md
+========================================================================
+
+## Overview
+13 enhancements organized into 4 parallel streams.
+
+## Stream 1: Trade Page Enhancements (frontend/app/(admin)/admin/trade/page.tsx)
+
+- [x] 1A. Expand incoming form: Card Name, Number, Set, Market, Value, % (labels + highlight on Value/%)
+- [x] 1B. Rename "Our Margin" → "Our Profit", show both $ profit and % gain
+- [x] 1C. Add editable date field (auto-today) to trade page, send on confirm
+- [x] 1C-BE. Backend: accept optional `trade_date` on PATCH /admin/trades/{id}
+
+## Stream 2: Show-Prep Enhancements (frontend/app/(admin)/admin/show-prep/page.tsx)
+
+- [x] 2A. Move ImageToggle from bottom to header row (next to threshold controls)
+- [x] 2B. Make Delta column sortable (local frontend sort)
+- [x] 2C. Add TCGplayer link column (right of delta): show link if tcg_url exists, else inline add-link input
+- [x] 2D. Mass sticker update: text input for bulk sticker_price update on selected items
+
+## Stream 3: Inventory & Card Detail Enhancements
+
+- [x] 3A. Fix vault pictures not loading (card_id was missing from vault API response)
+- [x] 3B. Verify inventory image toggle works (already coded — confirmed working)
+- [x] 3C. Remove "Listed Price" from CardDetailModal EDITABLE_FIELDS
+- [x] 3D. Rename "Cost Basis" → "Price Paid" in all UI labels (modal, tables, sell cart)
+- [x] 3E. Location dropdown: replace free-text with fixed <select> (glass, toploader, binder, storage)
+- [x] 3F. Delete after loss: show permanent delete option on lost items + confirmation popup
+
+## Stream 4: Cross-Page Features (sell date, sticker notes)
+
+- [x] 4A. Add editable date field to sell page (auto-today), send on confirm
+- [x] 4A-BE. Backend: accept optional `sale_date` on PATCH /admin/sales/{id}
+- [x] 4B. Add `sticker_notes` field to inventory model (backend)
+- [x] 4C. Display sticker_notes near sticker price in inventory, card detail modal, show-prep
+
+## Parallelism Map
+
+| Stream | Can run with | Conflict |
+|--------|-------------|----------|
+| 1 | 2, 3, 4 | None |
+| 2 | 1, 3, 4 | None |
+| 3 | 1, 2 | models/inventory.py shared with Stream 4 (4B adds field) |
+| 4 | 1, 2 | models/inventory.py shared with Stream 3 (minor — append-only) |
+
+Strategy: Run all 4 in parallel. Stream 3 is frontend-only (no model change).
+Stream 4 owns the model file addition (sticker_notes). No merge conflict expected.

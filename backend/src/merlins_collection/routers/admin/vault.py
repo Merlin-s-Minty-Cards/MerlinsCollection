@@ -32,6 +32,7 @@ class VaultItem(BaseModel):
     item_id: str
     name: str
     kind: str
+    card_id: str | None = None
     cost_basis: str
     current_market_value: str | None
     sticker_price: str | None
@@ -104,6 +105,7 @@ def get_vault(
                 item_id=item.item_id,
                 name=name,
                 kind=item.kind,
+                card_id=getattr(item, "card_id", None),
                 cost_basis=str(cost),
                 current_market_value=str(market) if market is not None else None,
                 sticker_price=str(item.sticker_price) if item.sticker_price is not None else None,

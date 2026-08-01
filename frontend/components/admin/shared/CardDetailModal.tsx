@@ -18,16 +18,19 @@ interface CardDetailModalProps {
   imageUrl?: string | null
 }
 
+/** Fixed location options for dropdown */
+const LOCATION_OPTIONS = ['glass', 'toploader', 'binder', 'storage']
+
 /** Editable fields with their display labels and value types */
-const EDITABLE_FIELDS: { key: string; label: string; type: 'text' | 'number' }[] = [
+const EDITABLE_FIELDS: { key: string; label: string; type: 'text' | 'number' | 'select' }[] = [
   { key: 'display_name', label: 'Display Name', type: 'text' },
   { key: 'product_name', label: 'Product Name', type: 'text' },
   { key: 'condition', label: 'Condition', type: 'text' },
-  { key: 'location', label: 'Location', type: 'text' },
-  { key: 'cost_basis', label: 'Cost Basis', type: 'number' },
+  { key: 'location', label: 'Location', type: 'select' },
+  { key: 'cost_basis', label: 'Price Paid', type: 'number' },
   { key: 'current_market_value', label: 'Market Value', type: 'number' },
   { key: 'sticker_price', label: 'Sticker Price', type: 'number' },
-  { key: 'listed_price', label: 'Listed Price', type: 'number' },
+  { key: 'sticker_notes', label: 'Sticker Notes', type: 'text' },
   { key: 'notes', label: 'Notes', type: 'text' },
   { key: 'status', label: 'Status', type: 'text' },
   { key: 'finish', label: 'Finish', type: 'text' },
@@ -184,18 +187,34 @@ export default function CardDetailModal({
                     </span>
                     {isEditing ? (
                       <div className="flex items-center gap-1 flex-1 min-w-0">
-                        <input
-                          type={field.type}
-                          value={editValue}
-                          onChange={(e) => setEditValue(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') saveEdit()
-                            if (e.key === 'Escape') cancelEdit()
-                          }}
-                          className="flex-1 min-w-0 bg-pine-900 border border-mint/30 rounded px-2 py-0.5 text-xs text-pine-100 focus:outline-none focus:border-mint/60"
-                          autoFocus
-                          disabled={saving}
-                        />
+                        {field.type === 'select' && field.key === 'location' ? (
+                          <select
+                            value={editValue}
+                            onChange={(e) => setEditValue(e.target.value)}
+                            className="flex-1 min-w-0 bg-pine-900 border border-mint/30 rounded px-2 py-0.5 text-xs text-pine-100 focus:outline-none focus:border-mint/60"
+                            autoFocus
+                            disabled={saving}
+                          >
+                            <option value="">— None —</option>
+                            {LOCATION_OPTIONS.map((loc) => (
+                              <option key={loc} value={loc}>{loc}</option>
+                            ))}
+                          </select>
+                        ) : (
+                          <input
+                            type={field.type === 'number' ? 'number' : 'text'}
+                            value={editValue}
+                            onChange={(e) => setEditValue(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') saveEdit()
+                              if (e.key === 'Escape') cancelEdit()
+                            }}
+                            maxLength={field.key === 'sticker_notes' ? 200 : undefined}
+                            className="flex-1 min-w-0 bg-pine-900 border border-mint/30 rounded px-2 py-0.5 text-xs text-pine-100 focus:outline-none focus:border-mint/60"
+                            autoFocus
+                            disabled={saving}
+                          />
+                        )}
                         <button
                           type="button"
                           onClick={saveEdit}
@@ -250,6 +269,11 @@ export default function CardDetailModal({
             ) : null}
             {item.company ? (
               <span>Grade: <span className="text-pine-300">{String(item.company)} {String(item.grade ?? '')}</span></span>
+            ) : null}
+            {item.tcg_url ? (
+              <a href={String(item.tcg_url)} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300">
+                TCGplayer Link ↗
+              </a>
             ) : null}
           </section>
         </div>

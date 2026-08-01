@@ -160,7 +160,7 @@ def update_sell_session(
         raise HTTPException(status_code=409, detail="Can only update draft sessions")
 
     # Merge allowed fields
-    for key in ("counterparty", "payment_method", "fee", "notes", "show_id"):
+    for key in ("counterparty", "payment_method", "fee", "notes", "show_id", "sale_date"):
         if key in body:
             session[key] = body[key]
 
@@ -252,6 +252,10 @@ def confirm_sell_session(
     total_revenue = Decimal("0")
     items_sold = 0
 
+    # Use sale_date if set (for backdating), otherwise today
+    sale_date_str = session.get("sale_date")
+    txn_date = date.fromisoformat(sale_date_str) if sale_date_str else date.today()
+
     # Calculate total first for fee computation
     for sell_item in items:
         total_revenue += Decimal(str(sell_item["agreed_price"]))
@@ -273,7 +277,7 @@ def confirm_sell_session(
             type=TransactionType.SALE,
             item_id=sell_item["item_id"],
             category=category,
-            date=date.today(),
+            date=txn_date,
             amount=price,
             payment_method=payment_method,
             fee=fee / len(items) if fee else Decimal("0"),  # Split fee across items

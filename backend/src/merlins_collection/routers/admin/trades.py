@@ -134,7 +134,7 @@ def update_trade_session(
     if session.get("status") != "draft":
         raise HTTPException(status_code=409, detail="Can only update draft sessions")
 
-    for key in ("mode", "counterparty", "notes", "show_id"):
+    for key in ("mode", "counterparty", "notes", "show_id", "trade_date"):
         if key in body:
             session[key] = body[key]
 
@@ -270,6 +270,7 @@ def add_incoming_leg(
     leg = {
         "card_id": body.get("card_id"),
         "name": body["name"],
+        "card_number": body.get("card_number"),
         "set_name": body.get("set_name"),
         "condition": body.get("condition"),
         "finish": body.get("finish", "normal"),
@@ -426,6 +427,10 @@ def confirm_trade_session(
     if not outgoing and not incoming:
         raise HTTPException(status_code=422, detail="Trade must have at least one leg")
 
+    # Use trade_date if set (for backdating), otherwise today
+    trade_date_str = session.get("trade_date")
+    txn_date = date.fromisoformat(trade_date_str) if trade_date_str else date.today()
+
     show_id = session.get("show_id")
     items_sold = 0
     items_created = 0
@@ -440,7 +445,7 @@ def confirm_trade_session(
             type=TransactionType.SALE,
             item_id=item_id,
             category=ItemCategory.RAW,
-            date=date.today(),
+            date=txn_date,
             amount=agreed_value,
             payment_method="trade",
             show_id=show_id,
@@ -473,7 +478,7 @@ def confirm_trade_session(
             "cost_basis": str(agreed_value),
             "market_value_at_purchase": str(leg.get("market_value") or agreed_value),
             "current_market_value": str(leg.get("market_value") or agreed_value),
-            "acquired_at": date.today().isoformat(),
+            "acquired_at": txn_date.isoformat(),
             "acquired_show_id": show_id,
             "display_name": leg.get("name"),
         }
@@ -485,7 +490,7 @@ def confirm_trade_session(
             type=TransactionType.PURCHASE,
             item_id=new_item_id,
             category=ItemCategory.RAW,
-            date=date.today(),
+            date=txn_date,
             amount=agreed_value,
             payment_method="trade",
             show_id=show_id,
@@ -509,7 +514,7 @@ def confirm_trade_session(
             type=txn_type,
             item_id=trade_id,  # Use trade_id as item_id for cash transactions
             category=ItemCategory.RAW,
-            date=date.today(),
+            date=txn_date,
             amount=cash_amount,
             payment_method=cash.get("payment_method", "cash"),
             show_id=show_id,

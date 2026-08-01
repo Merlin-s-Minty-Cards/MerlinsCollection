@@ -25,6 +25,7 @@ interface InventoryItem {
   cost_basis?: string
   current_market_value?: string
   sticker_price?: string
+  sticker_notes?: string
   finish?: string
   language?: string
   notes?: string
@@ -35,6 +36,7 @@ interface InventoryItem {
 const STATUS_OPTIONS = ['', 'available', 'sold', 'lost', 'on_hold', 'consigned']
 const CONDITION_OPTIONS = ['', 'M', 'NM', 'LP', 'MP', 'HP', 'D']
 const KIND_OPTIONS = ['', 'raw', 'graded', 'sealed', 'bulk']
+const LOCATION_OPTIONS = ['glass', 'toploader', 'binder', 'storage']
 
 export default function AdminInventoryPage() {
   const api = useAdminApi()
@@ -128,7 +130,12 @@ export default function AdminInventoryPage() {
     if (!deleteTarget) return
     setDeleting(true)
     try {
-      await api.del(`/inventory/${deleteTarget.item_id}`)
+      // If already lost, perform hard delete; otherwise soft-delete (mark as lost)
+      const isLost = deleteTarget.status === 'lost'
+      const url = isLost
+        ? `/inventory/${deleteTarget.item_id}?hard=true`
+        : `/inventory/${deleteTarget.item_id}`
+      await api.del(url)
       setDeleteTarget(null)
       fetchItems()
     } catch (err) {
@@ -194,15 +201,18 @@ export default function AdminInventoryPage() {
       render: (item) => {
         if (editingId === item.item_id && editField === 'location') {
           return (
-            <input
-              type="text"
+            <select
               value={editValue}
-              onChange={(e) => setEditValue(e.target.value)}
+              onChange={(e) => { setEditValue(e.target.value); }}
               onBlur={saveEdit}
-              onKeyDown={(e) => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') { setEditingId(null); setEditField(null); } }}
-              className="vault-field px-1.5 py-0.5 text-xs w-24 rounded"
+              className="vault-field px-1.5 py-0.5 text-xs w-28 rounded"
               autoFocus
-            />
+            >
+              <option value="">— None —</option>
+              {LOCATION_OPTIONS.map((loc) => (
+                <option key={loc} value={loc}>{loc}</option>
+              ))}
+            </select>
           )
         }
         return (
@@ -220,7 +230,7 @@ export default function AdminInventoryPage() {
     },
     {
       key: 'cost_basis',
-      label: 'Cost',
+      label: 'Price Paid',
       sortable: true,
       className: 'text-right',
       render: (item) => (
@@ -242,6 +252,7 @@ export default function AdminInventoryPage() {
       className: 'text-right',
       render: (item) => {
         const sticker = item.sticker_price as string | undefined
+        const stickerNotes = item.sticker_notes as string | undefined
         if (editingId === item.item_id && editField === 'sticker_price') {
           return (
             <input
@@ -261,9 +272,10 @@ export default function AdminInventoryPage() {
             type="button"
             onClick={(e) => { e.stopPropagation(); startEdit(item, 'sticker_price') }}
             className="text-xs text-amber-400/80 hover:text-amber-300 cursor-pointer flex items-center gap-1 group justify-end w-full"
-            title="Click to edit sticker price"
+            title={stickerNotes ? `Note: ${stickerNotes}` : 'Click to edit sticker price'}
           >
             <span className="font-mono">{sticker ? `$${parseFloat(sticker).toFixed(2)}` : '—'}</span>
+            {stickerNotes && <span className="text-[8px] text-pine-500">*</span>}
             <Pencil size={10} className="opacity-0 group-hover:opacity-100" />
           </button>
         )
@@ -350,9 +362,13 @@ export default function AdminInventoryPage() {
       {/* Delete confirmation */}
       <ConfirmDialog
         open={!!deleteTarget}
-        title="Delete Item"
-        description={`Are you sure you want to delete "${deleteTarget?.display_name || deleteTarget?.product_name || 'this item'}"? This will soft-delete (mark as lost).`}
-        confirmLabel="Delete"
+        title={deleteTarget?.status === 'lost' ? 'Permanently Delete' : 'Delete Item'}
+        description={
+          deleteTarget?.status === 'lost'
+            ? `This will permanently delete "${deleteTarget?.display_name || deleteTarget?.product_name || 'this item'}". This cannot be undone.`
+            : `Are you sure you want to delete "${deleteTarget?.display_name || deleteTarget?.product_name || 'this item'}"? This will mark it as lost.`
+        }
+        confirmLabel={deleteTarget?.status === 'lost' ? 'Permanently Delete' : 'Delete'}
         variant="danger"
         loading={deleting}
         onConfirm={handleDelete}
@@ -492,7 +508,9 @@ function CreateItemModal({
           </label>
           <label>
             <span className="text-[11px] text-pine-400 uppercase tracking-wider">Location</span>
-            <input value={form.location} onChange={(e) => update('location', e.target.value)} className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs" />
+            <select value={form.location} onChange={(e) => update('location', e.target.value)} className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs">
+              {LOCATION_OPTIONS.map((loc) => <option key={loc} value={loc}>{loc}</option>)}
+            </select>
           </label>
           <label>
             <span className="text-[11px] text-pine-400 uppercase tracking-wider">Language</span>

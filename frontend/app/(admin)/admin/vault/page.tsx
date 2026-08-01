@@ -115,7 +115,7 @@ export default function AdminVaultPage() {
             <div className="text-lg font-mono font-semibold text-pine-100">{summary.total_items}</div>
           </div>
           <div className="vault-panel rounded-xl p-4">
-            <div className="text-[10px] text-pine-400 uppercase tracking-wider mb-1">Cost Basis</div>
+            <div className="text-[10px] text-pine-400 uppercase tracking-wider mb-1">Price Paid</div>
             <div className="text-lg font-mono font-semibold text-pine-100">
               <PriceDisplay value={summary.total_cost_basis} className="text-lg font-mono font-semibold text-pine-100" />
             </div>
@@ -173,7 +173,7 @@ export default function AdminVaultPage() {
                   {showImages && <th className="px-2 py-2 font-medium w-12"></th>}
                   <th className="px-4 py-2 font-medium">Card</th>
                   <th className="px-4 py-2 font-medium">Condition</th>
-                  <th className="px-4 py-2 font-medium text-right">Cost</th>
+                  <th className="px-4 py-2 font-medium text-right">Price Paid</th>
                   <th className="px-4 py-2 font-medium text-right">Market</th>
                   <th className="px-4 py-2 font-medium text-right">Sticker</th>
                   <th className="px-4 py-2 font-medium text-right">$ Net</th>

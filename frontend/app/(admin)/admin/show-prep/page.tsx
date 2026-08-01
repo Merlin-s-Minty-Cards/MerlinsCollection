@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { MapPin, AlertTriangle, ArrowRight, Check } from 'lucide-react'
+import { MapPin, AlertTriangle, ArrowRight, Check, ExternalLink, Link2, Tag } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { useCardImages } from '@/lib/use-card-images'
 import DataTable, { Column } from '@/components/admin/shared/DataTable'
@@ -18,8 +18,10 @@ interface MispricedItem {
   cost_basis: string
   current_market_value: string
   sticker_price?: string | null
+  sticker_notes?: string | null
   delta_pct: string
   delta_dollar?: string
+  tcg_url?: string | null
   [key: string]: unknown
 }
 
@@ -46,11 +48,23 @@ export default function AdminShowPrepPage() {
   const [moving, setMoving] = useState(false)
   const [moveResult, setMoveResult] = useState<string | null>(null)
 
+  // Mass sticker update
+  const [stickerValue, setStickerValue] = useState('')
+  const [updatingStickers, setUpdatingStickers] = useState(false)
+
   // Image toggle and detail modal
   const [showImages, setShowImages] = useState(false)
   const [detailItem, setDetailItem] = useState<MispricedItem | null>(null)
   const cardIds = mispriced.map((i) => i.card_id)
   const { getImageUrl } = useCardImages(showImages ? cardIds : [])
+
+  // TCG URL inline edit
+  const [editingTcgId, setEditingTcgId] = useState<string | null>(null)
+  const [tcgUrlInput, setTcgUrlInput] = useState('')
+
+  // Sort
+  const [sortKey, setSortKey] = useState<string | null>(null)
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
   const fetchMispriced = useCallback(async () => {
     if (!api.isAuthenticated) return
@@ -108,6 +122,58 @@ export default function AdminShowPrepPage() {
     }
   }
 
+  const handleBulkStickerUpdate = async () => {
+    if (selectedIds.size === 0 || !stickerValue.trim()) return
+    setUpdatingStickers(true)
+    setMoveResult(null)
+    let updated = 0
+    const price = parseFloat(stickerValue)
+    if (isNaN(price) || price < 0) { setUpdatingStickers(false); return }
+
+    for (const id of selectedIds) {
+      try {
+        await api.put(`/inventory/${id}`, { sticker_price: stickerValue })
+        updated++
+      } catch { /* continue on error */ }
+    }
+    setMoveResult(`Updated sticker price to $${price.toFixed(2)} on ${updated} item${updated !== 1 ? 's' : ''}`)
+    setStickerValue('')
+    setSelectedIds(new Set())
+    setUpdatingStickers(false)
+    fetchMispriced()
+  }
+
+  const handleSaveTcgUrl = async (itemId: string) => {
+    try {
+      await api.put(`/inventory/${itemId}`, { tcg_url: tcgUrlInput.trim() || null })
+      setMispriced((prev) => prev.map((i) => i.item_id === itemId ? { ...i, tcg_url: tcgUrlInput.trim() || null } : i))
+    } catch (err) {
+      alert(err instanceof AdminApiError ? err.detail : 'Failed to save URL')
+    }
+    setEditingTcgId(null)
+    setTcgUrlInput('')
+  }
+
+  const handleSort = (key: string) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setSortKey(key)
+      setSortDir('desc')
+    }
+  }
+
+  // Apply local sort
+  const sortedMispriced = [...mispriced].sort((a, b) => {
+    if (!sortKey) return 0
+    if (sortKey === 'delta_pct') {
+      const aVal = parseFloat(a.delta_pct) || 0
+      const bVal = parseFloat(b.delta_pct) || 0
+      return sortDir === 'asc' ? aVal - bVal : bVal - aVal
+    }
+    return 0
+  })
+
   const columns: Column<MispricedItem>[] = [
     ...(showImages
       ? [
@@ -138,7 +204,7 @@ export default function AdminShowPrepPage() {
     },
     {
       key: 'cost_basis',
-      label: 'Cost',
+      label: 'Price Paid',
       className: 'text-right',
       render: (item) => <PriceDisplay value={item.cost_basis} className="text-xs text-pine-300" />,
     },
@@ -152,11 +218,21 @@ export default function AdminShowPrepPage() {
       key: 'sticker_price',
       label: 'Sticker',
       className: 'text-right',
-      render: (item) => item.sticker_price ? <PriceDisplay value={item.sticker_price} className="text-xs text-amber-400" /> : <span className="text-xs text-pine-600">—</span>,
+      render: (item) => (
+        <div className="flex items-center justify-end gap-1">
+          {item.sticker_price ? <PriceDisplay value={item.sticker_price} className="text-xs text-amber-400" /> : <span className="text-xs text-pine-600">—</span>}
+          {item.sticker_notes && (
+            <span className="text-[9px] text-pine-500 italic truncate max-w-[60px]" title={item.sticker_notes}>
+              ({item.sticker_notes})
+            </span>
+          )}
+        </div>
+      ),
     },
     {
       key: 'delta_pct',
       label: 'Delta',
+      sortable: true,
       className: 'text-right',
       render: (item) => {
         const pctVal = parseFloat(item.delta_pct)
@@ -166,6 +242,51 @@ export default function AdminShowPrepPage() {
           return <span className={`text-xs font-mono ${color}`}>{dollarVal > 0 ? '+' : ''}${dollarVal.toFixed(2)} ({pctVal > 0 ? '+' : ''}{pctVal.toFixed(1)}%)</span>
         }
         return <span className={`text-xs font-mono ${color}`}>{pctVal > 0 ? '+' : ''}{pctVal.toFixed(1)}%{dollarVal !== null ? ` ($${dollarVal > 0 ? '+' : ''}${dollarVal.toFixed(2)})` : ''}</span>
+      },
+    },
+    {
+      key: '_tcg_url',
+      label: 'TCG Link',
+      className: 'w-28',
+      render: (item) => {
+        if (editingTcgId === item.item_id) {
+          return (
+            <input
+              type="url"
+              value={tcgUrlInput}
+              onChange={(e) => setTcgUrlInput(e.target.value)}
+              onBlur={() => handleSaveTcgUrl(item.item_id)}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleSaveTcgUrl(item.item_id); if (e.key === 'Escape') { setEditingTcgId(null); setTcgUrlInput('') } }}
+              placeholder="Paste URL…"
+              className="vault-field w-full px-1.5 py-0.5 rounded text-[10px]"
+              autoFocus
+            />
+          )
+        }
+        if (item.tcg_url) {
+          return (
+            <a
+              href={item.tcg_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="inline-flex items-center gap-1 text-[10px] text-blue-400 hover:text-blue-300"
+            >
+              <ExternalLink size={11} />
+              TCGplayer
+            </a>
+          )
+        }
+        return (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); setEditingTcgId(item.item_id); setTcgUrlInput(item.tcg_url || '') }}
+            className="inline-flex items-center gap-1 text-[10px] text-pine-500 hover:text-pine-300"
+          >
+            <Link2 size={11} />
+            Add
+          </button>
+        )
       },
     },
   ]
@@ -199,14 +320,17 @@ export default function AdminShowPrepPage() {
 
       {/* Mispriced cards */}
       <section className="space-y-4">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between flex-wrap gap-3">
           <div className="flex items-center gap-2">
             <AlertTriangle size={15} className="text-amber-400" />
             <h2 className="text-xs font-semibold text-pine-200 uppercase tracking-wider">
               Mispriced Cards
             </h2>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
+            {/* Image toggle — moved to top */}
+            <ImageToggle showImages={showImages} onToggle={() => setShowImages(!showImages)} label="Images" />
+
             {/* Mode toggle */}
             <div className="flex rounded-lg border border-pine-700/40 overflow-hidden">
               <button
@@ -250,12 +374,14 @@ export default function AdminShowPrepPage() {
           </div>
         </div>
 
-        {/* Bulk move bar */}
+        {/* Bulk actions bar */}
         {selectedIds.size > 0 && (
-          <div className="vault-panel rounded-lg px-4 py-2.5 flex items-center gap-3">
+          <div className="vault-panel rounded-lg px-4 py-2.5 flex items-center gap-3 flex-wrap">
             <span className="text-xs text-pine-200">
               <span className="font-mono text-mint">{selectedIds.size}</span> selected
             </span>
+
+            {/* Bulk move */}
             <ArrowRight size={14} className="text-pine-500" />
             <input
               type="text"
@@ -272,6 +398,30 @@ export default function AdminShowPrepPage() {
             >
               {moving ? 'Moving…' : 'Move'}
             </button>
+
+            {/* Bulk sticker update */}
+            <div className="border-l border-pine-700/40 pl-3 flex items-center gap-2">
+              <Tag size={13} className="text-amber-400" />
+              <div className="relative">
+                <span className="absolute left-1.5 top-1/2 -translate-y-1/2 text-[10px] text-pine-500">$</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={stickerValue}
+                  onChange={(e) => setStickerValue(e.target.value)}
+                  placeholder="0.00"
+                  className="vault-field w-20 pl-4 pr-1.5 py-1 rounded-lg text-xs font-mono"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={handleBulkStickerUpdate}
+                disabled={!stickerValue.trim() || updatingStickers}
+                className="px-3 py-1.5 rounded-lg text-[11px] font-medium bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25 disabled:opacity-40 transition-colors"
+              >
+                {updatingStickers ? 'Updating…' : 'Set Sticker'}
+              </button>
+            </div>
           </div>
         )}
 
@@ -284,7 +434,7 @@ export default function AdminShowPrepPage() {
 
         <DataTable
           columns={columns}
-          data={mispriced}
+          data={sortedMispriced}
           keyField="item_id"
           loading={loadingMispriced}
           emptyMessage="No mispriced items found at this threshold"
@@ -292,11 +442,10 @@ export default function AdminShowPrepPage() {
           onSelect={handleSelect}
           onSelectAll={handleSelectAll}
           onRowClick={(item) => setDetailItem(item)}
+          sortKey={sortKey}
+          sortDir={sortDir}
+          onSort={handleSort}
         />
-
-        <div className="mt-3">
-          <ImageToggle showImages={showImages} onToggle={() => setShowImages(!showImages)} label="Images" />
-        </div>
       </section>
 
       <CardDetailModal

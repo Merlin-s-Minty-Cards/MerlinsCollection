@@ -56,6 +56,7 @@ export default function AdminSellPage() {
   const [paymentMethod, setPaymentMethod] = useState('cash')
   const [counterparty, setCounterparty] = useState('')
   const [notes, setNotes] = useState('')
+  const [saleDate, setSaleDate] = useState(new Date().toISOString().split('T')[0])
 
   // Search
   const [search, setSearch] = useState('')
@@ -190,6 +191,7 @@ export default function AdminSellPage() {
         payment_method: paymentMethod,
         counterparty: counterparty || null,
         notes: notes || null,
+        sale_date: saleDate || null,
       })
       const result = await api.post<{
         items_sold: number
@@ -216,6 +218,7 @@ export default function AdminSellPage() {
     setConfirmResult(null)
     setFeePreview(null)
     setBulkDiscount('')
+    setSaleDate(new Date().toISOString().split('T')[0])
   }
 
   // Confirmed state
@@ -315,6 +318,15 @@ export default function AdminSellPage() {
           {/* Session info */}
           <div className="vault-panel rounded-xl p-4 space-y-3">
             <label className="block">
+              <span className="text-[11px] text-pine-400 uppercase tracking-wider">Date</span>
+              <input
+                type="date"
+                value={saleDate}
+                onChange={(e) => setSaleDate(e.target.value)}
+                className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs"
+              />
+            </label>
+            <label className="block">
               <span className="text-[11px] text-pine-400 uppercase tracking-wider">Customer</span>
               <input
                 value={counterparty}
@@ -394,7 +406,7 @@ export default function AdminSellPage() {
                             <span>Market: <PriceDisplay value={item.original_price} className="text-[10px] text-pine-500 inline" /></span>
                           )}
                           {item.cost_basis && (
-                            <span>Cost: <PriceDisplay value={item.cost_basis} className="text-[10px] text-pine-500 inline" /></span>
+                            <span>Price Paid: <PriceDisplay value={item.cost_basis} className="text-[10px] text-pine-500 inline" /></span>
                           )}
                           {marginPct && (
                             <span className={`font-mono ${marginColor}`}>{parseFloat(marginPct) >= 0 ? '+' : ''}{marginPct}%</span>
