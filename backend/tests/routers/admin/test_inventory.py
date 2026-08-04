@@ -257,6 +257,170 @@ class TestAdminInventorySearch:
 
 
 # ===========================================================================
+# A5: Enhanced Inventory Search — card_number, artist, min/max price
+# ===========================================================================
+
+class TestAdminInventorySearchEnhanced:
+    """A5: Additional filter params for admin inventory search."""
+
+    def test_filter_by_card_number(self, admin_client):
+        """card_number filters by matching the catalog card's number field."""
+        client, repo, admin_token, _ = admin_client
+        # Create catalog cards with different numbers
+        repo.batch_upsert_catalog_cards([
+            _catalog(card_id="sv1-25", name="Pikachu", number="025"),
+            _catalog(card_id="sv1-4", name="Charizard", number="004"),
+        ])
+        repo.put_inventory_item(_raw(item_id="pika-1", card_id="sv1-25"))
+        repo.put_inventory_item(_raw(item_id="char-1", card_id="sv1-4"))
+
+        resp = client.get(
+            "/admin/inventory/search?card_number=025",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["items"][0]["item_id"] == "pika-1"
+
+    def test_filter_by_artist(self, admin_client):
+        """artist filters by case-insensitive substring on catalog artist field."""
+        client, repo, admin_token, _ = admin_client
+        repo.batch_upsert_catalog_cards([
+            _catalog(card_id="sv1-25", name="Pikachu", number="025", artist="Mitsuhiro Arita"),
+            _catalog(card_id="sv1-4", name="Charizard", number="004", artist="Ken Sugimori"),
+        ])
+        repo.put_inventory_item(_raw(item_id="pika-1", card_id="sv1-25"))
+        repo.put_inventory_item(_raw(item_id="char-1", card_id="sv1-4"))
+
+        resp = client.get(
+            "/admin/inventory/search?artist=arita",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["items"][0]["item_id"] == "pika-1"
+
+    def test_filter_by_artist_partial_match(self, admin_client):
+        """artist substring match works with partial names."""
+        client, repo, admin_token, _ = admin_client
+        repo.batch_upsert_catalog_cards([
+            _catalog(card_id="sv1-25", name="Pikachu", number="025", artist="Mitsuhiro Arita"),
+            _catalog(card_id="sv1-4", name="Charizard", number="004", artist="Ken Sugimori"),
+        ])
+        repo.put_inventory_item(_raw(item_id="pika-1", card_id="sv1-25"))
+        repo.put_inventory_item(_raw(item_id="char-1", card_id="sv1-4"))
+
+        resp = client.get(
+            "/admin/inventory/search?artist=sugi",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["items"][0]["item_id"] == "char-1"
+
+    def test_filter_by_min_price(self, admin_client):
+        """min_price filters items by cost_basis >= threshold."""
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="cheap-1", cost_basis="5.00"))
+        repo.put_inventory_item(_raw(item_id="mid-1", card_id="sv1-2", cost_basis="25.00"))
+        repo.put_inventory_item(_raw(item_id="exp-1", card_id="sv1-3", cost_basis="100.00"))
+
+        resp = client.get(
+            "/admin/inventory/search?min_price=20",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 2
+        ids = {i["item_id"] for i in data["items"]}
+        assert ids == {"mid-1", "exp-1"}
+
+    def test_filter_by_max_price(self, admin_client):
+        """max_price filters items by cost_basis <= threshold."""
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="cheap-1", cost_basis="5.00"))
+        repo.put_inventory_item(_raw(item_id="mid-1", card_id="sv1-2", cost_basis="25.00"))
+        repo.put_inventory_item(_raw(item_id="exp-1", card_id="sv1-3", cost_basis="100.00"))
+
+        resp = client.get(
+            "/admin/inventory/search?max_price=30",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 2
+        ids = {i["item_id"] for i in data["items"]}
+        assert ids == {"cheap-1", "mid-1"}
+
+    def test_filter_by_price_range(self, admin_client):
+        """min_price + max_price combined to form a range."""
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="cheap-1", cost_basis="5.00"))
+        repo.put_inventory_item(_raw(item_id="mid-1", card_id="sv1-2", cost_basis="25.00"))
+        repo.put_inventory_item(_raw(item_id="exp-1", card_id="sv1-3", cost_basis="100.00"))
+
+        resp = client.get(
+            "/admin/inventory/search?min_price=10&max_price=50",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["items"][0]["item_id"] == "mid-1"
+
+    def test_filters_combine_with_and(self, admin_client):
+        """Multiple enhanced filters are AND-combined with existing ones."""
+        client, repo, admin_token, _ = admin_client
+        repo.batch_upsert_catalog_cards([
+            _catalog(card_id="sv1-25", name="Pikachu", number="025", artist="Mitsuhiro Arita"),
+            _catalog(card_id="sv1-4", name="Charizard", number="004", artist="Mitsuhiro Arita"),
+        ])
+        repo.put_inventory_item(_raw(item_id="pika-1", card_id="sv1-25", cost_basis="10.00"))
+        repo.put_inventory_item(_raw(item_id="char-1", card_id="sv1-4", cost_basis="50.00"))
+
+        # Filter: artist=arita AND min_price=20 — should only get charizard
+        resp = client.get(
+            "/admin/inventory/search?artist=arita&min_price=20",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["items"][0]["item_id"] == "char-1"
+
+    def test_card_number_no_catalog_match_excluded(self, admin_client):
+        """Items without a card_id or without catalog card are excluded by card_number filter."""
+        client, repo, admin_token, _ = admin_client
+        # Item with no card_id (sealed)
+        from merlins_collection.models.inventory import SealedInventoryItem, SealedProductType
+        sealed = SealedInventoryItem(
+            item_id="sealed-1",
+            product_name="ETB",
+            product_type=SealedProductType.ETB,
+            cost_basis=Decimal("40.00"),
+            acquired_at=date(2025, 1, 1),
+        )
+        repo.put_inventory_item(sealed)
+        # Item with card_id but matching number
+        repo.batch_upsert_catalog_cards([
+            _catalog(card_id="sv1-25", name="Pikachu", number="025"),
+        ])
+        repo.put_inventory_item(_raw(item_id="pika-1", card_id="sv1-25"))
+
+        resp = client.get(
+            "/admin/inventory/search?card_number=025",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["items"][0]["item_id"] == "pika-1"
+
+
+# ===========================================================================
 # Get single item
 # ===========================================================================
 

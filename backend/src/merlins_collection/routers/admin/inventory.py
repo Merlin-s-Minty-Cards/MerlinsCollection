@@ -10,6 +10,7 @@ Unlike the customer ``/inventory/search``, this surface:
 from __future__ import annotations
 
 from datetime import date, timedelta
+from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -80,6 +81,10 @@ def admin_search_inventory(
     location: str | None = Query(None),
     condition: Condition | None = Query(None),
     kind: str | None = Query(None),
+    card_number: str | None = Query(None, max_length=20),
+    artist: str | None = Query(None, max_length=200),
+    min_price: Decimal | None = Query(None, ge=0),
+    max_price: Decimal | None = Query(None, ge=0),
     sort: str | None = Query(None),
     repo: InventoryRepository = Depends(get_repo),
 ) -> AdminInventorySearchResult:
@@ -111,6 +116,17 @@ def admin_search_inventory(
             i for i in items
             if _item_matches_name(i, name_lower)
         ]
+
+    # A5: Price range filters (cost_basis)
+    if min_price is not None:
+        items = [i for i in items if i.cost_basis is not None and i.cost_basis >= min_price]
+
+    if max_price is not None:
+        items = [i for i in items if i.cost_basis is not None and i.cost_basis <= max_price]
+
+    # A5: Catalog-based filters (card_number, artist) — requires joining with catalog
+    if card_number is not None or artist is not None:
+        items = _filter_by_catalog(items, repo, card_number=card_number, artist=artist)
 
     # Sort
     items = _sort_admin_results(items, sort)
@@ -383,6 +399,60 @@ def admin_resolve_card_images(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _filter_by_catalog(
+    items: list[InventoryItem],
+    repo: InventoryRepository,
+    *,
+    card_number: str | None = None,
+    artist: str | None = None,
+) -> list[InventoryItem]:
+    """Filter items by catalog card attributes (card_number, artist).
+
+    Items without a card_id are excluded when these filters are active.
+    Catalog cards are fetched in batch to avoid N+1 queries.
+    """
+    # Collect unique card_ids from items
+    card_ids = list({
+        getattr(item, "card_id", None)
+        for item in items
+        if getattr(item, "card_id", None) is not None
+    })
+
+    if not card_ids:
+        return []
+
+    # Batch-fetch catalog cards
+    catalog_map = {}
+    for card_id in card_ids:
+        card = repo.get_catalog_card(card_id)
+        if card is not None:
+            catalog_map[card_id] = card
+
+    result = []
+    for item in items:
+        item_card_id = getattr(item, "card_id", None)
+        if item_card_id is None:
+            continue
+        card = catalog_map.get(item_card_id)
+        if card is None:
+            continue
+
+        # Apply card_number filter (exact match)
+        if card_number is not None:
+            if card.number != card_number:
+                continue
+
+        # Apply artist filter (case-insensitive substring)
+        if artist is not None:
+            card_artist = getattr(card, "artist", None) or ""
+            if artist.lower() not in card_artist.lower():
+                continue
+
+        result.append(item)
+
+    return result
+
 
 def _item_matches_name(item: InventoryItem, name_lower: str) -> bool:
     """Check if an item matches a name substring (case-insensitive).

@@ -86,6 +86,7 @@ class CatalogCard(BaseModel):
     set_name: str
     number: str
     rarity: str | None = None
+    artist: str | None = None
     types: list[str] = []
     images: CardImages = CardImages()
     prices: dict[str, FinishPrice] = {}
