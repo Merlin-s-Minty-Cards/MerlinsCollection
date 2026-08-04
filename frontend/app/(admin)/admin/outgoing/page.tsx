@@ -1,29 +1,22 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
-import {
-  Package,
-  Truck,
-  Check,
-  Filter,
-  Pencil,
-  X,
-} from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Check, Pencil, X } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { useCardImages } from '@/lib/use-card-images'
-import { LOCATION_OPTIONS } from '@/lib/constants'
+import { useLocations } from '@/lib/use-locations'
 import DataTable, { Column } from '@/components/admin/shared/DataTable'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import CardImage from '@/components/admin/shared/CardImage'
 import ImageToggle from '@/components/admin/shared/ImageToggle'
-import StatusBadge from '@/components/admin/shared/StatusBadge'
+import InlineEditCell from '@/components/admin/shared/InlineEditCell'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-interface OutgoingItem {
+interface PrepQueueItem {
   item_id: string
   card_id?: string
   name?: string
@@ -34,41 +27,35 @@ interface OutgoingItem {
   sticker_price?: string | null
   cost_basis?: string | null
   current_market_value?: string | null
-  counterparty?: string | null
-  buyer_name?: string | null
   set_name?: string | null
   condition?: string | null
   [key: string]: unknown
 }
 
-type OutgoingFilter = 'all' | 'sold' | 'shipped' | 'completed'
-
 // ---------------------------------------------------------------------------
 // Main Page
 // ---------------------------------------------------------------------------
 
-export default function AdminOutgoingPage() {
+export default function AdminPrepQueuePage() {
   const api = useAdminApi()
+  const { options: locationOptions } = useLocations()
 
   // Data state
-  const [items, setItems] = useState<OutgoingItem[]>([])
+  const [items, setItems] = useState<PrepQueueItem[]>([])
   const [loading, setLoading] = useState(true)
-  const [filter, setFilter] = useState<OutgoingFilter>('all')
 
-  // Inline editing
-  const [editingPrice, setEditingPrice] = useState<string | null>(null)
-  const [editPriceValue, setEditPriceValue] = useState('')
+  // Inline location editing (select — not handled by InlineEditCell)
   const [editingLocation, setEditingLocation] = useState<string | null>(null)
   const [editLocationValue, setEditLocationValue] = useState('')
   const [saving, setSaving] = useState(false)
 
-  // Images
-  const [showImages, setShowImages] = useState(false)
+  // Images — default ON per spec
+  const [showImages, setShowImages] = useState(true)
   const cardIds = items.map((i) => i.card_id)
   const { getImageUrl } = useCardImages(showImages ? cardIds : [])
 
   // Detail modal
-  const [detailItem, setDetailItem] = useState<OutgoingItem | null>(null)
+  const [detailItem, setDetailItem] = useState<PrepQueueItem | null>(null)
 
   // Toast message
   const [message, setMessage] = useState<string | null>(null)
@@ -81,9 +68,11 @@ export default function AdminOutgoingPage() {
     if (!api.isAuthenticated) return
     setLoading(true)
     try {
-      // Fetch sold items — the outgoing queue
-      const params: Record<string, string> = { status: 'sold' }
-      const res = await api.get<{ items: OutgoingItem[] }>('/inventory/search', params)
+      const params: Record<string, string> = {
+        status: 'available',
+        missing_sticker: 'true',
+      }
+      const res = await api.get<{ items: PrepQueueItem[] }>('/inventory/search', params)
       setItems(res.items ?? [])
     } catch {
       setItems([])
@@ -97,46 +86,27 @@ export default function AdminOutgoingPage() {
   }, [fetchItems])
 
   // ---------------------------------------------------------------------------
-  // Filtering
+  // Inline sticker price editing (via InlineEditCell)
   // ---------------------------------------------------------------------------
 
-  const filteredItems = items.filter((item) => {
-    if (filter === 'all') return true
-    if (filter === 'sold') return item.status === 'sold' && item.location !== 'sold_pile'
-    if (filter === 'shipped') return item.location === 'sold_pile'
-    if (filter === 'completed') return item.status === 'completed'
-    return true
-  })
-
-  // ---------------------------------------------------------------------------
-  // Inline sticker price editing
-  // ---------------------------------------------------------------------------
-
-  const startPriceEdit = (itemId: string, currentPrice: string | null | undefined) => {
-    setEditingPrice(itemId)
-    setEditPriceValue(currentPrice ?? '')
-  }
-
-  const cancelPriceEdit = () => {
-    setEditingPrice(null)
-    setEditPriceValue('')
-  }
-
-  const savePriceEdit = async (itemId: string) => {
-    setSaving(true)
-    try {
-      const price = editPriceValue.trim() === '' ? null : editPriceValue.trim()
+  const handleStickerSave = useCallback(
+    async (itemId: string, newValue: string) => {
+      const price = newValue.trim() === '' ? null : newValue.trim()
       await api.put(`/inventory/${itemId}`, { sticker_price: price })
-      setEditingPrice(null)
-      setEditPriceValue('')
-      setMessage('Sticker price updated')
+      setMessage('Priced → removed from queue')
       fetchItems()
-    } catch (err) {
-      setMessage(err instanceof AdminApiError ? (err.detail ?? 'Update failed') : 'Update failed')
-    } finally {
-      setSaving(false)
-    }
-  }
+    },
+    [api, fetchItems],
+  )
+
+  const handleStickerError = useCallback(
+    (err: unknown) => {
+      setMessage(
+        err instanceof AdminApiError ? (err.detail ?? 'Update failed') : 'Update failed',
+      )
+    },
+    [],
+  )
 
   // ---------------------------------------------------------------------------
   // Inline location editing
@@ -169,36 +139,6 @@ export default function AdminOutgoingPage() {
   }
 
   // ---------------------------------------------------------------------------
-  // Completion workflow
-  // ---------------------------------------------------------------------------
-
-  const markAsShipped = async (itemId: string) => {
-    setSaving(true)
-    try {
-      await api.put(`/inventory/${itemId}`, { location: 'sold_pile' })
-      setMessage('Marked as shipped')
-      fetchItems()
-    } catch (err) {
-      setMessage(err instanceof AdminApiError ? (err.detail ?? 'Failed') : 'Failed')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  const markAsCompleted = async (itemId: string) => {
-    setSaving(true)
-    try {
-      await api.put(`/inventory/${itemId}`, { status: 'completed' })
-      setMessage('Marked as completed')
-      fetchItems()
-    } catch (err) {
-      setMessage(err instanceof AdminApiError ? (err.detail ?? 'Failed') : 'Failed')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  // ---------------------------------------------------------------------------
   // Clear message on timeout
   // ---------------------------------------------------------------------------
 
@@ -213,7 +153,7 @@ export default function AdminOutgoingPage() {
   // Helpers
   // ---------------------------------------------------------------------------
 
-  const getItemName = (item: OutgoingItem): string => {
+  const getItemName = (item: PrepQueueItem): string => {
     return item.display_name || item.product_name || item.name || '(unnamed)'
   }
 
@@ -221,18 +161,18 @@ export default function AdminOutgoingPage() {
   // Table columns
   // ---------------------------------------------------------------------------
 
-  const columns: Column<OutgoingItem>[] = [
+  const columns: Column<PrepQueueItem>[] = [
     ...(showImages
       ? [
           {
             key: '_image',
             label: '',
             className: 'w-24',
-            render: (item: OutgoingItem) => (
+            render: (item: PrepQueueItem) => (
               <CardImage
                 imageUrl={getImageUrl(item.card_id)}
                 alt={getItemName(item)}
-                size="md"
+                size="lg"
               />
             ),
           },
@@ -267,61 +207,24 @@ export default function AdminOutgoingPage() {
       key: 'sticker_price',
       label: 'Sticker',
       className: 'w-28',
-      render: (item) => {
-        if (editingPrice === item.item_id) {
-          return (
-            <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-              <div className="relative">
-                <span className="absolute left-1.5 top-1/2 -translate-y-1/2 text-[10px] text-pine-500">$</span>
-                <input
-                  type="number"
-                  step="0.01"
-                  value={editPriceValue}
-                  onChange={(e) => setEditPriceValue(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') savePriceEdit(item.item_id)
-                    if (e.key === 'Escape') cancelPriceEdit()
-                  }}
-                  onBlur={() => savePriceEdit(item.item_id)}
-                  className="vault-field w-20 pl-4 pr-1.5 py-0.5 rounded text-xs font-mono"
-                  autoFocus
-                  disabled={saving}
-                />
-              </div>
-              <button
-                type="button"
-                onClick={() => cancelPriceEdit()}
-                className="p-0.5 text-pine-500 hover:text-pine-300"
-                aria-label="Cancel"
-              >
-                <X size={12} />
-              </button>
-            </div>
-          )
-        }
-        return (
-          <div
-            className="flex items-center gap-1 group/price cursor-pointer"
-            onClick={(e) => {
-              e.stopPropagation()
-              startPriceEdit(item.item_id, item.sticker_price)
-            }}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') startPriceEdit(item.item_id, item.sticker_price)
-            }}
-            aria-label={`Edit sticker price for ${getItemName(item)}`}
-          >
-            {item.sticker_price ? (
+      render: (item) => (
+        <InlineEditCell
+          value={item.sticker_price ?? ''}
+          type="number"
+          prefix="$"
+          placeholder="0.00"
+          aria-label={`Edit sticker price for ${getItemName(item)}`}
+          displayValue={
+            item.sticker_price ? (
               <PriceDisplay value={item.sticker_price} className="text-xs text-amber-400" />
             ) : (
               <span className="text-xs text-pine-600">—</span>
-            )}
-            <Pencil size={10} className="text-pine-600 opacity-0 group-hover/price:opacity-100 transition-opacity" />
-          </div>
-        )
-      },
+            )
+          }
+          onSave={(v) => handleStickerSave(item.item_id, v)}
+          onError={handleStickerError}
+        />
+      ),
     },
     {
       key: 'location',
@@ -342,8 +245,7 @@ export default function AdminOutgoingPage() {
                 autoFocus
                 disabled={saving}
               >
-                <option value="">— None —</option>
-                {LOCATION_OPTIONS.map((loc) => (
+                {locationOptions.map((loc) => (
                   <option key={loc.value} value={loc.value}>
                     {loc.label}
                   </option>
@@ -387,56 +289,10 @@ export default function AdminOutgoingPage() {
       render: (item) => <PriceDisplay value={item.cost_basis} className="text-xs text-pine-400" />,
     },
     {
-      key: 'counterparty',
-      label: 'Buyer',
-      className: 'w-28',
-      render: (item) => (
-        <span className="text-xs text-pine-300 truncate block max-w-[100px]">
-          {item.buyer_name || item.counterparty || '—'}
-        </span>
-      ),
-    },
-    {
-      key: 'status',
-      label: 'Status',
-      className: 'w-24',
-      render: (item) => <StatusBadge status={item.status} />,
-    },
-    {
-      key: '_actions',
-      label: '',
-      className: 'w-28',
-      render: (item) => (
-        <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-          {item.location !== 'sold_pile' && item.status !== 'completed' && (
-            <button
-              type="button"
-              onClick={() => markAsShipped(item.item_id)}
-              disabled={saving}
-              className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium text-blue-400 bg-blue-400/10 border border-blue-400/20 hover:bg-blue-400/20 disabled:opacity-40 transition-colors"
-              title="Mark as shipped"
-            >
-              <Truck size={11} />
-              Ship
-            </button>
-          )}
-          {item.location === 'sold_pile' && item.status !== 'completed' && (
-            <button
-              type="button"
-              onClick={() => markAsCompleted(item.item_id)}
-              disabled={saving}
-              className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium text-mint bg-mint/10 border border-mint/20 hover:bg-mint/20 disabled:opacity-40 transition-colors"
-              title="Mark as completed"
-            >
-              <Check size={11} />
-              Done
-            </button>
-          )}
-          {item.status === 'completed' && (
-            <span className="text-[10px] text-pine-500 italic">Completed</span>
-          )}
-        </div>
-      ),
+      key: 'current_market_value',
+      label: 'Market',
+      className: 'text-right w-20',
+      render: (item) => <PriceDisplay value={item.current_market_value} className="text-xs text-pine-400" />,
     },
   ]
 
@@ -444,10 +300,16 @@ export default function AdminOutgoingPage() {
   // Summary stats
   // ---------------------------------------------------------------------------
 
-  const totalItems = items.length
-  const pendingCount = items.filter((i) => i.status === 'sold' && i.location !== 'sold_pile').length
-  const shippedCount = items.filter((i) => i.location === 'sold_pile' && i.status !== 'completed').length
-  const completedCount = items.filter((i) => i.status === 'completed').length
+  const queueCount = items.length
+
+  const estValue = useMemo(() => {
+    return items.reduce((sum, item) => {
+      const raw = item.current_market_value ?? item.cost_basis
+      if (raw == null) return sum
+      const n = typeof raw === 'string' ? parseFloat(raw) : raw
+      return sum + (isNaN(n) ? 0 : n)
+    }, 0)
+  }, [items])
 
   // ---------------------------------------------------------------------------
   // Render
@@ -457,55 +319,30 @@ export default function AdminOutgoingPage() {
     <div className="p-6 lg:p-8 max-w-7xl">
       <header className="mb-6">
         <span className="font-mono text-[11px] uppercase tracking-[0.22em] text-mint/70">
-          Outgoing
+          Prep Queue
         </span>
-        <h1 className="text-xl font-semibold text-pine-100">Outgoing Inventory Queue</h1>
+        <h1 className="text-xl font-semibold text-pine-100">Prep Queue</h1>
         <p className="text-xs text-pine-400 mt-1">
-          Items sold and awaiting shipment or completion
+          New inventory awaiting sticker prices
         </p>
       </header>
 
       {/* Summary cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+      <div className="grid grid-cols-2 gap-3 mb-6">
         <div className="vault-panel rounded-xl px-4 py-3 border border-pine-700/30">
-          <div className="text-[10px] text-pine-500 uppercase tracking-wider mb-1">Total</div>
-          <div className="text-lg font-mono text-pine-100">{totalItems}</div>
+          <div className="text-[10px] text-pine-500 uppercase tracking-wider mb-1">In queue</div>
+          <div className="text-lg font-mono text-pine-100">{queueCount}</div>
         </div>
         <div className="vault-panel rounded-xl px-4 py-3 border border-pine-700/30">
-          <div className="text-[10px] text-pine-500 uppercase tracking-wider mb-1">Pending</div>
-          <div className="text-lg font-mono text-amber-400">{pendingCount}</div>
-        </div>
-        <div className="vault-panel rounded-xl px-4 py-3 border border-pine-700/30">
-          <div className="text-[10px] text-pine-500 uppercase tracking-wider mb-1">Shipped</div>
-          <div className="text-lg font-mono text-blue-400">{shippedCount}</div>
-        </div>
-        <div className="vault-panel rounded-xl px-4 py-3 border border-pine-700/30">
-          <div className="text-[10px] text-pine-500 uppercase tracking-wider mb-1">Completed</div>
-          <div className="text-lg font-mono text-mint">{completedCount}</div>
+          <div className="text-[10px] text-pine-500 uppercase tracking-wider mb-1">Est. value</div>
+          <div className="text-lg font-mono text-amber-400">
+            ${estValue.toFixed(2)}
+          </div>
         </div>
       </div>
 
-      {/* Filter bar */}
-      <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
-        <div className="flex items-center gap-2">
-          <Filter size={14} className="text-pine-400" />
-          <div className="flex rounded-lg border border-pine-700/40 overflow-hidden">
-            {(['all', 'sold', 'shipped', 'completed'] as OutgoingFilter[]).map((f) => (
-              <button
-                key={f}
-                type="button"
-                onClick={() => setFilter(f)}
-                className={`px-3 py-1.5 text-[11px] font-medium capitalize transition-colors ${
-                  filter === f
-                    ? 'bg-mint/15 text-mint'
-                    : 'text-pine-400 hover:text-pine-200'
-                } ${f !== 'all' ? 'border-l border-pine-700/40' : ''}`}
-              >
-                {f === 'sold' ? 'Pending' : f}
-              </button>
-            ))}
-          </div>
-        </div>
+      {/* Image toggle */}
+      <div className="flex items-center justify-end mb-4">
         <ImageToggle showImages={showImages} onToggle={() => setShowImages(!showImages)} label="Images" />
       </div>
 
@@ -520,10 +357,10 @@ export default function AdminOutgoingPage() {
       {/* Data table */}
       <DataTable
         columns={columns}
-        data={filteredItems}
+        data={items}
         keyField="item_id"
         loading={loading}
-        emptyMessage="No outgoing items found"
+        emptyMessage="No items awaiting sticker prices"
         onRowClick={(item) => setDetailItem(item)}
       />
 
