@@ -5,6 +5,7 @@ import { Plus, Trash2, Pencil, RefreshCw } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { CONDITION_OPTIONS as COND_VALUES, LOCATION_OPTIONS as LOC_VALUES } from '@/lib/constants'
 import { useCardImages } from '@/lib/use-card-images'
+import { useLocations } from '@/lib/use-locations'
 import DataTable, { Column } from '@/components/admin/shared/DataTable'
 import SearchInput from '@/components/admin/shared/SearchInput'
 import StatusBadge from '@/components/admin/shared/StatusBadge'
@@ -13,6 +14,7 @@ import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
 import CardImage from '@/components/admin/shared/CardImage'
 import ImageToggle from '@/components/admin/shared/ImageToggle'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
+import OwnershipBadge from '@/components/admin/shared/OwnershipBadge'
 
 interface InventoryItem {
   item_id: string
@@ -31,6 +33,7 @@ interface InventoryItem {
   language?: string
   notes?: string
   acquired_at?: string
+  consignment?: Record<string, unknown> | null
   [key: string]: unknown
 }
 
@@ -49,6 +52,12 @@ export default function AdminInventoryPage() {
   const [conditionFilter, setConditionFilter] = useState('')
   const [kindFilter, setKindFilter] = useState('')
   const [locationFilter, setLocationFilter] = useState('')
+  const [setNameFilter, setSetNameFilter] = useState('')
+  const [cardNumberFilter, setCardNumberFilter] = useState('')
+  const [artistFilter, setArtistFilter] = useState('')
+  const [minPriceFilter, setMinPriceFilter] = useState('')
+  const [maxPriceFilter, setMaxPriceFilter] = useState('')
+  const [ownershipFilter, setOwnershipFilter] = useState('')
   const [sortKey, setSortKey] = useState<string | null>(null)
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
@@ -74,6 +83,9 @@ export default function AdminInventoryPage() {
   const [refreshing, setRefreshing] = useState(false)
   const [refreshResult, setRefreshResult] = useState<string | null>(null)
 
+  // Dynamic locations dropdown
+  const { options: locationOptions } = useLocations()
+
   // Resolve card images
   const cardIds = items.map((i) => i.card_id as string | undefined)
   const { getImageUrl } = useCardImages(showImages ? cardIds : [])
@@ -88,6 +100,14 @@ export default function AdminInventoryPage() {
       if (conditionFilter) params.condition = conditionFilter
       if (kindFilter) params.kind = kindFilter
       if (locationFilter) params.location = locationFilter
+      // Note: set_name, card_number, and artist filters only match catalog-linked
+      // items (backend drops card_id=None rows for those filters — known behavior).
+      if (setNameFilter) params.set_name = setNameFilter
+      if (cardNumberFilter) params.card_number = cardNumberFilter
+      if (artistFilter) params.artist = artistFilter
+      if (minPriceFilter) params.min_price = minPriceFilter
+      if (maxPriceFilter) params.max_price = maxPriceFilter
+      if (ownershipFilter) params.ownership = ownershipFilter
       if (sortKey) params.sort = `${sortKey}_${sortDir}`
 
       const res = await api.get<{ items: InventoryItem[]; total: number }>('/inventory/search', params)
@@ -98,7 +118,7 @@ export default function AdminInventoryPage() {
     } finally {
       setLoading(false)
     }
-  }, [api, search, statusFilter, conditionFilter, kindFilter, locationFilter, sortKey, sortDir])
+  }, [api, search, statusFilter, conditionFilter, kindFilter, locationFilter, setNameFilter, cardNumberFilter, artistFilter, minPriceFilter, maxPriceFilter, ownershipFilter, sortKey, sortDir])
 
   useEffect(() => {
     fetchItems()
@@ -301,6 +321,11 @@ export default function AdminInventoryPage() {
       },
     },
     {
+      key: 'consignment',
+      label: 'Ownership',
+      render: (item) => <OwnershipBadge consigned={item.consignment != null} />,
+    },
+    {
       key: '_actions',
       label: '',
       className: 'w-20',
@@ -354,24 +379,72 @@ export default function AdminInventoryPage() {
       </header>
 
       {/* Filters */}
-      <div className="flex flex-wrap items-center gap-2 mb-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2 mb-4">
         <SearchInput
           value={search}
           onChange={setSearch}
           placeholder="Search by name…"
-          className="w-56"
         />
         <FilterSelect value={statusFilter} onChange={setStatusFilter} options={STATUS_OPTIONS} placeholder="Status" />
         <FilterSelect value={conditionFilter} onChange={setConditionFilter} options={CONDITION_OPTIONS} placeholder="Condition" />
         <FilterSelect value={kindFilter} onChange={setKindFilter} options={KIND_OPTIONS} placeholder="Kind" />
-        <input
-          type="text"
+        <select
           value={locationFilter}
           onChange={(e) => setLocationFilter(e.target.value)}
-          placeholder="Location"
-          className="vault-field px-2.5 py-1.5 rounded-lg text-xs w-28"
+          className="vault-field px-2.5 py-1.5 rounded-lg text-xs appearance-none cursor-pointer"
+        >
+          <option value="">All locations</option>
+          {locationOptions.map((loc) => (
+            <option key={loc.value} value={loc.value}>{loc.label}</option>
+          ))}
+        </select>
+        <input
+          type="text"
+          value={setNameFilter}
+          onChange={(e) => setSetNameFilter(e.target.value)}
+          placeholder="Set"
+          className="vault-field px-2.5 py-1.5 rounded-lg text-xs"
         />
-        <div className="ml-auto">
+        <input
+          type="text"
+          value={cardNumberFilter}
+          onChange={(e) => setCardNumberFilter(e.target.value)}
+          placeholder="Card #"
+          className="vault-field px-2.5 py-1.5 rounded-lg text-xs"
+        />
+        <input
+          type="text"
+          value={artistFilter}
+          onChange={(e) => setArtistFilter(e.target.value)}
+          placeholder="Artist"
+          className="vault-field px-2.5 py-1.5 rounded-lg text-xs"
+        />
+        <input
+          type="number"
+          step="0.01"
+          value={minPriceFilter}
+          onChange={(e) => setMinPriceFilter(e.target.value)}
+          placeholder="Min $"
+          className="vault-field px-2.5 py-1.5 rounded-lg text-xs"
+        />
+        <input
+          type="number"
+          step="0.01"
+          value={maxPriceFilter}
+          onChange={(e) => setMaxPriceFilter(e.target.value)}
+          placeholder="Max $"
+          className="vault-field px-2.5 py-1.5 rounded-lg text-xs"
+        />
+        <select
+          value={ownershipFilter}
+          onChange={(e) => setOwnershipFilter(e.target.value)}
+          className="vault-field px-2.5 py-1.5 rounded-lg text-xs appearance-none cursor-pointer"
+        >
+          <option value="">Ownership</option>
+          <option value="owned">Owned</option>
+          <option value="consigned">Cosigned</option>
+        </select>
+        <div className="flex items-center">
           <ImageToggle showImages={showImages} onToggle={() => setShowImages(!showImages)} label="Images" />
         </div>
       </div>

@@ -395,11 +395,162 @@ additional statement, not an edit to the business-table one. **Never** substitut
 
 Also rotate the Phase 1 access key once production runs on IAM roles.
 
+## Phase 8 — Scheduled Syncs (EventBridge Scheduler → ECS RunTask)
+
+Two automated sync jobs keep prices and the card catalog current. Both run
+as **ECS RunTask** invocations of the existing backend container image,
+dispatched by EventBridge Scheduler.
+
+### Why ECS RunTask, not Lambda
+
+The sync jobs already exist as CLI scripts built to run in the backend
+container. The image carries all their dependencies (boto3,
+merlins_collection, tcgdex client), and the existing ECS task role already
+grants the required DynamoDB access. A new-set catalog sync can exceed
+Lambda's hard 15-minute timeout. ECS RunTask reuses the existing
+infrastructure with zero new deployment artefacts — no separate Lambda
+package, no new IAM role for Lambda, no cold-start tuning.
+
+### The two schedules
+
+| Schedule | Cron | Job | What it does |
+|----------|------|-----|--------------|
+| `merlins-price-sync` | Daily 09:00 UTC (~5 AM ET, before shop hours) | `--job prices` | Calls `run_daily_sync`: TCGdex depth pass for held cards, graded/sealed snapshots, inventory market-value refresh |
+| `merlins-catalog-sync` | First Monday of each month, 10:00 UTC | `--job catalog` | Calls `sync_new_sets`: seeds identity rows for any TCGdex set the catalog doesn't have yet |
+
+Both schedules have `FlexibleTimeWindow` enabled and a `RetryPolicy` with
+`MaximumRetryAttempts: 2`.
+
+### Setup commands
+
+Replace placeholders (`<ACCOUNT_ID>`, `<CLUSTER_ARN>`, `<TASK_DEF_ARN>`,
+`<SUBNET_IDS>`, `<SECURITY_GROUP_ID>`) with your actual values before running.
+
+**1. Create the scheduler IAM role:**
+
+```bash
+# Trust policy — lets EventBridge Scheduler assume the role
+aws iam create-role \
+  --role-name merlins-scheduler-role \
+  --assume-role-policy-document file://deploy/scheduled-sync-scheduler-role.json
+
+# Permissions — ecs:RunTask + iam:PassRole for the task/execution roles
+# Extract the "_permissions" block from the role JSON into a separate file,
+# or inline it:
+aws iam put-role-policy \
+  --role-name merlins-scheduler-role \
+  --policy-name SchedulerRunTask \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "RunSyncTask",
+        "Effect": "Allow",
+        "Action": "ecs:RunTask",
+        "Resource": "<TASK_DEF_ARN>",
+        "Condition": { "ArnLike": { "ecs:cluster": "<CLUSTER_ARN>" } }
+      },
+      {
+        "Sid": "PassTaskRoles",
+        "Effect": "Allow",
+        "Action": "iam:PassRole",
+        "Resource": [
+          "arn:aws:iam::<ACCOUNT_ID>:role/merlins-backend-task-role",
+          "arn:aws:iam::<ACCOUNT_ID>:role/ecsTaskExecutionRole"
+        ]
+      }
+    ]
+  }'
+```
+
+**2. Create the schedules** (reference definitions in
+`deploy/scheduled-sync-eventbridge.json`):
+
+```bash
+# Daily price sync
+aws scheduler create-schedule \
+  --name merlins-price-sync \
+  --schedule-expression "cron(0 9 * * ? *)" \
+  --flexible-time-window '{"Mode":"FLEXIBLE","MaximumWindowInMinutes":15}' \
+  --target '{
+    "Arn": "<CLUSTER_ARN>",
+    "RoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/merlins-scheduler-role",
+    "EcsParameters": {
+      "TaskDefinitionArn": "<TASK_DEF_ARN>",
+      "TaskCount": 1,
+      "LaunchType": "FARGATE",
+      "NetworkConfiguration": {
+        "AwsvpcConfiguration": {
+          "Subnets": ["<SUBNET_IDS>"],
+          "SecurityGroups": ["<SECURITY_GROUP_ID>"],
+          "AssignPublicIp": "ENABLED"
+        }
+      }
+    },
+    "Input": "{\"containerOverrides\":[{\"name\":\"backend\",\"command\":[\"python\",\"-m\",\"scripts.scheduled_sync\",\"--job\",\"prices\"]}]}",
+    "RetryPolicy": {"MaximumRetryAttempts": 2, "MaximumEventAgeInSeconds": 3600}
+  }'
+
+# Monthly catalog sync (first Monday)
+aws scheduler create-schedule \
+  --name merlins-catalog-sync \
+  --schedule-expression "cron(0 10 ? * MON#1 *)" \
+  --flexible-time-window '{"Mode":"FLEXIBLE","MaximumWindowInMinutes":30}' \
+  --target '{
+    "Arn": "<CLUSTER_ARN>",
+    "RoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/merlins-scheduler-role",
+    "EcsParameters": {
+      "TaskDefinitionArn": "<TASK_DEF_ARN>",
+      "TaskCount": 1,
+      "LaunchType": "FARGATE",
+      "NetworkConfiguration": {
+        "AwsvpcConfiguration": {
+          "Subnets": ["<SUBNET_IDS>"],
+          "SecurityGroups": ["<SECURITY_GROUP_ID>"],
+          "AssignPublicIp": "ENABLED"
+        }
+      }
+    },
+    "Input": "{\"containerOverrides\":[{\"name\":\"backend\",\"command\":[\"python\",\"-m\",\"scripts.scheduled_sync\",\"--job\",\"catalog\"]}]}",
+    "RetryPolicy": {"MaximumRetryAttempts": 2, "MaximumEventAgeInSeconds": 3600}
+  }'
+```
+
+### Monitoring
+
+Both jobs log a single structured JSON summary line to stdout, which lands in
+the ECS task's CloudWatch log group. Look for the log group associated with
+the backend task definition (typically `/ecs/merlins-backend` or similar).
+
+- **Success:** `{"job": "prices", "status": "ok", "summary": {...}}`
+- **Failure:** `{"job": "prices", "status": "error", "error": "RuntimeError: ..."}`
+
+The exit code is 0 on success and non-zero on failure, so ECS marks the task
+as STOPPED with a non-zero exit code on failure, and EventBridge's retry
+policy kicks in automatically.
+
+### Manual trigger
+
+Either job can be triggered on demand from the admin Market page (Sync Prices
+button / Check for New Sets button), or from the CLI:
+
+```bash
+# From the backend directory, with AWS creds configured:
+python -m scripts.scheduled_sync --job prices
+python -m scripts.scheduled_sync --job catalog
+```
+
+### One-time catalog bootstrap (NOT scheduled)
+
+The full catalog bootstrap (`scripts/seed_catalog.py --execute --confirm-table`)
+is **deliberately NOT scheduled**. It writes ~23,000+ rows into the live
+DynamoDB table and is designed as a one-time human-supervised operation. It
+must be run once by a human with AWS credentials before the first price sync
+will have catalog data to price against. See Phase 3 above for the exact
+command.
+
 ## Deferred (not needed to launch)
 
-- **Lambda + API Gateway** (price lookup / image processing) — the daily sync
-  currently runs manually via `run_daily_sync`; a scheduled Lambda (EventBridge
-  cron) is its natural home later.
 - **Rekognition** — future card-from-photo identification.
 - **Frontend Cognito login UI** — NextAuth provider wiring + a sign-in page +
   passing the session's access token into `searchInventory`/`sendChat` (the

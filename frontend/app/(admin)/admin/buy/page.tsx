@@ -1,9 +1,11 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { ShoppingBag, Plus, X, Check, Banknote, CreditCard, Smartphone, DollarSign, Calendar, Search, AlertTriangle } from 'lucide-react'
+import { ShoppingBag, Plus, X, Check, Banknote, CreditCard, Smartphone, DollarSign, Calendar, Search, AlertTriangle, ArrowLeft, PenLine } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
-import { CONDITION_OPTIONS, LOCATION_OPTIONS, parseCondition } from '@/lib/constants'
+import { CONDITION_OPTIONS, parseCondition } from '@/lib/constants'
+import { useLocations } from '@/lib/use-locations'
+import { buyFormMode, buildBuyItemBody } from '@/lib/buy-form'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
 import CardImage from '@/components/admin/shared/CardImage'
@@ -36,6 +38,7 @@ interface CatalogCard {
 
 export default function AdminBuyPage() {
   const api = useAdminApi()
+  const { options: locationOptions } = useLocations()
 
   // Session
   const [buyId, setBuyId] = useState<string | null>(null)
@@ -52,6 +55,9 @@ export default function AdminBuyPage() {
   const [selectedCard, setSelectedCard] = useState<CatalogCard | null>(null)
   const [catalogSearchDone, setCatalogSearchDone] = useState(false)
 
+  // Manual mode toggle
+  const [manualMode, setManualMode] = useState(false)
+
   // Form for adding
   const [form, setForm] = useState<BuyItem>({
     name: '',
@@ -64,6 +70,9 @@ export default function AdminBuyPage() {
     buy_pct: '',
     image_url: null,
   })
+
+  // Compute current form mode
+  const mode = buyFormMode(selectedCard, manualMode)
 
   // Search catalog for card name dropdown
   const searchCatalog = useCallback(async (q: string) => {
@@ -97,6 +106,7 @@ export default function AdminBuyPage() {
   // Select a catalog card to pre-fill form
   const selectCatalogCard = (card: CatalogCard) => {
     setSelectedCard(card)
+    setManualMode(false)
     setCatalogSearchDone(false)
     // Extract best market price from prices dict
     let marketPrice = ''
@@ -179,18 +189,24 @@ export default function AdminBuyPage() {
   const addItem = async () => {
     if (!buyId || !form.name.trim() || !form.buy_price) return
     try {
-      await api.post(`/purchases/${buyId}/items`, {
-        name: form.name.trim(),
-        ...parseCondition(form.condition),
-        buy_price: parseFloat(form.buy_price),
-        market_value: form.market_value ? parseFloat(form.market_value) : null,
-        set_name: form.set_name || null,
-        location: form.location,
-        number: form.card_number || null,
-      })
+      const body = buildBuyItemBody(
+        {
+          name: form.name.trim(),
+          ...parseCondition(form.condition),
+          buy_price: parseFloat(form.buy_price),
+          market_value: form.market_value ? parseFloat(form.market_value) : null,
+          set_name: form.set_name || null,
+          location: form.location,
+          number: form.card_number || null,
+        },
+        selectedCard,
+        manualMode,
+      )
+      await api.post(`/purchases/${buyId}/items`, body)
       setItems((prev) => [...prev, { ...form, is_catalog_match: !!selectedCard }])
       setForm({ name: '', condition: 'NM', buy_price: '', market_value: '', set_name: '', location: 'toploader', card_number: '', buy_pct: '', image_url: null })
       setSelectedCard(null)
+      setManualMode(false)
       setCatalogSearchDone(false)
     } catch (err) {
       alert(err instanceof AdminApiError ? err.detail : 'Failed to add item')
@@ -236,6 +252,7 @@ export default function AdminBuyPage() {
     setConfirmed(false)
     setConfirmResult(null)
     setSelectedCard(null)
+    setManualMode(false)
     setBuyDate(new Date().toISOString().split('T')[0])
   }
 
@@ -271,215 +288,7 @@ export default function AdminBuyPage() {
       </header>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left: Card Form with searchable name + image preview */}
-        <div className="lg:col-span-5 space-y-4">
-          <div className="vault-panel rounded-xl p-4 space-y-3">
-            <h3 className="text-xs font-semibold text-pine-200 uppercase tracking-wider">Add Card</h3>
-
-            {/* Searchable Card Name */}
-            <div className="relative">
-              <label className="block">
-                <span className="text-[11px] text-pine-400">Card Name</span>
-                <div className="relative mt-1">
-                  <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-pine-400 pointer-events-none" />
-                  <input
-                    value={selectedCard ? form.name : nameSearch || form.name}
-                    onChange={(e) => {
-                      const val = e.target.value
-                      if (selectedCard) {
-                        setSelectedCard(null)
-                        setForm((f) => ({ ...f, name: val, image_url: null }))
-                      }
-                      setNameSearch(val)
-                      setForm((f) => ({ ...f, name: val }))
-                    }}
-                    className="vault-field w-full pl-8 pr-3 py-1.5 rounded-lg text-sm"
-                    placeholder="Search catalog or type name…"
-                    autoComplete="off"
-                  />
-                </div>
-              </label>
-
-              {/* Catalog search dropdown */}
-              {catalogResults.length > 0 && !selectedCard && (
-                <div className="absolute z-20 left-0 right-0 mt-1 vault-panel rounded-lg border border-pine-700/50 max-h-56 overflow-y-auto vault-scroll shadow-xl">
-                  {catalogResults.map((card) => (
-                    <button
-                      key={card.card_id}
-                      type="button"
-                      onClick={() => selectCatalogCard(card)}
-                      className="w-full flex items-center gap-2 px-3 py-2 hover:bg-pine-800/60 transition-colors text-left"
-                    >
-                      {card.images?.small && (
-                        <CardImage imageUrl={card.images.small} alt={card.name} size="sm" />
-                      )}
-                      <div className="min-w-0 flex-1">
-                        <div className="text-xs text-pine-100 truncate">{card.name}</div>
-                        <div className="text-[10px] text-pine-400">
-                          {card.set_name || card.set_id}
-                          {card.number && ` · #${card.number}`}
-                          {card.rarity && ` · ${card.rarity}`}
-                        </div>
-                      </div>
-                    </button>
-                  ))}
-                  {searchingCatalog && (
-                    <div className="px-3 py-2 text-[10px] text-pine-500">Searching…</div>
-                  )}
-                </div>
-              )}
-
-              {/* Unknown card warning */}
-              {!selectedCard && form.name.trim().length >= 3 && catalogSearchDone && catalogResults.length === 0 && !searchingCatalog && (
-                <div className="flex items-center gap-1.5 mt-1.5 px-2 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/20">
-                  <AlertTriangle size={12} className="text-amber-400 flex-shrink-0" />
-                  <span className="text-[10px] text-amber-400">
-                    Unknown card — not found in catalog. You can still add it manually.
-                  </span>
-                </div>
-              )}
-            </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              <label>
-                <span className="text-[11px] text-pine-400">Set</span>
-                <input value={form.set_name} onChange={(e) => setForm((f) => ({ ...f, set_name: e.target.value }))} className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs" placeholder="Set name" />
-              </label>
-              <label>
-                <span className="text-[11px] text-pine-400">Card #</span>
-                <input value={form.card_number} onChange={(e) => setForm((f) => ({ ...f, card_number: e.target.value }))} className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs" placeholder="e.g. 006/165" />
-              </label>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <label>
-                <span className="text-[11px] text-pine-400">Condition</span>
-                <select value={form.condition} onChange={(e) => setForm((f) => ({ ...f, condition: e.target.value }))} className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs">
-                  {CONDITION_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
-                </select>
-              </label>
-              <label>
-                <span className="text-[11px] text-pine-400">Location</span>
-                <select value={form.location} onChange={(e) => setForm((f) => ({ ...f, location: e.target.value }))} className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs">
-                  {LOCATION_OPTIONS.map((loc) => <option key={loc.value} value={loc.value}>{loc.label}</option>)}
-                </select>
-              </label>
-            </div>
-            <label className="block">
-              <span className="text-[11px] text-pine-400">Market Value ($)</span>
-              <input type="number" step="0.01" value={form.market_value} onChange={(e) => updateMarketValue(e.target.value)} className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs" placeholder="0.00" />
-            </label>
-            <div className="grid grid-cols-5 gap-2 items-end">
-              <label className="col-span-2">
-                <span className="text-[11px] text-pine-400">Buy Price ($)</span>
-                <input type="number" step="0.01" value={form.buy_price} onChange={(e) => updateBuyPrice(e.target.value)} className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs" placeholder="0.00" />
-              </label>
-              <div className="flex items-center justify-center pb-1">
-                <span className="text-[10px] text-pine-500">or</span>
-              </div>
-              <label className="col-span-2">
-                <span className="text-[11px] text-pine-400">Buy %</span>
-                <div className="relative mt-1">
-                  <input type="number" step="1" min="0" max="100" value={form.buy_pct} onChange={(e) => updateBuyPct(e.target.value)} className="vault-field w-full px-2.5 py-1.5 pr-7 rounded-lg text-xs" placeholder="60" />
-                  <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-pine-500">%</span>
-                </div>
-              </label>
-            </div>
-            <button
-              type="button"
-              onClick={addItem}
-              disabled={!form.name.trim() || !form.buy_price}
-              className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium bg-spriggatito-400/15 text-spriggatito-400 border border-spriggatito-400/30 hover:bg-spriggatito-400/25 disabled:opacity-40 transition-colors"
-            >
-              <Plus size={14} />
-              Add to Purchase
-            </button>
-          </div>
-        </div>
-
-        {/* Center: Image Preview */}
-        <div className="lg:col-span-3 flex flex-col items-center">
-          <div className="vault-panel rounded-xl p-4 w-full flex flex-col items-center justify-center min-h-[280px]">
-            {selectedCard && form.image_url ? (
-              <>
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={form.image_url}
-                  alt={form.name}
-                  className="rounded-lg border border-pine-700/40 max-h-[220px] w-auto object-contain shadow-lg"
-                />
-                <div className="mt-3 text-center">
-                  <p className="text-xs text-pine-100 font-medium">{selectedCard.name}</p>
-                  <p className="text-[10px] text-pine-400">
-                    {selectedCard.set_name || selectedCard.set_id}
-                    {selectedCard.number && ` · #${selectedCard.number}`}
-                  </p>
-                  {selectedCard.rarity && (
-                    <p className="text-[10px] text-pine-500 mt-0.5">{selectedCard.rarity}</p>
-                  )}
-                </div>
-              </>
-            ) : (
-              <div className="text-center">
-                <div className="inline-flex items-center justify-center w-16 h-22 rounded-lg bg-pine-800/40 border border-pine-700/30 mb-3">
-                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-pine-600">
-                    <rect x="3" y="3" width="18" height="18" rx="2" />
-                    <circle cx="8.5" cy="8.5" r="1.5" />
-                    <path d="M21 15l-5-5L5 21" />
-                  </svg>
-                </div>
-                <p className="text-[11px] text-pine-500">Search for a card name to see its image</p>
-                <p className="text-[10px] text-pine-600 mt-0.5">Visual confirmation before purchase</p>
-              </div>
-            )}
-          </div>
-
-          {/* Session meta: date, seller, payment */}
-          <div className="vault-panel rounded-xl p-4 space-y-3 w-full mt-4">
-            <label className="block">
-              <span className="text-[11px] text-pine-400 uppercase tracking-wider flex items-center gap-1">
-                <Calendar size={11} /> Transaction Date
-              </span>
-              <input
-                type="date"
-                value={buyDate}
-                onChange={(e) => setBuyDate(e.target.value)}
-                className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs"
-              />
-            </label>
-            <label className="block">
-              <span className="text-[11px] text-pine-400 uppercase tracking-wider">Seller</span>
-              <input value={counterparty} onChange={(e) => setCounterparty(e.target.value)} placeholder="Name (optional)" className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs" />
-            </label>
-            <div>
-              <span className="text-[11px] text-pine-400 uppercase tracking-wider">Payment</span>
-              <div className="flex flex-wrap gap-2 mt-1">
-                {[
-                  { value: 'cash', icon: Banknote, label: 'Cash' },
-                  { value: 'card', icon: CreditCard, label: 'Card' },
-                  { value: 'venmo', icon: Smartphone, label: 'Venmo' },
-                  { value: 'zelle', icon: DollarSign, label: 'Zelle' },
-                ].map(({ value, icon: Icon, label }) => (
-                  <button key={value} type="button" onClick={() => setPaymentMethod(value)} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${paymentMethod === value ? 'bg-spriggatito-400/15 text-spriggatito-400 border-spriggatito-400/30' : 'text-pine-400 border-pine-700/40 hover:border-pine-600'}`}>
-                    <Icon size={13} />
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <label className="block">
-              <span className="text-[11px] text-pine-400 uppercase tracking-wider">Notes</span>
-              <textarea
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                rows={2}
-                className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs resize-none"
-                placeholder="Optional notes…"
-              />
-            </label>
-          </div>
-        </div>
-
-        {/* Right: Item list (cart) */}
+        {/* LEFT: Purchasing Cart */}
         <div className="lg:col-span-4">
           <div className="vault-panel rounded-xl overflow-hidden">
             <div className="px-4 py-3 border-b border-pine-700/40 flex items-center gap-2">
@@ -516,8 +325,8 @@ export default function AdminBuyPage() {
                           <div className="text-[10px] text-pine-400">
                             {item.condition} {item.set_name && `· ${item.set_name}`}
                             {item.card_number && ` · #${item.card_number}`}
-                            {item.market_value && <> · MV: <PriceDisplay value={item.market_value} className="text-[10px] text-pine-400 inline" /></>}
-                            {buyPct && <> · <span className="text-pine-300 font-mono">{buyPct}%</span></>}
+                            {item.market_value && <> &middot; MV: <PriceDisplay value={item.market_value} className="text-[10px] text-pine-400 inline" /></>}
+                            {buyPct && <> &middot; <span className="text-pine-300 font-mono">{buyPct}%</span></>}
                           </div>
                         </div>
                       </div>
@@ -534,18 +343,285 @@ export default function AdminBuyPage() {
             )}
 
             {items.length > 0 && (
-              <div className="px-4 py-3 border-t border-pine-700/40 bg-pine-800/20">
-                <div className="flex items-center justify-between mb-2">
+              <div className="px-4 py-3 border-t border-pine-700/40 bg-pine-800/20 space-y-3">
+                <div className="flex items-center justify-between">
                   <div className="text-xs text-pine-400">
                     Total Cost: <span className="font-mono text-spriggatito-400">${totalCost.toFixed(2)}</span>
-                    {totalMarket > 0 && <> · Avg Buy %: <span className="font-mono text-pine-200">{avgBuyPct}%</span></>}
+                    {totalMarket > 0 && <> &middot; Avg Buy %: <span className="font-mono text-pine-200">{avgBuyPct}%</span></>}
                   </div>
                 </div>
+                {/* Transaction Date — directly above Confirm */}
+                <label className="block">
+                  <span className="text-[11px] text-pine-400 uppercase tracking-wider flex items-center gap-1">
+                    <Calendar size={11} /> Transaction Date
+                  </span>
+                  <input
+                    type="date"
+                    value={buyDate}
+                    onChange={(e) => setBuyDate(e.target.value)}
+                    className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs"
+                  />
+                </label>
                 <button type="button" onClick={() => setShowConfirm(true)} className="w-full px-4 py-2 rounded-lg text-sm font-medium bg-spriggatito-400/15 text-spriggatito-400 border border-spriggatito-400/30 hover:bg-spriggatito-400/25 transition-colors">
                   Confirm Purchase
                 </button>
               </div>
             )}
+          </div>
+        </div>
+
+        {/* CENTER: Add Card Form */}
+        <div className="lg:col-span-5 space-y-4">
+          <div className="vault-panel rounded-xl p-4 space-y-3">
+            <h3 className="text-xs font-semibold text-pine-200 uppercase tracking-wider">Add Card</h3>
+
+            {/* Searchable Card Name — always visible in search & manual modes */}
+            {mode !== 'catalog' && (
+              <div className="relative">
+                <label className="block">
+                  <span className="text-[11px] text-pine-400">Card Name</span>
+                  <div className="relative mt-1">
+                    <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-pine-400 pointer-events-none" />
+                    <input
+                      value={nameSearch || form.name}
+                      onChange={(e) => {
+                        const val = e.target.value
+                        setNameSearch(val)
+                        setForm((f) => ({ ...f, name: val }))
+                      }}
+                      className="vault-field w-full pl-8 pr-3 py-1.5 rounded-lg text-sm"
+                      placeholder={mode === 'manual' ? 'Card name…' : 'Search catalog or type name…'}
+                      autoComplete="off"
+                    />
+                  </div>
+                </label>
+
+                {/* Catalog search dropdown — only in search mode */}
+                {mode === 'search' && catalogResults.length > 0 && (
+                  <div className="absolute z-20 left-0 right-0 mt-1 vault-panel rounded-lg border border-pine-700/50 max-h-56 overflow-y-auto vault-scroll shadow-xl">
+                    {catalogResults.map((card) => (
+                      <button
+                        key={card.card_id}
+                        type="button"
+                        onClick={() => selectCatalogCard(card)}
+                        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-pine-800/60 transition-colors text-left"
+                      >
+                        {card.images?.small && (
+                          <CardImage imageUrl={card.images.small} alt={card.name} size="sm" />
+                        )}
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs text-pine-100 truncate">{card.name}</div>
+                          <div className="text-[10px] text-pine-400">
+                            {card.set_name || card.set_id}
+                            {card.number && ` · #${card.number}`}
+                            {card.rarity && ` · ${card.rarity}`}
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                    {searchingCatalog && (
+                      <div className="px-3 py-2 text-[10px] text-pine-500">Searching&hellip;</div>
+                    )}
+                  </div>
+                )}
+
+                {/* Unknown card warning + Enter manually button — search mode only */}
+                {mode === 'search' && !selectedCard && catalogSearchDone && catalogResults.length === 0 && !searchingCatalog && form.name.trim().length >= 3 && (
+                  <div className="mt-1.5 space-y-2">
+                    <div className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/20">
+                      <AlertTriangle size={12} className="text-amber-400 flex-shrink-0" />
+                      <span className="text-[10px] text-amber-400">
+                        Unknown card &mdash; not found in catalog. You can still add it manually.
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setManualMode(true)}
+                      className="flex items-center gap-1.5 text-[11px] text-pine-300 hover:text-spriggatito-400 transition-colors"
+                    >
+                      <PenLine size={12} />
+                      Enter manually instead
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Catalog mode: show selected card identity as read-only */}
+            {mode === 'catalog' && selectedCard && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] text-pine-400">Selected Card</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedCard(null)
+                      setForm((f) => ({ ...f, name: '', set_name: '', card_number: '', market_value: '', image_url: null }))
+                    }}
+                    className="text-[10px] text-pine-500 hover:text-pine-300 transition-colors"
+                  >
+                    Change
+                  </button>
+                </div>
+                <div className="px-3 py-2 rounded-lg bg-pine-800/40 border border-pine-700/30">
+                  <p className="text-xs text-pine-100 font-medium">{form.name}</p>
+                  <p className="text-[10px] text-pine-400 mt-0.5">
+                    {form.set_name && <>{form.set_name}</>}
+                    {form.card_number && <> &middot; #{form.card_number}</>}
+                    {form.market_value && <> &middot; MV: ${form.market_value}</>}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Manual mode: back to search button */}
+            {mode === 'manual' && (
+              <button
+                type="button"
+                onClick={() => setManualMode(false)}
+                className="flex items-center gap-1 text-[11px] text-pine-400 hover:text-spriggatito-400 transition-colors"
+              >
+                <ArrowLeft size={12} />
+                Back to search
+              </button>
+            )}
+
+            {/* Fields shown in catalog and manual modes */}
+            {mode !== 'search' && (
+              <>
+                {/* Set/Card# — editable in manual, read-only text shown above in catalog */}
+                {mode === 'manual' && (
+                  <div className="grid grid-cols-2 gap-2">
+                    <label>
+                      <span className="text-[11px] text-pine-400">Set</span>
+                      <input value={form.set_name} onChange={(e) => setForm((f) => ({ ...f, set_name: e.target.value }))} className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs" placeholder="Set name" />
+                    </label>
+                    <label>
+                      <span className="text-[11px] text-pine-400">Card #</span>
+                      <input value={form.card_number} onChange={(e) => setForm((f) => ({ ...f, card_number: e.target.value }))} className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs" placeholder="e.g. 006/165" />
+                    </label>
+                  </div>
+                )}
+                <div className="grid grid-cols-2 gap-2">
+                  <label>
+                    <span className="text-[11px] text-pine-400">Condition</span>
+                    <select value={form.condition} onChange={(e) => setForm((f) => ({ ...f, condition: e.target.value }))} className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs">
+                      {CONDITION_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    <span className="text-[11px] text-pine-400">Location</span>
+                    <select value={form.location} onChange={(e) => setForm((f) => ({ ...f, location: e.target.value }))} className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs">
+                      {locationOptions.map((loc) => <option key={loc.value} value={loc.value}>{loc.label}</option>)}
+                    </select>
+                  </label>
+                </div>
+                {/* Market value — editable in manual, read-only in catalog (shown in the identity block) */}
+                {mode === 'manual' && (
+                  <label className="block">
+                    <span className="text-[11px] text-pine-400">Market Value ($)</span>
+                    <input type="number" step="0.01" value={form.market_value} onChange={(e) => updateMarketValue(e.target.value)} className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs" placeholder="0.00" />
+                  </label>
+                )}
+                <div className="grid grid-cols-5 gap-2 items-end">
+                  <label className="col-span-2">
+                    <span className="text-[11px] text-pine-400">Buy Price ($)</span>
+                    <input type="number" step="0.01" value={form.buy_price} onChange={(e) => updateBuyPrice(e.target.value)} className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs" placeholder="0.00" />
+                  </label>
+                  <div className="flex items-center justify-center pb-1">
+                    <span className="text-[10px] text-pine-500">or</span>
+                  </div>
+                  <label className="col-span-2">
+                    <span className="text-[11px] text-pine-400">Buy %</span>
+                    <div className="relative mt-1">
+                      <input type="number" step="1" min="0" max="100" value={form.buy_pct} onChange={(e) => updateBuyPct(e.target.value)} className="vault-field w-full px-2.5 py-1.5 pr-7 rounded-lg text-xs" placeholder="60" />
+                      <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-pine-500">%</span>
+                    </div>
+                  </label>
+                </div>
+                <button
+                  type="button"
+                  onClick={addItem}
+                  disabled={!form.name.trim() || !form.buy_price}
+                  className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium bg-spriggatito-400/15 text-spriggatito-400 border border-spriggatito-400/30 hover:bg-spriggatito-400/25 disabled:opacity-40 transition-colors"
+                >
+                  <Plus size={14} />
+                  Add to Purchase
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* RIGHT: Image Preview + Session Meta */}
+        <div className="lg:col-span-3 flex flex-col items-center">
+          <div className="vault-panel rounded-xl p-4 w-full flex flex-col items-center justify-center min-h-[280px]">
+            {selectedCard && form.image_url ? (
+              <>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={form.image_url}
+                  alt={form.name}
+                  className="rounded-lg border border-pine-700/40 max-h-[220px] w-auto object-contain shadow-lg"
+                />
+                <div className="mt-3 text-center">
+                  <p className="text-xs text-pine-100 font-medium">{selectedCard.name}</p>
+                  <p className="text-[10px] text-pine-400">
+                    {selectedCard.set_name || selectedCard.set_id}
+                    {selectedCard.number && ` · #${selectedCard.number}`}
+                  </p>
+                  {selectedCard.rarity && (
+                    <p className="text-[10px] text-pine-500 mt-0.5">{selectedCard.rarity}</p>
+                  )}
+                </div>
+              </>
+            ) : (
+              <div className="text-center">
+                <div className="inline-flex items-center justify-center w-16 h-22 rounded-lg bg-pine-800/40 border border-pine-700/30 mb-3">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-pine-600">
+                    <rect x="3" y="3" width="18" height="18" rx="2" />
+                    <circle cx="8.5" cy="8.5" r="1.5" />
+                    <path d="M21 15l-5-5L5 21" />
+                  </svg>
+                </div>
+                <p className="text-[11px] text-pine-500">Search for a card name to see its image</p>
+                <p className="text-[10px] text-pine-600 mt-0.5">Visual confirmation before purchase</p>
+              </div>
+            )}
+          </div>
+
+          {/* Session meta: seller, payment, notes */}
+          <div className="vault-panel rounded-xl p-4 space-y-3 w-full mt-4">
+            <label className="block">
+              <span className="text-[11px] text-pine-400 uppercase tracking-wider">Seller</span>
+              <input value={counterparty} onChange={(e) => setCounterparty(e.target.value)} placeholder="Name (optional)" className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs" />
+            </label>
+            <div>
+              <span className="text-[11px] text-pine-400 uppercase tracking-wider">Payment</span>
+              <div className="flex flex-wrap gap-2 mt-1">
+                {[
+                  { value: 'cash', icon: Banknote, label: 'Cash' },
+                  { value: 'card', icon: CreditCard, label: 'Card' },
+                  { value: 'venmo', icon: Smartphone, label: 'Venmo' },
+                  { value: 'zelle', icon: DollarSign, label: 'Zelle' },
+                ].map(({ value, icon: Icon, label }) => (
+                  <button key={value} type="button" onClick={() => setPaymentMethod(value)} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${paymentMethod === value ? 'bg-spriggatito-400/15 text-spriggatito-400 border-spriggatito-400/30' : 'text-pine-400 border-pine-700/40 hover:border-pine-600'}`}>
+                    <Icon size={13} />
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <label className="block">
+              <span className="text-[11px] text-pine-400 uppercase tracking-wider">Notes</span>
+              <textarea
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                rows={2}
+                className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs resize-none"
+                placeholder="Optional notes&hellip;"
+              />
+            </label>
           </div>
         </div>
       </div>

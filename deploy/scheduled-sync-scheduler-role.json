@@ -1,0 +1,61 @@
+{
+  "_comment": [
+    "IAM role for EventBridge Scheduler to invoke ECS RunTask.",
+    "Two documents: (1) trust policy — lets the Scheduler service assume this role;",
+    "(2) permissions — lets the assumed role call ecs:RunTask on the backend task",
+    "definition and iam:PassRole for both the task role and the execution role,",
+    "which ECS requires at launch time.",
+    "",
+    "Apply with:",
+    "  aws iam create-role --role-name merlins-scheduler-role \\",
+    "    --assume-role-policy-document file://deploy/scheduled-sync-scheduler-role.json",
+    "  aws iam put-role-policy --role-name merlins-scheduler-role \\",
+    "    --policy-name SchedulerRunTask \\",
+    "    --policy-document file://deploy/scheduled-sync-scheduler-permissions.json",
+    "",
+    "This file is the TRUST policy (--assume-role-policy-document).",
+    "The inline permissions policy is embedded below under '_permissions' for",
+    "reference; extract it into a separate file or use put-role-policy inline."
+  ],
+
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": { "Service": "scheduler.amazonaws.com" },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "StringEquals": {
+          "aws:SourceAccount": "<ACCOUNT_ID>"
+        }
+      }
+    }
+  ],
+
+  "_permissions": {
+    "_comment": "Inline permissions policy for the scheduler role. Apply via put-role-policy.",
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "RunSyncTask",
+        "Effect": "Allow",
+        "Action": "ecs:RunTask",
+        "Resource": "<TASK_DEF_ARN>",
+        "Condition": {
+          "ArnLike": {
+            "ecs:cluster": "<CLUSTER_ARN>"
+          }
+        }
+      },
+      {
+        "Sid": "PassTaskRoles",
+        "Effect": "Allow",
+        "Action": "iam:PassRole",
+        "Resource": [
+          "arn:aws:iam::<ACCOUNT_ID>:role/merlins-backend-task-role",
+          "arn:aws:iam::<ACCOUNT_ID>:role/ecsTaskExecutionRole"
+        ]
+      }
+    ]
+  }
+}
