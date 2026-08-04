@@ -48,6 +48,8 @@ def create_trade_session(
         "outgoing_legs": [],
         "incoming_legs": [],
         "cash": None,
+        "cash_components": [],
+        "margin_split": None,
         "counterparty": body.get("counterparty"),
         "notes": body.get("notes"),
     }
@@ -127,14 +129,14 @@ def update_trade_session(
     body: dict[str, Any],
     repo: InventoryRepository = Depends(get_repo),
 ) -> dict[str, Any]:
-    """Update trade metadata (mode, counterparty, notes)."""
+    """Update trade metadata (mode, counterparty, notes, margin_split)."""
     session = repo.get_trade_session(trade_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Trade session not found")
     if session.get("status") != "draft":
         raise HTTPException(status_code=409, detail="Can only update draft sessions")
 
-    for key in ("mode", "counterparty", "notes", "show_id", "trade_date"):
+    for key in ("mode", "counterparty", "notes", "show_id", "trade_date", "margin_split"):
         if key in body:
             session[key] = body[key]
 
@@ -317,18 +319,45 @@ def set_cash_component(
     body: dict[str, Any],
     repo: InventoryRepository = Depends(get_repo),
 ) -> dict[str, Any]:
-    """Set or update the cash component of a trade."""
+    """Set or update the cash component(s) of a trade.
+
+    Supports two formats:
+    - New: ``{"cash_components": [{"direction": ..., "amount": ..., "payment_method": ...}, ...]}``
+    - Legacy: ``{"direction": ..., "amount": ..., "payment_method": ...}``
+
+    New writes always store ``cash_components``. Legacy format is converted to a
+    single-element list for storage but the ``cash`` key is also kept for backward compat.
+    """
     session = repo.get_trade_session(trade_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Trade session not found")
     if session.get("status") != "draft":
         raise HTTPException(status_code=409, detail="Can only modify draft sessions")
 
-    session["cash"] = {
-        "direction": body.get("direction", "they_pay"),
-        "amount": body.get("amount"),
-        "payment_method": body.get("payment_method", "cash"),
-    }
+    if "cash_components" in body:
+        # New multi-asset format
+        session["cash_components"] = body["cash_components"]
+        # Also update legacy cash key with first component for backward compat
+        if body["cash_components"]:
+            first = body["cash_components"][0]
+            session["cash"] = {
+                "direction": first.get("direction", "they_pay"),
+                "amount": first.get("amount"),
+                "payment_method": first.get("payment_method", "cash"),
+            }
+        else:
+            session["cash"] = None
+    else:
+        # Legacy single-cash format
+        legacy_cash = {
+            "direction": body.get("direction", "they_pay"),
+            "amount": body.get("amount"),
+            "payment_method": body.get("payment_method", "cash"),
+        }
+        session["cash"] = legacy_cash
+        # Also store as cash_components for consistency
+        session["cash_components"] = [legacy_cash]
+
     repo.put_trade_session(session)
     return session
 
@@ -338,7 +367,7 @@ def remove_cash_component(
     trade_id: str,
     repo: InventoryRepository = Depends(get_repo),
 ) -> dict[str, Any]:
-    """Remove the cash component."""
+    """Remove all cash components."""
     session = repo.get_trade_session(trade_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Trade session not found")
@@ -346,6 +375,7 @@ def remove_cash_component(
         raise HTTPException(status_code=409, detail="Can only modify draft sessions")
 
     session["cash"] = None
+    session["cash_components"] = []
     repo.put_trade_session(session)
     return session
 
@@ -359,7 +389,11 @@ def get_trade_balance(
     trade_id: str,
     repo: InventoryRepository = Depends(get_repo),
 ) -> dict[str, Any]:
-    """Compute trade balance and margins."""
+    """Compute trade balance and margins.
+
+    Reads ``cash_components`` first; falls back to legacy ``cash`` key
+    for sessions created before the multi-asset upgrade.
+    """
     session = repo.get_trade_session(trade_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Trade session not found")
@@ -377,14 +411,25 @@ def get_trade_balance(
         for l in session.get("outgoing_legs", [])
     )
 
-    cash = session.get("cash")
+    # Compute cash delta from cash_components (preferred) or legacy cash key
     cash_delta = Decimal("0")
-    if cash and cash.get("amount"):
-        amount = Decimal(str(cash["amount"]))
-        if cash.get("direction") == "they_pay":
-            cash_delta = amount  # We receive cash
-        else:
-            cash_delta = -amount  # We pay cash
+    cash_components = session.get("cash_components", [])
+    if cash_components:
+        for comp in cash_components:
+            amount = Decimal(str(comp.get("amount") or 0))
+            if comp.get("direction") == "they_pay":
+                cash_delta += amount
+            else:
+                cash_delta -= amount
+    else:
+        # Fallback to legacy single cash key
+        cash = session.get("cash")
+        if cash and cash.get("amount"):
+            amount = Decimal(str(cash["amount"]))
+            if cash.get("direction") == "they_pay":
+                cash_delta = amount
+            else:
+                cash_delta = -amount
 
     # Margin: (value_in + cash_received - cost_of_out) / cost_of_out
     margin_pct = None
@@ -394,13 +439,19 @@ def get_trade_balance(
             .quantize(Decimal("0.1"))
         )
 
+    # Check for margin split
+    margin_split = session.get("margin_split")
+    margin_split_applied = bool(margin_split and margin_split.get("enabled"))
+
     return {
         "trade_id": session["trade_id"],
         "total_out_value": str(total_out),
         "total_in_value": str(total_in),
         "total_cost_basis": str(total_cost_out),
         "cash_delta": str(cash_delta),
+        "cash_components_net": str(cash_delta),
         "margin_pct": margin_pct,
+        "margin_split_applied": margin_split_applied,
         "is_balanced": abs(total_out - total_in - cash_delta) < Decimal("0.01"),
     }
 
@@ -471,9 +522,9 @@ def confirm_trade_session(
             "item_id": new_item_id,
             "card_id": leg.get("card_id"),
             "status": "available",
-            "finish": leg.get("finish", "normal"),
-            "condition": leg.get("condition", "NM"),
-            "language": leg.get("language", "EN"),
+            "finish": leg.get("finish") or "normal",
+            "condition": leg.get("condition") or "NM",
+            "language": leg.get("language") or "EN",
             "location": "toploader",
             "cost_basis": str(agreed_value),
             "market_value_at_purchase": str(leg.get("market_value") or agreed_value),
@@ -499,30 +550,54 @@ def confirm_trade_session(
         repo.put_transaction(txn)
         txns_created += 1
 
-    # Process cash component
-    cash = session.get("cash")
-    if cash and cash.get("amount"):
-        cash_amount = Decimal(str(cash["amount"]))
-        # Cash transaction: if they pay us, it's income on the trade
-        # If we pay them, it's an expense
-        if cash.get("direction") == "they_pay":
-            txn_type = TransactionType.SALE
-        else:
-            txn_type = TransactionType.PURCHASE
+    # Process cash component(s)
+    cash_components = session.get("cash_components", [])
+    if cash_components:
+        for comp in cash_components:
+            comp_amount = Decimal(str(comp.get("amount") or 0))
+            if not comp_amount:
+                continue
+            if comp.get("direction") == "they_pay":
+                txn_type = TransactionType.SALE
+            else:
+                txn_type = TransactionType.PURCHASE
 
-        cash_txn = Transaction(
-            type=txn_type,
-            item_id=trade_id,  # Use trade_id as item_id for cash transactions
-            category=ItemCategory.RAW,
-            date=txn_date,
-            amount=cash_amount,
-            payment_method=cash.get("payment_method", "cash"),
-            show_id=show_id,
-            trade_id=trade_id,
-            notes=f"Cash component: {cash.get('direction')}",
-        )
-        repo.put_transaction(cash_txn)
-        txns_created += 1
+            cash_txn = Transaction(
+                type=txn_type,
+                item_id=trade_id,
+                category=ItemCategory.RAW,
+                date=txn_date,
+                amount=comp_amount,
+                payment_method=comp.get("payment_method", "cash"),
+                show_id=show_id,
+                trade_id=trade_id,
+                notes=f"Cash component: {comp.get('direction')} via {comp.get('payment_method', 'cash')}",
+            )
+            repo.put_transaction(cash_txn)
+            txns_created += 1
+    else:
+        # Fallback to legacy single cash key
+        cash = session.get("cash")
+        if cash and cash.get("amount"):
+            cash_amount = Decimal(str(cash["amount"]))
+            if cash.get("direction") == "they_pay":
+                txn_type = TransactionType.SALE
+            else:
+                txn_type = TransactionType.PURCHASE
+
+            cash_txn = Transaction(
+                type=txn_type,
+                item_id=trade_id,
+                category=ItemCategory.RAW,
+                date=txn_date,
+                amount=cash_amount,
+                payment_method=cash.get("payment_method", "cash"),
+                show_id=show_id,
+                trade_id=trade_id,
+                notes=f"Cash component: {cash.get('direction')}",
+            )
+            repo.put_transaction(cash_txn)
+            txns_created += 1
 
     # Compute final totals
     total_out = sum(Decimal(str(l.get("agreed_value") or 0)) for l in outgoing)

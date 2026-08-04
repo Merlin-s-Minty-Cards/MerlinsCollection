@@ -379,3 +379,215 @@ class TestTradeCancel:
 
         resp = client.post(f"/admin/trades/{trade_id}/cancel", headers=_auth(token))
         assert resp.status_code == 409
+
+
+# ===========================================================================
+# A1: Advanced Trade Engine — Multi-asset cash_components + margin_split
+# ===========================================================================
+
+class TestTradeCashComponents:
+    """PUT /admin/trades/{id}/cash with cash_components (multi-asset)."""
+
+    def test_set_cash_components_multiple_methods(self, admin_client):
+        """cash_components supports multiple payment methods."""
+        client, repo, token = admin_client
+        create = client.post("/admin/trades", json={}, headers=_auth(token))
+        trade_id = create.json()["trade_id"]
+
+        resp = client.put(f"/admin/trades/{trade_id}/cash", json={
+            "cash_components": [
+                {"direction": "they_pay", "amount": "50.00", "payment_method": "venmo"},
+                {"direction": "we_pay", "amount": "10.00", "payment_method": "cash"},
+            ]
+        }, headers=_auth(token))
+        assert resp.status_code == 200
+        session = resp.json()
+        assert "cash_components" in session
+        assert len(session["cash_components"]) == 2
+        assert session["cash_components"][0]["payment_method"] == "venmo"
+        assert session["cash_components"][1]["payment_method"] == "cash"
+
+    def test_set_cash_components_single(self, admin_client):
+        """Single cash component in the list."""
+        client, repo, token = admin_client
+        create = client.post("/admin/trades", json={}, headers=_auth(token))
+        trade_id = create.json()["trade_id"]
+
+        resp = client.put(f"/admin/trades/{trade_id}/cash", json={
+            "cash_components": [
+                {"direction": "they_pay", "amount": "25.00", "payment_method": "zelle"},
+            ]
+        }, headers=_auth(token))
+        assert resp.status_code == 200
+        session = resp.json()
+        assert len(session["cash_components"]) == 1
+
+    def test_legacy_cash_still_works(self, admin_client):
+        """Old-style single cash dict is still accepted for backward compat."""
+        client, repo, token = admin_client
+        create = client.post("/admin/trades", json={}, headers=_auth(token))
+        trade_id = create.json()["trade_id"]
+
+        resp = client.put(f"/admin/trades/{trade_id}/cash", json={
+            "direction": "they_pay",
+            "amount": "15.00",
+            "payment_method": "cash",
+        }, headers=_auth(token))
+        assert resp.status_code == 200
+        session = resp.json()
+        # Should still have a cash key for backward compat
+        assert session.get("cash") is not None or session.get("cash_components") is not None
+
+
+class TestTradeMarginSplit:
+    """PATCH /admin/trades/{id} — margin_split for vendor mode."""
+
+    def test_set_vendor_mode_with_margin_split(self, admin_client):
+        """Setting mode=vendor with margin_split stores the split."""
+        client, repo, token = admin_client
+        create = client.post("/admin/trades", json={"mode": "vendor"}, headers=_auth(token))
+        trade_id = create.json()["trade_id"]
+
+        resp = client.patch(f"/admin/trades/{trade_id}", json={
+            "margin_split": {"enabled": True, "percent": "15"},
+        }, headers=_auth(token))
+        assert resp.status_code == 200
+        session = resp.json()
+        assert session["margin_split"]["enabled"] is True
+        assert session["margin_split"]["percent"] == "15"
+
+    def test_margin_split_defaults_to_none(self, admin_client):
+        """New sessions have no margin_split."""
+        client, repo, token = admin_client
+        create = client.post("/admin/trades", json={}, headers=_auth(token))
+        trade_id = create.json()["trade_id"]
+
+        resp = client.get(f"/admin/trades/{trade_id}", headers=_auth(token))
+        assert resp.status_code == 200
+        assert resp.json().get("margin_split") is None
+
+
+class TestTradeBalanceMultiCash:
+    """GET /admin/trades/{id}/balance — with multi-asset cash components."""
+
+    def test_balance_with_cash_components(self, admin_client):
+        """Balance computes net from multiple cash components."""
+        client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="20.00",
+                                     current_market_value="50.00"))
+
+        create = client.post("/admin/trades", json={}, headers=_auth(token))
+        trade_id = create.json()["trade_id"]
+
+        client.post(f"/admin/trades/{trade_id}/outgoing", json={
+            "item_id": "our-1", "agreed_value": "50.00",
+        }, headers=_auth(token))
+        client.post(f"/admin/trades/{trade_id}/incoming", json={
+            "name": "Their card", "agreed_value": "30.00",
+        }, headers=_auth(token))
+
+        # Multi-cash: they pay $15 Venmo + $5 cash = $20 total they pay
+        client.put(f"/admin/trades/{trade_id}/cash", json={
+            "cash_components": [
+                {"direction": "they_pay", "amount": "15.00", "payment_method": "venmo"},
+                {"direction": "they_pay", "amount": "5.00", "payment_method": "cash"},
+            ]
+        }, headers=_auth(token))
+
+        resp = client.get(f"/admin/trades/{trade_id}/balance", headers=_auth(token))
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_out_value"] == "50.00"
+        assert data["total_in_value"] == "30.00"
+        # Cash net: +15 + 5 = 20 (they pay)
+        assert data["cash_components_net"] == "20.00"
+        assert data["is_balanced"] is True
+
+    def test_balance_with_mixed_directions(self, admin_client):
+        """Cash components with mixed directions are netted correctly."""
+        client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="20.00",
+                                     current_market_value="50.00"))
+
+        create = client.post("/admin/trades", json={}, headers=_auth(token))
+        trade_id = create.json()["trade_id"]
+
+        client.post(f"/admin/trades/{trade_id}/outgoing", json={
+            "item_id": "our-1", "agreed_value": "50.00",
+        }, headers=_auth(token))
+        client.post(f"/admin/trades/{trade_id}/incoming", json={
+            "name": "Their card", "agreed_value": "40.00",
+        }, headers=_auth(token))
+
+        # They pay $15, we pay $5 = net +10 (they pay)
+        client.put(f"/admin/trades/{trade_id}/cash", json={
+            "cash_components": [
+                {"direction": "they_pay", "amount": "15.00", "payment_method": "venmo"},
+                {"direction": "we_pay", "amount": "5.00", "payment_method": "cash"},
+            ]
+        }, headers=_auth(token))
+
+        resp = client.get(f"/admin/trades/{trade_id}/balance", headers=_auth(token))
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["cash_components_net"] == "10.00"
+        assert data["is_balanced"] is True
+
+    def test_balance_with_margin_split(self, admin_client):
+        """Balance includes margin_split_applied flag when enabled."""
+        client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="20.00",
+                                     current_market_value="50.00"))
+
+        create = client.post("/admin/trades", json={"mode": "vendor"}, headers=_auth(token))
+        trade_id = create.json()["trade_id"]
+
+        client.patch(f"/admin/trades/{trade_id}", json={
+            "margin_split": {"enabled": True, "percent": "15"},
+        }, headers=_auth(token))
+
+        client.post(f"/admin/trades/{trade_id}/outgoing", json={
+            "item_id": "our-1", "agreed_value": "50.00",
+        }, headers=_auth(token))
+        client.post(f"/admin/trades/{trade_id}/incoming", json={
+            "name": "Their card", "agreed_value": "50.00",
+        }, headers=_auth(token))
+
+        resp = client.get(f"/admin/trades/{trade_id}/balance", headers=_auth(token))
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["margin_split_applied"] is True
+
+
+class TestTradeConfirmMultiCash:
+    """POST /admin/trades/{id}/confirm with cash_components."""
+
+    def test_confirm_creates_transactions_for_each_cash_component(self, admin_client):
+        """Confirm creates separate transactions per cash component."""
+        client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="20.00",
+                                     current_market_value="50.00"))
+
+        create = client.post("/admin/trades", json={}, headers=_auth(token))
+        trade_id = create.json()["trade_id"]
+
+        client.post(f"/admin/trades/{trade_id}/outgoing", json={
+            "item_id": "our-1", "agreed_value": "50.00",
+        }, headers=_auth(token))
+        client.post(f"/admin/trades/{trade_id}/incoming", json={
+            "name": "Their card", "agreed_value": "30.00",
+        }, headers=_auth(token))
+
+        client.put(f"/admin/trades/{trade_id}/cash", json={
+            "cash_components": [
+                {"direction": "they_pay", "amount": "15.00", "payment_method": "venmo"},
+                {"direction": "they_pay", "amount": "5.00", "payment_method": "cash"},
+            ]
+        }, headers=_auth(token))
+
+        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "confirmed"
+        # 1 outgoing sale + 1 incoming purchase + 2 cash transactions = 4
+        assert data["transactions_created"] == 4
