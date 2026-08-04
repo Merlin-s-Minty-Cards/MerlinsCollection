@@ -273,6 +273,113 @@ def admin_item_history(
 
 
 # ---------------------------------------------------------------------------
+# Timeline (A3)
+# ---------------------------------------------------------------------------
+
+@router.get("/{item_id}/timeline")
+def admin_item_timeline(
+    item_id: str,
+    repo: InventoryRepository = Depends(get_repo),
+) -> dict[str, Any]:
+    """Get all timeline events for an item in chronological order."""
+    item = repo.get_inventory_item(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+
+    events = repo.get_timeline_events(item_id)
+    # Strip DynamoDB keys from response
+    clean_events = []
+    for e in events:
+        clean_events.append({
+            "txn_id": e.get("txn_id"),
+            "type": e.get("type"),
+            "date": e.get("date"),
+            "amount": e.get("amount"),
+            "payment_method": e.get("payment_method"),
+            "trade_id": e.get("trade_id"),
+            "counterpart_item_id": e.get("counterpart_item_id"),
+            "show_id": e.get("show_id"),
+        })
+
+    return {"item_id": item_id, "events": clean_events}
+
+
+# ---------------------------------------------------------------------------
+# Lineage (A3)
+# ---------------------------------------------------------------------------
+
+@router.get("/{item_id}/lineage")
+def admin_item_lineage(
+    item_id: str,
+    repo: InventoryRepository = Depends(get_repo),
+) -> dict[str, Any]:
+    """Get the full trade chain for an item.
+
+    Walks predecessor_item_id backward to find the root, then forward
+    through items sharing the same lineage_id to build the complete chain.
+    """
+    item = repo.get_inventory_item(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+
+    lineage_id = item.lineage_id or item.item_id
+
+    # Find all items in this lineage
+    all_items = repo.list_inventory()
+    lineage_items = [
+        i for i in all_items
+        if (i.lineage_id == lineage_id) or (i.item_id == lineage_id and i.lineage_id is None)
+    ]
+
+    # If no items share this lineage, just return the current item
+    if not lineage_items:
+        lineage_items = [item]
+
+    # Build chain by walking predecessor links
+    # Create a map of item_id -> item
+    item_map = {i.item_id: i for i in lineage_items}
+
+    # Find the root (item with no predecessor or predecessor not in set)
+    roots = [
+        i for i in lineage_items
+        if i.predecessor_item_id is None or i.predecessor_item_id not in item_map
+    ]
+
+    # Walk from root forward
+    chain = []
+    if roots:
+        current = roots[0]
+        visited = set()
+        while current and current.item_id not in visited:
+            visited.add(current.item_id)
+            chain.append({
+                "item_id": current.item_id,
+                "name": getattr(current, "display_name", None) or getattr(current, "product_name", None) or "",
+                "acquired_cost": str(current.cost_basis),
+                "status": current.status.value,
+            })
+            # Find next in chain (item whose predecessor is current)
+            next_item = None
+            for i in lineage_items:
+                if i.predecessor_item_id == current.item_id and i.item_id not in visited:
+                    next_item = i
+                    break
+            current = next_item
+    else:
+        chain.append({
+            "item_id": item.item_id,
+            "name": getattr(item, "display_name", None) or "",
+            "acquired_cost": str(item.cost_basis),
+            "status": item.status.value,
+        })
+
+    return {
+        "lineage_id": lineage_id,
+        "chain": chain,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Price chart
 # ---------------------------------------------------------------------------
 

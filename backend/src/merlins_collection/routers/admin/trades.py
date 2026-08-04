@@ -506,6 +506,17 @@ def confirm_trade_session(
             repo.record_sale(txn)
             items_sold += 1
             txns_created += 1
+            # A3: Write timeline event for outgoing item
+            repo.put_timeline_event(item_id, {
+                "item_id": item_id,
+                "txn_id": txn.txn_id,
+                "type": "trade_out",
+                "date": txn_date.isoformat(),
+                "amount": str(agreed_value),
+                "payment_method": "trade",
+                "trade_id": trade_id,
+                "show_id": show_id,
+            })
         except ItemAlreadySoldError:
             raise HTTPException(
                 status_code=409,

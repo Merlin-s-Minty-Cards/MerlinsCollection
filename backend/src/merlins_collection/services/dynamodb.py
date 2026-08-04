@@ -1190,6 +1190,35 @@ class InventoryRepository:
                 return True
         return False
 
+    # ---- timeline events (A3) ----
+
+    def put_timeline_event(self, item_id: str, event: dict):
+        """Write a timeline event under the item's INV# partition."""
+        bucket = _bucket(item_id)
+        date_str = event.get("date", "")
+        txn_id = event.get("txn_id", "")
+        sk = f"TIMELINE#{date_str}#{txn_id}"
+        body = _serialize(event)
+        self._table.put_item(Item={
+            "PK": f"INV#{bucket}",
+            "SK": sk,
+            "entity": "timeline_event",
+            **body,
+        })
+
+    def get_timeline_events(self, item_id: str) -> list[dict]:
+        """Get all timeline events for an item, ordered by date."""
+        bucket = _bucket(item_id)
+        items = self._query_all(
+            KeyConditionExpression=(
+                Key("PK").eq(f"INV#{bucket}")
+                & Key("SK").begins_with("TIMELINE#")
+            ),
+        )
+        # Filter to only events for this specific item
+        events = [i for i in items if i.get("item_id") == item_id]
+        return sorted(events, key=lambda e: e.get("date", ""))
+
     # ---- config entities (CONFIG partition) ----
     def _put_config(self, sk: str, entity: str, model):
         body = _serialize(model.model_dump(mode="python"))

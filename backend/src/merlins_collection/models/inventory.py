@@ -166,6 +166,8 @@ class _ItemBase(BaseModel):
     tcg_url: str | None = None
     needs_review: bool = False
     value_note: str | None = None
+    lineage_id: str | None = None
+    predecessor_item_id: str | None = None
 
 
 # A sanitized, customer-safe fallback name (e.g. "Dragonair #181") materialized at
