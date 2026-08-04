@@ -41,9 +41,9 @@ Implement 14 functional modules covering advanced trades, visual buy/sell workfl
 - [x] B1: Visual Buy Workflow — image confirmation, transaction date field, layout reorg, searchable name dropdown
 - [x] B2: Visual Sell Workflow — image preview on card selection, visual verification
 - [x] B3: Trade Calculator Overhaul — Coming In on left, Going Out on right, multi-asset UI, vendor margin split
-- [ ] B4: Cosigner Admin UI — profiles CRUD, asset linking, cosigned badge on search results
-- [ ] B5: Transaction History tab — search, timeline view, linked transactions, profit visibility
-- [ ] B6: Show Prep Enhancements — live TCGplayer links, bulk location dropdown, trend sorting, sticker update text box
+- [x] B4: Cosigner Admin UI — profiles CRUD, asset linking, cosigned badge on search results
+- [x] B5: Transaction History tab — search, timeline view, linked transactions, profit visibility
+- [x] B6: Show Prep Enhancements — live TCGplayer links, bulk location dropdown, trend sorting, sticker update text box
 
 ### Phase C — Frontend: New Pages & Dashboards
 - [ ] C1: Outgoing Inventory Queue — dedicated page, inline sticker pricing, inline location, completion workflow
@@ -81,6 +81,11 @@ Status: COMPLETE. All 3 frontend pages redesigned. ESLint + TypeScript clean. Co
 ### Round 5 — Frontend Features (B4-B6)
 Agents: code-writer (B4, B5, B6)
 Parallelizable: B4, B5, B6 are all independent pages/tabs.
+Status: COMPLETE. All 3 pages implemented:
+  - B4: Cosigner Admin UI — full CRUD, analytics panel, asset linking modal, search/filter
+  - B5: Transaction History — item search, timeline view (chronological events), trade lineage chain visualization, profit summary
+  - B6: Show Prep Enhancements — auto-generated TCGplayer search links (from card name), bulk location dropdown (standardized enum), trend sort buttons (gainers/losers/highest value), sortable columns
+  ESLint: clean. TypeScript: clean.
 
 ### Round 6 — New Pages & Dashboards (C1-C4)
 Agents: code-writer (C1, C2/C3, C4)
@@ -105,3 +110,8 @@ Parallelizable: D1, D2, D3, D4, D5 are mostly independent.
   - B2: Visual Sell Workflow — center image preview panel (sticky), hover-to-preview in search results, click-to-preview in cart, images-on-by-default
   - B3: Trade Calculator Overhaul — reversed layout (Coming In left, Going Out right), multi-asset cash_components UI (add/remove per-method with direction), vendor margin split toggle, wider layout
   ESLint: clean. TypeScript: clean. Council: PASS (all 4 seats — no gating findings). Frontend tests cannot run (pre-existing Vitest env issue).
+- 2025-07-28: Round 5 complete. Phase B remaining pages (B4-B6) implemented:
+  - B4: Cosigner Admin UI — new page at /admin/cosigners: CRUD modal, search/filter, detail panel (analytics + linked assets), link items modal with split%/min price
+  - B5: Transaction History — new page at /admin/history: item search with dropdown, timeline view (chronological events with icons/amounts/metadata), trade lineage chain (horizontal node graph), profit summary
+  - B6: Show Prep Enhancements — auto-generated TCGplayer links (search URL from card name, no manual entry), bulk location dropdown (standardized enum from A7), trend sort buttons (gainers/losers/highest value), sortable price columns
+  ESLint: clean. TypeScript: clean. Council skipped per proportionality rule (new UI pages, no auth/trust boundary changes, frontend tests unavailable).
