@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { ShoppingBag, Plus, X, Check, Banknote, CreditCard, Smartphone, DollarSign } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
+import { CONDITION_OPTIONS, LOCATION_OPTIONS, parseCondition } from '@/lib/constants'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
 import ImageToggle from '@/components/admin/shared/ImageToggle'
@@ -99,7 +100,7 @@ export default function AdminBuyPage() {
     try {
       await api.post(`/purchases/${buyId}/items`, {
         name: form.name.trim(),
-        condition: form.condition,
+        ...parseCondition(form.condition),
         buy_price: parseFloat(form.buy_price),
         market_value: form.market_value ? parseFloat(form.market_value) : null,
         set_name: form.set_name || null,
@@ -206,12 +207,14 @@ export default function AdminBuyPage() {
               <label>
                 <span className="text-[11px] text-pine-400">Condition</span>
                 <select value={form.condition} onChange={(e) => setForm((f) => ({ ...f, condition: e.target.value }))} className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs">
-                  {['M', 'NM', 'LP', 'MP', 'HP', 'D'].map((c) => <option key={c} value={c}>{c}</option>)}
+                  {CONDITION_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
                 </select>
               </label>
               <label>
                 <span className="text-[11px] text-pine-400">Location</span>
-                <input value={form.location} onChange={(e) => setForm((f) => ({ ...f, location: e.target.value }))} className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs" />
+                <select value={form.location} onChange={(e) => setForm((f) => ({ ...f, location: e.target.value }))} className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs">
+                  {LOCATION_OPTIONS.map((loc) => <option key={loc.value} value={loc.value}>{loc.label}</option>)}
+                </select>
               </label>
             </div>
             <label className="block">

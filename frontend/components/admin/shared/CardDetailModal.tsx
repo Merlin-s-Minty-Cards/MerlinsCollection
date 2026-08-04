@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { X, Pencil, Check, XCircle } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
+import { CONDITION_OPTIONS, LOCATION_OPTIONS } from '@/lib/constants'
 import PriceDisplay from './PriceDisplay'
 import CardImage from './CardImage'
 import PriceChart from './PriceChart'
@@ -18,14 +19,13 @@ interface CardDetailModalProps {
   imageUrl?: string | null
 }
 
-/** Fixed location options for dropdown */
-const LOCATION_OPTIONS = ['glass', 'toploader', 'binder', 'storage']
+/** Fixed location options for dropdown — imported from lib/constants */
 
 /** Editable fields with their display labels and value types */
 const EDITABLE_FIELDS: { key: string; label: string; type: 'text' | 'number' | 'select' }[] = [
   { key: 'display_name', label: 'Display Name', type: 'text' },
   { key: 'product_name', label: 'Product Name', type: 'text' },
-  { key: 'condition', label: 'Condition', type: 'text' },
+  { key: 'condition', label: 'Condition', type: 'select' },
   { key: 'location', label: 'Location', type: 'select' },
   { key: 'cost_basis', label: 'Price Paid', type: 'number' },
   { key: 'current_market_value', label: 'Market Value', type: 'number' },
@@ -197,7 +197,19 @@ export default function CardDetailModal({
                           >
                             <option value="">— None —</option>
                             {LOCATION_OPTIONS.map((loc) => (
-                              <option key={loc} value={loc}>{loc}</option>
+                              <option key={loc.value} value={loc.value}>{loc.label}</option>
+                            ))}
+                          </select>
+                        ) : field.type === 'select' && field.key === 'condition' ? (
+                          <select
+                            value={editValue}
+                            onChange={(e) => setEditValue(e.target.value)}
+                            className="flex-1 min-w-0 bg-pine-900 border border-mint/30 rounded px-2 py-0.5 text-xs text-pine-100 focus:outline-none focus:border-mint/60"
+                            autoFocus
+                            disabled={saving}
+                          >
+                            {CONDITION_OPTIONS.map((c) => (
+                              <option key={c} value={c}>{c}</option>
                             ))}
                           </select>
                         ) : (

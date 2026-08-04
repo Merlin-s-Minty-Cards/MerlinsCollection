@@ -93,6 +93,31 @@ class ItemStatus(StrEnum):
     RETURNED_TO_CONSIGNOR = "returned_to_consignor"
 
 
+class InventoryLocation(StrEnum):
+    """Standardized physical locations where inventory can reside.
+
+    Replaces the legacy free-text ``location`` field. All admin UIs should
+    use this list via the ``/admin/locations`` endpoint or import it directly.
+    """
+
+    GLASS = "glass"
+    TOPLOADER = "toploader"
+    BINDER = "binder"
+    STORAGE = "storage"
+    SHOW_BOX_A = "show_box_a"
+    SHOW_BOX_B = "show_box_b"
+    DISPLAY_CASE = "display_case"
+    GRADING_PILE = "grading_pile"
+    SOLD_PILE = "sold_pile"
+
+
+# Ordered list for API/UI consumption — human-readable labels.
+INVENTORY_LOCATION_CHOICES: list[dict[str, str]] = [
+    {"value": loc.value, "label": loc.value.replace("_", " ").title()}
+    for loc in InventoryLocation
+]
+
+
 class SealedProductType(StrEnum):
     BOOSTER_BOX = "booster_box"
     ETB = "etb"

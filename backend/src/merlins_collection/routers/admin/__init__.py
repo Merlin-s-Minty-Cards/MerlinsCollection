@@ -7,6 +7,7 @@ Retool authenticates with a Bearer JWT token.
 from fastapi import APIRouter, Depends
 
 from merlins_collection.dependencies import require_admin
+from merlins_collection.models.inventory import INVENTORY_LOCATION_CHOICES
 
 from .inventory import router as inventory_router
 from .market import router as market_router
@@ -37,3 +38,9 @@ admin_router.include_router(vault_router)
 def admin_health() -> dict:
     """Simple health check confirming admin auth is working."""
     return {"status": "ok", "scope": "admin"}
+
+
+@admin_router.get("/locations")
+def list_locations() -> list[dict[str, str]]:
+    """Return the canonical list of inventory location choices for dropdowns."""
+    return INVENTORY_LOCATION_CHOICES

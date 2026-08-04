@@ -36,6 +36,7 @@ class BuySessionItem(BaseModel):
     set_name: str | None = None
     number: str | None = None
     condition: str = "NM"
+    condition_modifier: str | None = None
     finish: str = "normal"
     language: str = "EN"
     market_value: Decimal | None = None
@@ -139,6 +140,7 @@ def add_buy_item(
         "set_name": body.get("set_name"),
         "number": body.get("number"),
         "condition": body.get("condition", "NM"),
+        "condition_modifier": body.get("condition_modifier"),
         "finish": body.get("finish", "normal"),
         "language": body.get("language", "EN"),
         "market_value": body.get("market_value"),
@@ -208,6 +210,7 @@ def confirm_buy_session(
             "status": "available",
             "finish": buy_item.get("finish", "normal"),
             "condition": buy_item.get("condition", "NM"),
+            "condition_modifier": buy_item.get("condition_modifier"),
             "language": buy_item.get("language", "EN"),
             "location": buy_item.get("location", "toploader"),
             "cost_basis": str(buy_price),

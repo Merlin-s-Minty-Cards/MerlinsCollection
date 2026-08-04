@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Plus, Trash2, Pencil } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
+import { CONDITION_OPTIONS as COND_VALUES, LOCATION_OPTIONS as LOC_VALUES } from '@/lib/constants'
 import { useCardImages } from '@/lib/use-card-images'
 import DataTable, { Column } from '@/components/admin/shared/DataTable'
 import SearchInput from '@/components/admin/shared/SearchInput'
@@ -34,9 +35,9 @@ interface InventoryItem {
 }
 
 const STATUS_OPTIONS = ['', 'available', 'sold', 'lost', 'on_hold', 'consigned']
-const CONDITION_OPTIONS = ['', 'M', 'NM', 'LP', 'MP', 'HP', 'D']
+const CONDITION_OPTIONS = ['', ...COND_VALUES]
 const KIND_OPTIONS = ['', 'raw', 'graded', 'sealed', 'bulk']
-const LOCATION_OPTIONS = ['glass', 'toploader', 'binder', 'storage']
+const LOCATION_OPTIONS = LOC_VALUES.map((o) => o.value)
 
 export default function AdminInventoryPage() {
   const api = useAdminApi()
@@ -503,7 +504,7 @@ function CreateItemModal({
           <label>
             <span className="text-[11px] text-pine-400 uppercase tracking-wider">Condition</span>
             <select value={form.condition} onChange={(e) => update('condition', e.target.value)} className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs">
-              {['M', 'NM', 'LP', 'MP', 'HP', 'D'].map((c) => <option key={c} value={c}>{c}</option>)}
+              {COND_VALUES.map((c) => <option key={c} value={c}>{c}</option>)}
             </select>
           </label>
           <label>
