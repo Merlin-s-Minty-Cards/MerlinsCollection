@@ -92,6 +92,23 @@ class Show(BaseModel):
     notes: str | None = None
 
 
+class ShowAnalyticsSnapshot(BaseModel):
+    """Pre-computed analytics for a completed show (A4)."""
+
+    show_id: str
+    date: date_type
+    total_sold: Decimal = Decimal("0")
+    total_bought: Decimal = Decimal("0")
+    net_sales: Decimal = Decimal("0")
+    inventory_value_at_start: Decimal | None = None
+    sell_through_rate: Decimal | None = None
+    items_sold_count: int = 0
+    items_bought_count: int = 0
+    trades_count: int = 0
+    cash_at_start: Decimal | None = None
+    snapshot_generated_at: datetime | None = None
+
+
 class DebtDirection(StrEnum):
     OWED_TO_US = "owed_to_us"
     WE_OWE = "we_owe"

@@ -1096,6 +1096,31 @@ class InventoryRepository:
         read would need it; the show list is tiny, so filter instead.)"""
         return next((s for s in self.list_shows() if s.show_id == show_id), None)
 
+    # ---- show analytics (A4) ----
+
+    def put_show_analytics(self, snapshot):
+        """Store a show analytics snapshot at PK=SHOW#{show_id}, SK=ANALYTICS."""
+        from merlins_collection.models.business import ShowAnalyticsSnapshot
+        body = _serialize(snapshot.model_dump(mode="python"))
+        self._table.put_item(Item={
+            "PK": f"SHOW#{snapshot.show_id}",
+            "SK": "ANALYTICS",
+            "entity": "show_analytics",
+            **body,
+        })
+
+    def get_show_analytics(self, show_id: str):
+        """Retrieve the analytics snapshot for a show, or None."""
+        from merlins_collection.models.business import ShowAnalyticsSnapshot
+        resp = self._table.get_item(Key={
+            "PK": f"SHOW#{show_id}",
+            "SK": "ANALYTICS",
+        })
+        item = resp.get("Item")
+        if item is None:
+            return None
+        return ShowAnalyticsSnapshot.model_validate(item)
+
     # ---- debts (single small partition, both directions) ----
     def put_debt(self, debt: Debt):
         body = _serialize(debt.model_dump(mode="python"))
