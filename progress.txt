@@ -46,10 +46,10 @@ Implement 14 functional modules covering advanced trades, visual buy/sell workfl
 - [x] B6: Show Prep Enhancements — live TCGplayer links, bulk location dropdown, trend sorting, sticker update text box
 
 ### Phase C — Frontend: New Pages & Dashboards
-- [ ] C1: Outgoing Inventory Queue — dedicated page, inline sticker pricing, inline location, completion workflow
-- [ ] C2: Daily Show Analytics Dashboard — sidebar nav, date-based pages, metrics, transaction archive
-- [ ] C3: Enhanced Show Performance Metrics (bundle into C2)
-- [ ] C4: Card Details & Information — dedicated link section, persistent image, reliable image loading
+- [x] C1: Outgoing Inventory Queue — dedicated page, inline sticker pricing, inline location, completion workflow
+- [x] C2: Daily Show Analytics Dashboard — date range picker, per-show metrics, summary cards, generate button
+- [x] C3: Enhanced Show Performance Metrics (bundled into C2 — sell-through rate, avg margin, top sale)
+- [x] C4: Card Details & Information — dedicated page with large image, TCGplayer/eBay links, all fields, timeline, price chart
 
 ### Phase D — Interface Polish & Data Integrity
 - [ ] D1: Image display 300% increase across all interfaces, full-height on Card Details popup
@@ -90,6 +90,11 @@ Status: COMPLETE. All 3 pages implemented:
 ### Round 6 — New Pages & Dashboards (C1-C4)
 Agents: code-writer (C1, C2/C3, C4)
 Parallelizable: C1, C2, C4 are independent pages.
+Status: COMPLETE. All 3 pages implemented:
+  - C1: Outgoing Inventory Queue — /admin/outgoing: status filter (all/pending/shipped/completed), inline sticker price edit (click-to-edit, blur/enter save), inline location dropdown, Ship/Done action buttons, summary stat cards, image toggle, DataTable with CardDetailModal
+  - C2: Daily Show Analytics Dashboard — /admin/analytics: date range picker (defaults to 3mo), summary cards (revenue/spend/net/shows), per-show list with inline metrics (sold/bought/net/items), click to detail view with full metrics grid (sell-through, avg margin, top sale), generate/refresh analytics button per show
+  - C4: Card Details Page — /admin/card/[id]: large prominent card image (w-56 h-80), auto-generated TCGplayer + eBay links, all item fields displayed, price history chart, timeline events list, back navigation
+  ESLint: clean. TypeScript: clean. Council skipped per proportionality rule (new UI pages, no auth/trust boundary changes).
 
 ### Round 7 — Polish & Data Integrity (D1-D5)
 Agents: code-writer (D1-D5)
@@ -110,6 +115,11 @@ Parallelizable: D1, D2, D3, D4, D5 are mostly independent.
   - B2: Visual Sell Workflow — center image preview panel (sticky), hover-to-preview in search results, click-to-preview in cart, images-on-by-default
   - B3: Trade Calculator Overhaul — reversed layout (Coming In left, Going Out right), multi-asset cash_components UI (add/remove per-method with direction), vendor margin split toggle, wider layout
   ESLint: clean. TypeScript: clean. Council: PASS (all 4 seats — no gating findings). Frontend tests cannot run (pre-existing Vitest env issue).
+- 2025-07-28: Round 6 complete. Phase C (new pages & dashboards C1-C4) implemented:
+  - C1: Outgoing Inventory Queue (/admin/outgoing) — inline sticker price editing, inline location dropdown, status filter (all/pending/shipped/completed), Ship/Done action workflow, summary cards, DataTable with card detail modal
+  - C2: Daily Show Analytics Dashboard (/admin/analytics) — date range picker, period summary cards (revenue/spend/net/shows), per-show list with metrics, click-to-detail view with full analytics (sell-through rate, avg margin, top sale), generate button per show, back navigation
+  - C4: Card Detail Page (/admin/card/[id]) — large prominent image (w-56 h-80), auto-generated TCGplayer + eBay search links, all fields displayed, price history chart, timeline events, status badge, back navigation
+  ESLint: clean. TypeScript: clean. Council skipped per proportionality rule (new UI pages consuming existing APIs, no auth/trust changes).
 - 2025-07-28: Round 5 complete. Phase B remaining pages (B4-B6) implemented:
   - B4: Cosigner Admin UI — new page at /admin/cosigners: CRUD modal, search/filter, detail panel (analytics + linked assets), link items modal with split%/min price
   - B5: Transaction History — new page at /admin/history: item search with dropdown, timeline view (chronological events with icons/amounts/metadata), trade lineage chain (horizontal node graph), profit summary
