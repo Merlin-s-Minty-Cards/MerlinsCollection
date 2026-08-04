@@ -1,299 +1,91 @@
-========================================================================
-PROGRESS — RETOOL ADMIN API
-Branch: retool-admin-api (based on Polishing-For-Deployment)
-Date: 2025-01-27
-RFC: docs/rfcs/0004-retool-admin-api.md
-========================================================================
+# Database & Interface Enhancements — Progress Tracker
 
 ## Feature Goal
-
-Implement a comprehensive admin API surface (`/admin/...`) for Retool integration,
-enabling live database management during card shows. Covers trades, buys, sells,
-show prep, inventory CRUD, and market lookups. All endpoints gated behind admin
-Cognito auth via the existing `require_admin` dependency.
+Implement 14 functional modules covering advanced trades, visual buy/sell workflows, show prep intelligence, cosigner management, enhanced search, transaction history tracking, outgoing inventory queues, daily show analytics, enhanced performance metrics, card detail improvements, buy workflow enhancements, sales workflow visuals, trade calculator layout, and interface/data integrity fixes.
 
 ## Workspace Snapshot
+- Branch: `Polishing-For-Deployment`
+- Latest commit: `e58ee47` — feat(admin): round 4 UX enhancements
+- Working tree: clean (except this file and Implementation-Plan.md untracked)
+- Layers: frontend/ (Next.js 15, App Router), backend/ (FastAPI, DynamoDB), mcp-server/ (MCP SDK)
+- Existing admin pages: buy, sell, trade, show-prep, inventory, market, vault
+- Existing admin API routers: inventory, market, purchases, sales, show_prep, trades, vault
+- RFCs: 6 existing (0001–0006)
 
-- Branch: retool-admin-api
-- Base: Polishing-For-Deployment
-- Backend: Python 3.12 / FastAPI / DynamoDB (single-table)
-- Frontend: Next.js 14 / TypeScript (not touched by this feature)
-- Existing admin auth: `dependencies.py:require_admin` — tested, ready to use
-- Existing repo layer: `services/dynamodb.py:InventoryRepository` — full CRUD
-- Existing models: inventory.py, business.py, catalog.py (Transaction, Show, etc.)
+## Dependencies (key)
+- next: ^15.3.0, react: ^18.3.0, next-auth: 5.0.0-beta.31, tailwindcss: ^3.4.0
+- fastapi: >=0.111.0, boto3: >=1.34.0, pydantic-settings, ruff
+- @modelcontextprotocol/sdk: ^1.0.0, vitest, @testing-library/react
 
 ## Verification Commands
-
-| Layer   | Command                                        |
-|---------|------------------------------------------------|
-| Backend | `python -m pytest backend/tests -q --tb=short` |
-| Lint    | `ruff check backend/src`                        |
+| Layer | Command | Status |
+|---|---|---|
+| Backend | `python -m pytest backend/tests -q --tb=short` | Not yet run |
+| Frontend | `npm test --workspace=frontend` | Not yet run |
+| MCP Server | `npm test --workspace=mcp-server` | Not yet run |
+| Lint BE | `ruff check backend/src` | Not yet run |
+| Lint FE | `npm run lint --workspace=frontend` | Not yet run |
 
 ## Roadmap
 
-### Phase 1: Admin Auth & Router Shell + Inventory CRUD
-- [x] 1.1 Create `/admin` router shell with `require_admin` gate
-- [x] 1.2 Admin health check endpoint
-- [x] 1.3 Admin inventory search (all fields, all statuses, composable filters)
-- [x] 1.4 Get single inventory item (full admin view)
-- [x] 1.5 Update inventory item (partial update, any field)
-- [x] 1.6 Create inventory item manually
-- [x] 1.7 Delete inventory item (soft-delete to LOST or hard-delete)
-- [x] 1.8 Item history (price + transaction history)
-- [x] 1.9 Tests: auth gate, CRUD lifecycle, filter combinations, validation
+### Phase A — Data Layer & Backend (no frontend dependencies)
+- [ ] A1: Advanced Trade Engine — multi-asset (cash/Venmo/Zelle/card in+out), cost basis logic, vendor margin split
+- [ ] A2: Cosigner model & admin CRUD — profiles with payout %, asset association, filtered analytics
+- [ ] A3: Transaction History & Lineage — asset timeline model, trade chain tracking, profit at each step
+- [ ] A4: Show Analytics data layer — date-based aggregation, expanded metrics (sell-through, net, snapshots)
+- [ ] A5: Enhanced Inventory Search — card number, artist, location, price range filters
+- [ ] A6: Condition values update — add LP+/LP- to backend enum, DB, and validation
+- [ ] A7: Location standardization — convert to enum/dropdown with predefined values (backend)
 
-### Phase 2: Market Lookup
-- [x] 2.1 TCGdex catalog search endpoint (name, set)
-- [x] 2.2 Card detail + prices endpoint
-- [x] 2.3 Price trend endpoint (1/7/30d)
-- [x] 2.4 Watchlist model + DynamoDB storage
-- [x] 2.5 Watchlist CRUD endpoints
-- [x] 2.6 Tests: search, watchlist, TCGdex mock
+### Phase B — Frontend: Core UI Modules (depend on Phase A backends)
+- [ ] B1: Visual Buy Workflow — image confirmation, transaction date field, layout reorg, searchable name dropdown
+- [ ] B2: Visual Sell Workflow — image preview on card selection, visual verification
+- [ ] B3: Trade Calculator Overhaul — Coming In on left, Going Out on right, multi-asset UI, vendor margin split
+- [ ] B4: Cosigner Admin UI — profiles CRUD, asset linking, cosigned badge on search results
+- [ ] B5: Transaction History tab — search, timeline view, linked transactions, profit visibility
+- [ ] B6: Show Prep Enhancements — live TCGplayer links, bulk location dropdown, trend sorting, sticker update text box
 
-### Phase 3: Sell Flow
-- [x] 3.1 SellSession model + DynamoDB storage
-- [x] 3.2 SellEngine service (lifecycle)
-- [x] 3.3 Sell endpoints (create, add items, confirm, cancel)
-- [x] 3.4 Fee calculation + payment method integration
-- [x] 3.5 Atomic confirmation (status flip + transactions)
-- [x] 3.6 Tests: full lifecycle, fees, edge cases
+### Phase C — Frontend: New Pages & Dashboards
+- [ ] C1: Outgoing Inventory Queue — dedicated page, inline sticker pricing, inline location, completion workflow
+- [ ] C2: Daily Show Analytics Dashboard — sidebar nav, date-based pages, metrics, transaction archive
+- [ ] C3: Enhanced Show Performance Metrics (bundle into C2)
+- [ ] C4: Card Details & Information — dedicated link section, persistent image, reliable image loading
 
-### Phase 4: Buy Flow
-- [x] 4.1 BuySession model + DynamoDB storage
-- [x] 4.2 PurchaseEngine service (lifecycle)
-- [x] 4.3 Buy endpoints (create, add items, confirm, cancel)
-- [x] 4.4 Buy-price policy calculator
-- [x] 4.5 Atomic confirmation (create items + transactions)
-- [x] 4.6 Tests: full lifecycle, policy enforcement
+### Phase D — Interface Polish & Data Integrity
+- [ ] D1: Image display 300% increase across all interfaces, full-height on Card Details popup
+- [ ] D2: Location dropdown rollout across all forms (buy, sell, trade, show-prep, inventory)
+- [ ] D3: Market price 100% coverage — seeding script update
+- [ ] D4: Inventory input validation — searchable name dropdown on Buy, override + flag for unknowns
+- [ ] D5: Enhanced Inventory Lookup confidence ratings for Market Lookup
 
-### Phase 5: Trade Engine
-- [x] 5.1 TradeSession model + DynamoDB storage
-- [x] 5.2 TradeEngine service (state machine)
-- [x] 5.3 Trade endpoints (create, add legs, cash, confirm, cancel)
-- [x] 5.4 Balance calculator + margin tracking
-- [x] 5.5 Customer view projection (sanitized)
-- [x] 5.6 Vendor-to-vendor mode (margin transfer)
-- [x] 5.7 Atomic confirmation (multi-directional)
-- [x] 5.8 Tests: balance math, margin transfer, atomicity, sanitization
+## Execution Rounds (for multi-conversation orchestration)
 
-### Phase 6: Show Prep
-- [x] 6.1 Mispriced card detection (threshold-based)
-- [x] 6.2 Price update endpoint
-- [x] 6.3 Bulk location move
-- [x] 6.4 Location summary
-- [x] 6.5 Tests: flagging logic, bulk moves, thresholds
+### Round 1 — Foundation (this conversation)
+Setup progress.txt, plan, create feature branch.
 
-### Phase 7: Photo Upload
-- [ ] 7.1 S3 presigned URL generation endpoint
-- [ ] 7.2 Photo key storage on item metadata
-- [ ] 7.3 Tests: URL generation, auth gate
+### Round 2 — Backend Data Layer
+Agents: design-doc (A1-A7 schema), code-writer (A6, A7 — small enum changes), test-qa
+Parallelizable: A6 + A7 are independent small changes. A1-A5 need design first.
 
-### Phase 8: Analytics/Reporting
-- [ ] 8.1 Show P&L aggregation
-- [ ] 8.2 Trade margin reporting
-- [ ] 8.3 Inventory velocity metrics
-- [ ] 8.4 Tests: aggregation math, date ranges
+### Round 3 — Backend Feature Implementation
+Agents: code-writer (A1, A2, A3, A4, A5 in sequence — each needs Council)
+Parallelizable: A2 + A5 are independent. A1 depends on trade model. A3 depends on transaction model. A4 depends on A3.
 
-========================================================================
-ADMIN PANEL UX OVERHAUL
-========================================================================
+### Round 4 — Frontend Core Workflows (B1-B3)
+Agents: code-writer (B1, B2, B3 — visual buy/sell/trade)
+Parallelizable: B1 + B2 are independent pages. B3 is independent.
 
-## Overview
-16 enhancements to the admin frontend + supporting backend changes.
-Organized into 3 rounds for parallel execution.
+### Round 5 — Frontend Features (B4-B6)
+Agents: code-writer (B4, B5, B6)
+Parallelizable: B4, B5, B6 are all independent pages/tabs.
 
-## Round 1 — Bug Fixes + Quick Wins (4 parallel streams)
+### Round 6 — New Pages & Dashboards (C1-C4)
+Agents: code-writer (C1, C2/C3, C4)
+Parallelizable: C1, C2, C4 are independent pages.
 
-### Stream A: Bug Fixes (trade, inventory sort/filter, trade edit)
-- [x] A.1 Fix trade incoming: frontend sends `value` but backend expects `agreed_value`
-- [x] A.2 Add PATCH endpoint for trade outgoing leg `agreed_value` editing
-- [x] A.3 Frontend: expose edit UI for outgoing leg values in trade page
-- [x] A.4 Fix inventory sort: support all columns (name, status, cost, market, location)
-- [x] A.5 Fix inventory location filter: substring match not exact
-- [ ] A.6 Tests for new sort/filter logic + trade leg patch
-
-### Stream B: Buy Page Improvements
-- [x] B.1 Bidirectional % ↔ buy price calculator (enter % → calc price, or price → calc %)
-- [x] B.2 Flip field order: market value first, then buy price (muscle memory)
-- [x] B.3 Add card number field to buy form for faster DB lookup
-- [x] B.4 Wire card_number through to backend item creation
-
-### Stream C: Show-Prep Improvements
-- [x] C.1 Add percent vs dollar toggle for threshold mode
-- [x] C.2 Backend: accept `threshold_mode=percent|dollar` query param
-- [x] C.3 Add manual numeric input alongside the slider
-- [ ] C.4 Tests for dollar-mode threshold logic
-
-### Stream D: Sell Page Improvements
-- [x] D.1 Editable sell prices inline in cart (no more prompt())
-- [x] D.2 Bulk discount field: enter % discount, applies to all items
-- [x] D.3 Per-card % profit margin display in cart (agreed - cost / cost)
-- [x] D.4 Remove prompt() for price entry, use inline input on add
-
-## Round 2 — Feature Work (3 parallel streams)
-
-### Stream E: Sticker Price + Sell Defaults
-- [x] E.1 Add `sticker_price` field to inventory model (DynamoDB)
-- [x] E.2 Display sticker price in inventory table, sell cart, show-prep
-- [x] E.3 Default sell price popup to sticker value (not market)
-- [x] E.4 Backend: include sticker_price in serialization, allow CRUD
-- [x] E.5 Tests for sticker field
-
-### Stream F: Expanded Payment Methods + Venmo Fee
-- [x] F.1 Backend: extend payment_method to include venmo, zelle, epayment
-- [x] F.2 Frontend: add ePayment button group (Venmo, Zelle) in sell/buy/trade
-- [x] F.3 Venmo fee calculation: (amount × 0.019) + $0.10 on sell
-- [x] F.4 Display fee deduction in sell confirmation + profit summary
-- [x] F.5 Tests for fee calculation
-
-### Stream G: Merlin's Vault Page
-- [x] G.1 Backend endpoint: GET /admin/vault — all on_hold items with P&L calc
-- [x] G.2 Frontend: new /admin/vault page with card list, % gain/loss, $ gain/loss
-- [x] G.3 Per-card: current market vs cost basis, % net, $ net
-- [x] G.4 Portfolio summary: total value held, total gain/loss
-- [x] G.5 Ability to move cards to/from vault (status toggle)
-- [x] G.6 Tests for vault endpoint
-
-## Round 3 — Composite Features (2 parallel streams)
-
-### Stream H: Card Images in All Menus
-- [x] H.1 Pull card images from TCGdex via card_id
-- [x] H.2 Per-card image toggle button in all list views
-- [x] H.3 Global "show all images" toggle per page
-- [x] H.4 Lazy-load images, fallback placeholder for missing card_id
-- [x] H.5 Shared ImageToggle component
-
-### Stream I: Editable Detail Modal + Price History Graph
-- [x] I.1 Backend: daily price snapshot recording (scheduled task setup)
-- [x] I.2 Backend: GET /admin/inventory/{id}/price-chart — returns time-series
-- [x] I.3 Shared CardDetailModal component (click any card → opens modal)
-- [x] I.4 All fields editable with pencil toggle in modal
-- [x] I.5 Price chart: Chart.js line graph, toggleable timeframes (1mo/3mo/6mo/1yr/2yr)
-- [x] I.6 Buy price marker on the graph (date + price dot)
-- [x] I.7 Wire modal into all admin pages (inventory, sell, buy, trade, show-prep, vault)
-- [x] I.8 Tests for price-chart endpoint
+### Round 7 — Polish & Data Integrity (D1-D5)
+Agents: code-writer (D1-D5)
+Parallelizable: D1, D2, D3, D4, D5 are mostly independent.
 
 ## Log
-
-- 2025-01-27: Progress file created. RFC 0004 written. Branch created off
-  Polishing-For-Deployment. Phase 1 implementation started.
-- 2025-01-27: Phase 1 COMPLETE. Admin router shell + inventory CRUD implemented.
-  26 tests passing (auth gate, search, get, create, update, delete, history).
-  Lint clean. Router wired into main.py.
-- 2025-01-27: Phase 2 COMPLETE. Market lookup + watchlist CRUD implemented.
-  12 tests passing (catalog search, card detail, price trend, watchlist CRUD).
-  Added watchlist entity storage to DynamoDB repo.
-- 2025-01-27: Phases 3+4 COMPLETE. Sell and Buy session flows implemented.
-  24 tests passing (12 sales + 12 purchases). Full lifecycle: create, add items,
-  confirm (atomic status flip + transactions), cancel. DynamoDB session storage added.
-- 2025-01-27: Phase 5 COMPLETE. Trade engine implemented with full lifecycle.
-  17 tests passing. Multi-directional trades: outgoing legs (sell), incoming legs
-  (buy), cash balancing, margin calculation, customer view sanitization.
-- 2025-01-27: Phase 6 COMPLETE. Show prep endpoints: mispriced card detection,
-  bulk location move, location summary. 5 tests passing.
-- 2025-01-27: RFC 0005 written: Admin Panel Frontend design doc.
-  API key auth added. Next.js admin panel implementation starting next session.
-- Round 1 (Admin UX Overhaul) IMPLEMENTED:
-  Stream A: Fixed trade incoming bug (value→agreed_value), added PATCH endpoint
-  for outgoing leg editing, fixed TradeBalance interface mismatch with backend,
-  fixed cash endpoint (POST→PUT), fixed inventory sort to support all columns
-  (name/status/cost/market/location/kind/condition), fixed location filter to
-  use substring match. Added inline editable values for outgoing trade legs.
-  Stream B: Bidirectional buy %↔price calculator, market value field moved above
-  buy price, card number field added to buy form, per-card buy % shown in list.
-  Stream C: Percent vs dollar threshold toggle, manual numeric input alongside
-  slider, backend accepts threshold_mode param, delta_dollar returned in response.
-  Stream D: Removed prompt() from sell, inline editable prices in cart, bulk
-  discount % field with apply button, per-card profit margin % display with
-  color coding (green=profit, red=loss), cost_basis shown in cart items.
-  REMAINING from Round 1: A.6 (tests for sort/trade patch),
-  C.4 (tests for dollar mode). All B tasks complete.
-- Round 2 (Admin UX Overhaul) IMPLEMENTED:
-  Stream E: Added sticker_price field to _ItemBase (inventory model), flows
-  through DynamoDB CRUD automatically (Optional[Decimal], defaults None).
-  Displayed in inventory table (inline-editable), sell cart, show-prep mispriced
-  table. Sell page defaults price to sticker_price when adding to cart (falls
-  back to market if no sticker). Tests: create/update/search/get/clear sticker.
-  Stream F: Payment method fee schedules defined in sales router (_PAYMENT_FEES
-  dict). Venmo: 1.9% + $0.10, others free. GET /admin/sales/calculate-fee
-  endpoint for real-time preview. Sale confirmation auto-calculates fees from
-  payment_method and returns net_revenue. Frontend: Venmo + Zelle buttons added
-  to sell and buy pages. Fee preview displayed live in sell cart footer. Fee
-  shown in confirmation dialog and post-confirm summary.
-  Stream G: New /admin/vault backend router — GET returns all on_hold items
-  with per-card P&L (dollar_net, percent_net) and portfolio summary (total cost,
-  market, gain/loss). POST /{id}/hold and POST /{id}/release toggle item status.
-  Frontend: full vault page with summary cards, searchable table, release
-  button. Added to AdminShell nav and dashboard quick actions.
-  Tests: 13 vault tests (listing, P&L calc, hold/release), 12 sticker+fee tests.
-- Round 3 (Admin UX Overhaul) IMPLEMENTED:
-  Stream H: Card images in all admin menus. New shared components: CardImage
-  (lazy-loading with fallback placeholder), ImageToggle (global show/hide per
-  page). Bulk card image resolution via POST /admin/inventory/card-images
-  endpoint (batch card_id→image URL lookup from catalog). useCardImages hook
-  for frontend batch resolution. Wired into inventory, sell, show-prep, and
-  vault pages with per-page toggle and card thumbnails in table rows.
-  Stream I: Editable detail modal + price history graph. Backend: new
-  GET /admin/inventory/{id}/price-chart endpoint — returns time-series price
-  data with timeframe filtering (1mo/3mo/6mo/1yr/2yr). Uses card-level history
-  for raw/graded items, item-level for sealed/bulk. Buy price marker from
-  cost_basis + acquired_at. Frontend: PriceChart component (Chart.js line
-  graph with mint color scheme, timeframe toggles, buy marker as amber dot).
-  CardDetailModal: shared modal with all fields editable via pencil toggle,
-  price history chart, item metadata. Wired into inventory, sell, show-prep,
-  vault pages via onRowClick. Dependencies added: chart.js@4.4.7,
-  react-chartjs-2@5.3.0. Tests: 7 price-chart endpoint tests (sealed/raw/
-  graded history, buy marker, timeframe filtering, 404, invalid timeframe).
-  Daily price snapshot infrastructure: already complete — existing daily_sync
-  handles raw (via refresh_held_prices), graded (snapshot_graded_prices), and
-  sealed (snapshot_sealed_prices) items.
-
-========================================================================
-ADMIN PANEL UX — ROUND 4 (13 Enhancements)
-RFC: docs/rfcs/0006-admin-panel-ux-round4.md
-========================================================================
-
-## Overview
-13 enhancements organized into 4 parallel streams.
-
-## Stream 1: Trade Page Enhancements (frontend/app/(admin)/admin/trade/page.tsx)
-
-- [x] 1A. Expand incoming form: Card Name, Number, Set, Market, Value, % (labels + highlight on Value/%)
-- [x] 1B. Rename "Our Margin" → "Our Profit", show both $ profit and % gain
-- [x] 1C. Add editable date field (auto-today) to trade page, send on confirm
-- [x] 1C-BE. Backend: accept optional `trade_date` on PATCH /admin/trades/{id}
-
-## Stream 2: Show-Prep Enhancements (frontend/app/(admin)/admin/show-prep/page.tsx)
-
-- [x] 2A. Move ImageToggle from bottom to header row (next to threshold controls)
-- [x] 2B. Make Delta column sortable (local frontend sort)
-- [x] 2C. Add TCGplayer link column (right of delta): show link if tcg_url exists, else inline add-link input
-- [x] 2D. Mass sticker update: text input for bulk sticker_price update on selected items
-
-## Stream 3: Inventory & Card Detail Enhancements
-
-- [x] 3A. Fix vault pictures not loading (card_id was missing from vault API response)
-- [x] 3B. Verify inventory image toggle works (already coded — confirmed working)
-- [x] 3C. Remove "Listed Price" from CardDetailModal EDITABLE_FIELDS
-- [x] 3D. Rename "Cost Basis" → "Price Paid" in all UI labels (modal, tables, sell cart)
-- [x] 3E. Location dropdown: replace free-text with fixed <select> (glass, toploader, binder, storage)
-- [x] 3F. Delete after loss: show permanent delete option on lost items + confirmation popup
-
-## Stream 4: Cross-Page Features (sell date, sticker notes)
-
-- [x] 4A. Add editable date field to sell page (auto-today), send on confirm
-- [x] 4A-BE. Backend: accept optional `sale_date` on PATCH /admin/sales/{id}
-- [x] 4B. Add `sticker_notes` field to inventory model (backend)
-- [x] 4C. Display sticker_notes near sticker price in inventory, card detail modal, show-prep
-
-## Parallelism Map
-
-| Stream | Can run with | Conflict |
-|--------|-------------|----------|
-| 1 | 2, 3, 4 | None |
-| 2 | 1, 3, 4 | None |
-| 3 | 1, 2 | models/inventory.py shared with Stream 4 (4B adds field) |
-| 4 | 1, 2 | models/inventory.py shared with Stream 3 (minor — append-only) |
-
-Strategy: Run all 4 in parallel. Stream 3 is frontend-only (no model change).
-Stream 4 owns the model file addition (sticker_notes). No merge conflict expected.
+- 2025-07-27: Baseline established. Branch: Polishing-For-Deployment @ e58ee47. Implementation plan analyzed, decomposed into 7 rounds across 4 phases. 14 modules mapped to ~22 discrete tasks.
