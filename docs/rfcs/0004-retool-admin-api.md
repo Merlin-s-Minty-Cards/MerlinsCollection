@@ -129,20 +129,23 @@ class TradeLegCustomerView(BaseModel):
     image_url: str | None
 ```
 
-#### Vendor-to-Vendor Margin Transfer
+#### ~~Vendor-to-Vendor Margin Transfer~~ Trade Cost-Basis Modes (superseded by Task 3.0, 2026-08-04)
 
-When `mode=VENDOR`, confirming a trade applies "split the middle" logic:
+**The "split the middle" formula above is superseded.** The owner's ruling replaces
+the per-leg cost-ratio formula with three named basis modes applied to the total pool:
 
-```
-For each incoming leg:
-    their_market = leg.market_value
-    our_outgoing_avg_cost_pct = sum(out.our_cost_basis) / sum(out.market_value)
-    # We split the savings: new cost basis = midpoint of their market and what
-    # we'd have paid at our usual buy percentage
-    new_cost_basis = (their_market * our_outgoing_avg_cost_pct + their_market) / 2
-```
+| Mode | `basis_pool` (total incoming cost basis) | Cash allowed? |
+|---|---|---|
+| `transfer` | `total_out_basis` (what we paid for the outgoing cards) | No |
+| `split` | `(total_out_basis + total_in_agreed) / 2` (midpoint of our cost and their agreed value) | No |
+| `manual` | operator-supplied total | Yes (required when cash is present) |
 
-This means we confirm some profit on what we traded away and carry a slightly higher cost basis on what we acquired — the margin is split rather than fully realized or fully deferred.
+The `basis_pool` is then allocated pro-rata across incoming legs by `agreed_value`
+using a cumulative-subtotal allocator that guarantees non-negativity and an exact sum.
+
+For card-only trades (no cash), the outgoing sale amounts are also recorded at pro-rata
+shares of `basis_pool`, enforcing the invariant: total outgoing sale amounts == total
+incoming cost bases. This defers all profit to the eventual resale of the incoming cards.
 
 ### Buy/Sell Sessions
 

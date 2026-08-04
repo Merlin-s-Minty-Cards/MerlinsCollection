@@ -79,6 +79,43 @@ def _cash_totals(session: dict[str, Any]) -> tuple[Decimal, Decimal]:
     return we_pay, they_pay
 
 
+def _has_cash(session: dict[str, Any]) -> bool:
+    """Return ``True`` if any cash component carries a non-zero amount."""
+    we_pay, they_pay = _cash_totals(session)
+    return (we_pay + they_pay) > 0
+
+
+def _effective_basis_mode(session: dict[str, Any]) -> tuple[str, str | None]:
+    """Determine the effective basis mode and any blocking error.
+
+    Returns ``(mode, error_string_or_None)``.  The error string is one of the
+    three pinned strings from the contract (task-3.0-contract.md section 4);
+    when non-null, the trade MUST NOT be confirmed.
+    """
+    explicit_mode = session.get("basis_mode")
+    margin_split = session.get("margin_split")
+    has_cash = _has_cash(session)
+
+    # Legacy: margin_split.enabled == True and no explicit basis_mode
+    if explicit_mode is None and margin_split and margin_split.get("enabled"):
+        return "transfer", (
+            "This trade uses the retired percent-based margin split; "
+            "choose a basis mode"
+        )
+
+    mode = explicit_mode or "transfer"
+
+    # Cash blocks transfer / split
+    if mode in ("transfer", "split") and has_cash:
+        return mode, "Cash components require Manual basis mode"
+
+    # Manual requires manual_basis
+    if mode == "manual" and not session.get("manual_basis"):
+        return mode, "Manual basis mode requires a total basis amount"
+
+    return mode, None
+
+
 def _allocate_incoming_basis(
     basis_pool: Decimal, incoming: list[dict[str, Any]]
 ) -> list[Decimal]:
@@ -231,7 +268,8 @@ def update_trade_session(
     if session.get("status") != "draft":
         raise HTTPException(status_code=409, detail="Can only update draft sessions")
 
-    for key in ("mode", "counterparty", "notes", "show_id", "trade_date", "margin_split"):
+    for key in ("mode", "counterparty", "notes", "show_id", "trade_date",
+                "margin_split", "basis_mode", "manual_basis"):
         if key in body:
             session[key] = body[key]
 
@@ -541,9 +579,21 @@ def get_trade_balance(
             .quantize(Decimal("0.1"))
         )
 
-    # Check for margin split
-    margin_split = session.get("margin_split")
-    margin_split_applied = bool(margin_split and margin_split.get("enabled"))
+    # ------------------------------------------------------------------
+    # 3.0: basis mode fields
+    # ------------------------------------------------------------------
+    has_cash = _has_cash(session)
+    mode, basis_mode_error = _effective_basis_mode(session)
+
+    projected_basis_pool: str | None = None
+    if basis_mode_error is None:
+        if mode == "transfer":
+            projected_basis_pool = str(_cents(total_cost_out))
+        elif mode == "split":
+            projected_basis_pool = str(_cents((total_cost_out + total_in) / 2))
+        elif mode == "manual":
+            mb = session.get("manual_basis")
+            projected_basis_pool = str(_cents(_money(mb))) if mb else None
 
     return {
         "trade_id": session["trade_id"],
@@ -553,8 +603,11 @@ def get_trade_balance(
         "cash_delta": str(cash_delta),
         "cash_components_net": str(cash_delta),
         "margin_pct": margin_pct,
-        "margin_split_applied": margin_split_applied,
         "is_balanced": abs(total_out - total_in - cash_delta) < Decimal("0.01"),
+        "basis_mode": mode,
+        "has_cash": has_cash,
+        "projected_basis_pool": projected_basis_pool,
+        "basis_mode_error": basis_mode_error,
     }
 
 
@@ -590,40 +643,47 @@ def confirm_trade_session(
     txns_created = 0
 
     # ------------------------------------------------------------------
-    # Cost-basis allocation (spec §1 "Cost Basis Logic")
+    # 3.0: Basis-mode validation and basis-pool computation
     #
-    # A trade is not a realization event by default: the gain rides along in
-    # the cards we received. So the incoming items inherit the OUTGOING items'
-    # cost basis, adjusted only by cash that actually moved (cash we paid adds
-    # to what the incoming cards cost us; cash they paid us returns part of it).
+    # Three named modes replace the retired percent-based margin split:
+    #   transfer → basis_pool = total outgoing cost basis
+    #   split    → basis_pool = (total_out_basis + total_in_agreed) / 2
+    #   manual   → basis_pool = operator-supplied total
     #
-    # A vendor `margin_split` is the exception: it declares that `percent` of
-    # the trade's profit is recognized NOW rather than deferred. Recognizing
-    # profit raises the incoming basis toward market by that amount, so a 100%
-    # split ends at basis == agreed value (nothing left to defer) and a 0% /
-    # absent split defers everything. Losses are never "recognized" this way.
+    # Cash BLOCKS transfer and split — the operator must pick Manual
+    # whenever money moves, so a human decides the basis.
     # ------------------------------------------------------------------
+    mode, basis_mode_error = _effective_basis_mode(session)
+    if basis_mode_error:
+        raise HTTPException(status_code=422, detail=basis_mode_error)
+
     total_out_basis = sum(
         (_money(leg.get("our_cost_basis") or leg.get("agreed_value")) for leg in outgoing),
         Decimal("0"),
     )
-    cash_we_pay, cash_they_pay = _cash_totals(session)
-    total_in_value = sum((_money(leg.get("agreed_value")) for leg in incoming), Decimal("0"))
+    total_in_agreed = sum((_money(leg.get("agreed_value")) for leg in incoming), Decimal("0"))
+    total_out_agreed = sum((_money(leg.get("agreed_value")) for leg in outgoing), Decimal("0"))
 
-    deferred_pool = total_out_basis + cash_we_pay - cash_they_pay
-    total_profit = (total_in_value + cash_they_pay - cash_we_pay) - total_out_basis
+    if mode == "transfer":
+        basis_pool = _cents(total_out_basis)
+    elif mode == "split":
+        basis_pool = _cents((total_out_basis + total_in_agreed) / 2)
+    elif mode == "manual":
+        basis_pool = _cents(_money(session.get("manual_basis")))
+    else:
+        basis_pool = _cents(total_out_basis)
 
-    recognized = Decimal("0")
-    margin_split = session.get("margin_split")
-    if margin_split and margin_split.get("enabled") and total_profit > 0:
-        # `percent` is the share of profit recognized now (0 = full deferral,
-        # 100 = fully recognized ⇒ basis == agreed value).
-        pct = _money(margin_split.get("percent"))
-        if pct:
-            recognized = total_profit * pct / Decimal("100")
-
-    basis_pool = max(deferred_pool + recognized, Decimal("0"))
+    basis_pool = max(basis_pool, Decimal("0"))
     incoming_basis = _allocate_incoming_basis(basis_pool, incoming)
+
+    # For card-only trades, record outgoing sales at pro-rata shares of
+    # basis_pool (not agreed_value) to enforce the invariant:
+    # Σ outgoing sale amounts == Σ incoming bases == basis_pool.
+    cash_we_pay, cash_they_pay = _cash_totals(session)
+    is_card_only = (cash_we_pay + cash_they_pay) == 0
+    outgoing_sale_amounts: list[Decimal] | None = None
+    if is_card_only and incoming and total_out_agreed > 0:
+        outgoing_sale_amounts = _allocate_incoming_basis(basis_pool, outgoing)
 
     # ------------------------------------------------------------------
     # Lineage — make the resulting card chain walkable from either end.
@@ -659,9 +719,15 @@ def confirm_trade_session(
         )
 
     # Process outgoing legs (our items being sold/traded away)
-    for leg in outgoing:
+    for i, leg in enumerate(outgoing):
         item_id = leg["item_id"]
         agreed_value = Decimal(str(leg.get("agreed_value") or 0))
+        # For card-only trades, use allocated share of basis_pool (invariant).
+        sale_amount = (
+            outgoing_sale_amounts[i]
+            if outgoing_sale_amounts is not None
+            else agreed_value
+        )
 
         # Stamp the shared lineage BEFORE record_sale. That call flips `status`
         # via a targeted UpdateExpression so it preserves this write, whereas
@@ -681,7 +747,7 @@ def confirm_trade_session(
             item_id=item_id,
             category=ItemCategory.RAW,
             date=txn_date,
-            amount=agreed_value,
+            amount=sale_amount,
             payment_method="trade",
             show_id=show_id,
             trade_id=trade_id,
@@ -696,7 +762,7 @@ def confirm_trade_session(
                 "txn_id": txn.txn_id,
                 "type": "trade_out",
                 "date": txn_date.isoformat(),
-                "amount": str(agreed_value),
+                "amount": str(sale_amount),
                 "payment_method": "trade",
                 "trade_id": trade_id,
                 "show_id": show_id,
@@ -821,6 +887,7 @@ def confirm_trade_session(
     session["confirmed_at"] = datetime.now(tz=timezone.utc).isoformat()
     session["total_out_value"] = str(total_out)
     session["total_in_value"] = str(total_in)
+    session["basis_mode"] = mode
     repo.put_trade_session(session)
 
     return {

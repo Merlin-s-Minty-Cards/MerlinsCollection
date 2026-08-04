@@ -23,9 +23,9 @@ The existing trade engine handles basic card-for-card + cash trades but cannot r
 
 1. Replace the single `cash` component with a `cash_components` list supporting multiple payment methods (cash, Venmo, Zelle, card) each with its own direction and amount.
 2. Add a `mode` field that distinguishes `customer` (default) from `vendor` trades.
-3. For `vendor` mode, add `margin_split` metadata: a manual percentage override that adjusts incoming card cost bases to reflect the negotiated profit split.
+3. ~~For `vendor` mode, add `margin_split` metadata: a manual percentage override that adjusts incoming card cost bases to reflect the negotiated profit split.~~ **Superseded by Task 3.0** (2026-08-04): `margin_split` is retired. Replaced by three named `basis_mode` values — see below.
 4. The balance endpoint computes `is_balanced` using the sum of all cash components.
-5. Incoming leg cost basis = `agreed_value` by default; in vendor mode with margin split, cost basis = `agreed_value * (1 - margin_split_pct / 100)`.
+5. ~~Incoming leg cost basis = `agreed_value` by default; in vendor mode with margin split, cost basis = `agreed_value * (1 - margin_split_pct / 100)`.~~ **Superseded by Task 3.0** (2026-08-04): cost basis is determined by the named `basis_mode`, not a percent formula. See the three modes below.
 
 **New fields on trade session dict:**
 
@@ -39,13 +39,26 @@ The existing trade engine handles basic card-for-card + cash trades but cannot r
     },
     ...
 ],
-# Vendor trade margin
+# RETIRED (Task 3.0, 2026-08-04) — kept on legacy sessions for read-back only.
+# Replaced by basis_mode + manual_basis.
 "margin_split": {
     "enabled": bool,
-    "percent": Decimal,  # e.g. 15 = 15% profit split
-    "confirmed_by": str | None,
+    "percent": Decimal,
 } | None,
+# Task 3.0: Three named basis modes (replaces percent-based margin split)
+"basis_mode": "transfer" | "split" | "manual",  # default "transfer" when absent
+"manual_basis": Decimal | None,                  # required iff basis_mode == "manual"
 ```
+
+**Basis mode math (Task 3.0, owner's ruling 2026-08-04):**
+
+| Mode | `basis_pool` | Cash allowed? |
+|---|---|---|
+| `transfer` | `total_out_basis` | No (422) |
+| `split` | `(total_out_basis + total_in_agreed) / 2` | No (422) |
+| `manual` | operator-supplied `manual_basis` | Yes (required when cash is present) |
+
+For card-only trades, the invariant holds: total outgoing sale amounts == total incoming cost bases == `basis_pool`.
 
 **Backward compatibility:** The existing `cash` key is preserved for reading old sessions. New writes always use `cash_components`. The balance endpoint reads whichever is present.
 
