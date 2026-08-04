@@ -9,7 +9,7 @@ created as new inventory, and transactions are recorded for both sides.
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -23,8 +23,84 @@ from merlins_collection.models.inventory import (
     new_ulid,
 )
 from merlins_collection.services.dynamodb import InventoryRepository, ItemAlreadySoldError
+from merlins_collection.services.locations import validate_location
 
 router = APIRouter(prefix="/trades", tags=["admin-trades"])
+
+CENTS = Decimal("0.01")
+
+#: Payment rails we actually accept for the cash side of a trade.
+CASH_PAYMENT_METHODS = {"cash", "venmo", "zelle", "card"}
+
+
+def _money(value: Any) -> Decimal:
+    """Coerce an untyped session/leg value to ``Decimal`` (never via ``float``)."""
+    return Decimal(str(value or 0))
+
+
+def _cents(value: Decimal) -> Decimal:
+    return value.quantize(CENTS, rounding=ROUND_HALF_UP)
+
+
+def _validate_payment_method(component: dict[str, Any]) -> None:
+    method = component.get("payment_method", "cash")
+    if method not in CASH_PAYMENT_METHODS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Unsupported payment_method '{method}'. "
+                f"Must be one of: {', '.join(sorted(CASH_PAYMENT_METHODS))}."
+            ),
+        )
+
+
+def _cash_totals(session: dict[str, Any]) -> tuple[Decimal, Decimal]:
+    """Return ``(cash_we_pay, cash_they_pay)`` for a session.
+
+    Reads ``cash_components`` (the multi-asset shape) and falls back to the
+    legacy single ``cash`` dict for sessions written before that upgrade. Both
+    shapes carry the same keys; only ``"they_pay"`` counts as money coming in,
+    every other direction value (including a missing one) is money going out —
+    matching how the balance endpoint has always read this field.
+    """
+    components = session.get("cash_components") or []
+    if not components:
+        legacy = session.get("cash")
+        components = [legacy] if legacy and legacy.get("amount") else []
+
+    we_pay = Decimal("0")
+    they_pay = Decimal("0")
+    for comp in components:
+        amount = _money(comp.get("amount"))
+        if comp.get("direction") == "they_pay":
+            they_pay += amount
+        else:
+            we_pay += amount
+    return we_pay, they_pay
+
+
+def _allocate_incoming_basis(
+    basis_pool: Decimal, incoming: list[dict[str, Any]]
+) -> list[Decimal]:
+    """Split ``basis_pool`` across incoming legs pro-rata by ``agreed_value``.
+
+    The last leg absorbs the rounding remainder so the allocation sums to the
+    pool exactly (no cent leaks into or out of the books).
+    """
+    n = len(incoming)
+    if n == 0:
+        return []
+
+    agreed = [_money(leg.get("agreed_value")) for leg in incoming]
+    total = sum(agreed, Decimal("0"))
+
+    if total > 0:
+        allocated = [_cents(basis_pool * a / total) for a in agreed]
+    else:
+        allocated = [_cents(basis_pool / n) for _ in range(n)]
+
+    allocated[-1] = _cents(basis_pool - sum(allocated[:-1], Decimal("0")))
+    return allocated
 
 
 # ---------------------------------------------------------------------------
@@ -269,8 +345,12 @@ def add_incoming_leg(
     if "name" not in body or "agreed_value" not in body:
         raise HTTPException(status_code=422, detail="name and agreed_value required")
 
+    # Locations are admin-managed (Task 1.1) — never hardcode the list here.
+    validate_location(repo, body.get("location"))
+
     leg = {
         "card_id": body.get("card_id"),
+        "location": body.get("location"),
         "name": body["name"],
         "card_number": body.get("card_number"),
         "set_name": body.get("set_name"),
@@ -336,6 +416,8 @@ def set_cash_component(
 
     if "cash_components" in body:
         # New multi-asset format
+        for comp in body["cash_components"]:
+            _validate_payment_method(comp)
         session["cash_components"] = body["cash_components"]
         # Also update legacy cash key with first component for backward compat
         if body["cash_components"]:
@@ -354,6 +436,7 @@ def set_cash_component(
             "amount": body.get("amount"),
             "payment_method": body.get("payment_method", "cash"),
         }
+        _validate_payment_method(legacy_cash)
         session["cash"] = legacy_cash
         # Also store as cash_components for consistency
         session["cash_components"] = [legacy_cash]
@@ -487,10 +570,76 @@ def confirm_trade_session(
     items_created = 0
     txns_created = 0
 
+    # ------------------------------------------------------------------
+    # Cost-basis allocation (spec §1 "Cost Basis Logic")
+    #
+    # A trade is not a realization event by default: the gain rides along in
+    # the cards we received. So the incoming items inherit the OUTGOING items'
+    # cost basis, adjusted only by cash that actually moved (cash we paid adds
+    # to what the incoming cards cost us; cash they paid us returns part of it).
+    #
+    # A vendor `margin_split` is the exception: it declares that `percent` of
+    # the trade's profit is recognized NOW rather than deferred. Recognizing
+    # profit raises the incoming basis toward market by that amount, so a 100%
+    # split ends at basis == agreed value (nothing left to defer) and a 0% /
+    # absent split defers everything. Losses are never "recognized" this way.
+    # ------------------------------------------------------------------
+    total_out_basis = sum(
+        (_money(leg.get("our_cost_basis") or leg.get("agreed_value")) for leg in outgoing),
+        Decimal("0"),
+    )
+    cash_we_pay, cash_they_pay = _cash_totals(session)
+    total_in_value = sum((_money(leg.get("agreed_value")) for leg in incoming), Decimal("0"))
+
+    deferred_pool = total_out_basis + cash_we_pay - cash_they_pay
+    total_profit = (total_in_value + cash_they_pay - cash_we_pay) - total_out_basis
+
+    recognized = Decimal("0")
+    margin_split = session.get("margin_split")
+    if margin_split and margin_split.get("enabled") and total_profit > 0:
+        # `percent` is the share of profit recognized now (0 = full deferral,
+        # 100 = fully recognized ⇒ basis == agreed value).
+        pct = _money(margin_split.get("percent"))
+        if pct:
+            recognized = total_profit * pct / Decimal("100")
+
+    basis_pool = max(deferred_pool + recognized, Decimal("0"))
+    incoming_basis = _allocate_incoming_basis(basis_pool, incoming)
+
+    # ------------------------------------------------------------------
+    # Lineage — make the resulting card chain walkable from either end.
+    #
+    # A 1-out/1-in trade is a clean succession, so the incoming item points at
+    # the outgoing one. With multiple outgoing legs there is no single parent,
+    # so we drop `predecessor_item_id` but still stamp ONE shared `lineage_id`
+    # across every item on both sides. That is an approximation for N↔M trades;
+    # the `trade_id` on the transactions preserves the full fidelity.
+    # ------------------------------------------------------------------
+    predecessor_item_id = outgoing[0]["item_id"] if len(outgoing) == 1 else None
+    outgoing_items = {
+        leg["item_id"]: repo.get_inventory_item(leg["item_id"]) for leg in outgoing
+    }
+    lineage_id: str | None = None
+    if outgoing:
+        existing = next(
+            (item.lineage_id for item in outgoing_items.values()
+             if item is not None and item.lineage_id),
+            None,
+        )
+        lineage_id = existing or new_ulid()
+
     # Process outgoing legs (our items being sold/traded away)
     for leg in outgoing:
         item_id = leg["item_id"]
         agreed_value = Decimal(str(leg.get("agreed_value") or 0))
+
+        # Stamp the shared lineage BEFORE record_sale: that call only flips
+        # `status` via an UpdateExpression, so it preserves this write, whereas
+        # a full re-put afterwards would race the status change.
+        out_item = outgoing_items.get(item_id)
+        if out_item is not None and out_item.lineage_id != lineage_id:
+            out_item.lineage_id = lineage_id
+            repo.put_inventory_item(out_item)
 
         txn = Transaction(
             type=TransactionType.SALE,
@@ -524,9 +673,10 @@ def confirm_trade_session(
             )
 
     # Process incoming legs (their cards becoming our inventory)
-    for leg in incoming:
+    for index, leg in enumerate(incoming):
         new_item_id = new_ulid()
         agreed_value = Decimal(str(leg.get("agreed_value") or 0))
+        cost_basis = incoming_basis[index]
 
         item_data = {
             "kind": "raw",
@@ -536,13 +686,15 @@ def confirm_trade_session(
             "finish": leg.get("finish") or "normal",
             "condition": leg.get("condition") or "NM",
             "language": leg.get("language") or "EN",
-            "location": "toploader",
-            "cost_basis": str(agreed_value),
+            "location": leg.get("location") or "toploader",
+            "cost_basis": str(cost_basis),
             "market_value_at_purchase": str(leg.get("market_value") or agreed_value),
             "current_market_value": str(leg.get("market_value") or agreed_value),
             "acquired_at": txn_date.isoformat(),
             "acquired_show_id": show_id,
             "display_name": leg.get("name"),
+            "lineage_id": lineage_id,
+            "predecessor_item_id": predecessor_item_id,
         }
         inv_item = InventoryItemAdapter.validate_python(item_data)
         repo.put_inventory_item(inv_item)
@@ -560,6 +712,21 @@ def confirm_trade_session(
         )
         repo.put_transaction(txn)
         txns_created += 1
+
+        # Timeline event for the incoming item (mirrors the trade_out event
+        # written above, plus the item it came across from).
+        repo.put_timeline_event(new_item_id, {
+            "item_id": new_item_id,
+            "txn_id": txn.txn_id,
+            "type": "trade_in",
+            "date": txn_date.isoformat(),
+            "amount": str(agreed_value),
+            "payment_method": "trade",
+            "trade_id": trade_id,
+            "show_id": show_id,
+            "counterpart_item_id": predecessor_item_id,
+            "cost_basis": str(cost_basis),
+        })
 
     # Process cash component(s)
     cash_components = session.get("cash_components", [])

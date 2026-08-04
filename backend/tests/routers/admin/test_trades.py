@@ -327,7 +327,10 @@ class TestTradeConfirm:
         all_items = repo.list_inventory()
         new_items = [i for i in all_items if i.status == ItemStatus.AVAILABLE]
         assert len(new_items) == 1
-        assert new_items[0].cost_basis == Decimal("75.00")
+        # Cost-basis deferral (2.2): outgoing basis 20 + 15 = 35, they pay $15 cash,
+        # no margin split -> deferred_pool = 35 - 15 = 20.00 allocated to the single
+        # incoming leg. (Was 75.00 = agreed_value, which recognized the whole gain.)
+        assert new_items[0].cost_basis == Decimal("20.00")
 
     def test_confirm_empty_trade_returns_422(self, admin_client):
         client, repo, token = admin_client
@@ -591,3 +594,327 @@ class TestTradeConfirmMultiCash:
         assert data["status"] == "confirmed"
         # 1 outgoing sale + 1 incoming purchase + 2 cash transactions = 4
         assert data["transactions_created"] == 4
+
+
+# ===========================================================================
+# 2.2: Trade engine — cost-basis deferral, margin split, lineage, timeline
+# ===========================================================================
+
+def _new_available_items(repo, exclude: set[str]):
+    """Every AVAILABLE item not in ``exclude`` — i.e. the incoming items."""
+    return [
+        i for i in repo.list_inventory()
+        if i.status == ItemStatus.AVAILABLE and i.item_id not in exclude
+    ]
+
+
+def _build_trade(client, token, *, out_legs=(), in_legs=(), cash_components=None,
+                 margin_split=None):
+    """Create a draft trade with the given legs and return its trade_id."""
+    trade_id = client.post("/admin/trades", json={}, headers=_auth(token)).json()["trade_id"]
+    if margin_split is not None:
+        client.patch(f"/admin/trades/{trade_id}", json={"margin_split": margin_split},
+                     headers=_auth(token))
+    for item_id, agreed in out_legs:
+        r = client.post(f"/admin/trades/{trade_id}/outgoing",
+                        json={"item_id": item_id, "agreed_value": agreed},
+                        headers=_auth(token))
+        assert r.status_code == 200, r.text
+    for name, agreed in in_legs:
+        r = client.post(f"/admin/trades/{trade_id}/incoming",
+                        json={"name": name, "agreed_value": agreed, "condition": "NM"},
+                        headers=_auth(token))
+        assert r.status_code == 200, r.text
+    if cash_components:
+        r = client.put(f"/admin/trades/{trade_id}/cash",
+                       json={"cash_components": cash_components}, headers=_auth(token))
+        assert r.status_code == 200, r.text
+    return trade_id
+
+
+class TestTradeCostBasisAllocation:
+    """Incoming cost basis defers outgoing basis (spec §1 Cost Basis Logic)."""
+
+    def test_incoming_basis_defers_outgoing_basis(self, admin_client):
+        # out: cost_basis 15, agreed 20; in: one leg agreed 25; no cash.
+        # deferred_pool = 15, no margin split -> incoming basis 15.00
+        client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
+                                     current_market_value="20.00"))
+
+        trade_id = _build_trade(client, token,
+                                out_legs=[("our-1", "20.00")],
+                                in_legs=[("Their Card", "25.00")])
+        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
+        assert resp.status_code == 200, resp.text
+
+        new_items = _new_available_items(repo, {"our-1"})
+        assert len(new_items) == 1
+        assert new_items[0].cost_basis == Decimal("15.00")
+
+    def test_cash_adjusts_basis_pool(self, admin_client):
+        # we pay $5 -> pool 15 + 5 = 20.00
+        client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
+                                     current_market_value="20.00"))
+        trade_id = _build_trade(
+            client, token,
+            out_legs=[("our-1", "20.00")],
+            in_legs=[("Their Card", "25.00")],
+            cash_components=[{"direction": "we_pay", "amount": "5.00",
+                              "payment_method": "cash"}],
+        )
+        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
+        assert resp.status_code == 200, resp.text
+        new_items = _new_available_items(repo, {"our-1"})
+        assert len(new_items) == 1
+        assert new_items[0].cost_basis == Decimal("20.00")
+
+    def test_cash_they_pay_reduces_basis_pool(self, admin_client):
+        # they pay $5 -> pool 15 - 5 = 10.00
+        client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="our-2", cost_basis="15.00",
+                                     current_market_value="20.00"))
+        trade_id = _build_trade(
+            client, token,
+            out_legs=[("our-2", "20.00")],
+            in_legs=[("Their Card", "25.00")],
+            cash_components=[{"direction": "they_pay", "amount": "5.00",
+                              "payment_method": "cash"}],
+        )
+        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
+        assert resp.status_code == 200, resp.text
+        new_items = _new_available_items(repo, {"our-2"})
+        assert len(new_items) == 1
+        assert new_items[0].cost_basis == Decimal("10.00")
+
+    def test_margin_split_raises_basis(self, admin_client):
+        # out basis 15, in agreed 25, no cash, split 50%
+        # profit = 25 - 15 = 10 -> recognized 5 -> pool 15 + 5 = 20.00
+        client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
+                                     current_market_value="20.00"))
+        trade_id = _build_trade(client, token,
+                                out_legs=[("our-1", "20.00")],
+                                in_legs=[("Their Card", "25.00")],
+                                margin_split={"enabled": True, "percent": "50"})
+        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
+        assert resp.status_code == 200, resp.text
+        new_items = _new_available_items(repo, {"our-1"})
+        assert len(new_items) == 1
+        assert new_items[0].cost_basis == Decimal("20.00")
+
+    def test_margin_split_full_percent_makes_basis_equal_agreed_value(self, admin_client):
+        # 100% split recognizes all profit now -> basis == agreed value (25.00)
+        client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
+                                     current_market_value="20.00"))
+        trade_id = _build_trade(client, token,
+                                out_legs=[("our-1", "20.00")],
+                                in_legs=[("Their Card", "25.00")],
+                                margin_split={"enabled": True, "percent": "100"})
+        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
+        assert resp.status_code == 200, resp.text
+        new_items = _new_available_items(repo, {"our-1"})
+        assert new_items[0].cost_basis == Decimal("25.00")
+
+    def test_margin_split_ignored_when_trade_is_a_loss(self, admin_client):
+        # in 10 vs out basis 15 -> profit negative -> recognized 0 -> pool 15
+        client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
+                                     current_market_value="20.00"))
+        trade_id = _build_trade(client, token,
+                                out_legs=[("our-1", "20.00")],
+                                in_legs=[("Their Card", "10.00")],
+                                margin_split={"enabled": True, "percent": "50"})
+        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
+        assert resp.status_code == 200, resp.text
+        new_items = _new_available_items(repo, {"our-1"})
+        assert new_items[0].cost_basis == Decimal("15.00")
+
+    def test_multi_incoming_pro_rata_with_rounding(self, admin_client):
+        # pool 10.00 across agreed 10 & 20 -> 3.33 and 6.67, summing exactly
+        client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="10.00",
+                                     current_market_value="30.00"))
+        trade_id = _build_trade(client, token,
+                                out_legs=[("our-1", "30.00")],
+                                in_legs=[("Card A", "10.00"), ("Card B", "20.00")])
+        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
+        assert resp.status_code == 200, resp.text
+
+        new_items = _new_available_items(repo, {"our-1"})
+        assert len(new_items) == 2
+        bases = sorted(i.cost_basis for i in new_items)
+        assert bases == [Decimal("3.33"), Decimal("6.67")]
+        assert sum(bases) == Decimal("10.00")
+
+    def test_basis_pool_floors_at_zero(self, admin_client):
+        # they pay far more cash than our basis -> pool clamps to 0
+        client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="5.00",
+                                     current_market_value="20.00"))
+        trade_id = _build_trade(
+            client, token,
+            out_legs=[("our-1", "20.00")],
+            in_legs=[("Their Card", "25.00")],
+            cash_components=[{"direction": "they_pay", "amount": "50.00",
+                              "payment_method": "cash"}],
+        )
+        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
+        assert resp.status_code == 200, resp.text
+        new_items = _new_available_items(repo, {"our-1"})
+        assert new_items[0].cost_basis == Decimal("0.00")
+
+
+class TestTradeLineage:
+    def test_lineage_written_on_confirm(self, admin_client):
+        client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
+                                     current_market_value="20.00"))
+        trade_id = _build_trade(client, token,
+                                out_legs=[("our-1", "20.00")],
+                                in_legs=[("Their Card", "25.00")])
+        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
+        assert resp.status_code == 200, resp.text
+
+        new_items = _new_available_items(repo, {"our-1"})
+        assert len(new_items) == 1
+        new_item = new_items[0]
+        old_item = repo.get_inventory_item("our-1")
+
+        assert new_item.predecessor_item_id == "our-1"
+        assert new_item.lineage_id is not None
+        assert old_item.lineage_id == new_item.lineage_id
+        assert old_item.status == ItemStatus.SOLD
+
+        chain = client.get(f"/admin/inventory/{new_item.item_id}/lineage",
+                           headers=_auth(token)).json()
+        assert [c["item_id"] for c in chain["chain"]] == ["our-1", new_item.item_id]
+
+    def test_multi_outgoing_shares_lineage_without_predecessor(self, admin_client):
+        client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="10.00",
+                                     current_market_value="20.00"))
+        repo.put_inventory_item(_raw(item_id="our-2", card_id="sv1-2",
+                                     cost_basis="10.00",
+                                     current_market_value="20.00"))
+        trade_id = _build_trade(client, token,
+                                out_legs=[("our-1", "20.00"), ("our-2", "20.00")],
+                                in_legs=[("Their Card", "40.00")])
+        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
+        assert resp.status_code == 200, resp.text
+
+        new_items = _new_available_items(repo, {"our-1", "our-2"})
+        assert len(new_items) == 1
+        new_item = new_items[0]
+        assert new_item.predecessor_item_id is None
+        assert new_item.lineage_id is not None
+        assert repo.get_inventory_item("our-1").lineage_id == new_item.lineage_id
+        assert repo.get_inventory_item("our-2").lineage_id == new_item.lineage_id
+
+    def test_existing_lineage_id_is_reused(self, admin_client):
+        client, repo, token = admin_client
+        item = _raw(item_id="our-1", cost_basis="15.00", current_market_value="20.00")
+        item.lineage_id = "root-lineage"
+        repo.put_inventory_item(item)
+
+        trade_id = _build_trade(client, token,
+                                out_legs=[("our-1", "20.00")],
+                                in_legs=[("Their Card", "25.00")])
+        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
+        assert resp.status_code == 200, resp.text
+
+        new_items = _new_available_items(repo, {"our-1"})
+        assert new_items[0].lineage_id == "root-lineage"
+
+
+class TestTradeInTimeline:
+    def test_trade_in_timeline_event(self, admin_client):
+        client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
+                                     current_market_value="20.00"))
+        trade_id = _build_trade(client, token,
+                                out_legs=[("our-1", "20.00")],
+                                in_legs=[("Their Card", "25.00")])
+        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
+        assert resp.status_code == 200, resp.text
+
+        new_items = _new_available_items(repo, {"our-1"})
+        new_id = new_items[0].item_id
+
+        events = repo.get_timeline_events(new_id)
+        trade_ins = [e for e in events if e.get("type") == "trade_in"]
+        assert len(trade_ins) == 1
+        evt = trade_ins[0]
+        assert evt["counterpart_item_id"] == "our-1"
+        assert evt["trade_id"] == trade_id
+        assert evt["amount"] == "25.00"
+        assert evt["payment_method"] == "trade"
+        assert evt["txn_id"]
+
+
+class TestTradeCashValidation:
+    def test_cash_payment_method_validated(self, admin_client):
+        client, repo, token = admin_client
+        trade_id = client.post("/admin/trades", json={},
+                               headers=_auth(token)).json()["trade_id"]
+
+        bad = client.put(f"/admin/trades/{trade_id}/cash", json={
+            "cash_components": [
+                {"direction": "they_pay", "amount": "10.00", "payment_method": "paypal"},
+            ]
+        }, headers=_auth(token))
+        assert bad.status_code == 422
+
+        good = client.put(f"/admin/trades/{trade_id}/cash", json={
+            "cash_components": [
+                {"direction": "they_pay", "amount": "10.00", "payment_method": "zelle"},
+            ]
+        }, headers=_auth(token))
+        assert good.status_code == 200
+
+    def test_legacy_cash_payment_method_validated(self, admin_client):
+        client, repo, token = admin_client
+        trade_id = client.post("/admin/trades", json={},
+                               headers=_auth(token)).json()["trade_id"]
+
+        bad = client.put(f"/admin/trades/{trade_id}/cash", json={
+            "direction": "they_pay", "amount": "10.00", "payment_method": "paypal",
+        }, headers=_auth(token))
+        assert bad.status_code == 422
+
+        good = client.put(f"/admin/trades/{trade_id}/cash", json={
+            "direction": "they_pay", "amount": "10.00", "payment_method": "venmo",
+        }, headers=_auth(token))
+        assert good.status_code == 200
+
+
+class TestTradeIncomingLocation:
+    def test_incoming_leg_rejects_unknown_location(self, admin_client):
+        client, repo, token = admin_client
+        trade_id = client.post("/admin/trades", json={},
+                               headers=_auth(token)).json()["trade_id"]
+
+        resp = client.post(f"/admin/trades/{trade_id}/incoming", json={
+            "name": "Their Card", "agreed_value": "25.00", "location": "under_the_bed",
+        }, headers=_auth(token))
+        assert resp.status_code == 422
+
+    def test_incoming_leg_location_flows_to_created_item(self, admin_client):
+        client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
+                                     current_market_value="20.00"))
+        trade_id = client.post("/admin/trades", json={},
+                               headers=_auth(token)).json()["trade_id"]
+        client.post(f"/admin/trades/{trade_id}/outgoing", json={
+            "item_id": "our-1", "agreed_value": "20.00",
+        }, headers=_auth(token))
+        resp = client.post(f"/admin/trades/{trade_id}/incoming", json={
+            "name": "Their Card", "agreed_value": "25.00", "location": "binder",
+        }, headers=_auth(token))
+        assert resp.status_code == 200, resp.text
+
+        client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
+        new_items = _new_available_items(repo, {"our-1"})
+        assert new_items[0].location == "binder"
