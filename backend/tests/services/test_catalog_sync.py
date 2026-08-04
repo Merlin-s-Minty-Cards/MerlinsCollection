@@ -15,13 +15,15 @@ from merlins_collection.models.inventory import (
     RawInventoryItem,
     SealedInventoryItem,
 )
+from merlins_collection.models.catalog import FinishPrice
 from merlins_collection.services.catalog_sync import (
     refresh_inventory_market_values,
     run_daily_sync,
     snapshot_graded_prices,
     snapshot_sealed_prices,
+    sync_new_sets,
 )
-from merlins_collection.services.tcgdex import to_catalog_card
+from merlins_collection.services.tcgdex import build_card_id, to_catalog_card
 
 FX = Decimal("1.08")
 
@@ -1020,3 +1022,115 @@ def test_write_path_agrees_with_read_path_for_every_finish_combination(
     written = dynamo_repo.get_inventory_item(item.item_id).current_market_value
     expected = _market_price(card, item_finish)
     assert written == expected
+
+
+# ---------------------------------------------------------------------------
+# Task 2.8 — sync_new_sets: incremental catalog sync for newly released sets
+# ---------------------------------------------------------------------------
+
+
+class FakeSetsClient:
+    """Serves ``list_sets``/``iter_brief_cards`` per language, mirroring
+    ``FakeClient`` in ``tests/scripts/test_seed_catalog.py`` — the same shape,
+    scoped to the two breadth-pass calls ``sync_new_sets`` reuses."""
+
+    def __init__(self, sets_by_language=None, cards_by_language=None):
+        self.sets_by_language = sets_by_language or {}
+        self.cards_by_language = cards_by_language or {}
+        self.set_calls = []
+        self.card_calls = []
+
+    def list_sets(self, language):
+        self.set_calls.append(language)
+        return self.sets_by_language.get(language, [])
+
+    def iter_brief_cards(self, language):
+        self.card_calls.append(language)
+        yield from self.cards_by_language.get(language, [])
+
+
+SWSH1_SET = {"id": "swsh1", "name": "Sword & Shield"}
+SWSH2_SET = {"id": "swsh2", "name": "Rebel Clash"}
+
+SWSH1_CARD_ROW = {"id": "swsh1-1", "localId": "1", "name": "Celebi V"}
+SWSH2_CARD_ROWS = [
+    {"id": "swsh2-1", "localId": "1", "name": "Grookey"},
+    {"id": "swsh2-2", "localId": "2", "name": "Thwackey"},
+]
+
+
+def test_sync_new_sets_adds_only_missing_sets(dynamo_repo):
+    """Two sets from the client, one already populated in the repo -> only the
+    other's cards are written, and ``new_sets`` names exactly that one."""
+    dynamo_repo.batch_upsert_catalog_cards([
+        to_catalog_card_brief_for_test("swsh1", "1", "Celebi V"),
+    ])
+    client = FakeSetsClient(
+        sets_by_language={Language.EN: [SWSH1_SET, SWSH2_SET]},
+        cards_by_language={Language.EN: [SWSH1_CARD_ROW, *SWSH2_CARD_ROWS]},
+    )
+
+    summary = sync_new_sets(dynamo_repo, client)
+
+    assert summary["new_sets"] == ["en:swsh2"]
+    assert summary["cards_added"] == 2
+    assert summary["sets_checked"] == 2
+    assert dynamo_repo.get_catalog_card("en:swsh2-1") is not None
+    assert dynamo_repo.get_catalog_card("en:swsh2-2") is not None
+    # the already-populated set is untouched: still exactly the one seeded card
+    assert len(dynamo_repo.list_cards_by_set("en:swsh1")) == 1
+
+
+def test_sync_new_sets_never_overwrites_existing_card(dynamo_repo):
+    """The most important test: a card that already carries prices must survive
+    a sync run untouched, even though the client's list response for the same
+    set repeats its identity (with no pricing, as the list endpoint always is)."""
+    priced = to_catalog_card_brief_for_test("swsh1", "1", "Celebi V")
+    priced = priced.model_copy(update={
+        "detail": "full",
+        "prices": {"holofoil": FinishPrice(market=Decimal("9.25"))},
+    })
+    dynamo_repo.batch_upsert_catalog_cards([priced])
+    client = FakeSetsClient(
+        sets_by_language={Language.EN: [SWSH1_SET]},
+        cards_by_language={Language.EN: [SWSH1_CARD_ROW]},
+    )
+
+    summary = sync_new_sets(dynamo_repo, client)
+
+    assert summary["new_sets"] == []
+    assert summary["cards_added"] == 0
+    stored = dynamo_repo.get_catalog_card("en:swsh1-1")
+    assert stored.detail == "full"
+    assert stored.prices["holofoil"].market == Decimal("9.25")
+
+
+def test_sync_new_sets_dry_run_writes_nothing(dynamo_repo):
+    client = FakeSetsClient(
+        sets_by_language={Language.EN: [SWSH2_SET]},
+        cards_by_language={Language.EN: SWSH2_CARD_ROWS},
+    )
+
+    summary = sync_new_sets(dynamo_repo, client, dry_run=True)
+
+    assert summary["new_sets"] == ["en:swsh2"]
+    assert dynamo_repo.list_cards_by_set("en:swsh2") == []
+    assert dynamo_repo.get_catalog_card("en:swsh2-1") is None
+
+
+def to_catalog_card_brief_for_test(raw_set_id, local_id, name):
+    """Builds a stored-shape brief `CatalogCard` for `en:{raw_set_id}-{local_id}`
+    without going through the client, for pre-seeding the repo in a test."""
+    from merlins_collection.models.catalog import CardImages, CatalogCard
+
+    return CatalogCard(
+        card_id=build_card_id(Language.EN, f"{raw_set_id}-{local_id}"),
+        language=Language.EN,
+        name=name,
+        set_id=build_card_id(Language.EN, raw_set_id),
+        set_name="",
+        number=local_id,
+        images=CardImages(),
+        detail="brief",
+        last_synced_at=datetime.now(tz=timezone.utc),
+    )

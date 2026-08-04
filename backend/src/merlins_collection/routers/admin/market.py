@@ -20,6 +20,7 @@ from merlins_collection.models.inventory import new_ulid
 from merlins_collection.services.catalog_sync import (
     refresh_held_prices,
     refresh_inventory_market_values,
+    sync_new_sets,
 )
 from merlins_collection.services.dynamodb import InventoryRepository
 from merlins_collection.services.tcgdex import TcgdexClient
@@ -269,6 +270,88 @@ def trigger_market_sync(
 def market_sync_status() -> dict[str, Any]:
     """Return the current (or most recent) sync run's status."""
     return _SYNC_STATUS
+
+
+# ---------------------------------------------------------------------------
+# Catalog Sync Trigger (Task 2.8) — incremental "check for new sets"
+# ---------------------------------------------------------------------------
+
+# A SEPARATE module-level status dict from `_SYNC_STATUS` above, by design: the
+# price sync (depth pass, held cards only) and the catalog sync (breadth,
+# newly released sets only) are different jobs that must be independently
+# runnable and independently reportable. A single shared dict would make one
+# job's "running" block the other's trigger, and one job's completion would
+# clobber the other's last-run report.
+_CATALOG_SYNC_STATUS: dict[str, Any] = {
+    "state": "idle",
+    "started_at": None,
+    "finished_at": None,
+    "sets_checked": None,
+    "new_sets": None,
+    "cards_added": None,
+    "error": None,
+}
+
+
+def _run_catalog_sync(repo: InventoryRepository) -> None:
+    """Background task body: check for newly released sets and seed identity rows.
+
+    Wrapped end-to-end in try/except: a crash here must set `state="failed"`
+    with an `error`, never leave the status stuck on `"running"` -- that would
+    permanently 409 every future trigger of this endpoint.
+    """
+    try:
+        with TcgdexClient() as client:
+            summary = sync_new_sets(repo, client)
+        _CATALOG_SYNC_STATUS.update({
+            "state": "completed",
+            "finished_at": datetime.now(tz=timezone.utc).isoformat(),
+            "sets_checked": summary.get("sets_checked", 0),
+            "new_sets": summary.get("new_sets", []),
+            "cards_added": summary.get("cards_added", 0),
+            "error": None,
+        })
+    except Exception as exc:  # noqa: BLE001 - report the failure, don't crash the worker
+        _CATALOG_SYNC_STATUS.update({
+            "state": "failed",
+            "finished_at": datetime.now(tz=timezone.utc).isoformat(),
+            "error": str(exc),
+        })
+
+
+@router.post("/catalog-sync", status_code=202)
+def trigger_catalog_sync(
+    background_tasks: BackgroundTasks,
+    repo: InventoryRepository = Depends(get_repo),
+) -> dict[str, str]:
+    """Kick off an incremental catalog sync for newly released sets.
+
+    Runs in the background so the request returns immediately; poll
+    ``GET /admin/market/catalog-sync/status`` for progress. This is the
+    button-driven counterpart to the CLI-only full-catalog bootstrap
+    (``scripts/seed_catalog.py``): it only touches sets we hold zero cards
+    for, so it carries none of the bootstrap's dry-run-by-default rails.
+    """
+    if _CATALOG_SYNC_STATUS["state"] == "running":
+        raise HTTPException(status_code=409, detail="A catalog sync is already running")
+
+    _CATALOG_SYNC_STATUS.update({
+        "state": "running",
+        "started_at": datetime.now(tz=timezone.utc).isoformat(),
+        "finished_at": None,
+        "sets_checked": None,
+        "new_sets": None,
+        "cards_added": None,
+        "error": None,
+    })
+    background_tasks.add_task(_run_catalog_sync, repo)
+    return {"state": "started"}
+
+
+@router.get("/catalog-sync/status")
+def catalog_sync_status() -> dict[str, Any]:
+    """Return the current (or most recent) catalog sync run's status."""
+    return _CATALOG_SYNC_STATUS
 
 
 # ---------------------------------------------------------------------------

@@ -29,20 +29,29 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import date
+from datetime import date, datetime, timezone
 
 from merlins_collection.config import settings
 from merlins_collection.models.catalog import PricePoint
-from merlins_collection.models.inventory import ItemStatus, _market_price, new_ulid
+from merlins_collection.models.inventory import ItemStatus, Language, _market_price, new_ulid
 from merlins_collection.services.condition_pricing import apply_condition_adjustment
 from merlins_collection.services.dynamodb import CatalogReseedInProgressError
 from merlins_collection.services.tcgdex import (
+    build_card_id,
     parse_card_id,
     to_catalog_card,
+    to_catalog_card_brief,
     to_price_points,
 )
 
 logger = logging.getLogger(__name__)
+
+# Write buffer size for `sync_new_sets`. A newly released set is a few hundred
+# cards at most, orders of magnitude below `scripts/seed_catalog.py`'s
+# 23k-card whole-catalog walk, so one flush per set-language pass is typically
+# enough; the cap exists so a pathological response still writes in bounded
+# chunks rather than building one unbounded list in memory.
+_NEW_SETS_BATCH_SIZE = 500
 
 
 def snapshot_graded_prices(repo, today: date) -> dict:
@@ -352,3 +361,98 @@ def run_daily_sync(repo, client, today: date) -> dict:
     summary.update(snapshot_sealed_prices(repo, today))
     summary["items_refreshed"] = refresh_inventory_market_values(repo)
     return summary
+
+
+def sync_new_sets(repo, client, *, dry_run: bool = False) -> dict:
+    """Incremental catalog sync: seed identity rows for any set we hold none of.
+
+    The "check for new sets" button/schedule (Round 3 Tasks 3.8/3.9). Distinct
+    from BOTH catalog jobs this module already has: it is not the full-catalog
+    breadth seed (``scripts/seed_catalog.py``, CLI-only, can rewrite ~31k rows)
+    and not the depth pass (``refresh_held_prices``, prices only, for cards
+    already held). This is the narrow case in between -- a new Pokemon set
+    releases, we hold none of it yet, and its cards are entirely missing from
+    the catalog -- so it is cheap and safe enough to run from a button or a
+    monthly schedule with no dry-run rail.
+
+    Reuses the exact breadth-pass building blocks ``seed_catalog.seed_language``
+    uses, so an incrementally-added set has byte-identical row shape to one
+    seeded by the full bootstrap: ``client.list_sets`` to enumerate sets,
+    ``client.iter_brief_cards`` to walk a language's cards, and
+    ``to_catalog_card_brief`` to map a list row into an identity-only
+    (no-price) ``CatalogCard``. Prices are deliberately NOT fetched here --
+    that is ``refresh_held_prices``' job once a card is actually held.
+
+    A set counts as "new" when ``repo.list_cards_by_set`` on its composite id
+    returns nothing. Any set with even one existing row is left alone
+    entirely -- its cards are never walked, let alone written -- which is what
+    makes "never overwrite an existing card row" a structural guarantee here
+    rather than a promise resting on the writer. The writer underneath
+    (``batch_upsert_catalog_cards(..., preserve_priced=True)``) is the same
+    conditional-write path the breadth seed's ``flush()`` uses, kept as a
+    second, independent layer of the same guarantee.
+
+    ``dry_run`` counts what WOULD be written (``new_sets``, ``cards_added``)
+    without calling the writer at all -- mirroring the breadth seed's own
+    dry-run-by-default posture, even though this incremental path is safe
+    enough to default to executing.
+
+    Only ``list_sets`` for one language failing degrades that language to zero
+    new sets found (logged, not raised) -- one struggling upstream endpoint
+    must not abort the whole run when the other language is healthy.
+    """
+    sets_checked = 0
+    new_sets: list[str] = []
+    cards_added = 0
+    synced_at = datetime.now(timezone.utc)
+
+    for language in Language:
+        try:
+            sets = client.list_sets(language)
+        except Exception as exc:  # noqa: BLE001 - one language's outage must not sink the run
+            logger.warning("catalog sync: set list unavailable for %s (%s: %s); "
+                           "skipping", language, type(exc).__name__, exc)
+            continue
+        sets_checked += len(sets)
+
+        missing_set_ids: set[str] = set()
+        for raw_set in sets:
+            raw_set_id = raw_set.get("id")
+            if not raw_set_id:
+                continue
+            composite_set_id = build_card_id(language, raw_set_id)
+            if not repo.list_cards_by_set(composite_set_id):
+                missing_set_ids.add(composite_set_id)
+
+        if not missing_set_ids:
+            continue
+        new_sets.extend(sorted(missing_set_ids))
+
+        set_names = {s["id"]: s.get("name", "") for s in sets}
+        buffer: list = []
+
+        def flush():
+            nonlocal buffer, cards_added
+            if not buffer:
+                return
+            cards_added += len(buffer)
+            if not dry_run:
+                repo.batch_upsert_catalog_cards(buffer, preserve_priced=True)
+            buffer = []
+
+        for raw in client.iter_brief_cards(language):
+            try:
+                card = to_catalog_card_brief(raw, language, set_names=set_names,
+                                             synced_at=synced_at)
+            except Exception as exc:  # noqa: BLE001 - one bad row must not abort the run
+                logger.warning("catalog sync: skipped %r (%s: %s)",
+                               raw.get("id"), type(exc).__name__, exc)
+                continue
+            if card.set_id not in missing_set_ids:
+                continue
+            buffer.append(card)
+            if len(buffer) >= _NEW_SETS_BATCH_SIZE:
+                flush()
+        flush()
+
+    return {"sets_checked": sets_checked, "new_sets": new_sets, "cards_added": cards_added}

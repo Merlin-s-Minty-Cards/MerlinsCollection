@@ -47,6 +47,28 @@ def _catalog_card(card_id="en:sv1-1", name="Pikachu", set_id="sv1",
 
 # ---- fixtures ----
 
+@pytest.fixture(autouse=True)
+def _reset_sync_status_dicts():
+    """Round-1 finding, fixed here (Task 2.8): both sync-run status dicts are
+    module-level mutable state, so a test that stamps one to `"running"` (or
+    leaves it `"completed"`) without resetting it leaks into whichever test
+    runs next -- order-dependence that gets worse now that there are two of
+    these dicts instead of one. Reset both to their idle shape after every
+    test regardless of how it left them."""
+    yield
+    from merlins_collection.routers.admin import market
+
+    market._SYNC_STATUS.update({
+        "state": "idle", "started_at": None, "finished_at": None,
+        "priced_cards": None, "updated_items": None, "error": None,
+    })
+    market._CATALOG_SYNC_STATUS.update({
+        "state": "idle", "started_at": None, "finished_at": None,
+        "sets_checked": None, "new_sets": None, "cards_added": None,
+        "error": None,
+    })
+
+
 @pytest.fixture
 def admin_client(cognito_config, jwks, dynamo_repo, mint_token):
     """TestClient + repo + admin token for admin market endpoint tests."""
@@ -372,6 +394,83 @@ class TestAdminMarketSync:
             assert resp.status_code == 409
         finally:
             market._SYNC_STATUS["state"] = "idle"
+
+
+# ===========================================================================
+# Catalog Sync (Task 2.8) — incremental "check for new sets"
+# ===========================================================================
+
+class TestAdminCatalogSync:
+    """POST /admin/market/catalog-sync and GET /admin/market/catalog-sync/status
+
+    Uses a SEPARATE module-level status dict (`_CATALOG_SYNC_STATUS`) from the
+    price sync's `_SYNC_STATUS` -- the two jobs are independently runnable and
+    independently reportable.
+    """
+
+    def test_catalog_sync_endpoint_starts_and_reports(self, admin_client, monkeypatch):
+        client, repo, token = admin_client
+        called = {}
+        monkeypatch.setattr(
+            "merlins_collection.routers.admin.market.sync_new_sets",
+            lambda repo, tcgdex_client: (
+                called.update(ran=True) or {
+                    "sets_checked": 5, "new_sets": ["en:swsh9"], "cards_added": 120,
+                }
+            ),
+        )
+
+        resp = client.post("/admin/market/catalog-sync", headers=_auth(token))
+        assert resp.status_code == 202
+        assert resp.json() == {"state": "started"}
+
+        status = client.get(
+            "/admin/market/catalog-sync/status", headers=_auth(token)
+        ).json()
+        assert status["state"] == "completed", status.get("error")
+        assert status["sets_checked"] == 5
+        assert status["new_sets"] == ["en:swsh9"]
+        assert status["cards_added"] == 120
+        assert called == {"ran": True}
+
+    def test_catalog_sync_409_when_running(self, admin_client):
+        client, repo, token = admin_client
+        from merlins_collection.routers.admin import market
+
+        market._CATALOG_SYNC_STATUS["state"] = "running"
+        resp = client.post("/admin/market/catalog-sync", headers=_auth(token))
+        assert resp.status_code == 409
+
+    def test_catalog_sync_endpoint_reports_failure_without_getting_stuck(
+        self, admin_client, monkeypatch
+    ):
+        """A crash in the background job must set `state="failed"` with an
+        `error`, never leave the status stuck on `"running"` -- that would
+        permanently 409 every future run."""
+        client, repo, token = admin_client
+        monkeypatch.setattr(
+            "merlins_collection.routers.admin.market.sync_new_sets",
+            lambda repo, tcgdex_client: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+
+        resp = client.post("/admin/market/catalog-sync", headers=_auth(token))
+        assert resp.status_code == 202
+
+        status = client.get(
+            "/admin/market/catalog-sync/status", headers=_auth(token)
+        ).json()
+        assert status["state"] == "failed"
+        assert "boom" in status["error"]
+
+        # recoverable: a fresh trigger is accepted, not blocked by a stuck "running"
+        monkeypatch.setattr(
+            "merlins_collection.routers.admin.market.sync_new_sets",
+            lambda repo, tcgdex_client: {
+                "sets_checked": 0, "new_sets": [], "cards_added": 0,
+            },
+        )
+        resp = client.post("/admin/market/catalog-sync", headers=_auth(token))
+        assert resp.status_code == 202
 
 
 # ===========================================================================
