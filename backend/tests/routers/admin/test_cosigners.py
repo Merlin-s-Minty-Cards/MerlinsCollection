@@ -221,6 +221,24 @@ class TestCosignerAssets:
         assert item_a.consignment.consignor_id == cid
         assert item_a.consignment.split_percent == Decimal("0.60")
 
+    def test_link_default_split_is_our_cut(self, admin_client):
+        """Without an explicit split_percent, default must be OUR cut (1 - consignor's payout fraction)."""
+        client, repo, token = admin_client
+        create = client.post("/admin/cosigners", json={
+            "name": "Alice", "payout_percent": "70",
+        }, headers=_auth(token))
+        cid = create.json()["consignor_id"]
+
+        repo.put_inventory_item(_raw(item_id="item-a"))
+
+        resp = client.post(f"/admin/cosigners/{cid}/link", json={
+            "item_ids": ["item-a"],
+        }, headers=_auth(token))
+        assert resp.status_code == 200
+
+        item_a = repo.get_inventory_item("item-a")
+        assert item_a.consignment.split_percent == Decimal("0.30")
+
 
 # ===========================================================================
 # Analytics
@@ -247,4 +265,48 @@ class TestCosignerAnalytics:
         data = resp.json()
         assert data["total_items"] == 2
         assert data["items_sold"] == 1
-        assert data["total_value"] == "50.00"  # 20 + 30
+        # Both items use the _raw() default current_market_value of 50.00,
+        # which takes precedence over cost_basis (20 + 30) per the fix.
+        assert data["total_value"] == "100.00"  # 50 + 50 (market value)
+
+    def test_analytics_total_value_prefers_market(self, admin_client):
+        """total_value uses current_market_value when present, else falls back to cost_basis."""
+        client, repo, token = admin_client
+        create = client.post("/admin/cosigners", json={"name": "Alice"}, headers=_auth(token))
+        cid = create.json()["consignor_id"]
+
+        terms = ConsignmentTerms(
+            consignor_id=cid, split_percent=Decimal("0.50"), minimum_price=Decimal("10.00"),
+        )
+        item_with_market = RawInventoryItem(
+            item_id="item-1",
+            card_id="sv1-1",
+            finish="holofoil",
+            condition=Condition.NM,
+            location="glass",
+            status=ItemStatus.AVAILABLE,
+            cost_basis=Decimal("10.00"),
+            current_market_value=Decimal("25.00"),
+            acquired_at=date(2025, 1, 1),
+            consignment=terms,
+        )
+        item_without_market = RawInventoryItem(
+            item_id="item-2",
+            card_id="sv1-2",
+            finish="holofoil",
+            condition=Condition.NM,
+            location="glass",
+            status=ItemStatus.AVAILABLE,
+            cost_basis=Decimal("15.00"),
+            current_market_value=None,
+            acquired_at=date(2025, 1, 1),
+            consignment=terms,
+        )
+        repo.put_inventory_item(item_with_market)
+        repo.put_inventory_item(item_without_market)
+
+        resp = client.get(f"/admin/cosigners/{cid}/analytics", headers=_auth(token))
+        assert resp.status_code == 200
+        data = resp.json()
+        # 25.00 (market value preferred) + 15.00 (cost_basis fallback)
+        assert data["total_value"] == "40.00"

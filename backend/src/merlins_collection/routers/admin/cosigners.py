@@ -144,7 +144,8 @@ def link_items_to_cosigner(
         raise HTTPException(status_code=404, detail="Cosigner not found")
 
     item_ids = body.get("item_ids", [])
-    split_percent = Decimal(str(body.get("split_percent", str(consignor.payout_percent / 100))))
+    default_split = (Decimal("100") - consignor.payout_percent) / Decimal("100")
+    split_percent = Decimal(str(body.get("split_percent", str(default_split))))
     minimum_price = Decimal(str(body["minimum_price"])) if body.get("minimum_price") else None
 
     linked = 0
@@ -188,7 +189,11 @@ def get_cosigner_analytics(
 
     total_items = len(linked)
     items_sold = sum(1 for i in linked if i.status.value == "sold")
-    total_value = sum(i.cost_basis for i in linked if i.cost_basis is not None)
+    item_values = [
+        i.current_market_value if i.current_market_value is not None else i.cost_basis
+        for i in linked
+    ]
+    total_value = sum(v for v in item_values if v is not None)
 
     return {
         "consignor_id": consignor_id,
