@@ -84,22 +84,41 @@ def _allocate_incoming_basis(
 ) -> list[Decimal]:
     """Split ``basis_pool`` across incoming legs pro-rata by ``agreed_value``.
 
-    The last leg absorbs the rounding remainder so the allocation sums to the
-    pool exactly (no cent leaks into or out of the books).
+    Allocated by *running cumulative* total rather than by rounding each leg
+    independently and dumping the remainder on the last one. Both approaches
+    sum to the pool exactly, but this one also guarantees every leg is
+    non-negative: each leg is the difference between two non-decreasing
+    quantized cumulative totals.
+
+    That guarantee matters. Rounding each leg half-up independently can
+    overspend the pool, and the remainder-on-the-last-leg fix-up then goes
+    NEGATIVE — e.g. a pool of 0.04 across agreed values [1,1,1,1,1,1,2] lands
+    on [0.01 x6, -0.02]. ``cost_basis`` is an unconstrained ``Decimal``, so a
+    negative would persist as a negative book cost and read as inflated profit
+    on the next sale. Reachable in practice whenever the counterparty's cash
+    nearly cancels our outgoing basis across several incoming cards.
     """
     n = len(incoming)
     if n == 0:
         return []
 
+    # Quantize the pool first so the final cumulative step lands on it exactly.
+    pool = _cents(basis_pool)
+
     agreed = [_money(leg.get("agreed_value")) for leg in incoming]
     total = sum(agreed, Decimal("0"))
+    # No agreed values to weight by (all zero) — split evenly.
+    weights = agreed if total > 0 else [Decimal("1")] * n
+    weight_total = total if total > 0 else Decimal(n)
 
-    if total > 0:
-        allocated = [_cents(basis_pool * a / total) for a in agreed]
-    else:
-        allocated = [_cents(basis_pool / n) for _ in range(n)]
-
-    allocated[-1] = _cents(basis_pool - sum(allocated[:-1], Decimal("0")))
+    allocated: list[Decimal] = []
+    running = Decimal("0")
+    previous_cumulative = Decimal("0")
+    for weight in weights:
+        running += weight
+        cumulative = _cents(pool * running / weight_total)
+        allocated.append(cumulative - previous_cumulative)
+        previous_cumulative = cumulative
     return allocated
 
 
@@ -614,6 +633,16 @@ def confirm_trade_session(
     # so we drop `predecessor_item_id` but still stamp ONE shared `lineage_id`
     # across every item on both sides. That is an approximation for N↔M trades;
     # the `trade_id` on the transactions preserves the full fidelity.
+    #
+    # We only ADOPT an outgoing item's existing `lineage_id` when every already-
+    # chained outgoing item agrees on it. If two outgoing cards come from
+    # DIFFERENT chains, rewriting one to the other's id would be destructive:
+    # the lineage endpoint resolves a chain by filtering on `lineage_id`
+    # (inventory.py), so the rewritten card's own predecessors would drop out of
+    # its chain, and their chain would lose the card. Two histories destroyed to
+    # record one. In that case we mint a fresh id for this trade's output and
+    # leave both existing chains untouched — an item is therefore never moved
+    # out of a lineage it already belongs to, only ever given its first one.
     # ------------------------------------------------------------------
     predecessor_item_id = outgoing[0]["item_id"] if len(outgoing) == 1 else None
     outgoing_items = {
@@ -621,23 +650,29 @@ def confirm_trade_session(
     }
     lineage_id: str | None = None
     if outgoing:
-        existing = next(
-            (item.lineage_id for item in outgoing_items.values()
-             if item is not None and item.lineage_id),
-            None,
+        existing_lineages = {
+            item.lineage_id for item in outgoing_items.values()
+            if item is not None and item.lineage_id
+        }
+        lineage_id = (
+            existing_lineages.pop() if len(existing_lineages) == 1 else new_ulid()
         )
-        lineage_id = existing or new_ulid()
 
     # Process outgoing legs (our items being sold/traded away)
     for leg in outgoing:
         item_id = leg["item_id"]
         agreed_value = Decimal(str(leg.get("agreed_value") or 0))
 
-        # Stamp the shared lineage BEFORE record_sale: that call only flips
-        # `status` via an UpdateExpression, so it preserves this write, whereas
-        # a full re-put afterwards would race the status change.
+        # Stamp the shared lineage BEFORE record_sale. That call flips `status`
+        # via a targeted UpdateExpression so it preserves this write, whereas
+        # `put_inventory_item` is an unconditional full-item put — running it
+        # afterwards would write `status=available` back over the sale and
+        # silently un-sell the card.
+        #
+        # Only ever fills in a MISSING lineage; never moves an item between
+        # chains (see the note above).
         out_item = outgoing_items.get(item_id)
-        if out_item is not None and out_item.lineage_id != lineage_id:
+        if out_item is not None and out_item.lineage_id is None:
             out_item.lineage_id = lineage_id
             repo.put_inventory_item(out_item)
 

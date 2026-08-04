@@ -745,9 +745,41 @@ class TestTradeCostBasisAllocation:
 
         new_items = _new_available_items(repo, {"our-1"})
         assert len(new_items) == 2
-        bases = sorted(i.cost_basis for i in new_items)
-        assert bases == [Decimal("3.33"), Decimal("6.67")]
-        assert sum(bases) == Decimal("10.00")
+        # Key on the leg, not on a sorted list: sorting would let an inverted
+        # allocation (the 10.00 card getting 6.67) pass unnoticed.
+        by_name = {i.display_name: i.cost_basis for i in new_items}
+        assert by_name["Card A"] == Decimal("3.33")   # agreed 10 -> 10/30 of 10.00
+        assert by_name["Card B"] == Decimal("6.67")   # agreed 20 -> 20/30 of 10.00
+        assert sum(by_name.values()) == Decimal("10.00")
+
+    def test_allocation_never_goes_negative(self, admin_client):
+        """A near-zero pool across many legs must not hand any leg a negative basis.
+
+        Rounding each leg half-up independently overspends a 0.04 pool across
+        agreed [1,1,1,1,1,1,2] and the remainder-on-last-leg fix-up lands on
+        -0.02, which would persist as a negative book cost.
+        """
+        client, repo, token = admin_client
+        # out basis 100.04, they pay 100.00 -> pool = 0.04
+        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="100.04",
+                                     current_market_value="120.00"))
+        in_legs = [(f"Card {i}", "1.00") for i in range(6)] + [("Card 6", "2.00")]
+        trade_id = _build_trade(
+            client, token,
+            out_legs=[("our-1", "120.00")],
+            in_legs=in_legs,
+            cash_components=[{"direction": "they_pay", "amount": "100.00",
+                              "payment_method": "cash"}],
+        )
+        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
+        assert resp.status_code == 200, resp.text
+
+        new_items = _new_available_items(repo, {"our-1"})
+        assert len(new_items) == 7
+        bases = [i.cost_basis for i in new_items]
+        assert all(b >= Decimal("0") for b in bases), bases
+        # And the pool is still conserved exactly.
+        assert sum(bases) == Decimal("0.04")
 
     def test_basis_pool_floors_at_zero(self, admin_client):
         # they pay far more cash than our basis -> pool clamps to 0
@@ -827,6 +859,57 @@ class TestTradeLineage:
 
         new_items = _new_available_items(repo, {"our-1"})
         assert new_items[0].lineage_id == "root-lineage"
+
+    def test_outgoing_items_from_different_lineages_are_not_merged(self, admin_client):
+        """Trading two already-chained cards must not rewrite either chain.
+
+        W is in lineage L1. X is in lineage L2 and succeeds P (also L2).
+        Adopting one id for both would drop P out of X's chain and strand it.
+        """
+        client, repo, token = admin_client
+
+        # P: X's predecessor, already sold in the earlier trade that produced X.
+        p = _raw(item_id="pred-p", card_id="sv1-p", cost_basis="5.00",
+                 status=ItemStatus.SOLD)
+        p.lineage_id = "L2"
+        repo.put_inventory_item(p)
+
+        x = _raw(item_id="our-x", card_id="sv1-x", cost_basis="10.00",
+                 current_market_value="20.00")
+        x.lineage_id = "L2"
+        x.predecessor_item_id = "pred-p"
+        repo.put_inventory_item(x)
+
+        w = _raw(item_id="our-w", card_id="sv1-w", cost_basis="10.00",
+                 current_market_value="20.00")
+        w.lineage_id = "L1"
+        repo.put_inventory_item(w)
+
+        trade_id = _build_trade(client, token,
+                                out_legs=[("our-w", "20.00"), ("our-x", "20.00")],
+                                in_legs=[("Their Card", "40.00")])
+        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
+        assert resp.status_code == 200, resp.text
+
+        # Neither pre-existing chain was rewritten.
+        assert repo.get_inventory_item("our-w").lineage_id == "L1"
+        assert repo.get_inventory_item("our-x").lineage_id == "L2"
+        assert repo.get_inventory_item("pred-p").lineage_id == "L2"
+
+        # P is still reachable from X's chain, and X from P's.
+        x_chain = client.get("/admin/inventory/our-x/lineage",
+                             headers=_auth(token)).json()
+        assert x_chain["lineage_id"] == "L2"
+        assert [c["item_id"] for c in x_chain["chain"]] == ["pred-p", "our-x"]
+
+        p_chain = client.get("/admin/inventory/pred-p/lineage",
+                             headers=_auth(token)).json()
+        assert [c["item_id"] for c in p_chain["chain"]] == ["pred-p", "our-x"]
+
+        # The new card gets its own fresh lineage rather than hijacking either.
+        new_items = _new_available_items(repo, {"our-w", "our-x", "pred-p"})
+        assert len(new_items) == 1
+        assert new_items[0].lineage_id not in {"L1", "L2", None}
 
 
 class TestTradeInTimeline:
