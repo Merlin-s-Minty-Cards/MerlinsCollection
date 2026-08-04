@@ -10,10 +10,10 @@ interface CardImageProps {
 }
 
 const SIZE_CLASSES = {
-  sm: 'w-12 h-[4.25rem]',
-  md: 'w-20 h-28',
-  lg: 'w-32 h-44',
-  xl: 'w-48 h-[16.5rem]',
+  sm: 'w-24 h-[8.5rem]',
+  md: 'w-40 h-56',
+  lg: 'w-56 h-80',
+  xl: 'w-72 h-[25.75rem]',
 }
 
 /**

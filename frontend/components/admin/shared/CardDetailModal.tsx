@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { X, Pencil, Check, XCircle } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
-import { CONDITION_OPTIONS, LOCATION_OPTIONS } from '@/lib/constants'
+import { CONDITION_OPTIONS, LOCATION_OPTIONS, parseCondition, formatCondition } from '@/lib/constants'
 import PriceDisplay from './PriceDisplay'
 import CardImage from './CardImage'
 import PriceChart from './PriceChart'
@@ -35,6 +35,7 @@ const EDITABLE_FIELDS: { key: string; label: string; type: 'text' | 'number' | '
   { key: 'status', label: 'Status', type: 'text' },
   { key: 'finish', label: 'Finish', type: 'text' },
   { key: 'language', label: 'Language', type: 'text' },
+  { key: 'tcg_url', label: 'TCGplayer Link', type: 'text' },
 ]
 
 /**
@@ -89,7 +90,14 @@ export default function CardDetailModal({
     setError(null)
     try {
       const value = editValue.trim() === '' ? null : editValue.trim()
-      await api.put(`/inventory/${item.item_id}`, { [editingField]: value })
+      const edits: Record<string, unknown> = { [editingField]: value }
+      const payload = { ...edits }
+      if (typeof payload.condition === 'string') {
+        const { condition, condition_modifier } = parseCondition(payload.condition)
+        payload.condition = condition
+        payload.condition_modifier = condition_modifier
+      }
+      await api.put(`/inventory/${item.item_id}`, payload)
       setEditingField(null)
       setEditValue('')
       onUpdated?.()
@@ -124,7 +132,7 @@ export default function CardDetailModal({
       aria-label={`Details for ${name}`}
     >
       <div
-        className="relative w-full max-w-4xl max-h-[90vh] overflow-y-auto vault-panel rounded-2xl border border-pine-700/50 shadow-2xl mx-4"
+        className="relative w-full max-w-4xl h-[90vh] vault-panel rounded-2xl flex flex-col overflow-hidden border border-pine-700/50 shadow-2xl mx-4"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -143,14 +151,22 @@ export default function CardDetailModal({
           </button>
         </div>
 
-        <div className="p-5 flex flex-col md:flex-row gap-6">
+        <div className="flex-1 min-h-0 p-5 flex flex-col md:flex-row gap-6">
           {/* Left: Large Card Image */}
-          <div className="flex-shrink-0 flex items-start justify-center">
-            <CardImage imageUrl={imageUrl} alt={name} size="xl" className="rounded-xl shadow-lg" />
+          <div className="flex-shrink-0 flex items-center justify-center md:h-full">
+            {imageUrl ? (
+              <img
+                src={imageUrl}
+                alt={String(item?.display_name ?? item?.product_name ?? 'Card')}
+                className="h-64 md:h-full w-auto object-contain rounded-xl shadow-lg"
+              />
+            ) : (
+              <CardImage imageUrl={null} alt="No image" size="xl" className="rounded-xl" />
+            )}
           </div>
 
           {/* Right: Details */}
-          <div className="flex-1 min-w-0 space-y-5">
+          <div className="flex-1 min-w-0 space-y-5 overflow-y-auto vault-scroll">
           {/* Error banner */}
           {error && (
             <div className="text-xs text-red-400 bg-red-400/10 border border-red-400/20 rounded px-3 py-2">
@@ -179,7 +195,12 @@ export default function CardDetailModal({
               {visibleFields.map((field) => {
                 const value = item[field.key]
                 const isEditing = editingField === field.key
-                const displayValue = value != null ? String(value) : '—'
+                const displayValue =
+                  field.key === 'condition' && item.condition != null
+                    ? formatCondition(String(item.condition), item.condition_modifier as string | null | undefined)
+                    : value != null
+                      ? String(value)
+                      : '—'
 
                 return (
                   <div
@@ -199,7 +220,6 @@ export default function CardDetailModal({
                             autoFocus
                             disabled={saving}
                           >
-                            <option value="">— None —</option>
                             {LOCATION_OPTIONS.map((loc) => (
                               <option key={loc.value} value={loc.value}>{loc.label}</option>
                             ))}
