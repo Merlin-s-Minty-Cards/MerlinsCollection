@@ -199,3 +199,69 @@ class TestBuySessionCancel:
 
         resp = client.post(f"/admin/purchases/{buy_id}/cancel", headers=_auth(token))
         assert resp.status_code == 409
+
+
+# ===========================================================================
+# A6: Condition Modifier support in buy flow
+# ===========================================================================
+
+class TestConditionModifierInPurchase:
+    def test_add_item_with_condition_modifier(self, admin_client):
+        """Items can be added with a condition_modifier (LP+, LP-)."""
+        client, repo, token = admin_client
+        create = client.post("/admin/purchases", json={}, headers=_auth(token))
+        buy_id = create.json()["buy_id"]
+
+        resp = client.post(f"/admin/purchases/{buy_id}/items", json={
+            "name": "Pikachu #25",
+            "buy_price": "15.00",
+            "condition": "LP",
+            "condition_modifier": "+",
+            "finish": "holofoil",
+        }, headers=_auth(token))
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert items[0]["condition"] == "LP"
+        assert items[0]["condition_modifier"] == "+"
+
+    def test_confirm_with_condition_modifier_creates_item(self, admin_client):
+        """Confirmed buy creates inventory item preserving the modifier."""
+        client, repo, token = admin_client
+        create = client.post("/admin/purchases", json={}, headers=_auth(token))
+        buy_id = create.json()["buy_id"]
+
+        client.post(f"/admin/purchases/{buy_id}/items", json={
+            "name": "Dragonair",
+            "buy_price": "20.00",
+            "condition": "LP",
+            "condition_modifier": "-",
+            "finish": "normal",
+        }, headers=_auth(token))
+
+        resp = client.post(f"/admin/purchases/{buy_id}/confirm", headers=_auth(token))
+        assert resp.status_code == 200
+
+        # Verify the inventory item has the modifier
+        from merlins_collection.models.inventory import ConditionModifier
+        all_items = repo.list_inventory()
+        assert len(all_items) == 1
+        item = all_items[0]
+        assert item.condition_modifier is ConditionModifier.MINUS
+
+    def test_confirm_without_modifier_defaults_none(self, admin_client):
+        """Items without a modifier default to None (no modifier)."""
+        client, repo, token = admin_client
+        create = client.post("/admin/purchases", json={}, headers=_auth(token))
+        buy_id = create.json()["buy_id"]
+
+        client.post(f"/admin/purchases/{buy_id}/items", json={
+            "name": "Bulbasaur",
+            "buy_price": "5.00",
+            "condition": "NM",
+            "finish": "normal",
+        }, headers=_auth(token))
+
+        client.post(f"/admin/purchases/{buy_id}/confirm", headers=_auth(token))
+        all_items = repo.list_inventory()
+        assert len(all_items) == 1
+        assert all_items[0].condition_modifier is None
