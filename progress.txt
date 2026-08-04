@@ -38,9 +38,9 @@ Implement 14 functional modules covering advanced trades, visual buy/sell workfl
 - [x] A7: Location standardization — convert to enum/dropdown with predefined values (backend)
 
 ### Phase B — Frontend: Core UI Modules (depend on Phase A backends)
-- [ ] B1: Visual Buy Workflow — image confirmation, transaction date field, layout reorg, searchable name dropdown
-- [ ] B2: Visual Sell Workflow — image preview on card selection, visual verification
-- [ ] B3: Trade Calculator Overhaul — Coming In on left, Going Out on right, multi-asset UI, vendor margin split
+- [x] B1: Visual Buy Workflow — image confirmation, transaction date field, layout reorg, searchable name dropdown
+- [x] B2: Visual Sell Workflow — image preview on card selection, visual verification
+- [x] B3: Trade Calculator Overhaul — Coming In on left, Going Out on right, multi-asset UI, vendor margin split
 - [ ] B4: Cosigner Admin UI — profiles CRUD, asset linking, cosigned badge on search results
 - [ ] B5: Transaction History tab — search, timeline view, linked transactions, profit visibility
 - [ ] B6: Show Prep Enhancements — live TCGplayer links, bulk location dropdown, trend sorting, sticker update text box
@@ -76,6 +76,7 @@ Status: COMPLETE. All 5 tasks (A5, A1, A2, A3, A4) implemented with TDD. 35 new 
 ### Round 4 — Frontend Core Workflows (B1-B3)
 Agents: code-writer (B1, B2, B3 — visual buy/sell/trade)
 Parallelizable: B1 + B2 are independent pages. B3 is independent.
+Status: COMPLETE. All 3 frontend pages redesigned. ESLint + TypeScript clean. Council: PASS (no gating findings).
 
 ### Round 5 — Frontend Features (B4-B6)
 Agents: code-writer (B4, B5, B6)
@@ -99,3 +100,8 @@ Parallelizable: D1, D2, D3, D4, D5 are mostly independent.
   - A3: Transaction history & lineage (timeline events, trade chain, lineage_id/predecessor fields) — 8 new tests
   - A4: Show analytics (ShowAnalyticsSnapshot, generate/get/list-by-date endpoints) — 6 new tests
   Total: 43 new tests. Council skipped per proportionality rule (straightforward implementations, no auth/trust boundary changes). Regression suite running.
+- 2025-07-28: Round 4 complete. Phase B core workflows (B1-B3) implemented:
+  - B1: Visual Buy Workflow — searchable catalog dropdown (GET /market/search), card image preview panel, transaction date picker, 3-column layout (form|image|cart)
+  - B2: Visual Sell Workflow — center image preview panel (sticky), hover-to-preview in search results, click-to-preview in cart, images-on-by-default
+  - B3: Trade Calculator Overhaul — reversed layout (Coming In left, Going Out right), multi-asset cash_components UI (add/remove per-method with direction), vendor margin split toggle, wider layout
+  ESLint: clean. TypeScript: clean. Council: PASS (all 4 seats — no gating findings). Frontend tests cannot run (pre-existing Vitest env issue).
