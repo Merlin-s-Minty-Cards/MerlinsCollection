@@ -203,6 +203,40 @@ class TestSellSessionConfirm:
         assert resp.status_code == 409
 
 
+# ===========================================================================
+# Task 2.1: sale timeline events
+# ===========================================================================
+
+class TestSaleTimelineEvent:
+    def test_confirm_writes_sale_timeline_event(self, admin_client):
+        client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="card-1"))
+        repo.put_inventory_item(_raw(item_id="card-2", card_id="sv1-2"))
+
+        create = client.post("/admin/sales", json={"payment_method": "cash"}, headers=_auth(token))
+        sell_id = create.json()["sell_id"]
+
+        client.post(f"/admin/sales/{sell_id}/items", json={
+            "item_id": "card-1", "agreed_price": "45.00",
+        }, headers=_auth(token))
+        client.post(f"/admin/sales/{sell_id}/items", json={
+            "item_id": "card-2", "agreed_price": "30.00",
+        }, headers=_auth(token))
+
+        resp = client.post(f"/admin/sales/{sell_id}/confirm", headers=_auth(token))
+        assert resp.status_code == 200
+
+        events1 = client.get("/admin/inventory/card-1/timeline", headers=_auth(token)).json()["events"]
+        sale_events1 = [e for e in events1 if e.get("type") == "sale"]
+        assert len(sale_events1) == 1
+        assert sale_events1[0]["amount"] == "45.00"
+
+        events2 = client.get("/admin/inventory/card-2/timeline", headers=_auth(token)).json()["events"]
+        sale_events2 = [e for e in events2 if e.get("type") == "sale"]
+        assert len(sale_events2) == 1
+        assert sale_events2[0]["amount"] == "30.00"
+
+
 class TestSellSessionCancel:
     def test_cancel_draft(self, admin_client):
         client, repo, token = admin_client

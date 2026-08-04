@@ -178,6 +178,116 @@ class TestBuySessionConfirm:
         assert resp.status_code == 409
 
 
+# ===========================================================================
+# Task 2.1: transaction date, manual-entry flag, timeline events
+# ===========================================================================
+
+class TestPurchaseDateAndReview:
+    def test_confirm_uses_purchase_date(self, admin_client):
+        client, repo, token = admin_client
+        create = client.post("/admin/purchases", json={"payment_method": "cash"}, headers=_auth(token))
+        buy_id = create.json()["buy_id"]
+
+        client.patch(f"/admin/purchases/{buy_id}", json={"purchase_date": "2026-07-04"}, headers=_auth(token))
+        client.post(f"/admin/purchases/{buy_id}/items", json={
+            "name": "Pikachu #25", "buy_price": "15.00",
+        }, headers=_auth(token))
+
+        resp = client.post(f"/admin/purchases/{buy_id}/confirm", headers=_auth(token))
+        assert resp.status_code == 200
+
+        all_items = repo.list_inventory()
+        assert len(all_items) == 1
+        assert all_items[0].acquired_at == date(2026, 7, 4)
+
+        txns = repo.list_transactions(date(2026, 7, 1), date(2026, 7, 31))
+        purchase_txns = [t for t in txns if t.item_id == all_items[0].item_id]
+        assert len(purchase_txns) == 1
+        assert purchase_txns[0].date == date(2026, 7, 4)
+
+    def test_patch_rejects_bad_date(self, admin_client):
+        client, repo, token = admin_client
+        create = client.post("/admin/purchases", json={}, headers=_auth(token))
+        buy_id = create.json()["buy_id"]
+
+        resp = client.patch(f"/admin/purchases/{buy_id}", json={"purchase_date": "July 4th"}, headers=_auth(token))
+        assert resp.status_code == 422
+
+    def test_manual_entry_sets_needs_review(self, admin_client):
+        client, repo, token = admin_client
+        create = client.post("/admin/purchases", json={}, headers=_auth(token))
+        buy_id = create.json()["buy_id"]
+
+        client.post(f"/admin/purchases/{buy_id}/items", json={
+            "name": "Mystery Card", "buy_price": "5.00", "manual_entry": True,
+        }, headers=_auth(token))
+
+        client.post(f"/admin/purchases/{buy_id}/confirm", headers=_auth(token))
+        all_items = repo.list_inventory()
+        assert len(all_items) == 1
+        assert all_items[0].needs_review is True
+
+    def test_manual_entry_via_missing_card_id_sets_needs_review(self, admin_client):
+        client, repo, token = admin_client
+        create = client.post("/admin/purchases", json={}, headers=_auth(token))
+        buy_id = create.json()["buy_id"]
+
+        client.post(f"/admin/purchases/{buy_id}/items", json={
+            "name": "Mystery Card", "buy_price": "5.00",
+        }, headers=_auth(token))
+
+        client.post(f"/admin/purchases/{buy_id}/confirm", headers=_auth(token))
+        all_items = repo.list_inventory()
+        assert len(all_items) == 1
+        assert all_items[0].needs_review is True
+
+    def test_catalog_match_not_flagged(self, admin_client):
+        client, repo, token = admin_client
+        create = client.post("/admin/purchases", json={}, headers=_auth(token))
+        buy_id = create.json()["buy_id"]
+
+        client.post(f"/admin/purchases/{buy_id}/items", json={
+            "name": "Charizard", "buy_price": "80.00", "card_id": "en:base1-4",
+        }, headers=_auth(token))
+
+        client.post(f"/admin/purchases/{buy_id}/confirm", headers=_auth(token))
+        all_items = repo.list_inventory()
+        assert len(all_items) == 1
+        assert all_items[0].needs_review is False
+
+    def test_item_rejects_unknown_location(self, admin_client):
+        client, repo, token = admin_client
+        create = client.post("/admin/purchases", json={}, headers=_auth(token))
+        buy_id = create.json()["buy_id"]
+
+        resp = client.post(f"/admin/purchases/{buy_id}/items", json={
+            "name": "Pikachu", "buy_price": "5.00", "location": "narnia",
+        }, headers=_auth(token))
+        assert resp.status_code == 422
+
+    def test_confirm_writes_purchase_timeline_event(self, admin_client):
+        client, repo, token = admin_client
+        create = client.post("/admin/purchases", json={"payment_method": "venmo"}, headers=_auth(token))
+        buy_id = create.json()["buy_id"]
+
+        client.post(f"/admin/purchases/{buy_id}/items", json={
+            "name": "Pikachu #25", "buy_price": "15.00",
+        }, headers=_auth(token))
+        client.post(f"/admin/purchases/{buy_id}/confirm", headers=_auth(token))
+
+        all_items = repo.list_inventory()
+        assert len(all_items) == 1
+        new_item_id = all_items[0].item_id
+
+        resp = client.get(f"/admin/inventory/{new_item_id}/timeline", headers=_auth(token))
+        assert resp.status_code == 200
+        events = resp.json()["events"]
+        purchase_events = [e for e in events if e.get("type") == "purchase"]
+        assert len(purchase_events) == 1
+        assert purchase_events[0]["amount"] == "15.00"
+        assert purchase_events[0]["payment_method"] == "venmo"
+
+
 class TestBuySessionCancel:
     def test_cancel_draft(self, admin_client):
         client, repo, token = admin_client

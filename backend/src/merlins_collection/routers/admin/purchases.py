@@ -22,6 +22,7 @@ from merlins_collection.models.inventory import (
     new_ulid,
 )
 from merlins_collection.services.dynamodb import InventoryRepository
+from merlins_collection.services.locations import validate_location
 
 router = APIRouter(prefix="/purchases", tags=["admin-purchases"])
 
@@ -114,6 +115,13 @@ def update_buy_session(
         if key in body:
             session[key] = body[key]
 
+    if "purchase_date" in body:
+        try:
+            date.fromisoformat(body["purchase_date"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="purchase_date must be YYYY-MM-DD")
+        session["purchase_date"] = body["purchase_date"]
+
     repo.put_buy_session(session)
     return session
 
@@ -134,6 +142,8 @@ def add_buy_item(
     if "name" not in body or "buy_price" not in body:
         raise HTTPException(status_code=422, detail="name and buy_price required")
 
+    validate_location(repo, body.get("location", "toploader"))
+
     buy_item = {
         "card_id": body.get("card_id"),
         "name": body["name"],
@@ -147,6 +157,7 @@ def add_buy_item(
         "buy_price": body["buy_price"],
         "buy_pct": body.get("buy_pct"),
         "location": body.get("location", "toploader"),
+        "manual_entry": bool(body.get("manual_entry")),
     }
     session.setdefault("items", []).append(buy_item)
     repo.put_buy_session(session)
@@ -197,6 +208,9 @@ def confirm_buy_session(
     total_cost = Decimal("0")
     items_created = 0
 
+    purchase_date_str = session.get("purchase_date")
+    txn_date = date.fromisoformat(purchase_date_str) if purchase_date_str else date.today()
+
     for buy_item in items:
         buy_price = Decimal(str(buy_item["buy_price"]))
         total_cost += buy_price
@@ -216,9 +230,10 @@ def confirm_buy_session(
             "cost_basis": str(buy_price),
             "market_value_at_purchase": buy_item.get("market_value"),
             "current_market_value": buy_item.get("market_value"),
-            "acquired_at": date.today().isoformat(),
+            "acquired_at": txn_date.isoformat(),
             "acquired_show_id": show_id,
             "display_name": buy_item.get("name"),
+            "needs_review": bool(buy_item.get("manual_entry")) or buy_item.get("card_id") is None,
         }
 
         inv_item = InventoryItemAdapter.validate_python(item_data)
@@ -230,12 +245,18 @@ def confirm_buy_session(
             type=TransactionType.PURCHASE,
             item_id=new_item_id,
             category=ItemCategory.RAW,
-            date=date.today(),
+            date=txn_date,
             amount=buy_price,
             payment_method=payment_method,
             show_id=show_id,
         )
         repo.put_transaction(txn)
+
+        repo.put_timeline_event(new_item_id, {
+            "item_id": new_item_id, "txn_id": txn.txn_id, "type": "purchase",
+            "date": txn_date.isoformat(), "amount": str(buy_price),
+            "payment_method": payment_method, "show_id": show_id,
+        })
 
     # Update session
     session["status"] = "confirmed"

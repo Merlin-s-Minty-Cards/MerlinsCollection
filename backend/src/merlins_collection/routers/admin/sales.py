@@ -287,6 +287,11 @@ def confirm_sell_session(
         try:
             repo.record_sale(txn)
             items_sold += 1
+            repo.put_timeline_event(sell_item["item_id"], {
+                "item_id": sell_item["item_id"], "txn_id": txn.txn_id, "type": "sale",
+                "date": txn_date.isoformat(), "amount": str(price),
+                "payment_method": payment_method, "show_id": show_id,
+            })
         except ItemAlreadySoldError:
             raise HTTPException(
                 status_code=409,
