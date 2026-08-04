@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from merlins_collection.models.inventory import (
     Condition,
+    ConsignmentTerms,
     ItemStatus,
     RawInventoryItem,
 )
@@ -135,6 +136,26 @@ class TestVaultGet:
         resp = client.get("/admin/vault", headers=_auth(token))
         data = resp.json()
         assert data["items"][0]["sticker_price"] == "35.00"
+
+    def test_vault_reports_consigned_flag(self, admin_client):
+        client, repo, token = admin_client
+        owned = _raw("hold-owned")
+        consigned = _raw("hold-consigned")
+        consigned = consigned.model_copy(
+            update={
+                "consignment": ConsignmentTerms(
+                    consignor_id="consignor-1", split_percent=Decimal("0.20")
+                )
+            }
+        )
+        repo.put_inventory_item(owned)
+        repo.put_inventory_item(consigned)
+
+        resp = client.get("/admin/vault", headers=_auth(token))
+        data = resp.json()
+        by_id = {i["item_id"]: i for i in data["items"]}
+        assert by_id["hold-owned"]["consigned"] is False
+        assert by_id["hold-consigned"]["consigned"] is True
 
 
 # ===========================================================================

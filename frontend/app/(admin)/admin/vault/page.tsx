@@ -4,12 +4,16 @@ import { useCallback, useEffect, useState } from 'react'
 import { Lock, Unlock } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { useCardImages } from '@/lib/use-card-images'
+import { formatCondition } from '@/lib/constants'
+import { sortVaultItems } from '@/lib/vault-sort'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import SearchInput from '@/components/admin/shared/SearchInput'
 import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
 import CardImage from '@/components/admin/shared/CardImage'
 import ImageToggle from '@/components/admin/shared/ImageToggle'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
+import OwnershipBadge from '@/components/admin/shared/OwnershipBadge'
+import DataTable, { Column } from '@/components/admin/shared/DataTable'
 
 interface VaultItem {
   item_id: string
@@ -21,8 +25,10 @@ interface VaultItem {
   sticker_price: string | null
   location: string | null
   condition: string | null
+  condition_modifier: string | null
   dollar_net: string | null
   percent_net: string | null
+  consigned: boolean
   [key: string]: unknown
 }
 
@@ -47,6 +53,8 @@ export default function AdminVaultPage() {
   const [search, setSearch] = useState('')
   const [releaseId, setReleaseId] = useState<string | null>(null)
   const [releasing, setReleasing] = useState(false)
+  const [sortKey, setSortKey] = useState<string | null>(null)
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
   // Image toggle and detail modal
   const [showImages, setShowImages] = useState(false)
@@ -85,6 +93,15 @@ export default function AdminVaultPage() {
     }
   }
 
+  const handleSort = (key: string) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setSortKey(key)
+      setSortDir('asc')
+    }
+  }
+
   const filteredItems = data?.items.filter((item) => {
     if (!search) return true
     const q = search.toLowerCase()
@@ -94,7 +111,126 @@ export default function AdminVaultPage() {
     )
   }) ?? []
 
+  const sortedItems = sortKey ? sortVaultItems(filteredItems, sortKey, sortDir) : filteredItems
+
   const summary = data?.summary
+
+  const columns: Column<VaultItem>[] = [
+    ...(showImages
+      ? [
+          {
+            key: '_image',
+            label: '',
+            className: 'w-16',
+            render: (item: VaultItem) => (
+              <CardImage imageUrl={getImageUrl(item.card_id)} alt={item.name || 'card'} size="md" />
+            ),
+          },
+        ]
+      : []),
+    {
+      key: 'name',
+      label: 'Card',
+      sortable: true,
+      className: 'min-w-[180px]',
+      render: (item) => (
+        <div>
+          <div className="text-pine-100 font-medium truncate max-w-[200px]">{item.name || '(unnamed)'}</div>
+          <div className="text-[10px] text-pine-500">{item.kind} · {item.location ?? '—'}</div>
+        </div>
+      ),
+    },
+    {
+      key: 'condition',
+      label: 'Condition',
+      sortable: true,
+      render: (item) => (
+        <span className="text-pine-300">
+          {item.condition ? formatCondition(item.condition, item.condition_modifier) : '—'}
+        </span>
+      ),
+    },
+    {
+      key: 'cost_basis',
+      label: 'Price Paid',
+      sortable: true,
+      className: 'text-right',
+      render: (item) => <PriceDisplay value={item.cost_basis} className="text-xs text-pine-300 font-mono" />,
+    },
+    {
+      key: 'current_market_value',
+      label: 'Market',
+      sortable: true,
+      className: 'text-right',
+      render: (item) => <PriceDisplay value={item.current_market_value} className="text-xs text-mint font-mono" />,
+    },
+    {
+      key: 'sticker_price',
+      label: 'Sticker',
+      sortable: true,
+      className: 'text-right',
+      render: (item) =>
+        item.sticker_price ? (
+          <PriceDisplay value={item.sticker_price} className="text-xs text-pine-300 font-mono" />
+        ) : (
+          <span className="text-pine-600">—</span>
+        ),
+    },
+    {
+      key: 'dollar_net',
+      label: '$ Net',
+      sortable: true,
+      className: 'text-right',
+      render: (item) => {
+        const dollarNet = item.dollar_net ? parseFloat(item.dollar_net) : null
+        if (dollarNet === null) return <span className="text-pine-600">—</span>
+        const isPositive = dollarNet >= 0
+        return (
+          <span className={`font-mono ${isPositive ? 'text-mint' : 'text-red-400'}`}>
+            {isPositive ? '+' : ''}${dollarNet.toFixed(2)}
+          </span>
+        )
+      },
+    },
+    {
+      key: 'percent_net',
+      label: '% Net',
+      sortable: true,
+      className: 'text-right',
+      render: (item) => {
+        const pctNet = item.percent_net ? parseFloat(item.percent_net) : null
+        if (pctNet === null) return <span className="text-pine-600">—</span>
+        const isPositive = pctNet >= 0
+        return (
+          <span className={`font-mono ${isPositive ? 'text-mint' : 'text-red-400'}`}>
+            {isPositive ? '+' : ''}{pctNet.toFixed(1)}%
+          </span>
+        )
+      },
+    },
+    {
+      key: 'consigned',
+      label: 'Ownership',
+      sortable: true,
+      render: (item) => <OwnershipBadge consigned={item.consigned} />,
+    },
+    {
+      key: '_action',
+      label: 'Action',
+      className: 'text-center',
+      render: (item) => (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); setReleaseId(item.item_id) }}
+          className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium text-pine-300 border border-pine-700/40 hover:border-mint/30 hover:text-mint transition-colors"
+          title="Release from vault"
+        >
+          <Unlock size={11} />
+          Release
+        </button>
+      ),
+    },
+  ]
 
   return (
     <div className="p-6 lg:p-8 max-w-6xl">
@@ -155,98 +291,21 @@ export default function AdminVaultPage() {
         <div className="px-4 py-3 border-b border-pine-700/40 flex items-center gap-2">
           <Lock size={16} className="text-mint" />
           <span className="text-sm font-medium text-pine-100">
-            Vault Holdings ({filteredItems.length})
+            Vault Holdings ({sortedItems.length})
           </span>
         </div>
 
-        {loading ? (
-          <div className="p-6 text-center text-xs text-pine-500">Loading vault…</div>
-        ) : filteredItems.length === 0 ? (
-          <div className="p-6 text-center text-xs text-pine-500">
-            {search ? 'No matching items' : 'No items in vault'}
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="border-b border-pine-700/30 text-pine-400 text-left">
-                  {showImages && <th className="px-2 py-2 font-medium w-12"></th>}
-                  <th className="px-4 py-2 font-medium">Card</th>
-                  <th className="px-4 py-2 font-medium">Condition</th>
-                  <th className="px-4 py-2 font-medium text-right">Price Paid</th>
-                  <th className="px-4 py-2 font-medium text-right">Market</th>
-                  <th className="px-4 py-2 font-medium text-right">Sticker</th>
-                  <th className="px-4 py-2 font-medium text-right">$ Net</th>
-                  <th className="px-4 py-2 font-medium text-right">% Net</th>
-                  <th className="px-4 py-2 font-medium text-center">Action</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-pine-700/20">
-                {filteredItems.map((item) => {
-                  const dollarNet = item.dollar_net ? parseFloat(item.dollar_net) : null
-                  const pctNet = item.percent_net ? parseFloat(item.percent_net) : null
-                  const isPositive = dollarNet !== null && dollarNet >= 0
-                  return (
-                    <tr key={item.item_id} className="hover:bg-pine-800/30 transition-colors cursor-pointer" onClick={() => setDetailItem(item)}>
-                      {showImages && (
-                        <td className="px-2 py-2.5">
-                          <CardImage imageUrl={getImageUrl(item.card_id)} alt={item.name || 'card'} size="md" />
-                        </td>
-                      )}
-                      <td className="px-4 py-2.5">
-                        <div className="text-pine-100 font-medium truncate max-w-[200px]">{item.name || '(unnamed)'}</div>
-                        <div className="text-[10px] text-pine-500">{item.kind} · {item.location ?? '—'}</div>
-                      </td>
-                      <td className="px-4 py-2.5 text-pine-300">{item.condition ?? '—'}</td>
-                      <td className="px-4 py-2.5 text-right">
-                        <PriceDisplay value={item.cost_basis} className="text-xs text-pine-300 font-mono" />
-                      </td>
-                      <td className="px-4 py-2.5 text-right">
-                        <PriceDisplay value={item.current_market_value} className="text-xs text-mint font-mono" />
-                      </td>
-                      <td className="px-4 py-2.5 text-right">
-                        {item.sticker_price ? (
-                          <PriceDisplay value={item.sticker_price} className="text-xs text-pine-300 font-mono" />
-                        ) : (
-                          <span className="text-pine-600">—</span>
-                        )}
-                      </td>
-                      <td className="px-4 py-2.5 text-right">
-                        {dollarNet !== null ? (
-                          <span className={`font-mono ${isPositive ? 'text-mint' : 'text-red-400'}`}>
-                            {isPositive ? '+' : ''}${dollarNet.toFixed(2)}
-                          </span>
-                        ) : (
-                          <span className="text-pine-600">—</span>
-                        )}
-                      </td>
-                      <td className="px-4 py-2.5 text-right">
-                        {pctNet !== null ? (
-                          <span className={`font-mono ${isPositive ? 'text-mint' : 'text-red-400'}`}>
-                            {pctNet >= 0 ? '+' : ''}{pctNet.toFixed(1)}%
-                          </span>
-                        ) : (
-                          <span className="text-pine-600">—</span>
-                        )}
-                      </td>
-                      <td className="px-4 py-2.5 text-center">
-                        <button
-                          type="button"
-                          onClick={() => setReleaseId(item.item_id)}
-                          className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium text-pine-300 border border-pine-700/40 hover:border-mint/30 hover:text-mint transition-colors"
-                          title="Release from vault"
-                        >
-                          <Unlock size={11} />
-                          Release
-                        </button>
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
+        <DataTable
+          columns={columns}
+          data={sortedItems}
+          keyField="item_id"
+          sortKey={sortKey}
+          sortDir={sortDir}
+          onSort={handleSort}
+          onRowClick={(item) => setDetailItem(item)}
+          loading={loading}
+          emptyMessage={search ? 'No matching items' : 'No items in vault'}
+        />
       </div>
 
       <ConfirmDialog

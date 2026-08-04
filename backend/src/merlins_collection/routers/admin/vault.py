@@ -14,7 +14,6 @@ from pydantic import BaseModel
 
 from merlins_collection.dependencies import get_repo
 from merlins_collection.models.inventory import (
-    InventoryItem,
     InventoryItemAdapter,
     ItemStatus,
 )
@@ -38,8 +37,10 @@ class VaultItem(BaseModel):
     sticker_price: str | None
     location: str | None
     condition: str | None
+    condition_modifier: str | None = None
     dollar_net: str | None  # market - cost
     percent_net: str | None  # (market - cost) / cost * 100
+    consigned: bool
 
 
 class VaultSummary(BaseModel):
@@ -110,9 +111,19 @@ def get_vault(
                 current_market_value=str(market) if market is not None else None,
                 sticker_price=str(item.sticker_price) if item.sticker_price is not None else None,
                 location=getattr(item, "location", None),
-                condition=str(getattr(item, "condition", None)) if getattr(item, "condition", None) else None,
+                condition=(
+                    str(getattr(item, "condition", None))
+                    if getattr(item, "condition", None)
+                    else None
+                ),
+                condition_modifier=(
+                    str(getattr(item, "condition_modifier", None))
+                    if getattr(item, "condition_modifier", None)
+                    else None
+                ),
                 dollar_net=dollar_net,
                 percent_net=percent_net,
+                consigned=getattr(item, "consignment", None) is not None,
             )
         )
 
