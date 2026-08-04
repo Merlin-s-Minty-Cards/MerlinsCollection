@@ -935,7 +935,12 @@ class InventoryRepository:
         """Return the entire inventory, fanning out across all shard partitions."""
         items = []
         for bucket in range(INVENTORY_SHARD_COUNT):
-            items.extend(self._query_all(KeyConditionExpression=Key("PK").eq(f"INV#{bucket}")))
+            items.extend(self._query_all(
+                KeyConditionExpression=(
+                    Key("PK").eq(f"INV#{bucket}")
+                    & Key("SK").begins_with("ITEM#")
+                ),
+            ))
         return [InventoryItemAdapter.validate_python(i) for i in items]
 
     def list_inventory_for_card(self, card_id):
