@@ -1458,21 +1458,61 @@ class InventoryRepository:
         return item if item else None
 
     # ---- admin-managed inventory locations ----
-    def put_location_config(self, locations: list[dict[str, str]]) -> None:
-        """Persist the full admin-managed location list (single row)."""
+    def put_location_config(
+        self,
+        locations: list[dict[str, str]],
+        *,
+        expected_generation: int | None = None,
+    ) -> int:
+        """Persist the full admin-managed location list (single row), guarded
+        by optimistic concurrency on ``gen`` (mirrors the ``#g = :gen`` lock
+        pattern used for the import/catalog locks above).
+
+        ``expected_generation=None`` means "this is the first write" (initial
+        seeding) and the write is conditioned on the row not existing yet.
+        Otherwise the write is conditioned on the stored generation still
+        matching ``expected_generation`` and bumps it by one. Two concurrent
+        read-modify-write callers racing on the same generation would
+        otherwise silently drop one admin's change (last write wins) while
+        both requests report success — the loser instead gets a
+        ``ConditionalCheckFailedException`` (``ClientError``) here, which
+        callers translate into a 409 for the admin to retry. Returns the new
+        generation on success.
+        """
+        new_gen = 1 if expected_generation is None else expected_generation + 1
         record = {
             "PK": "CONFIG#LOCATIONS",
             "SK": "META",
             "entity": "location_config",
             "locations": _serialize(locations),
+            "gen": new_gen,
         }
-        self._table.put_item(Item=record)
+        if expected_generation is None:
+            self._table.put_item(
+                Item=record,
+                ConditionExpression="attribute_not_exists(PK)",
+            )
+        else:
+            self._table.put_item(
+                Item=record,
+                ConditionExpression="#g = :gen",
+                ExpressionAttributeNames={"#g": "gen"},
+                ExpressionAttributeValues={":gen": expected_generation},
+            )
+        return new_gen
 
     def get_location_config(self) -> list[dict[str, str]] | None:
         """Fetch the persisted location list, or ``None`` if never seeded."""
+        result = self.get_location_config_with_generation()
+        return result[0] if result is not None else None
+
+    def get_location_config_with_generation(self) -> tuple[list[dict[str, str]], int] | None:
+        """Fetch the persisted location list plus its ``gen``, for callers
+        that need to round-trip ``expected_generation`` into a later write
+        (e.g. admin add/remove) — or ``None`` if never seeded."""
         item = self._table.get_item(
             Key={"PK": "CONFIG#LOCATIONS", "SK": "META"},
         ).get("Item")
         if not item:
             return None
-        return item["locations"]
+        return item["locations"], item.get("gen", 0)

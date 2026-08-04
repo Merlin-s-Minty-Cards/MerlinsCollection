@@ -164,6 +164,72 @@ class TestLocationsAdminManaged:
         )
         assert r.status_code == 422
 
+    def test_post_label_too_long_422(self, admin_client):
+        client, token = admin_client
+        r = client.post(
+            "/admin/locations",
+            json={"value": "show_box_f", "label": "x" * 61},
+            headers=_auth(token),
+        )
+        assert r.status_code == 422
+
+
+class TestLocationConfigConcurrency:
+    """Optimistic-concurrency guard on the single CONFIG#LOCATIONS row.
+
+    Two admins racing a create/delete must not silently drop one write while
+    both requests report success — the loser must get a 409 to retry.
+    """
+
+    def test_stale_generation_write_is_rejected(self, dynamo_repo):
+        """Direct repo-level proof that put_location_config enforces its
+        expected_generation precondition (RFC: mirrors the #g = :gen lock
+        pattern already used for import/catalog locks in dynamodb.py)."""
+        from botocore.exceptions import ClientError
+
+        gen1 = dynamo_repo.put_location_config([{"value": "a", "label": "A"}])
+
+        # A second writer commits ahead of us, advancing the generation.
+        dynamo_repo.put_location_config(
+            [{"value": "a", "label": "A"}, {"value": "b", "label": "B"}],
+            expected_generation=gen1,
+        )
+
+        # Our write is still holding the now-stale gen1 and must be rejected,
+        # not silently overwrite the second writer's change.
+        with pytest.raises(ClientError) as exc_info:
+            dynamo_repo.put_location_config(
+                [{"value": "a", "label": "A"}, {"value": "c", "label": "C"}],
+                expected_generation=gen1,
+            )
+        assert exc_info.value.response["Error"]["Code"] == "ConditionalCheckFailedException"
+
+    def test_post_translates_conflict_to_409(self, admin_client, dynamo_repo, monkeypatch):
+        """A lost-update race surfaced by DynamoDB is a 409 to the caller,
+        not a silently-dropped write and a fake 201."""
+        from botocore.exceptions import ClientError
+
+        client, token = admin_client
+
+        # Seed the config row first (via a normal GET) so the router's
+        # subsequent read-then-write in create_location reaches the mutating
+        # put_location_config call rather than tripping over an unseeded row.
+        client.get("/admin/locations", headers=_auth(token))
+
+        def _raise_conflict(*args, **kwargs):
+            raise ClientError(
+                {"Error": {"Code": "ConditionalCheckFailedException", "Message": "stale"}},
+                "PutItem",
+            )
+
+        monkeypatch.setattr(dynamo_repo, "put_location_config", _raise_conflict)
+        r = client.post(
+            "/admin/locations",
+            json={"value": "show_box_g", "label": "Show Box G"},
+            headers=_auth(token),
+        )
+        assert r.status_code == 409
+
 
 class TestInventoryLocationEnum:
     def test_enum_values_match_choices(self):

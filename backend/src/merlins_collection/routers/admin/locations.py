@@ -4,10 +4,16 @@ Replaces the hardcoded ``InventoryLocation`` enum as the source of truth for
 which locations are valid. Seeded from the enum plus any distinct values
 already present in inventory (see ``services.locations.get_locations``), then
 stored as a single config row that admins can add to and prune.
+
+Add/remove are guarded by optimistic concurrency (see
+``services.locations.get_locations_with_generation`` and
+``InventoryRepository.put_location_config``): a lost race against a
+concurrent admin surfaces as a 409 to retry, never a silently dropped write.
 """
 
 from __future__ import annotations
 
+from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
 
@@ -16,6 +22,9 @@ from merlins_collection.services import locations as locations_service
 from merlins_collection.services.dynamodb import InventoryRepository
 
 router = APIRouter(prefix="/locations", tags=["admin-locations"])
+
+_MAX_LABEL_LENGTH = 60
+_CONFLICT_DETAIL = "Location list was modified concurrently; retry"
 
 
 class LocationCreate(BaseModel):
@@ -38,13 +47,24 @@ def create_location(
 ) -> dict[str, str]:
     """Add a new admin-managed location."""
     locations_service.validate_new_slug(body.value)
-    current = locations_service.get_locations(repo)
+    if body.label is not None and len(body.label) > _MAX_LABEL_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=f"label must be at most {_MAX_LABEL_LENGTH} characters",
+        )
+
+    current, gen = locations_service.get_locations_with_generation(repo)
     if any(loc["value"] == body.value for loc in current):
         raise HTTPException(status_code=409, detail=f"Location '{body.value}' already exists")
 
-    entry = {"value": body.value, "label": body.label or locations_service._label(body.value)}
-    current.append(entry)
-    repo.put_location_config(current)
+    entry = {"value": body.value, "label": body.label or locations_service.label(body.value)}
+    updated = current + [entry]
+    try:
+        repo.put_location_config(updated, expected_generation=gen)
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+            raise
+        raise HTTPException(status_code=409, detail=_CONFLICT_DETAIL) from exc
     return entry
 
 
@@ -54,7 +74,7 @@ def delete_location(
     repo: InventoryRepository = Depends(get_repo),
 ) -> Response:
     """Remove an admin-managed location, if unused by any inventory item."""
-    current = locations_service.get_locations(repo)
+    current, gen = locations_service.get_locations_with_generation(repo)
     if not any(loc["value"] == value for loc in current):
         raise HTTPException(status_code=404, detail=f"Unknown location '{value}'")
 
@@ -62,5 +82,10 @@ def delete_location(
         raise HTTPException(status_code=409, detail=f"Location '{value}' is still in use")
 
     updated = [loc for loc in current if loc["value"] != value]
-    repo.put_location_config(updated)
+    try:
+        repo.put_location_config(updated, expected_generation=gen)
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+            raise
+        raise HTTPException(status_code=409, detail=_CONFLICT_DETAIL) from exc
     return Response(status_code=204)
