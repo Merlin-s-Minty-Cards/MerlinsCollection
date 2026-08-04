@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import {
   Clock,
   GitBranch,
@@ -10,6 +11,8 @@ import {
   ShoppingCart,
   ArrowRightLeft,
   DollarSign,
+  ExternalLink,
+  AlertTriangle,
 } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import SearchInput from '@/components/admin/shared/SearchInput'
@@ -36,6 +39,10 @@ interface LineageNode {
   name: string
   acquired_cost: string
   status: string
+  disposed_via?: string | null
+  disposed_value?: string | null
+  step_profit?: string | null
+  cumulative_profit?: string
 }
 
 interface InventorySearchResult {
@@ -56,9 +63,12 @@ interface InventorySearchResult {
 
 export default function AdminHistoryPage() {
   const api = useAdminApi()
+  const router = useRouter()
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
+  const [minPrice, setMinPrice] = useState('')
+  const [maxPrice, setMaxPrice] = useState('')
   const [searchResults, setSearchResults] = useState<InventorySearchResult[]>([])
   const [searching, setSearching] = useState(false)
 
@@ -68,6 +78,7 @@ export default function AdminHistoryPage() {
   // Timeline and lineage
   const [timeline, setTimeline] = useState<TimelineEvent[]>([])
   const [lineage, setLineage] = useState<LineageNode[]>([])
+  const [chainComplete, setChainComplete] = useState(false)
   const [loadingTimeline, setLoadingTimeline] = useState(false)
   const [loadingLineage, setLoadingLineage] = useState(false)
 
@@ -87,9 +98,12 @@ export default function AdminHistoryPage() {
       }
       setSearching(true)
       try {
+        const params: Record<string, string> = { name: query.trim() }
+        if (minPrice) params.min_price = minPrice
+        if (maxPrice) params.max_price = maxPrice
         const res = await api.get<{ items: InventorySearchResult[]; total: number }>(
           '/inventory/search',
-          { name: query.trim() },
+          params,
         )
         setSearchResults(res.items?.slice(0, 20) ?? [])
       } catch {
@@ -98,7 +112,7 @@ export default function AdminHistoryPage() {
         setSearching(false)
       }
     },
-    [api],
+    [api, minPrice, maxPrice],
   )
 
   // ---------------------------------------------------------------------------
@@ -127,12 +141,16 @@ export default function AdminHistoryPage() {
       // Fetch lineage
       setLoadingLineage(true)
       try {
-        const res = await api.get<{ lineage_id: string; chain: LineageNode[] }>(
-          `/inventory/${item.item_id}/lineage`,
-        )
+        const res = await api.get<{
+          lineage_id: string
+          chain: LineageNode[]
+          chain_complete: boolean
+        }>(`/inventory/${item.item_id}/lineage`)
         setLineage(res.chain ?? [])
+        setChainComplete(res.chain_complete ?? false)
       } catch {
         setLineage([])
+        setChainComplete(false)
       } finally {
         setLoadingLineage(false)
       }
@@ -180,6 +198,39 @@ export default function AdminHistoryPage() {
     }
   }
 
+  const getDisposedLabel = (via: string) => {
+    switch (via) {
+      case 'sale':
+      case 'sell':
+        return 'Sold'
+      case 'trade_out':
+        return 'Traded Out'
+      default:
+        return via.replace(/_/g, ' ')
+    }
+  }
+
+  /** Format step_profit as +$x.xx / -$x.xx with color and cost_basis guard. */
+  const renderStepProfit = (node: LineageNode) => {
+    if (node.step_profit == null) return null
+    const profit = parseFloat(node.step_profit)
+    const isPositive = profit >= 0
+    const costBasisZero = node.acquired_cost === '0' || node.acquired_cost === '0.00'
+
+    return (
+      <span className="inline-flex items-center gap-1">
+        <span className={isPositive ? 'text-mint' : 'text-red-400'}>
+          {isPositive ? '+' : '-'}${Math.abs(profit).toFixed(2)}
+        </span>
+        {costBasisZero && (
+          <span title="Profit may be overstated — cost basis is $0 (consigned)">
+            <AlertTriangle size={11} className="text-amber-400" />
+          </span>
+        )}
+      </span>
+    )
+  }
+
   // ---------------------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------------------
@@ -196,14 +247,42 @@ export default function AdminHistoryPage() {
         </p>
       </header>
 
-      {/* Search bar */}
+      {/* Search bar with price filters */}
       <div className="relative mb-6">
-        <SearchInput
-          value={searchQuery}
-          onChange={handleSearch}
-          placeholder="Search by card name…"
-          className="max-w-lg"
-        />
+        <div className="flex items-end gap-3">
+          <SearchInput
+            value={searchQuery}
+            onChange={handleSearch}
+            placeholder="Search by card name…"
+            className="max-w-lg flex-1"
+          />
+          <div className="flex items-center gap-2">
+            <div>
+              <label className="text-[10px] text-pine-400 block mb-1">Min $</label>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={minPrice}
+                onChange={(e) => setMinPrice(e.target.value)}
+                placeholder="0.00"
+                className="vault-field w-24 px-2.5 py-2 rounded-lg text-sm"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] text-pine-400 block mb-1">Max $</label>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={maxPrice}
+                onChange={(e) => setMaxPrice(e.target.value)}
+                placeholder="0.00"
+                className="vault-field w-24 px-2.5 py-2 rounded-lg text-sm"
+              />
+            </div>
+          </div>
+        </div>
 
         {/* Search results dropdown */}
         {searchResults.length > 0 && (
@@ -248,18 +327,26 @@ export default function AdminHistoryPage() {
           <div className="vault-panel rounded-xl p-4 flex items-center justify-between">
             <div>
               <h2 className="text-sm font-semibold text-pine-100">
-                {selectedItem.display_name || selectedItem.product_name || selectedItem.name}
+                {selectedItem.display_name ||
+                  selectedItem.product_name ||
+                  selectedItem.name ||
+                  selectedItem.item_id}
               </h2>
               <div className="flex items-center gap-3 mt-1">
                 {selectedItem.set_name && (
                   <span className="text-[10px] text-pine-400">{selectedItem.set_name}</span>
                 )}
-                <span className="text-[10px] text-pine-500 font-mono">{selectedItem.item_id}</span>
+                <span className="text-[10px] text-pine-500 font-mono">
+                  {selectedItem.item_id}
+                </span>
               </div>
             </div>
             <div className="flex items-center gap-3">
               {selectedItem.cost_basis && (
-                <PriceDisplay value={selectedItem.cost_basis} className="text-sm font-semibold" />
+                <PriceDisplay
+                  value={selectedItem.cost_basis}
+                  className="text-sm font-semibold"
+                />
               )}
               {selectedItem.status && <StatusBadge status={selectedItem.status} />}
             </div>
@@ -305,7 +392,9 @@ export default function AdminHistoryPage() {
               ) : timeline.length === 0 ? (
                 <div className="vault-panel rounded-xl p-6 text-center">
                   <Clock size={24} className="text-pine-600 mx-auto mb-2" />
-                  <p className="text-xs text-pine-400">No transaction events recorded for this item.</p>
+                  <p className="text-xs text-pine-400">
+                    No transaction events recorded for this item.
+                  </p>
                 </div>
               ) : (
                 <div className="relative pl-6">
@@ -330,7 +419,7 @@ export default function AdminHistoryPage() {
                             {event.date || '—'}
                           </span>
                         </div>
-                        <div className="flex items-center gap-4 text-[11px] text-pine-300 mt-1">
+                        <div className="flex items-center gap-4 text-[11px] text-pine-300 mt-1 flex-wrap">
                           {event.amount && (
                             <span className="flex items-center gap-1">
                               <DollarSign size={11} />
@@ -346,9 +435,15 @@ export default function AdminHistoryPage() {
                             </span>
                           )}
                           {event.counterpart_item_id && (
-                            <span className="font-mono text-pine-500">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                selectItem({ item_id: event.counterpart_item_id! })
+                              }
+                              className="font-mono text-blue-400 hover:text-blue-300 underline underline-offset-2 transition-colors"
+                            >
                               Counterpart: {event.counterpart_item_id.slice(0, 8)}…
-                            </span>
+                            </button>
                           )}
                           {event.show_id && (
                             <span className="font-mono text-pine-500">
@@ -382,30 +477,79 @@ export default function AdminHistoryPage() {
                       <div key={node.item_id} className="flex items-center">
                         {/* Node */}
                         <div
-                          className={`vault-panel rounded-xl px-4 py-3 min-w-[180px] ${
+                          className={`vault-panel rounded-xl min-w-[180px] relative ${
                             isSelected ? 'border-mint/50 bg-mint/5' : ''
                           }`}
                         >
-                          <div className="text-xs font-medium text-pine-100 mb-1 truncate">
-                            {node.name || '(unnamed)'}
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <PriceDisplay value={node.acquired_cost} className="text-[11px]" />
-                            <StatusBadge status={node.status} />
-                          </div>
-                          <div className="text-[9px] font-mono text-pine-600 mt-1">
-                            {node.item_id.slice(0, 12)}…
-                          </div>
-                          {isSelected && (
-                            <div className="text-[9px] text-mint font-medium mt-1">
-                              Current Item
+                          {/* ExternalLink icon — opens card detail page */}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              router.push('/admin/card/' + node.item_id)
+                            }
+                            className="absolute top-3 right-3 text-pine-500 hover:text-mint transition-colors z-10"
+                            title="Open card details"
+                          >
+                            <ExternalLink size={11} />
+                          </button>
+
+                          {/* Clickable node — selects item in this page */}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              selectItem({
+                                item_id: node.item_id,
+                                name: node.name,
+                              })
+                            }
+                            className="w-full text-left px-4 py-3 hover:bg-pine-800/30 transition-colors rounded-xl"
+                            aria-label={`View history for ${node.name || 'unnamed card'}`}
+                          >
+                            <div className="text-xs font-medium text-pine-100 mb-1 truncate pr-5">
+                              {node.name || '(unnamed)'}
                             </div>
-                          )}
+                            <div className="flex items-center gap-2">
+                              <PriceDisplay
+                                value={node.acquired_cost}
+                                className="text-[11px]"
+                              />
+                              <StatusBadge status={node.status} />
+                            </div>
+                            {/* Disposal info + step profit */}
+                            {node.disposed_via && (
+                              <div className="flex items-center gap-2 mt-1.5 text-[10px]">
+                                <span className="text-pine-400">
+                                  {getDisposedLabel(node.disposed_via)}
+                                </span>
+                                {node.disposed_value && (
+                                  <span className="text-pine-300">
+                                    ${parseFloat(node.disposed_value).toFixed(2)}
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                            {node.step_profit != null && (
+                              <div className="mt-1 text-[11px]">
+                                {renderStepProfit(node)}
+                              </div>
+                            )}
+                            <div className="text-[9px] font-mono text-pine-600 mt-1">
+                              {node.item_id.slice(0, 12)}…
+                            </div>
+                            {isSelected && (
+                              <div className="text-[9px] text-mint font-medium mt-1">
+                                Current Item
+                              </div>
+                            )}
+                          </button>
                         </div>
 
                         {/* Arrow between nodes */}
                         {idx < lineage.length - 1 && (
-                          <ArrowRight size={16} className="text-pine-600 mx-2 flex-shrink-0" />
+                          <ArrowRight
+                            size={16}
+                            className="text-pine-600 mx-2 flex-shrink-0"
+                          />
                         )}
                       </div>
                     )
@@ -426,12 +570,45 @@ export default function AdminHistoryPage() {
                     </div>
                     <div className="px-3 py-2 rounded-lg bg-pine-800/50 border border-pine-700/30">
                       <div className="text-[10px] text-pine-400">Initial Cost</div>
-                      <PriceDisplay value={lineage[0]?.acquired_cost} className="text-sm font-mono" />
+                      <PriceDisplay
+                        value={lineage[0]?.acquired_cost}
+                        className="text-sm font-mono"
+                      />
                     </div>
                     <div className="px-3 py-2 rounded-lg bg-pine-800/50 border border-pine-700/30">
-                      <div className="text-[10px] text-pine-400">Latest Cost</div>
-                      <PriceDisplay value={lineage[lineage.length - 1]?.acquired_cost} className="text-sm font-mono" />
+                      <div className="text-[10px] text-pine-400">Chain Profit</div>
+                      {(() => {
+                        const lastNode = lineage[lineage.length - 1]
+                        const cp = lastNode?.cumulative_profit
+                        if (cp == null) {
+                          return (
+                            <span className="text-sm font-mono text-pine-400">—</span>
+                          )
+                        }
+                        const val = parseFloat(cp)
+                        return (
+                          <span
+                            className={`text-sm font-mono ${val >= 0 ? 'text-mint' : 'text-red-400'}`}
+                          >
+                            {val >= 0 ? '+' : '-'}${Math.abs(val).toFixed(2)}
+                          </span>
+                        )
+                      })()}
                     </div>
+                  </div>
+                  {/* Chain lifecycle chip */}
+                  <div className="mt-3">
+                    <span
+                      className={`inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-medium ${
+                        chainComplete
+                          ? 'bg-mint/10 text-mint border border-mint/20'
+                          : 'bg-blue-500/10 text-blue-400 border border-blue-500/20'
+                      }`}
+                    >
+                      {chainComplete
+                        ? 'Lifecycle complete (cashed out)'
+                        : 'Still in inventory'}
+                    </span>
                   </div>
                 </div>
               )}
