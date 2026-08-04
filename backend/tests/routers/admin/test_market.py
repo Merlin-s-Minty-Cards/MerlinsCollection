@@ -3,14 +3,25 @@
 Covers catalog search, card detail, price trend, and watchlist CRUD.
 """
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
 
-from merlins_collection.models.catalog import CardImages, CatalogCard, FinishPrice
-from merlins_collection.models.inventory import Language
+from merlins_collection.models.catalog import (
+    CardImages,
+    CatalogCard,
+    FinishPrice,
+    PricePoint,
+)
+from merlins_collection.models.inventory import (
+    Condition,
+    Language,
+    RawInventoryItem,
+    SealedInventoryItem,
+    SealedProductType,
+)
 
 
 # ---- helpers ----
@@ -113,6 +124,34 @@ class TestAdminMarketSearch:
         resp = client.get("/admin/market/search?name=nonexistent", headers=_auth(token))
         assert resp.status_code == 200
         assert resp.json()["total"] == 0
+
+    def test_search_caps_results_at_50(self, admin_client):
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([
+            _catalog_card(card_id=f"en:sv1-{i}", name="Pikachu", number=str(i))
+            for i in range(60)
+        ])
+
+        resp = client.get("/admin/market/search?name=pikachu", headers=_auth(token))
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["items"]) == 50
+        assert data["total"] == 60
+
+    def test_search_filters_by_number(self, admin_client):
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([
+            _catalog_card(card_id="en:sv1-25", name="Pikachu", number="25"),
+            _catalog_card(card_id="en:sv1-26", name="Pikachu", number="26"),
+        ])
+
+        resp = client.get(
+            "/admin/market/search?name=pikachu&number=25", headers=_auth(token)
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["items"]) == 1
+        assert data["items"][0]["number"] == "25"
 
 
 # ===========================================================================
@@ -236,4 +275,165 @@ class TestAdminWatchlist:
     def test_delete_nonexistent_returns_404(self, admin_client):
         client, _, token = admin_client
         resp = client.delete("/admin/watchlist/fake-id", headers=_auth(token))
+        assert resp.status_code == 404
+
+
+# ===========================================================================
+# Coverage Report
+# ===========================================================================
+
+class TestAdminMarketCoverage:
+    """GET /admin/market/coverage"""
+
+    def test_coverage_reports_unmatched(self, admin_client):
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([
+            _catalog_card(
+                card_id="en:sv1-1",
+                prices={"holofoil": FinishPrice(market=Decimal("10.00"), source="tcgplayer")},
+            ),
+        ])
+        repo.put_inventory_item(RawInventoryItem(
+            card_id="en:sv1-1",
+            cost_basis=Decimal("4"),
+            acquired_at=date(2026, 1, 1),
+            finish="holofoil",
+            condition=Condition.NM,
+            current_market_value=Decimal("10.00"),
+        ))
+        repo.put_inventory_item(SealedInventoryItem(
+            product_name="Booster Box",
+            product_type=SealedProductType.BOOSTER_BOX,
+            cost_basis=Decimal("100"),
+            acquired_at=date(2026, 1, 1),
+        ))
+
+        resp = client.get("/admin/market/coverage", headers=_auth(token))
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_items"] == 2
+        assert data["items_with_card_id"] == 1
+        assert data["items_with_market_value"] == 1
+        assert data["catalog_cards"] == 1
+        assert data["catalog_cards_with_prices"] == 1
+        assert data["item_coverage_pct"] == "50.0"
+        assert len(data["unmatched_sample"]) == 1
+        assert data["unmatched_sample"][0]["name"] == "Booster Box"
+
+    def test_coverage_empty_reports_zero_pct(self, admin_client):
+        client, _, token = admin_client
+        resp = client.get("/admin/market/coverage", headers=_auth(token))
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_items"] == 0
+        assert data["item_coverage_pct"] == "0"
+
+
+# ===========================================================================
+# Sync Trigger
+# ===========================================================================
+
+class TestAdminMarketSync:
+    """POST /admin/market/sync and GET /admin/market/sync/status"""
+
+    def test_sync_endpoint_runs_refresh(self, admin_client, monkeypatch):
+        client, repo, token = admin_client
+        called = {}
+        monkeypatch.setattr(
+            "merlins_collection.routers.admin.market.refresh_held_prices",
+            lambda repo, tcgdex_client, today: (
+                called.update(prices=True) or {"cards_updated": 3}
+            ),
+        )
+        monkeypatch.setattr(
+            "merlins_collection.routers.admin.market.refresh_inventory_market_values",
+            lambda repo: called.update(items=True) or 5,
+        )
+
+        resp = client.post("/admin/market/sync", headers=_auth(token))
+        assert resp.status_code == 202
+        assert resp.json() == {"state": "started"}
+
+        status = client.get("/admin/market/sync/status", headers=_auth(token)).json()
+        assert status["state"] == "completed", status.get("error")
+        assert status["priced_cards"] == 3
+        assert status["updated_items"] == 5
+        assert called == {"prices": True, "items": True}
+
+    def test_sync_returns_409_when_already_running(self, admin_client, monkeypatch):
+        client, repo, token = admin_client
+        # Never finishes on its own within this test — we directly stamp the
+        # module status to "running" to simulate an in-flight sync.
+        from merlins_collection.routers.admin import market
+
+        market._SYNC_STATUS["state"] = "running"
+        try:
+            resp = client.post("/admin/market/sync", headers=_auth(token))
+            assert resp.status_code == 409
+        finally:
+            market._SYNC_STATUS["state"] = "idle"
+
+
+# ===========================================================================
+# Purchase Confidence
+# ===========================================================================
+
+class TestAdminMarketConfidence:
+    """GET /admin/market/card/{card_id}/confidence"""
+
+    def test_confidence_levels(self, admin_client):
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([_catalog_card(card_id="en:sv1-1")])
+
+        today = date.today()
+        tight_points = [
+            PricePoint(
+                card_id="en:sv1-1", date=today - timedelta(days=i),
+                source="tcgplayer", kind="raw", finish="holofoil",
+                market=Decimal("10.00") + Decimal("0.01") * i,
+            )
+            for i in range(10)
+        ]
+        repo.append_price_points(tight_points)
+
+        resp = client.get(
+            "/admin/market/card/en:sv1-1/confidence?days=90", headers=_auth(token)
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["points"] == 10
+        assert data["level"] == "high"
+
+    def test_confidence_low_with_few_points(self, admin_client):
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([_catalog_card(card_id="en:sv1-2")])
+
+        today = date.today()
+        sparse_points = [
+            PricePoint(
+                card_id="en:sv1-2", date=today - timedelta(days=1),
+                source="tcgplayer", kind="raw", finish="holofoil",
+                market=Decimal("10.00"),
+            ),
+            PricePoint(
+                card_id="en:sv1-2", date=today,
+                source="tcgplayer", kind="raw", finish="holofoil",
+                market=Decimal("40.00"),
+            ),
+        ]
+        repo.append_price_points(sparse_points)
+
+        resp = client.get(
+            "/admin/market/card/en:sv1-2/confidence?days=90", headers=_auth(token)
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["points"] == 2
+        assert data["level"] == "low"
+
+    def test_confidence_nonexistent_card_returns_404(self, admin_client):
+        client, _, token = admin_client
+        resp = client.get(
+            "/admin/market/card/en:no-card/confidence", headers=_auth(token)
+        )
         assert resp.status_code == 404

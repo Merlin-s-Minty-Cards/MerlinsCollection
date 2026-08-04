@@ -7,18 +7,38 @@ wants to track for buying opportunities.
 
 from __future__ import annotations
 
+import statistics
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from merlins_collection.dependencies import get_repo
 from merlins_collection.models.inventory import new_ulid
+from merlins_collection.services.catalog_sync import (
+    refresh_held_prices,
+    refresh_inventory_market_values,
+)
 from merlins_collection.services.dynamodb import InventoryRepository
+from merlins_collection.services.tcgdex import TcgdexClient
 
 router = APIRouter(prefix="/market", tags=["admin-market"])
+
+# Sync-run status, kept in a module-level dict rather than a datastore. This is
+# a single-worker assumption: with more than one API process/worker the status
+# would only reflect whichever process last ran a sync, and a 409 from one
+# worker would not block a concurrent POST landing on another. Fine for the
+# current single-instance deployment; revisit if the admin API ever scales out.
+_SYNC_STATUS: dict[str, Any] = {
+    "state": "idle",
+    "started_at": None,
+    "finished_at": None,
+    "priced_cards": None,
+    "updated_items": None,
+    "error": None,
+}
 
 # Watchlist lives at /admin/watchlist (not /admin/market/watchlist per RFC)
 watchlist_router = APIRouter(prefix="/watchlist", tags=["admin-watchlist"])
@@ -50,9 +70,10 @@ class WatchlistResponse(BaseModel):
 def market_search(
     name: str | None = Query(None, max_length=200),
     set_id: str | None = Query(None),
+    number: str | None = Query(None),
     repo: InventoryRepository = Depends(get_repo),
 ) -> MarketSearchResult:
-    """Search the synced catalog for cards by name and/or set.
+    """Search the synced catalog for cards by name, set, and/or number.
 
     This searches the LOCAL DynamoDB catalog (already synced from TCGdex),
     not the live TCGdex API. For the admin to see a card here, the catalog
@@ -70,10 +91,17 @@ def market_search(
         name_lower = name.lower()
         cards = [c for c in cards if name_lower in c.name.lower()]
 
-    # Serialize
-    serialized = [c.model_dump(mode="json") for c in cards]
+    # Apply number filter (exact match)
+    if number is not None:
+        cards = [c for c in cards if c.number == number]
 
-    return MarketSearchResult(items=serialized, total=len(serialized))
+    total = len(cards)
+    # Cap the response to keep the payload bounded — the catalog scan behind
+    # this endpoint is unindexed by name/number, so `total` still reflects the
+    # full match count even once `items` is capped.
+    serialized = [c.model_dump(mode="json") for c in cards[:50]]
+
+    return MarketSearchResult(items=serialized, total=total)
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +146,183 @@ def market_price_trend(
     serialized = [p.model_dump(mode="json") for p in points]
 
     return PriceTrendResponse(card_id=card_id, points=serialized)
+
+
+# ---------------------------------------------------------------------------
+# Purchase Confidence
+# ---------------------------------------------------------------------------
+
+@router.get("/card/{card_id}/confidence")
+def market_card_confidence(
+    card_id: str,
+    days: int = Query(90, ge=1, le=365),
+    repo: InventoryRepository = Depends(get_repo),
+) -> dict[str, Any]:
+    """Rate how much a card's recent price history supports a buying decision.
+
+    Reuses the same finish-unfiltered point fetch the trend endpoint uses
+    (``repo.get_price_history``), just over the confidence window instead of
+    the trend window.
+    """
+    card = repo.get_catalog_card(card_id)
+    if card is None:
+        raise HTTPException(status_code=404, detail="Card not found in catalog")
+
+    end = date.today()
+    start = end - timedelta(days=days)
+    # Fetched WITHOUT a repo-side `start`/`end` (unlike the trend endpoint's
+    # explicit-finish call): `get_price_history`'s range query keys on
+    # `PRICE#RAW#<finish>#<date>`, and with no finish segment the date bound
+    # compares against the finish text itself, silently matching nothing. The
+    # trend endpoint sidesteps this because its `finish` query param is part
+    # of its own contract; confidence deliberately spans all finishes, so the
+    # range is applied here in Python instead.
+    points = repo.get_price_history(card_id)
+    points = [p for p in points if start <= p.date <= end]
+    prices = [float(p.market) for p in points if p.market is not None]
+    n = len(prices)
+
+    if n >= 2:
+        volatility = statistics.stdev(prices) / statistics.mean(prices) * 100
+    else:
+        volatility = 0.0
+
+    if prices and prices[0] != 0:
+        trend = (prices[-1] - prices[0]) / prices[0] * 100
+    else:
+        trend = 0.0
+
+    if n >= 8 and volatility <= 15:
+        level = "high"
+    elif n >= 4 and volatility <= 30:
+        level = "medium"
+    else:
+        level = "low"
+
+    reason = f"{n} price point{'s' if n != 1 else ''} over {days}d, {volatility:.1f}% volatility"
+
+    return {
+        "level": level,
+        "points": n,
+        "volatility_pct": _pct_str(volatility),
+        "trend_pct": _pct_str(trend),
+        "reason": reason,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Sync Trigger
+# ---------------------------------------------------------------------------
+
+def _run_market_sync(repo: InventoryRepository) -> None:
+    """Background task body: run the depth pass then the item denormalization.
+
+    Mirrors ``scripts/daily_sync.py``'s two-step order — the depth pass writes
+    the catalog prices ``refresh_inventory_market_values`` then denormalizes —
+    but only those two steps; the snapshot steps stay on the scheduled job.
+    """
+    try:
+        with TcgdexClient() as client:
+            price_summary = refresh_held_prices(repo, client, date.today())
+        updated_items = refresh_inventory_market_values(repo)
+        _SYNC_STATUS.update({
+            "state": "completed",
+            "finished_at": datetime.now(tz=timezone.utc).isoformat(),
+            "priced_cards": price_summary.get("cards_updated", 0),
+            "updated_items": updated_items,
+            "error": None,
+        })
+    except Exception as exc:  # noqa: BLE001 - report the failure, don't crash the worker
+        _SYNC_STATUS.update({
+            "state": "failed",
+            "finished_at": datetime.now(tz=timezone.utc).isoformat(),
+            "error": str(exc),
+        })
+
+
+@router.post("/sync", status_code=202)
+def trigger_market_sync(
+    background_tasks: BackgroundTasks,
+    repo: InventoryRepository = Depends(get_repo),
+) -> dict[str, str]:
+    """Kick off a price sync (TCGdex depth pass + inventory denormalization).
+
+    Runs in the background so the request returns immediately; poll
+    ``GET /admin/market/sync/status`` for progress.
+    """
+    if _SYNC_STATUS["state"] == "running":
+        raise HTTPException(status_code=409, detail="A market sync is already running")
+
+    _SYNC_STATUS.update({
+        "state": "running",
+        "started_at": datetime.now(tz=timezone.utc).isoformat(),
+        "finished_at": None,
+        "priced_cards": None,
+        "updated_items": None,
+        "error": None,
+    })
+    background_tasks.add_task(_run_market_sync, repo)
+    return {"state": "started"}
+
+
+@router.get("/sync/status")
+def market_sync_status() -> dict[str, Any]:
+    """Return the current (or most recent) sync run's status."""
+    return _SYNC_STATUS
+
+
+# ---------------------------------------------------------------------------
+# Coverage Report
+# ---------------------------------------------------------------------------
+
+@router.get("/coverage")
+def market_coverage(repo: InventoryRepository = Depends(get_repo)) -> dict[str, Any]:
+    """Report how much of inventory and the catalog actually carry a price.
+
+    Makes the pricing gap visible: the pipeline can be fully wired and still
+    leave every item unpriced if it has never run, or if items don't resolve
+    to a catalog card. ``unmatched_sample`` is capped at 50 to keep the
+    payload bounded.
+    """
+    items = repo.list_inventory()
+    total_items = len(items)
+    items_with_card_id = sum(1 for i in items if getattr(i, "card_id", None))
+    items_with_market_value = sum(
+        1 for i in items if i.current_market_value is not None
+    )
+
+    cards = _scan_catalog(repo)
+    catalog_cards = len(cards)
+    catalog_cards_with_prices = sum(1 for c in cards if c.prices)
+
+    if total_items:
+        pct = (Decimal(items_with_market_value) / Decimal(total_items) * 100).quantize(
+            Decimal("0.1")
+        )
+        item_coverage_pct = str(pct)
+    else:
+        item_coverage_pct = "0"
+
+    unmatched_sample = [
+        {
+            "item_id": i.item_id,
+            "name": getattr(i, "display_name", None)
+            or getattr(i, "product_name", None)
+            or "?",
+        }
+        for i in items
+        if i.current_market_value is None
+    ][:50]
+
+    return {
+        "total_items": total_items,
+        "items_with_card_id": items_with_card_id,
+        "items_with_market_value": items_with_market_value,
+        "catalog_cards": catalog_cards,
+        "catalog_cards_with_prices": catalog_cards_with_prices,
+        "item_coverage_pct": item_coverage_pct,
+        "unmatched_sample": unmatched_sample,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -184,3 +389,8 @@ def _scan_catalog(repo: InventoryRepository):
     """Scan all catalog cards. Uses the list_all_catalog_cards method if available,
     otherwise falls back to listing known sets."""
     return repo.list_all_catalog_cards()
+
+
+def _pct_str(value: float) -> str:
+    """Format a float percentage as a string quantized to one decimal place."""
+    return str(Decimal(str(value)).quantize(Decimal("0.1")))
