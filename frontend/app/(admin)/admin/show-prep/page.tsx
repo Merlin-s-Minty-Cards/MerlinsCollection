@@ -1,9 +1,10 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { MapPin, AlertTriangle, ArrowRight, Check, ExternalLink, Link2, Tag } from 'lucide-react'
+import { MapPin, AlertTriangle, ArrowRight, Check, ExternalLink, Tag, TrendingUp, TrendingDown } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { useCardImages } from '@/lib/use-card-images'
+import { LOCATION_OPTIONS } from '@/lib/constants'
 import DataTable, { Column } from '@/components/admin/shared/DataTable'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import CardImage from '@/components/admin/shared/CardImage'
@@ -21,7 +22,6 @@ interface MispricedItem {
   sticker_notes?: string | null
   delta_pct: string
   delta_dollar?: string
-  tcg_url?: string | null
   [key: string]: unknown
 }
 
@@ -57,10 +57,6 @@ export default function AdminShowPrepPage() {
   const [detailItem, setDetailItem] = useState<MispricedItem | null>(null)
   const cardIds = mispriced.map((i) => i.card_id)
   const { getImageUrl } = useCardImages(showImages ? cardIds : [])
-
-  // TCG URL inline edit
-  const [editingTcgId, setEditingTcgId] = useState<string | null>(null)
-  const [tcgUrlInput, setTcgUrlInput] = useState('')
 
   // Sort
   const [sortKey, setSortKey] = useState<string | null>(null)
@@ -143,17 +139,6 @@ export default function AdminShowPrepPage() {
     fetchMispriced()
   }
 
-  const handleSaveTcgUrl = async (itemId: string) => {
-    try {
-      await api.put(`/inventory/${itemId}`, { tcg_url: tcgUrlInput.trim() || null })
-      setMispriced((prev) => prev.map((i) => i.item_id === itemId ? { ...i, tcg_url: tcgUrlInput.trim() || null } : i))
-    } catch (err) {
-      alert(err instanceof AdminApiError ? err.detail : 'Failed to save URL')
-    }
-    setEditingTcgId(null)
-    setTcgUrlInput('')
-  }
-
   const handleSort = (key: string) => {
     if (sortKey === key) {
       setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
@@ -169,6 +154,21 @@ export default function AdminShowPrepPage() {
     if (sortKey === 'delta_pct') {
       const aVal = parseFloat(a.delta_pct) || 0
       const bVal = parseFloat(b.delta_pct) || 0
+      return sortDir === 'asc' ? aVal - bVal : bVal - aVal
+    }
+    if (sortKey === 'delta_dollar') {
+      const aVal = a.delta_dollar ? parseFloat(a.delta_dollar) : 0
+      const bVal = b.delta_dollar ? parseFloat(b.delta_dollar) : 0
+      return sortDir === 'asc' ? aVal - bVal : bVal - aVal
+    }
+    if (sortKey === 'current_market_value') {
+      const aVal = parseFloat(a.current_market_value) || 0
+      const bVal = parseFloat(b.current_market_value) || 0
+      return sortDir === 'asc' ? aVal - bVal : bVal - aVal
+    }
+    if (sortKey === 'cost_basis') {
+      const aVal = parseFloat(a.cost_basis) || 0
+      const bVal = parseFloat(b.cost_basis) || 0
       return sortDir === 'asc' ? aVal - bVal : bVal - aVal
     }
     return 0
@@ -205,12 +205,14 @@ export default function AdminShowPrepPage() {
     {
       key: 'cost_basis',
       label: 'Price Paid',
+      sortable: true,
       className: 'text-right',
       render: (item) => <PriceDisplay value={item.cost_basis} className="text-xs text-pine-300" />,
     },
     {
       key: 'current_market_value',
       label: 'Market',
+      sortable: true,
       className: 'text-right',
       render: (item) => <PriceDisplay value={item.current_market_value} className="text-xs text-mint" />,
     },
@@ -246,46 +248,25 @@ export default function AdminShowPrepPage() {
     },
     {
       key: '_tcg_url',
-      label: 'TCG Link',
+      label: 'TCG Price',
       className: 'w-28',
       render: (item) => {
-        if (editingTcgId === item.item_id) {
-          return (
-            <input
-              type="url"
-              value={tcgUrlInput}
-              onChange={(e) => setTcgUrlInput(e.target.value)}
-              onBlur={() => handleSaveTcgUrl(item.item_id)}
-              onKeyDown={(e) => { if (e.key === 'Enter') handleSaveTcgUrl(item.item_id); if (e.key === 'Escape') { setEditingTcgId(null); setTcgUrlInput('') } }}
-              placeholder="Paste URL…"
-              className="vault-field w-full px-1.5 py-0.5 rounded text-[10px]"
-              autoFocus
-            />
-          )
-        }
-        if (item.tcg_url) {
-          return (
-            <a
-              href={item.tcg_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(e) => e.stopPropagation()}
-              className="inline-flex items-center gap-1 text-[10px] text-blue-400 hover:text-blue-300"
-            >
-              <ExternalLink size={11} />
-              TCGplayer
-            </a>
-          )
-        }
+        // Build a TCGplayer search URL from the card name
+        const searchQuery = encodeURIComponent(item.name || '')
+        const tcgSearchUrl = `https://www.tcgplayer.com/search/pokemon/product?q=${searchQuery}&view=grid`
+
         return (
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); setEditingTcgId(item.item_id); setTcgUrlInput(item.tcg_url || '') }}
-            className="inline-flex items-center gap-1 text-[10px] text-pine-500 hover:text-pine-300"
+          <a
+            href={tcgSearchUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="inline-flex items-center gap-1 text-[10px] text-blue-400 hover:text-blue-300 transition-colors"
+            title={`Search TCGplayer for "${item.name}"`}
           >
-            <Link2 size={11} />
-            Add
-          </button>
+            <ExternalLink size={11} />
+            Check Price
+          </a>
         )
       },
     },
@@ -374,6 +355,43 @@ export default function AdminShowPrepPage() {
           </div>
         </div>
 
+        {/* Trend sort buttons */}
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] text-pine-400 font-medium">Sort by trend:</span>
+          <button
+            type="button"
+            onClick={() => { setSortKey('delta_pct'); setSortDir('desc') }}
+            className={`inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium transition-colors ${sortKey === 'delta_pct' && sortDir === 'desc' ? 'bg-mint/15 text-mint border border-mint/30' : 'text-pine-400 hover:text-pine-200 border border-pine-700/40'}`}
+          >
+            <TrendingUp size={11} />
+            Gainers
+          </button>
+          <button
+            type="button"
+            onClick={() => { setSortKey('delta_pct'); setSortDir('asc') }}
+            className={`inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium transition-colors ${sortKey === 'delta_pct' && sortDir === 'asc' ? 'bg-red-500/15 text-red-400 border border-red-500/30' : 'text-pine-400 hover:text-pine-200 border border-pine-700/40'}`}
+          >
+            <TrendingDown size={11} />
+            Losers
+          </button>
+          <button
+            type="button"
+            onClick={() => { setSortKey('current_market_value'); setSortDir('desc') }}
+            className={`inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium transition-colors ${sortKey === 'current_market_value' ? 'bg-mint/15 text-mint border border-mint/30' : 'text-pine-400 hover:text-pine-200 border border-pine-700/40'}`}
+          >
+            Highest Value
+          </button>
+          {sortKey && (
+            <button
+              type="button"
+              onClick={() => setSortKey(null)}
+              className="text-[10px] text-pine-500 hover:text-pine-300 transition-colors"
+            >
+              Clear
+            </button>
+          )}
+        </div>
+
         {/* Bulk actions bar */}
         {selectedIds.size > 0 && (
           <div className="vault-panel rounded-lg px-4 py-2.5 flex items-center gap-3 flex-wrap">
@@ -383,13 +401,18 @@ export default function AdminShowPrepPage() {
 
             {/* Bulk move */}
             <ArrowRight size={14} className="text-pine-500" />
-            <input
-              type="text"
+            <select
               value={moveTarget}
               onChange={(e) => setMoveTarget(e.target.value)}
-              placeholder="Move to location…"
-              className="vault-field px-2.5 py-1 rounded-lg text-xs flex-1 max-w-48"
-            />
+              className="vault-field px-2.5 py-1 rounded-lg text-xs max-w-48"
+            >
+              <option value="">Move to…</option>
+              {LOCATION_OPTIONS.map((loc) => (
+                <option key={loc.value} value={loc.value}>
+                  {loc.label}
+                </option>
+              ))}
+            </select>
             <button
               type="button"
               onClick={handleBulkMove}
