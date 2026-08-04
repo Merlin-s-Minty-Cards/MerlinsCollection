@@ -12,9 +12,12 @@ import {
   RefreshCw,
   ChevronRight,
   ChevronLeft,
+  Package,
 } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
+import DataTable, { type Column } from '@/components/admin/shared/DataTable'
+import StatusBadge from '@/components/admin/shared/StatusBadge'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -38,12 +41,35 @@ interface ShowAnalytics {
   items_bought_count: number
   trades_count: number
   sell_through_rate?: number | null
-  avg_margin?: string | null
-  top_sale?: string | null
+  inventory_value_at_start?: string | null
   [key: string]: unknown
 }
 
-type ViewMode = 'list' | 'detail'
+interface DailyAnalytics {
+  date: string
+  total_sold: string
+  total_bought: string
+  net_sales: string
+  items_sold_count: number
+  items_bought_count: number
+  trades_count: number
+  inventory_value_at_start: string
+  sell_through_rate: string | null
+}
+
+interface TransactionRecord {
+  txn_id: string
+  type: string
+  item_id: string
+  date: string
+  amount: string
+  payment_method: string
+  trade_id?: string | null
+  [key: string]: unknown
+}
+
+type Tab = 'daily' | 'shows'
+type ShowViewMode = 'list' | 'detail'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -69,39 +95,143 @@ function getDefaultDateRange(): { start: string; end: string } {
 }
 
 // ---------------------------------------------------------------------------
+// Transaction table columns
+// ---------------------------------------------------------------------------
+
+const txnColumns: Column<TransactionRecord>[] = [
+  {
+    key: 'date',
+    label: 'Date',
+    sortable: true,
+    render: (t) => <span className="font-mono text-xs">{formatDate(t.date)}</span>,
+  },
+  {
+    key: 'type',
+    label: 'Type',
+    sortable: true,
+    render: (t) => {
+      const style = t.type === 'sale'
+        ? 'bg-mint/15 text-mint border-mint/30'
+        : t.type === 'purchase'
+          ? 'bg-blue-400/15 text-blue-300 border-blue-400/30'
+          : undefined
+      return style ? (
+        <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-medium uppercase tracking-wider border ${style}`}>
+          {t.type}
+        </span>
+      ) : (
+        <StatusBadge status={t.type} />
+      )
+    },
+  },
+  {
+    key: 'amount',
+    label: 'Amount',
+    sortable: true,
+    className: 'text-right',
+    render: (t) => <PriceDisplay value={t.amount} className="text-xs" />,
+  },
+  {
+    key: 'payment_method',
+    label: 'Payment Method',
+    sortable: true,
+    render: (t) => <span className="text-xs text-pine-300">{t.payment_method}</span>,
+  },
+  {
+    key: 'trade_id',
+    label: 'Trade',
+    render: (t) =>
+      t.trade_id ? (
+        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-purple-500/15 text-purple-300 border border-purple-500/30">
+          {t.trade_id.slice(0, 8)}
+        </span>
+      ) : null,
+  },
+]
+
+// ---------------------------------------------------------------------------
 // Main Page
 // ---------------------------------------------------------------------------
 
 export default function AdminAnalyticsPage() {
   const api = useAdminApi()
+  const [activeTab, setActiveTab] = useState<Tab>('daily')
 
-  // Date range
+  // === Daily view state ===
+  const [availableDates, setAvailableDates] = useState<string[]>([])
+  const [loadingDates, setLoadingDates] = useState(false)
+  const [selectedDate, setSelectedDate] = useState<string | null>(null)
+  const [dailyData, setDailyData] = useState<DailyAnalytics | null>(null)
+  const [loadingDaily, setLoadingDaily] = useState(false)
+  const [transactions, setTransactions] = useState<TransactionRecord[]>([])
+  const [loadingTxns, setLoadingTxns] = useState(false)
+
+  // === Shows view state ===
   const defaultRange = getDefaultDateRange()
   const [startDate, setStartDate] = useState(defaultRange.start)
   const [endDate, setEndDate] = useState(defaultRange.end)
-
-  // Shows
   const [shows, setShows] = useState<Show[]>([])
   const [loadingShows, setLoadingShows] = useState(true)
-
-  // Analytics (date range)
   const [analytics, setAnalytics] = useState<ShowAnalytics[]>([])
   const [loadingAnalytics, setLoadingAnalytics] = useState(false)
-
-  // Detail view
-  const [viewMode, setViewMode] = useState<ViewMode>('list')
+  const [showViewMode, setShowViewMode] = useState<ShowViewMode>('list')
   const [selectedShow, setSelectedShow] = useState<Show | null>(null)
   const [showDetail, setShowDetail] = useState<ShowAnalytics | null>(null)
   const [loadingDetail, setLoadingDetail] = useState(false)
-
-  // Generating
   const [generatingId, setGeneratingId] = useState<string | null>(null)
 
-  // Messages
+  // Shared
   const [message, setMessage] = useState<string | null>(null)
 
   // ---------------------------------------------------------------------------
-  // Data fetching
+  // Daily view data fetching
+  // ---------------------------------------------------------------------------
+
+  const fetchAvailableDates = useCallback(async () => {
+    if (!api.isAuthenticated) return
+    setLoadingDates(true)
+    try {
+      const res = await api.get<{ dates: string[] }>('/analytics/dates')
+      setAvailableDates(res.dates ?? [])
+    } catch {
+      setAvailableDates([])
+    } finally {
+      setLoadingDates(false)
+    }
+  }, [api])
+
+  const fetchDailyData = useCallback(async (date: string) => {
+    if (!api.isAuthenticated || !date) return
+    setLoadingDaily(true)
+    setLoadingTxns(true)
+    try {
+      const [daily, txns] = await Promise.all([
+        api.get<DailyAnalytics>('/analytics/daily', { date }),
+        api.get<{ items: TransactionRecord[] }>('/transactions', { start: date, end: date }),
+      ])
+      setDailyData(daily)
+      setTransactions(txns.items ?? [])
+    } catch {
+      setDailyData(null)
+      setTransactions([])
+    } finally {
+      setLoadingDaily(false)
+      setLoadingTxns(false)
+    }
+  }, [api])
+
+  useEffect(() => {
+    if (activeTab === 'daily') fetchAvailableDates()
+  }, [activeTab, fetchAvailableDates])
+
+  useEffect(() => {
+    if (activeTab === 'daily' && selectedDate) {
+      fetchDailyData(selectedDate)
+    }
+  }, [activeTab, selectedDate, fetchDailyData])
+
+  // ---------------------------------------------------------------------------
+  // Shows view data fetching
   // ---------------------------------------------------------------------------
 
   const fetchShows = useCallback(async () => {
@@ -109,7 +239,6 @@ export default function AdminAnalyticsPage() {
     setLoadingShows(true)
     try {
       const res = await api.get<{ shows: Show[] } | Show[]>('/shows')
-      // Handle both array and {shows: [...]} responses
       const showsList = Array.isArray(res) ? res : res.shows ?? []
       setShows(showsList)
     } catch {
@@ -150,12 +279,12 @@ export default function AdminAnalyticsPage() {
   }, [api])
 
   useEffect(() => {
-    fetchShows()
-  }, [fetchShows])
+    if (activeTab === 'shows') fetchShows()
+  }, [activeTab, fetchShows])
 
   useEffect(() => {
-    fetchAnalyticsByDate()
-  }, [fetchAnalyticsByDate])
+    if (activeTab === 'shows') fetchAnalyticsByDate()
+  }, [activeTab, fetchAnalyticsByDate])
 
   // ---------------------------------------------------------------------------
   // Actions
@@ -168,7 +297,6 @@ export default function AdminAnalyticsPage() {
       await api.post(`/shows/${showId}/analytics/generate`)
       setMessage('Analytics generated successfully')
       fetchAnalyticsByDate()
-      // If viewing detail for this show, refresh it
       if (selectedShow?.show_id === showId) {
         fetchShowDetail(showId)
       }
@@ -181,12 +309,12 @@ export default function AdminAnalyticsPage() {
 
   const openShowDetail = (show: Show) => {
     setSelectedShow(show)
-    setViewMode('detail')
+    setShowViewMode('detail')
     fetchShowDetail(show.show_id)
   }
 
   const backToList = () => {
-    setViewMode('list')
+    setShowViewMode('list')
     setSelectedShow(null)
     setShowDetail(null)
   }
@@ -203,7 +331,7 @@ export default function AdminAnalyticsPage() {
   }, [message])
 
   // ---------------------------------------------------------------------------
-  // Aggregate metrics for the period
+  // Shows aggregate metrics
   // ---------------------------------------------------------------------------
 
   const totalRevenue = analytics.reduce((sum, a) => sum + (parseFloat(a.total_sold) || 0), 0)
@@ -211,13 +339,8 @@ export default function AdminAnalyticsPage() {
   const netProfit = analytics.reduce((sum, a) => sum + (parseFloat(a.net_sales) || 0), 0)
   const totalShows = analytics.length
 
-  // ---------------------------------------------------------------------------
-  // Match analytics to shows for the list view
-  // ---------------------------------------------------------------------------
-
   const showsWithAnalytics = shows
     .filter((show) => {
-      // Only shows within date range
       if (!show.date) return false
       return show.date >= startDate && show.date <= endDate
     })
@@ -228,10 +351,10 @@ export default function AdminAnalyticsPage() {
     })
 
   // ---------------------------------------------------------------------------
-  // Render
+  // Shows detail view (rendered early return)
   // ---------------------------------------------------------------------------
 
-  if (viewMode === 'detail' && selectedShow) {
+  if (activeTab === 'shows' && showViewMode === 'detail' && selectedShow) {
     return (
       <div className="p-6 lg:p-8 max-w-5xl">
         {/* Back button */}
@@ -274,43 +397,34 @@ export default function AdminAnalyticsPage() {
         ) : showDetail ? (
           <div className="space-y-6">
             {/* Metrics grid */}
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
               <MetricCard label="Total Sold" value={showDetail.total_sold} icon={<ShoppingBag size={14} />} color="text-mint" />
               <MetricCard label="Total Bought" value={showDetail.total_bought} icon={<ShoppingCart size={14} />} color="text-blue-400" />
               <MetricCard label="Net Sales" value={showDetail.net_sales} icon={<DollarSign size={14} />} color="text-amber-400" />
+              {showDetail.inventory_value_at_start != null && (
+                <MetricCard label="Inventory Value at Start" value={String(showDetail.inventory_value_at_start)} icon={<Package size={14} />} color="text-pine-200" />
+              )}
               <MetricCard label="Items Sold" value={String(showDetail.items_sold_count)} icon={<ShoppingBag size={14} />} color="text-mint" isCount />
               <MetricCard label="Items Bought" value={String(showDetail.items_bought_count)} icon={<ShoppingCart size={14} />} color="text-blue-400" isCount />
               <MetricCard label="Trades" value={String(showDetail.trades_count)} icon={<ArrowRightLeft size={14} />} color="text-purple-400" isCount />
             </div>
 
-            {/* Additional metrics */}
-            <div className="vault-panel rounded-xl p-4 border border-pine-700/30">
-              <h3 className="text-[11px] font-semibold uppercase tracking-wider text-pine-400 mb-3">
-                Performance Details
-              </h3>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                {showDetail.sell_through_rate != null && (
+            {/* Performance details */}
+            {showDetail.sell_through_rate != null && (
+              <div className="vault-panel rounded-xl p-4 border border-pine-700/30">
+                <h3 className="text-[11px] font-semibold uppercase tracking-wider text-pine-400 mb-3">
+                  Performance Details
+                </h3>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                   <div>
                     <div className="text-[10px] text-pine-500 uppercase mb-1">Sell-Through Rate</div>
                     <div className="text-sm font-mono text-pine-100">
                       {(showDetail.sell_through_rate * 100).toFixed(1)}%
                     </div>
                   </div>
-                )}
-                {showDetail.avg_margin && (
-                  <div>
-                    <div className="text-[10px] text-pine-500 uppercase mb-1">Avg Margin</div>
-                    <PriceDisplay value={showDetail.avg_margin} className="text-sm text-pine-100" />
-                  </div>
-                )}
-                {showDetail.top_sale && (
-                  <div>
-                    <div className="text-[10px] text-pine-500 uppercase mb-1">Top Sale</div>
-                    <PriceDisplay value={showDetail.top_sale} className="text-sm text-amber-400" />
-                  </div>
-                )}
+                </div>
               </div>
-            </div>
+            )}
           </div>
         ) : (
           <div className="vault-panel rounded-xl p-8 text-center text-xs text-pine-500">
@@ -329,7 +443,7 @@ export default function AdminAnalyticsPage() {
   }
 
   // ---------------------------------------------------------------------------
-  // List view (default)
+  // Main render with tabs
   // ---------------------------------------------------------------------------
 
   return (
@@ -338,67 +452,28 @@ export default function AdminAnalyticsPage() {
         <span className="font-mono text-[11px] uppercase tracking-[0.22em] text-mint/70">
           Analytics
         </span>
-        <h1 className="text-xl font-semibold text-pine-100">Show Analytics Dashboard</h1>
+        <h1 className="text-xl font-semibold text-pine-100">Analytics Dashboard</h1>
         <p className="text-xs text-pine-400 mt-1">
-          Performance metrics across your card shows
+          Daily metrics and show performance
         </p>
       </header>
 
-      {/* Date range picker */}
-      <section className="vault-panel rounded-xl p-4 border border-pine-700/30 mb-6">
-        <div className="flex items-center gap-4 flex-wrap">
-          <Calendar size={15} className="text-mint" />
-          <div className="flex items-center gap-2">
-            <label className="text-[10px] text-pine-500 uppercase">From</label>
-            <input
-              type="date"
-              value={startDate}
-              onChange={(e) => setStartDate(e.target.value)}
-              className="vault-field px-3 py-1.5 rounded-lg text-xs font-mono"
-            />
-          </div>
-          <div className="flex items-center gap-2">
-            <label className="text-[10px] text-pine-500 uppercase">To</label>
-            <input
-              type="date"
-              value={endDate}
-              onChange={(e) => setEndDate(e.target.value)}
-              className="vault-field px-3 py-1.5 rounded-lg text-xs font-mono"
-            />
-          </div>
-        </div>
-      </section>
-
-      {/* Summary cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
-        <div className="vault-panel rounded-xl px-4 py-3 border border-pine-700/30">
-          <div className="flex items-center gap-1.5 mb-1">
-            <TrendingUp size={12} className="text-mint" />
-            <span className="text-[10px] text-pine-500 uppercase tracking-wider">Revenue</span>
-          </div>
-          <PriceDisplay value={totalRevenue} className="text-lg text-mint" />
-        </div>
-        <div className="vault-panel rounded-xl px-4 py-3 border border-pine-700/30">
-          <div className="flex items-center gap-1.5 mb-1">
-            <ShoppingCart size={12} className="text-blue-400" />
-            <span className="text-[10px] text-pine-500 uppercase tracking-wider">Spend</span>
-          </div>
-          <PriceDisplay value={totalSpend} className="text-lg text-blue-400" />
-        </div>
-        <div className="vault-panel rounded-xl px-4 py-3 border border-pine-700/30">
-          <div className="flex items-center gap-1.5 mb-1">
-            <DollarSign size={12} className="text-amber-400" />
-            <span className="text-[10px] text-pine-500 uppercase tracking-wider">Net Profit</span>
-          </div>
-          <PriceDisplay value={netProfit} className={`text-lg ${netProfit >= 0 ? 'text-mint' : 'text-red-400'}`} />
-        </div>
-        <div className="vault-panel rounded-xl px-4 py-3 border border-pine-700/30">
-          <div className="flex items-center gap-1.5 mb-1">
-            <BarChart3 size={12} className="text-purple-400" />
-            <span className="text-[10px] text-pine-500 uppercase tracking-wider">Shows</span>
-          </div>
-          <div className="text-lg font-mono text-pine-100">{totalShows}</div>
-        </div>
+      {/* Tab switcher */}
+      <div className="flex gap-1 mb-6 border-b border-pine-700/40 pb-px">
+        {([['daily', 'Daily'], ['shows', 'Shows']] as [Tab, string][]).map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setActiveTab(key)}
+            className={`px-4 py-2 text-xs font-medium rounded-t-lg transition-colors ${
+              activeTab === key
+                ? 'bg-pine-800/60 text-mint border border-pine-700/40 border-b-transparent -mb-px'
+                : 'text-pine-400 hover:text-pine-200'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
       </div>
 
       {/* Message */}
@@ -408,103 +483,273 @@ export default function AdminAnalyticsPage() {
         </div>
       )}
 
-      {/* Shows list */}
-      <section>
-        <h2 className="text-xs font-semibold text-pine-200 uppercase tracking-wider mb-3">
-          Shows in Period
-        </h2>
-        {loadingShows || loadingAnalytics ? (
-          <div className="vault-panel rounded-xl p-6 text-center text-xs text-pine-400">
-            Loading…
-          </div>
-        ) : showsWithAnalytics.length === 0 ? (
-          <div className="vault-panel rounded-xl p-6 text-center text-xs text-pine-500">
-            No shows found in the selected date range
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {showsWithAnalytics.map(({ show, analytics: showAnalytic }) => (
-              <div
-                key={show.show_id}
-                className="vault-panel rounded-xl px-4 py-3 border border-pine-700/30 hover:border-pine-600/50 transition-colors cursor-pointer"
-                onClick={() => openShowDetail(show)}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') openShowDetail(show)
-                }}
-              >
-                <div className="flex items-center justify-between gap-4">
-                  <div className="flex items-center gap-4 min-w-0 flex-1">
-                    <div className="min-w-0">
-                      <div className="text-sm text-pine-100 font-medium truncate">{show.name}</div>
-                      <div className="text-[10px] text-pine-500 mt-0.5">
-                        {formatDate(show.date)} {show.location && `• ${show.location}`}
-                      </div>
-                    </div>
-                  </div>
+      {/* ================================================================== */}
+      {/* Daily view                                                         */}
+      {/* ================================================================== */}
+      {activeTab === 'daily' && (
+        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+          {/* Left: date list */}
+          <div className="lg:col-span-1 space-y-3">
+            <div>
+              <label className="text-[10px] text-pine-500 uppercase tracking-wider block mb-1">
+                Pick a date
+              </label>
+              <input
+                type="date"
+                value={selectedDate ?? ''}
+                onChange={(e) => setSelectedDate(e.target.value || null)}
+                className="vault-field px-3 py-1.5 rounded-lg text-xs font-mono w-full"
+              />
+            </div>
 
-                  {showAnalytic ? (
-                    <div className="flex items-center gap-4 flex-shrink-0">
-                      <div className="text-right">
-                        <div className="text-[10px] text-pine-500">Sold</div>
-                        <PriceDisplay value={showAnalytic.total_sold} className="text-xs text-mint" />
-                      </div>
-                      <div className="text-right">
-                        <div className="text-[10px] text-pine-500">Bought</div>
-                        <PriceDisplay value={showAnalytic.total_bought} className="text-xs text-blue-400" />
-                      </div>
-                      <div className="text-right">
-                        <div className="text-[10px] text-pine-500">Net</div>
-                        <PriceDisplay
-                          value={showAnalytic.net_sales}
-                          className={`text-xs ${parseFloat(showAnalytic.net_sales) >= 0 ? 'text-mint' : 'text-red-400'}`}
-                        />
-                      </div>
-                      <div className="text-right hidden sm:block">
-                        <div className="text-[10px] text-pine-500">Items S/B/T</div>
-                        <span className="text-xs font-mono text-pine-300">
-                          {showAnalytic.items_sold_count}/{showAnalytic.items_bought_count}/{showAnalytic.trades_count}
-                        </span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          generateAnalytics(show.show_id)
-                        }}
-                        disabled={generatingId === show.show_id}
-                        className="p-1.5 rounded text-pine-500 hover:text-mint hover:bg-mint/10 disabled:opacity-40 transition-colors"
-                        title="Regenerate analytics"
-                      >
-                        <RefreshCw size={13} className={generatingId === show.show_id ? 'animate-spin' : ''} />
-                      </button>
-                      <ChevronRight size={14} className="text-pine-600" />
+            <div>
+              <h3 className="text-[10px] text-pine-500 uppercase tracking-wider mb-2">
+                Dates with activity
+              </h3>
+              {loadingDates ? (
+                <div className="text-xs text-pine-400">Loading…</div>
+              ) : availableDates.length === 0 ? (
+                <div className="text-xs text-pine-500">No activity dates found</div>
+              ) : (
+                <div className="space-y-1 max-h-[400px] overflow-y-auto vault-scroll">
+                  {availableDates.map((d) => (
+                    <button
+                      key={d}
+                      type="button"
+                      onClick={() => setSelectedDate(d)}
+                      className={`w-full text-left px-3 py-1.5 rounded-lg text-xs font-mono transition-colors ${
+                        selectedDate === d
+                          ? 'bg-pine-700/70 text-mint'
+                          : 'text-pine-300 hover:text-pine-100 hover:bg-pine-800/60'
+                      }`}
+                    >
+                      {formatDate(d)}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Right: metrics + transaction archive */}
+          <div className="lg:col-span-3 space-y-6">
+            {!selectedDate ? (
+              <div className="vault-panel rounded-xl p-8 text-center text-xs text-pine-500">
+                Select a date to view daily analytics
+              </div>
+            ) : loadingDaily ? (
+              <div className="vault-panel rounded-xl p-8 text-center text-xs text-pine-400">
+                Loading analytics…
+              </div>
+            ) : dailyData ? (
+              <>
+                {/* Daily metrics grid */}
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+                  <MetricCard label="Total Sold" value={dailyData.total_sold} icon={<ShoppingBag size={14} />} color="text-mint" />
+                  <MetricCard label="Total Bought" value={dailyData.total_bought} icon={<ShoppingCart size={14} />} color="text-blue-400" />
+                  <MetricCard label="Net Sales" value={dailyData.net_sales} icon={<DollarSign size={14} />} color="text-amber-400" />
+                  <MetricCard label="Inventory Value at Start" value={dailyData.inventory_value_at_start} icon={<Package size={14} />} color="text-pine-200" />
+                  <MetricCard
+                    label="Sell-Through"
+                    value={dailyData.sell_through_rate != null ? `${(parseFloat(dailyData.sell_through_rate) * 100).toFixed(1)}%` : '—'}
+                    icon={<TrendingUp size={14} />}
+                    color="text-amber-400"
+                    isCount
+                  />
+                  <MetricCard label="Items Sold" value={String(dailyData.items_sold_count)} icon={<ShoppingBag size={14} />} color="text-mint" isCount />
+                  <MetricCard label="Items Bought" value={String(dailyData.items_bought_count)} icon={<ShoppingCart size={14} />} color="text-blue-400" isCount />
+                  <MetricCard label="Trades" value={String(dailyData.trades_count)} icon={<ArrowRightLeft size={14} />} color="text-purple-400" isCount />
+                </div>
+
+                {/* Transaction archive */}
+                <section>
+                  <h2 className="text-xs font-semibold text-pine-200 uppercase tracking-wider mb-3">
+                    Transaction Archive
+                  </h2>
+                  {loadingTxns ? (
+                    <div className="vault-panel rounded-xl p-6 text-center text-xs text-pine-400">
+                      Loading…
                     </div>
                   ) : (
-                    <div className="flex items-center gap-3 flex-shrink-0">
-                      <span className="text-[10px] text-pine-600 italic">No analytics</span>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          generateAnalytics(show.show_id)
-                        }}
-                        disabled={generatingId === show.show_id}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-[10px] font-medium bg-mint/10 text-mint border border-mint/20 hover:bg-mint/20 disabled:opacity-40 transition-colors"
-                      >
-                        <RefreshCw size={11} className={generatingId === show.show_id ? 'animate-spin' : ''} />
-                        Generate
-                      </button>
-                      <ChevronRight size={14} className="text-pine-600" />
-                    </div>
+                    <DataTable
+                      columns={txnColumns}
+                      data={transactions as unknown as Record<string, unknown>[]}
+                      keyField="txn_id"
+                      emptyMessage="No transactions for this date"
+                    />
                   )}
-                </div>
+                </section>
+              </>
+            ) : (
+              <div className="vault-panel rounded-xl p-8 text-center text-xs text-pine-500">
+                No data for the selected date
               </div>
-            ))}
+            )}
           </div>
-        )}
-      </section>
+        </div>
+      )}
+
+      {/* ================================================================== */}
+      {/* Shows view                                                         */}
+      {/* ================================================================== */}
+      {activeTab === 'shows' && (
+        <>
+          {/* Date range picker */}
+          <section className="vault-panel rounded-xl p-4 border border-pine-700/30 mb-6">
+            <div className="flex items-center gap-4 flex-wrap">
+              <Calendar size={15} className="text-mint" />
+              <div className="flex items-center gap-2">
+                <label className="text-[10px] text-pine-500 uppercase">From</label>
+                <input
+                  type="date"
+                  value={startDate}
+                  onChange={(e) => setStartDate(e.target.value)}
+                  className="vault-field px-3 py-1.5 rounded-lg text-xs font-mono"
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <label className="text-[10px] text-pine-500 uppercase">To</label>
+                <input
+                  type="date"
+                  value={endDate}
+                  onChange={(e) => setEndDate(e.target.value)}
+                  className="vault-field px-3 py-1.5 rounded-lg text-xs font-mono"
+                />
+              </div>
+            </div>
+          </section>
+
+          {/* Summary cards */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+            <div className="vault-panel rounded-xl px-4 py-3 border border-pine-700/30">
+              <div className="flex items-center gap-1.5 mb-1">
+                <TrendingUp size={12} className="text-mint" />
+                <span className="text-[10px] text-pine-500 uppercase tracking-wider">Revenue</span>
+              </div>
+              <PriceDisplay value={totalRevenue} className="text-lg text-mint" />
+            </div>
+            <div className="vault-panel rounded-xl px-4 py-3 border border-pine-700/30">
+              <div className="flex items-center gap-1.5 mb-1">
+                <ShoppingCart size={12} className="text-blue-400" />
+                <span className="text-[10px] text-pine-500 uppercase tracking-wider">Spend</span>
+              </div>
+              <PriceDisplay value={totalSpend} className="text-lg text-blue-400" />
+            </div>
+            <div className="vault-panel rounded-xl px-4 py-3 border border-pine-700/30">
+              <div className="flex items-center gap-1.5 mb-1">
+                <DollarSign size={12} className="text-amber-400" />
+                <span className="text-[10px] text-pine-500 uppercase tracking-wider">Net Profit</span>
+              </div>
+              <PriceDisplay value={netProfit} className={`text-lg ${netProfit >= 0 ? 'text-mint' : 'text-red-400'}`} />
+            </div>
+            <div className="vault-panel rounded-xl px-4 py-3 border border-pine-700/30">
+              <div className="flex items-center gap-1.5 mb-1">
+                <BarChart3 size={12} className="text-purple-400" />
+                <span className="text-[10px] text-pine-500 uppercase tracking-wider">Shows</span>
+              </div>
+              <div className="text-lg font-mono text-pine-100">{totalShows}</div>
+            </div>
+          </div>
+
+          {/* Shows list */}
+          <section>
+            <h2 className="text-xs font-semibold text-pine-200 uppercase tracking-wider mb-3">
+              Shows in Period
+            </h2>
+            {loadingShows || loadingAnalytics ? (
+              <div className="vault-panel rounded-xl p-6 text-center text-xs text-pine-400">
+                Loading…
+              </div>
+            ) : showsWithAnalytics.length === 0 ? (
+              <div className="vault-panel rounded-xl p-6 text-center text-xs text-pine-500">
+                No shows found in the selected date range
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {showsWithAnalytics.map(({ show, analytics: showAnalytic }) => (
+                  <div
+                    key={show.show_id}
+                    className="vault-panel rounded-xl px-4 py-3 border border-pine-700/30 hover:border-pine-600/50 transition-colors cursor-pointer"
+                    onClick={() => openShowDetail(show)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') openShowDetail(show)
+                    }}
+                  >
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="flex items-center gap-4 min-w-0 flex-1">
+                        <div className="min-w-0">
+                          <div className="text-sm text-pine-100 font-medium truncate">{show.name}</div>
+                          <div className="text-[10px] text-pine-500 mt-0.5">
+                            {formatDate(show.date)} {show.location && `• ${show.location}`}
+                          </div>
+                        </div>
+                      </div>
+
+                      {showAnalytic ? (
+                        <div className="flex items-center gap-4 flex-shrink-0">
+                          <div className="text-right">
+                            <div className="text-[10px] text-pine-500">Sold</div>
+                            <PriceDisplay value={showAnalytic.total_sold} className="text-xs text-mint" />
+                          </div>
+                          <div className="text-right">
+                            <div className="text-[10px] text-pine-500">Bought</div>
+                            <PriceDisplay value={showAnalytic.total_bought} className="text-xs text-blue-400" />
+                          </div>
+                          <div className="text-right">
+                            <div className="text-[10px] text-pine-500">Net</div>
+                            <PriceDisplay
+                              value={showAnalytic.net_sales}
+                              className={`text-xs ${parseFloat(showAnalytic.net_sales) >= 0 ? 'text-mint' : 'text-red-400'}`}
+                            />
+                          </div>
+                          <div className="text-right hidden sm:block">
+                            <div className="text-[10px] text-pine-500">Items S/B/T</div>
+                            <span className="text-xs font-mono text-pine-300">
+                              {showAnalytic.items_sold_count}/{showAnalytic.items_bought_count}/{showAnalytic.trades_count}
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              generateAnalytics(show.show_id)
+                            }}
+                            disabled={generatingId === show.show_id}
+                            className="p-1.5 rounded text-pine-500 hover:text-mint hover:bg-mint/10 disabled:opacity-40 transition-colors"
+                            title="Regenerate analytics"
+                          >
+                            <RefreshCw size={13} className={generatingId === show.show_id ? 'animate-spin' : ''} />
+                          </button>
+                          <ChevronRight size={14} className="text-pine-600" />
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-3 flex-shrink-0">
+                          <span className="text-[10px] text-pine-600 italic">No analytics</span>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              generateAnalytics(show.show_id)
+                            }}
+                            disabled={generatingId === show.show_id}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-[10px] font-medium bg-mint/10 text-mint border border-mint/20 hover:bg-mint/20 disabled:opacity-40 transition-colors"
+                          >
+                            <RefreshCw size={11} className={generatingId === show.show_id ? 'animate-spin' : ''} />
+                            Generate
+                          </button>
+                          <ChevronRight size={14} className="text-pine-600" />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        </>
+      )}
     </div>
   )
 }

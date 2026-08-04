@@ -12,6 +12,10 @@ import {
   TrendingUp,
   MapPin,
   Lock,
+  Tags,
+  BarChart3,
+  History,
+  Users,
   PanelLeftClose,
   PanelLeft,
   LogOut,
@@ -27,6 +31,10 @@ const navItems = [
   { href: '/admin/vault', label: 'Vault', icon: Lock },
   { href: '/admin/market', label: 'Market', icon: TrendingUp },
   { href: '/admin/show-prep', label: 'Show Prep', icon: MapPin },
+  { href: '/admin/outgoing', label: 'Prep Queue', icon: Tags },
+  { href: '/admin/analytics', label: 'Show Analytics', icon: BarChart3 },
+  { href: '/admin/history', label: 'History', icon: History },
+  { href: '/admin/cosigners', label: 'Cosigners', icon: Users },
 ]
 
 export default function AdminShell({ children }: { children: React.ReactNode }) {
