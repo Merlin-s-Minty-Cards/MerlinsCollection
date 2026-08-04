@@ -11,17 +11,32 @@ export interface InlineEditCellProps {
   /** Read-only content shown when not editing (e.g. a formatted price or link). */
   displayValue: ReactNode
   /**
-   * Called when the edit is committed (Enter or blur). Receives the raw
-   * string typed into the input — the caller owns parsing/validation and
-   * empty-string handling (e.g. converting '' to null before saving).
+   * Called when the edit is committed (Enter or blur) with a value that
+   * actually changed from `value` — unchanged edits are skipped entirely
+   * (no call, no save, no round trip). The caller owns parsing/validation
+   * (throw/reject to reject the edit — see below) and empty-string handling
+   * (e.g. converting '' to null before saving).
+   *
+   * May return a Promise. While it is pending the input stays open and
+   * disabled. If it resolves, the cell exits edit mode. If it rejects, edit
+   * mode stays open (so the admin can see/retry the offending value) and the
+   * rejection reason is forwarded to `onError`, if provided.
    */
-  onSave: (value: string) => void
-  /** Optional: disables the input and suppresses further edits while a save is in flight. */
+  onSave: (value: string) => void | Promise<void>
+  /**
+   * Called when `onSave` rejects/throws. Typically used to surface a message
+   * (e.g. "Save failed: <detail>") somewhere in the caller's UI. The cell
+   * itself renders no error text — it only keeps the editor open.
+   */
+  onError?: (error: unknown) => void
+  /** Optional: disables the input and suppresses further edits (e.g. a sibling bulk action is in flight). */
   saving?: boolean
   /** Optional: overrides the numeric step attribute (defaults to "0.01"). */
   step?: string
   /** Optional: placeholder shown in the input. */
   placeholder?: string
+  /** Optional: adornment rendered inside the input's left edge (e.g. "$"). */
+  prefix?: ReactNode
   /** Optional: accessible label for the display/edit trigger. */
   'aria-label'?: string
 }
@@ -29,25 +44,31 @@ export interface InlineEditCellProps {
 /**
  * Click-to-edit table cell: shows `displayValue` until clicked, then swaps in
  * a text input of the given `type`. Enter and blur commit the typed value via
- * `onSave`; Escape cancels and restores the original value without saving,
- * and — critically — the blur that follows an Escape-driven focus loss must
- * NOT also trigger a save (the classic double-fire bug in this pattern).
+ * `onSave` (skipped entirely if unchanged); Escape cancels and restores the
+ * original value without saving, and — critically — the blur that follows an
+ * Escape-driven focus loss must NOT also trigger a save (the classic
+ * double-fire bug in this pattern).
  *
  * Not coupled to any specific data shape — callers own the field name(s),
- * parsing, and API call in their `onSave` callback.
+ * parsing, and API call in their `onSave` callback. `onSave` may be async: a
+ * rejection keeps the editor open instead of silently reverting, so failed
+ * saves are visible and retryable rather than swallowed.
  */
 export default function InlineEditCell({
   value,
   type,
   displayValue,
   onSave,
+  onError,
   saving = false,
   step = '0.01',
   placeholder,
+  prefix,
   'aria-label': ariaLabel,
 }: InlineEditCellProps) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(value)
+  const [submitting, setSubmitting] = useState(false)
   // Guards against the blur handler firing a save after Escape already
   // cancelled the edit. A ref (not state) is required here: Escape calls
   // blur() synchronously within the same handler, so the blur's onBlur
@@ -56,19 +77,33 @@ export default function InlineEditCell({
   const cancelledRef = useRef(false)
 
   const startEdit = () => {
-    if (saving) return
+    if (saving || submitting) return
     setDraft(value)
     cancelledRef.current = false
     setEditing(true)
   }
 
-  const commit = () => {
+  const commit = async () => {
     if (cancelledRef.current) {
       cancelledRef.current = false
       return
     }
-    setEditing(false)
-    onSave(draft)
+    // Dirty-check: reading a value and clicking away must not fire a save.
+    if (draft === value) {
+      setEditing(false)
+      return
+    }
+    setSubmitting(true)
+    try {
+      await onSave(draft)
+      setEditing(false)
+    } catch (err) {
+      // Keep the editor open on failure so the admin can see/retry the
+      // offending value instead of it silently reverting.
+      onError?.(err)
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   const cancel = () => {
@@ -87,20 +122,28 @@ export default function InlineEditCell({
   }
 
   if (editing) {
+    const disabled = saving || submitting
     return (
       <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-        <input
-          type={type}
-          step={type === 'number' ? step : undefined}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={handleKeyDown}
-          onBlur={commit}
-          placeholder={placeholder}
-          className="vault-field w-full min-w-0 px-1.5 py-0.5 rounded text-xs font-mono"
-          autoFocus
-          disabled={saving}
-        />
+        <div className="relative flex-1 min-w-0">
+          {prefix && (
+            <span className="absolute left-1.5 top-1/2 -translate-y-1/2 text-[10px] text-pine-500 pointer-events-none">
+              {prefix}
+            </span>
+          )}
+          <input
+            type={type}
+            step={type === 'number' ? step : undefined}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={handleKeyDown}
+            onBlur={commit}
+            placeholder={placeholder}
+            className={`vault-field w-full min-w-0 py-0.5 rounded text-xs font-mono ${prefix ? 'pl-4 pr-1.5' : 'px-1.5'}`}
+            autoFocus
+            disabled={disabled}
+          />
+        </div>
         <button
           type="button"
           onClick={cancel}

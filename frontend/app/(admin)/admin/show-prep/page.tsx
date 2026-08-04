@@ -38,6 +38,7 @@ export default function AdminShowPrepPage() {
 
   // Per-row inline edits (sticker price, TCG link)
   const [savingItemId, setSavingItemId] = useState<string | null>(null)
+  const [itemEditError, setItemEditError] = useState<string | null>(null)
 
   // Mispriced
   const [threshold, setThreshold] = useState(20)
@@ -145,16 +146,32 @@ export default function AdminShowPrepPage() {
     fetchMispriced()
   }
 
+  // Row-level inline edit save/error path. InlineEditCell keeps the editor
+  // open on rejection, so these handlers throw on both validation and API
+  // failure — the thrown error reaches the column's onError, which surfaces
+  // it in `itemEditError` (see banner in the JSX below).
   const saveItemStickerPrice = async (itemId: string, rawValue: string) => {
     const trimmed = rawValue.trim()
-    const price = parseFloat(trimmed)
-    if (trimmed !== '' && (isNaN(price) || price < 0)) return
     setSavingItemId(itemId)
     try {
-      await api.put(`/inventory/${itemId}`, { sticker_price: trimmed === '' ? null : trimmed })
+      if (trimmed === '') {
+        await api.put(`/inventory/${itemId}`, { sticker_price: null })
+      } else {
+        const price = parseFloat(trimmed)
+        if (isNaN(price) || price < 0) {
+          throw new Error('Enter a valid, non-negative sticker price')
+        }
+        // Send the parsed number, not the raw typed string — parseFloat
+        // tolerates trailing garbage ("12abc" -> 12) that must not reach the API.
+        await api.put(`/inventory/${itemId}`, { sticker_price: String(price) })
+      }
+      setItemEditError(null)
       fetchMispriced()
-    } catch { /* leave the row as-is; the value reverts on next fetch */ }
-    finally { setSavingItemId(null) }
+    } catch (err) {
+      throw err instanceof AdminApiError ? err : err instanceof Error ? err : new Error('Failed to save sticker price')
+    } finally {
+      setSavingItemId(null)
+    }
   }
 
   const saveItemTcgUrl = async (itemId: string, rawValue: string) => {
@@ -162,9 +179,17 @@ export default function AdminShowPrepPage() {
     setSavingItemId(itemId)
     try {
       await api.put(`/inventory/${itemId}`, { tcg_url: trimmed || null })
+      setItemEditError(null)
       fetchMispriced()
-    } catch { /* leave the row as-is; the value reverts on next fetch */ }
-    finally { setSavingItemId(null) }
+    } catch (err) {
+      throw err instanceof AdminApiError ? err : new Error('Failed to save TCG link')
+    } finally {
+      setSavingItemId(null)
+    }
+  }
+
+  const handleItemEditError = (err: unknown) => {
+    setItemEditError(err instanceof AdminApiError ? (err.detail || 'Save failed') : err instanceof Error ? err.message : 'Save failed')
   }
 
   const handleSort = (key: string) => {
@@ -253,10 +278,12 @@ export default function AdminShowPrepPage() {
           value={item.sticker_price ? String(item.sticker_price) : ''}
           type="number"
           step="0.01"
+          prefix="$"
           placeholder="0.00"
           saving={savingItemId === item.item_id}
           aria-label={`Edit sticker price for ${item.name || 'item'}`}
           onSave={(v) => saveItemStickerPrice(item.item_id, v)}
+          onError={handleItemEditError}
           displayValue={
             <div className="flex items-center justify-end gap-1">
               {item.sticker_price ? <PriceDisplay value={item.sticker_price} className="text-xs text-amber-400" /> : <span className="text-xs text-pine-600">—</span>}
@@ -303,6 +330,7 @@ export default function AdminShowPrepPage() {
             saving={savingItemId === item.item_id}
             aria-label={`Edit stored TCG link for ${item.name || 'item'}`}
             onSave={(v) => saveItemTcgUrl(item.item_id, v)}
+            onError={handleItemEditError}
             displayValue={
               <a
                 href={linkHref}
@@ -502,6 +530,21 @@ export default function AdminShowPrepPage() {
           <div className="flex items-center gap-2 text-xs text-mint bg-mint/5 border border-mint/20 rounded-lg px-3 py-2">
             <Check size={14} />
             {moveResult}
+          </div>
+        )}
+
+        {itemEditError && (
+          <div className="flex items-center gap-2 text-xs text-red-400 bg-red-500/5 border border-red-500/20 rounded-lg px-3 py-2">
+            <AlertTriangle size={14} />
+            {itemEditError}
+            <button
+              type="button"
+              onClick={() => setItemEditError(null)}
+              className="ml-auto text-red-500/70 hover:text-red-400"
+              aria-label="Dismiss error"
+            >
+              ×
+            </button>
           </div>
         )}
 

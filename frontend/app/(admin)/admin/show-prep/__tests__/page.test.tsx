@@ -82,4 +82,45 @@ describe('AdminShowPrepPage inline sticker editing', () => {
     const mispricedCallsAfter = getMock.mock.calls.filter((c) => c[0] === '/show-prep/mispriced').length
     expect(mispricedCallsAfter).toBeGreaterThan(mispricedCallsBefore)
   })
+
+  it('does not PUT when the sticker price is reopened but left unchanged', async () => {
+    render(<AdminShowPrepPage />)
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    const stickerDisplay = await screen.findByRole('button', { name: /edit sticker price for pikachu vmax/i })
+    fireEvent.click(stickerDisplay)
+    const input = screen.getByPlaceholderText('0.00')
+
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Enter' })
+      await Promise.resolve()
+    })
+
+    expect(putMock).not.toHaveBeenCalled()
+  })
+
+  it('surfaces a failure message and keeps the editor open when the PUT rejects', async () => {
+    putMock.mockRejectedValueOnce(new Error('boom'))
+    render(<AdminShowPrepPage />)
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    const stickerDisplay = await screen.findByRole('button', { name: /edit sticker price for pikachu vmax/i })
+    fireEvent.click(stickerDisplay)
+    const input = screen.getByPlaceholderText('0.00')
+    fireEvent.change(input, { target: { value: '19.99' } })
+
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Enter' })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(await screen.findByText('boom')).toBeInTheDocument()
+    // Editor stays open on failure rather than silently reverting.
+    expect(screen.getByPlaceholderText('0.00')).toBeInTheDocument()
+  })
 })
