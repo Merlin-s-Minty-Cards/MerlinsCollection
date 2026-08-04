@@ -6,6 +6,7 @@ import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import SearchInput from '@/components/admin/shared/SearchInput'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
+import { availableModes, canConfirmBasis, type BasisMode } from '@/lib/trade-basis'
 
 interface TradeLeg {
   item_id?: string
@@ -30,8 +31,11 @@ interface TradeBalance {
   cash_delta: string
   cash_components_net?: string
   margin_pct: string | null
-  margin_split_applied?: boolean
   is_balanced: boolean
+  basis_mode: BasisMode
+  has_cash: boolean
+  projected_basis_pool: string | null
+  basis_mode_error: string | null
 }
 
 interface InventoryItem {
@@ -66,9 +70,12 @@ export default function AdminTradePage() {
   const [customerView, setCustomerView] = useState(false)
   const [tradeDate, setTradeDate] = useState(todayISO())
 
-  // Vendor margin split
+  // Vendor mode toggle
   const [vendorMode, setVendorMode] = useState(false)
-  const [marginSplitPct, setMarginSplitPct] = useState('15')
+
+  // Basis mode
+  const [basisMode, setBasisMode] = useState<BasisMode>('transfer')
+  const [manualBasis, setManualBasis] = useState('')
 
   // Search for outgoing items
   const [outSearch, setOutSearch] = useState('')
@@ -116,6 +123,7 @@ export default function AdminTradePage() {
     try {
       const bal = await api.get<TradeBalance>(`/trades/${tradeId}/balance`)
       setBalance(bal)
+      setBasisMode(bal.basis_mode ?? 'transfer')
     } catch { /* ignore */ }
   }, [tradeId, api])
 
@@ -251,25 +259,26 @@ export default function AdminTradePage() {
     }
   }
 
-  // Vendor margin split sync
-  const syncMarginSplit = async () => {
+  // Basis mode sync
+  const syncBasisMode = async (mode: BasisMode) => {
     if (!tradeId) return
     try {
-      await api.patch(`/trades/${tradeId}`, {
-        margin_split: vendorMode ? {
-          enabled: true,
-          percent: parseFloat(marginSplitPct) || 15,
-        } : null,
-      })
+      await api.patch(`/trades/${tradeId}`, { basis_mode: mode })
       fetchBalance()
     } catch (err) {
-      alert(err instanceof AdminApiError ? err.detail : 'Failed to update margin split')
+      alert(err instanceof AdminApiError ? err.detail : 'Failed to update basis mode')
     }
   }
 
-  useEffect(() => {
-    if (tradeId) syncMarginSplit()
-  }, [vendorMode, marginSplitPct]) // eslint-disable-line react-hooks/exhaustive-deps
+  const syncManualBasis = async (value: string) => {
+    if (!tradeId) return
+    try {
+      await api.patch(`/trades/${tradeId}`, { manual_basis: value })
+      fetchBalance()
+    } catch (err) {
+      alert(err instanceof AdminApiError ? err.detail : 'Failed to update manual basis')
+    }
+  }
 
   const handleConfirm = async () => {
     if (!tradeId) return
@@ -301,7 +310,8 @@ export default function AdminTradePage() {
     setConfirmed(false)
     setTradeDate(todayISO())
     setVendorMode(false)
-    setMarginSplitPct('15')
+    setBasisMode('transfer')
+    setManualBasis('')
   }
 
   const outTotal = outgoing.reduce((s, i) => s + parseFloat(String(i.value || 0)), 0)
@@ -356,27 +366,62 @@ export default function AdminTradePage() {
         </div>
       </header>
 
-      {/* Vendor margin split panel */}
-      {vendorMode && (
-        <div className="mb-4 vault-panel rounded-xl p-3 flex items-center gap-4">
-          <span className="text-[11px] text-purple-400 uppercase tracking-wider font-medium">Margin Split</span>
-          <div className="flex items-center gap-2">
-            <input
-              type="number"
-              step="1"
-              min="0"
-              max="100"
-              value={marginSplitPct}
-              onChange={(e) => setMarginSplitPct(e.target.value)}
-              className="vault-field w-16 px-2 py-1 rounded-lg text-xs text-center font-mono"
-            />
-            <span className="text-[10px] text-pine-400">% profit split to vendor</span>
+      {/* Basis mode selector — rendered unconditionally (not gated behind vendorMode) */}
+      <div className="mb-4 vault-panel rounded-xl p-3">
+        <div className="flex items-center gap-4 flex-wrap">
+          <span className="text-[11px] text-pine-400 uppercase tracking-wider font-medium">Cost Basis Mode</span>
+          <div className="flex items-center gap-1">
+            {availableModes(balance?.has_cash ?? false).map(({ mode, disabled, reason }) => (
+              <button
+                key={mode}
+                type="button"
+                disabled={disabled}
+                title={reason ?? undefined}
+                onClick={() => {
+                  setBasisMode(mode)
+                  syncBasisMode(mode)
+                }}
+                className={`px-3 py-1 rounded-lg text-xs font-medium border transition-colors ${
+                  basisMode === mode
+                    ? 'bg-spriggatito-300/15 text-spriggatito-300 border-spriggatito-300/30'
+                    : 'text-pine-400 border-pine-700/40 hover:border-pine-600'
+                } disabled:opacity-40 disabled:cursor-not-allowed`}
+              >
+                {mode.charAt(0).toUpperCase() + mode.slice(1)}
+              </button>
+            ))}
           </div>
-          {balance?.margin_split_applied && (
-            <span className="text-[10px] text-purple-400 ml-auto">Applied to cost basis</span>
+          {balance?.projected_basis_pool !== undefined && balance.projected_basis_pool !== null && (
+            <span className="text-[10px] text-pine-300 ml-auto font-mono">
+              Incoming cost basis: ${balance.projected_basis_pool}
+            </span>
           )}
         </div>
-      )}
+        {basisMode === 'manual' && (
+          <div className="mt-2 flex items-center gap-2">
+            <label className="text-[10px] text-pine-400 uppercase tracking-wider">Total cost basis</label>
+            <div className="relative">
+              <DollarSign size={10} className="absolute left-1.5 top-1/2 -translate-y-1/2 text-pine-500" />
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                value={manualBasis}
+                onChange={(e) => setManualBasis(e.target.value)}
+                onBlur={() => syncManualBasis(manualBasis)}
+                onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+                className="vault-field w-28 pl-5 pr-2 py-1 rounded-lg text-xs font-mono"
+                placeholder="0.00"
+              />
+            </div>
+          </div>
+        )}
+        {balance?.basis_mode_error && (
+          <div className="mt-2 text-[10px] text-amber-400">
+            {balance.basis_mode_error}
+          </div>
+        )}
+      </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* LEFT: Coming In (Their cards) */}
@@ -672,7 +717,7 @@ export default function AdminTradePage() {
           <button
             type="button"
             onClick={() => setShowConfirm(true)}
-            disabled={outgoing.length === 0 && incoming.length === 0}
+            disabled={(outgoing.length === 0 && incoming.length === 0) || !canConfirmBasis(basisMode, balance?.has_cash ?? false, manualBasis)}
             className="px-4 py-2 rounded-lg text-xs font-medium bg-spriggatito-300/15 text-spriggatito-300 border border-spriggatito-300/30 hover:bg-spriggatito-300/25 disabled:opacity-40 transition-colors"
           >
             Confirm Trade
