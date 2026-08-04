@@ -392,14 +392,14 @@ export default function AdminSellPage() {
 
         {/* Center: Image Preview */}
         <div className="lg:col-span-3 flex flex-col items-center">
-          <div className="vault-panel rounded-xl p-4 w-full flex flex-col items-center justify-center min-h-[300px] sticky top-6">
+          <div className="vault-panel rounded-xl p-4 w-full flex flex-col items-center justify-center min-h-[32rem] sticky top-6">
             {previewItem?.card_id && getImageUrl(previewItem.card_id) ? (
               <>
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
                   src={getImageUrl(previewItem.card_id)!}
                   alt={previewItem.name}
-                  className="rounded-lg border border-pine-700/40 max-h-[240px] w-auto object-contain shadow-lg"
+                  className="rounded-lg border border-pine-700/40 max-h-[30rem] w-auto object-contain shadow-lg"
                 />
                 <p className="mt-3 text-xs text-pine-100 font-medium text-center">{previewItem.name}</p>
                 <p className="text-[10px] text-pine-500 mt-0.5">Visual confirmation</p>
