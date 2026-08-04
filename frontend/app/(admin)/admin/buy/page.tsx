@@ -1,12 +1,11 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { ShoppingBag, Plus, X, Check, Banknote, CreditCard, Smartphone, DollarSign } from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
+import { ShoppingBag, Plus, X, Check, Banknote, CreditCard, Smartphone, DollarSign, Calendar, Search } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { CONDITION_OPTIONS, LOCATION_OPTIONS, parseCondition } from '@/lib/constants'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
-import ImageToggle from '@/components/admin/shared/ImageToggle'
 import CardImage from '@/components/admin/shared/CardImage'
 
 interface BuyItem {
@@ -18,6 +17,20 @@ interface BuyItem {
   location: string
   card_number: string
   buy_pct: string
+  image_url?: string | null
+}
+
+interface CatalogCard {
+  card_id: string
+  name: string
+  set_id?: string
+  set_name?: string
+  number?: string
+  rarity?: string
+  artist?: string
+  images?: { small?: string; large?: string }
+  prices?: Record<string, { market?: number | string | null }>
+  [key: string]: unknown
 }
 
 export default function AdminBuyPage() {
@@ -29,6 +42,13 @@ export default function AdminBuyPage() {
   const [paymentMethod, setPaymentMethod] = useState('cash')
   const [counterparty, setCounterparty] = useState('')
   const [notes, setNotes] = useState('')
+  const [buyDate, setBuyDate] = useState(new Date().toISOString().split('T')[0])
+
+  // Card name search (catalog lookup)
+  const [nameSearch, setNameSearch] = useState('')
+  const [catalogResults, setCatalogResults] = useState<CatalogCard[]>([])
+  const [searchingCatalog, setSearchingCatalog] = useState(false)
+  const [selectedCard, setSelectedCard] = useState<CatalogCard | null>(null)
 
   // Form for adding
   const [form, setForm] = useState<BuyItem>({
@@ -40,7 +60,63 @@ export default function AdminBuyPage() {
     location: 'toploader',
     card_number: '',
     buy_pct: '',
+    image_url: null,
   })
+
+  // Search catalog for card name dropdown
+  const searchCatalog = useCallback(async (q: string) => {
+    if (!q.trim() || !api.isAuthenticated) {
+      setCatalogResults([])
+      return
+    }
+    setSearchingCatalog(true)
+    try {
+      const res = await api.get<{ items: CatalogCard[]; total: number }>('/market/search', { name: q })
+      setCatalogResults(res.items.slice(0, 12))
+    } catch {
+      setCatalogResults([])
+    } finally {
+      setSearchingCatalog(false)
+    }
+  }, [api])
+
+  useEffect(() => {
+    if (!nameSearch.trim()) {
+      setCatalogResults([])
+      return
+    }
+    const timeout = setTimeout(() => searchCatalog(nameSearch), 300)
+    return () => clearTimeout(timeout)
+  }, [nameSearch, searchCatalog])
+
+  // Select a catalog card to pre-fill form
+  const selectCatalogCard = (card: CatalogCard) => {
+    setSelectedCard(card)
+    // Extract best market price from prices dict
+    let marketPrice = ''
+    if (card.prices) {
+      for (const finish of Object.values(card.prices)) {
+        if (finish?.market) {
+          marketPrice = String(finish.market)
+          break
+        }
+      }
+    }
+    setForm((f) => ({
+      ...f,
+      name: card.name,
+      set_name: card.set_name || card.set_id || '',
+      card_number: card.number || '',
+      market_value: marketPrice,
+      image_url: card.images?.small || null,
+      // Recalculate buy_price if percentage is set
+      buy_price: f.buy_pct && marketPrice
+        ? ((parseFloat(f.buy_pct) / 100) * parseFloat(marketPrice)).toFixed(2)
+        : f.buy_price,
+    }))
+    setNameSearch('')
+    setCatalogResults([])
+  }
 
   // Bidirectional percentage calculation
   const updateBuyPrice = (price: string) => {
@@ -72,7 +148,6 @@ export default function AdminBuyPage() {
   const updateMarketValue = (mv: string) => {
     setForm((f) => {
       const newForm = { ...f, market_value: mv }
-      // Recalculate buy price from percentage if pct is set
       if (f.buy_pct && mv) {
         const price = ((parseFloat(f.buy_pct) / 100) * parseFloat(mv)).toFixed(2)
         newForm.buy_price = price
@@ -108,7 +183,8 @@ export default function AdminBuyPage() {
         number: form.card_number || null,
       })
       setItems((prev) => [...prev, { ...form }])
-      setForm({ name: '', condition: 'NM', buy_price: '', market_value: '', set_name: '', location: 'toploader', card_number: '', buy_pct: '' })
+      setForm({ name: '', condition: 'NM', buy_price: '', market_value: '', set_name: '', location: 'toploader', card_number: '', buy_pct: '', image_url: null })
+      setSelectedCard(null)
     } catch (err) {
       alert(err instanceof AdminApiError ? err.detail : 'Failed to add item')
     }
@@ -132,6 +208,7 @@ export default function AdminBuyPage() {
         payment_method: paymentMethod,
         counterparty: counterparty || null,
         notes: notes || null,
+        purchase_date: buyDate || null,
       })
       const result = await api.post<{ items_created: number; total_cost: string }>(`/purchases/${buyId}/confirm`)
       setConfirmResult(result)
@@ -151,6 +228,8 @@ export default function AdminBuyPage() {
     setNotes('')
     setConfirmed(false)
     setConfirmResult(null)
+    setSelectedCard(null)
+    setBuyDate(new Date().toISOString().split('T')[0])
   }
 
   const totalCost = items.reduce((sum, i) => sum + parseFloat(i.buy_price || '0'), 0)
@@ -178,21 +257,72 @@ export default function AdminBuyPage() {
   }
 
   return (
-    <div className="p-6 lg:p-8 max-w-5xl">
+    <div className="p-6 lg:p-8 max-w-6xl">
       <header className="mb-6">
         <span className="font-mono text-[11px] uppercase tracking-[0.22em] text-spriggatito-400/70">Buy</span>
         <h1 className="text-xl font-semibold text-pine-100">New Purchase</h1>
       </header>
 
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
-        {/* Left: Add form */}
-        <div className="lg:col-span-2 space-y-4">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        {/* Left: Card Form with searchable name + image preview */}
+        <div className="lg:col-span-5 space-y-4">
           <div className="vault-panel rounded-xl p-4 space-y-3">
             <h3 className="text-xs font-semibold text-pine-200 uppercase tracking-wider">Add Card</h3>
-            <label className="block">
-              <span className="text-[11px] text-pine-400">Card Name</span>
-              <input value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-sm" placeholder="e.g. Charizard ex" />
-            </label>
+
+            {/* Searchable Card Name */}
+            <div className="relative">
+              <label className="block">
+                <span className="text-[11px] text-pine-400">Card Name</span>
+                <div className="relative mt-1">
+                  <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-pine-400 pointer-events-none" />
+                  <input
+                    value={selectedCard ? form.name : nameSearch || form.name}
+                    onChange={(e) => {
+                      const val = e.target.value
+                      if (selectedCard) {
+                        setSelectedCard(null)
+                        setForm((f) => ({ ...f, name: val, image_url: null }))
+                      }
+                      setNameSearch(val)
+                      setForm((f) => ({ ...f, name: val }))
+                    }}
+                    className="vault-field w-full pl-8 pr-3 py-1.5 rounded-lg text-sm"
+                    placeholder="Search catalog or type name…"
+                    autoComplete="off"
+                  />
+                </div>
+              </label>
+
+              {/* Catalog search dropdown */}
+              {catalogResults.length > 0 && !selectedCard && (
+                <div className="absolute z-20 left-0 right-0 mt-1 vault-panel rounded-lg border border-pine-700/50 max-h-56 overflow-y-auto vault-scroll shadow-xl">
+                  {catalogResults.map((card) => (
+                    <button
+                      key={card.card_id}
+                      type="button"
+                      onClick={() => selectCatalogCard(card)}
+                      className="w-full flex items-center gap-2 px-3 py-2 hover:bg-pine-800/60 transition-colors text-left"
+                    >
+                      {card.images?.small && (
+                        <CardImage imageUrl={card.images.small} alt={card.name} size="sm" />
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs text-pine-100 truncate">{card.name}</div>
+                        <div className="text-[10px] text-pine-400">
+                          {card.set_name || card.set_id}
+                          {card.number && ` · #${card.number}`}
+                          {card.rarity && ` · ${card.rarity}`}
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                  {searchingCatalog && (
+                    <div className="px-3 py-2 text-[10px] text-pine-500">Searching…</div>
+                  )}
+                </div>
+              )}
+            </div>
+
             <div className="grid grid-cols-2 gap-2">
               <label>
                 <span className="text-[11px] text-pine-400">Set</span>
@@ -247,14 +377,63 @@ export default function AdminBuyPage() {
               Add to Purchase
             </button>
           </div>
+        </div>
 
-          {/* Session meta */}
-          <div className="vault-panel rounded-xl p-4 space-y-3">
+        {/* Center: Image Preview */}
+        <div className="lg:col-span-3 flex flex-col items-center">
+          <div className="vault-panel rounded-xl p-4 w-full flex flex-col items-center justify-center min-h-[280px]">
+            {selectedCard && form.image_url ? (
+              <>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={form.image_url}
+                  alt={form.name}
+                  className="rounded-lg border border-pine-700/40 max-h-[220px] w-auto object-contain shadow-lg"
+                />
+                <div className="mt-3 text-center">
+                  <p className="text-xs text-pine-100 font-medium">{selectedCard.name}</p>
+                  <p className="text-[10px] text-pine-400">
+                    {selectedCard.set_name || selectedCard.set_id}
+                    {selectedCard.number && ` · #${selectedCard.number}`}
+                  </p>
+                  {selectedCard.rarity && (
+                    <p className="text-[10px] text-pine-500 mt-0.5">{selectedCard.rarity}</p>
+                  )}
+                </div>
+              </>
+            ) : (
+              <div className="text-center">
+                <div className="inline-flex items-center justify-center w-16 h-22 rounded-lg bg-pine-800/40 border border-pine-700/30 mb-3">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-pine-600">
+                    <rect x="3" y="3" width="18" height="18" rx="2" />
+                    <circle cx="8.5" cy="8.5" r="1.5" />
+                    <path d="M21 15l-5-5L5 21" />
+                  </svg>
+                </div>
+                <p className="text-[11px] text-pine-500">Search for a card name to see its image</p>
+                <p className="text-[10px] text-pine-600 mt-0.5">Visual confirmation before purchase</p>
+              </div>
+            )}
+          </div>
+
+          {/* Session meta: date, seller, payment */}
+          <div className="vault-panel rounded-xl p-4 space-y-3 w-full mt-4">
+            <label className="block">
+              <span className="text-[11px] text-pine-400 uppercase tracking-wider flex items-center gap-1">
+                <Calendar size={11} /> Transaction Date
+              </span>
+              <input
+                type="date"
+                value={buyDate}
+                onChange={(e) => setBuyDate(e.target.value)}
+                className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs"
+              />
+            </label>
             <label className="block">
               <span className="text-[11px] text-pine-400 uppercase tracking-wider">Seller</span>
               <input value={counterparty} onChange={(e) => setCounterparty(e.target.value)} placeholder="Name (optional)" className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs" />
             </label>
-            <label className="block">
+            <div>
               <span className="text-[11px] text-pine-400 uppercase tracking-wider">Payment</span>
               <div className="flex flex-wrap gap-2 mt-1">
                 {[
@@ -269,12 +448,22 @@ export default function AdminBuyPage() {
                   </button>
                 ))}
               </div>
+            </div>
+            <label className="block">
+              <span className="text-[11px] text-pine-400 uppercase tracking-wider">Notes</span>
+              <textarea
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                rows={2}
+                className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs resize-none"
+                placeholder="Optional notes…"
+              />
             </label>
           </div>
         </div>
 
-        {/* Right: Item list */}
-        <div className="lg:col-span-3">
+        {/* Right: Item list (cart) */}
+        <div className="lg:col-span-4">
           <div className="vault-panel rounded-xl overflow-hidden">
             <div className="px-4 py-3 border-b border-pine-700/40 flex items-center gap-2">
               <ShoppingBag size={16} className="text-spriggatito-400" />
@@ -283,23 +472,28 @@ export default function AdminBuyPage() {
 
             {items.length === 0 ? (
               <div className="p-6 text-center text-xs text-pine-500">
-                Add cards you&apos;re buying above
+                Add cards you&apos;re buying using the form
               </div>
             ) : (
-              <div className="divide-y divide-pine-700/25">
+              <div className="divide-y divide-pine-700/25 max-h-[420px] overflow-y-auto vault-scroll">
                 {items.map((item, idx) => {
                   const buyPct = item.market_value && parseFloat(item.market_value) > 0
                     ? ((parseFloat(item.buy_price) / parseFloat(item.market_value)) * 100).toFixed(0)
                     : null
                   return (
                     <div key={idx} className="flex items-center justify-between px-4 py-2.5">
-                      <div className="min-w-0 flex-1">
-                        <div className="text-xs text-pine-100 truncate">{item.name}</div>
-                        <div className="text-[10px] text-pine-400">
-                          {item.condition} {item.set_name && `· ${item.set_name}`}
-                          {item.card_number && ` · #${item.card_number}`}
-                          {item.market_value && <> · MV: <PriceDisplay value={item.market_value} className="text-[10px] text-pine-400 inline" /></>}
-                          {buyPct && <> · <span className="text-pine-300 font-mono">{buyPct}%</span></>}
+                      <div className="flex items-center gap-2 min-w-0 flex-1">
+                        {item.image_url && (
+                          <CardImage imageUrl={item.image_url} alt={item.name} size="sm" />
+                        )}
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs text-pine-100 truncate">{item.name}</div>
+                          <div className="text-[10px] text-pine-400">
+                            {item.condition} {item.set_name && `· ${item.set_name}`}
+                            {item.card_number && ` · #${item.card_number}`}
+                            {item.market_value && <> · MV: <PriceDisplay value={item.market_value} className="text-[10px] text-pine-400 inline" /></>}
+                            {buyPct && <> · <span className="text-pine-300 font-mono">{buyPct}%</span></>}
+                          </div>
                         </div>
                       </div>
                       <div className="flex items-center gap-3">
@@ -334,7 +528,7 @@ export default function AdminBuyPage() {
       <ConfirmDialog
         open={showConfirm}
         title="Confirm Purchase"
-        description={`Buy ${items.length} card${items.length !== 1 ? 's' : ''} for $${totalCost.toFixed(2)}?`}
+        description={`Buy ${items.length} card${items.length !== 1 ? 's' : ''} for $${totalCost.toFixed(2)}${buyDate !== new Date().toISOString().split('T')[0] ? ` (dated ${buyDate})` : ''}?`}
         confirmLabel="Complete Purchase"
         loading={confirming}
         onConfirm={handleConfirm}

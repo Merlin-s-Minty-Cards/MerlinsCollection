@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { Plus, X, Check, Eye, EyeOff, DollarSign, Calendar } from 'lucide-react'
+import { Plus, X, Check, Eye, EyeOff, DollarSign, Calendar, Banknote, CreditCard, Smartphone, ArrowLeftRight } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import SearchInput from '@/components/admin/shared/SearchInput'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
@@ -16,13 +16,21 @@ interface TradeLeg {
   value: string | number
 }
 
+interface CashComponent {
+  direction: 'we_pay' | 'they_pay'
+  amount: string
+  payment_method: 'cash' | 'venmo' | 'zelle' | 'card'
+}
+
 interface TradeBalance {
   trade_id: string
   total_out_value: string
   total_in_value: string
   total_cost_basis: string
   cash_delta: string
+  cash_components_net?: string
   margin_pct: string | null
+  margin_split_applied?: boolean
   is_balanced: boolean
 }
 
@@ -35,6 +43,13 @@ interface InventoryItem {
   [key: string]: unknown
 }
 
+const PAYMENT_METHOD_OPTIONS = [
+  { value: 'cash', icon: Banknote, label: 'Cash' },
+  { value: 'venmo', icon: Smartphone, label: 'Venmo' },
+  { value: 'zelle', icon: DollarSign, label: 'Zelle' },
+  { value: 'card', icon: CreditCard, label: 'Card' },
+] as const
+
 function todayISO() {
   return new Date().toISOString().split('T')[0]
 }
@@ -45,12 +60,15 @@ export default function AdminTradePage() {
   const [tradeId, setTradeId] = useState<string | null>(null)
   const [outgoing, setOutgoing] = useState<TradeLeg[]>([])
   const [incoming, setIncoming] = useState<TradeLeg[]>([])
-  const [cashAmount, setCashAmount] = useState('')
-  const [cashDirection, setCashDirection] = useState<'we_pay' | 'they_pay'>('they_pay')
+  const [cashComponents, setCashComponents] = useState<CashComponent[]>([])
   const [balance, setBalance] = useState<TradeBalance | null>(null)
   const [counterparty, setCounterparty] = useState('')
   const [customerView, setCustomerView] = useState(false)
   const [tradeDate, setTradeDate] = useState(todayISO())
+
+  // Vendor margin split
+  const [vendorMode, setVendorMode] = useState(false)
+  const [marginSplitPct, setMarginSplitPct] = useState('15')
 
   // Search for outgoing items
   const [outSearch, setOutSearch] = useState('')
@@ -101,7 +119,7 @@ export default function AdminTradePage() {
     } catch { /* ignore */ }
   }, [tradeId, api])
 
-  useEffect(() => { fetchBalance() }, [outgoing, incoming, cashAmount, fetchBalance])
+  useEffect(() => { fetchBalance() }, [outgoing, incoming, cashComponents, fetchBalance])
 
   const addOutgoing = async (item: InventoryItem) => {
     if (!tradeId) return
@@ -200,23 +218,65 @@ export default function AdminTradePage() {
     }
   }
 
-  const updateCash = async () => {
-    if (!tradeId || !cashAmount) return
+  // Multi-asset cash components
+  const addCashComponent = () => {
+    setCashComponents((prev) => [...prev, { direction: 'they_pay', amount: '', payment_method: 'cash' }])
+  }
+
+  const updateCashComponent = (idx: number, updates: Partial<CashComponent>) => {
+    setCashComponents((prev) => prev.map((c, i) => i === idx ? { ...c, ...updates } : c))
+  }
+
+  const removeCashComponent = (idx: number) => {
+    setCashComponents((prev) => prev.filter((_, i) => i !== idx))
+  }
+
+  const syncCashComponents = async () => {
+    if (!tradeId) return
+    // Filter out empty amounts
+    const validComponents = cashComponents
+      .filter((c) => c.amount && parseFloat(c.amount) > 0)
+      .map((c) => ({
+        direction: c.direction,
+        amount: parseFloat(c.amount),
+        payment_method: c.payment_method,
+      }))
     try {
       await api.put(`/trades/${tradeId}/cash`, {
-        amount: parseFloat(cashAmount),
-        direction: cashDirection,
+        cash_components: validComponents,
       })
       fetchBalance()
     } catch (err) {
-      alert(err instanceof AdminApiError ? err.detail : 'Failed to set cash')
+      alert(err instanceof AdminApiError ? err.detail : 'Failed to update cash')
     }
   }
+
+  // Vendor margin split sync
+  const syncMarginSplit = async () => {
+    if (!tradeId) return
+    try {
+      await api.patch(`/trades/${tradeId}`, {
+        margin_split: vendorMode ? {
+          enabled: true,
+          percent: parseFloat(marginSplitPct) || 15,
+        } : null,
+      })
+      fetchBalance()
+    } catch (err) {
+      alert(err instanceof AdminApiError ? err.detail : 'Failed to update margin split')
+    }
+  }
+
+  useEffect(() => {
+    if (tradeId) syncMarginSplit()
+  }, [vendorMode, marginSplitPct]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleConfirm = async () => {
     if (!tradeId) return
     setConfirming(true)
     try {
+      // Sync cash before confirming
+      await syncCashComponents()
       await api.patch(`/trades/${tradeId}`, {
         counterparty: counterparty || null,
         trade_date: tradeDate || null,
@@ -235,15 +295,21 @@ export default function AdminTradePage() {
     setTradeId(null)
     setOutgoing([])
     setIncoming([])
-    setCashAmount('')
+    setCashComponents([])
     setBalance(null)
     setCounterparty('')
     setConfirmed(false)
     setTradeDate(todayISO())
+    setVendorMode(false)
+    setMarginSplitPct('15')
   }
 
   const outTotal = outgoing.reduce((s, i) => s + parseFloat(String(i.value || 0)), 0)
   const inTotal = incoming.reduce((s, i) => s + parseFloat(String(i.value || 0)), 0)
+  const cashNet = cashComponents.reduce((s, c) => {
+    const amt = parseFloat(c.amount || '0')
+    return s + (c.direction === 'they_pay' ? amt : -amt)
+  }, 0)
 
   if (confirmed) {
     return (
@@ -263,77 +329,61 @@ export default function AdminTradePage() {
   }
 
   return (
-    <div className="p-6 lg:p-8 max-w-6xl">
+    <div className="p-6 lg:p-8 max-w-7xl">
       <header className="flex items-center justify-between mb-6">
         <div>
           <span className="font-mono text-[11px] uppercase tracking-[0.22em] text-spriggatito-300/70">Trade</span>
           <h1 className="text-xl font-semibold text-pine-100">Trade Calculator</h1>
         </div>
-        <button
-          type="button"
-          onClick={() => setCustomerView((v) => !v)}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${customerView ? 'bg-amber-500/15 text-amber-400 border-amber-500/30' : 'text-pine-400 border-pine-700/40 hover:border-pine-600'}`}
-        >
-          {customerView ? <EyeOff size={13} /> : <Eye size={13} />}
-          {customerView ? 'Admin View' : 'Customer View'}
-        </button>
+        <div className="flex items-center gap-2">
+          {/* Vendor mode toggle */}
+          <button
+            type="button"
+            onClick={() => setVendorMode((v) => !v)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${vendorMode ? 'bg-purple-500/15 text-purple-400 border-purple-500/30' : 'text-pine-400 border-pine-700/40 hover:border-pine-600'}`}
+          >
+            <ArrowLeftRight size={13} />
+            {vendorMode ? 'Vendor Mode' : 'Customer Mode'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setCustomerView((v) => !v)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${customerView ? 'bg-amber-500/15 text-amber-400 border-amber-500/30' : 'text-pine-400 border-pine-700/40 hover:border-pine-600'}`}
+          >
+            {customerView ? <EyeOff size={13} /> : <Eye size={13} />}
+            {customerView ? 'Admin View' : 'Customer View'}
+          </button>
+        </div>
       </header>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Outgoing (Our cards) */}
-        <div className="space-y-3">
-          <h3 className="text-xs font-semibold uppercase tracking-wider text-red-400">Going Out (Ours)</h3>
-          <SearchInput value={outSearch} onChange={setOutSearch} placeholder="Search our inventory…" />
-          {outSearch && outResults.length > 0 && (
-            <div className="vault-panel rounded-lg divide-y divide-pine-700/30 max-h-40 overflow-y-auto vault-scroll">
-              {outResults.map((item) => (
-                <button key={item.item_id} type="button" onClick={() => addOutgoing(item)} className="w-full flex items-center justify-between px-3 py-2 hover:bg-pine-800/50 text-left text-xs">
-                  <span className="text-pine-100 truncate">{item.display_name || item.product_name}</span>
-                  <span className="text-pine-400 ml-2"><PriceDisplay value={item.current_market_value} className="text-[10px] inline" /></span>
-                </button>
-              ))}
-            </div>
-          )}
-          <div className="vault-panel rounded-xl overflow-hidden">
-            {outgoing.length === 0 ? (
-              <div className="p-4 text-center text-xs text-pine-500">No items going out yet</div>
-            ) : (
-              <div className="divide-y divide-pine-700/25">
-                {outgoing.map((item, idx) => (
-                  <div key={idx} className="flex items-center justify-between px-3 py-2">
-                    <span className="text-xs text-pine-200 truncate flex-1">{item.name}</span>
-                    <div className="flex items-center gap-2">
-                      <span className="text-[10px] text-pine-500">$</span>
-                      <input
-                        type="number"
-                        step="0.01"
-                        defaultValue={parseFloat(String(item.value)).toFixed(2)}
-                        onBlur={(e) => {
-                          const newVal = e.target.value
-                          if (newVal && parseFloat(newVal) !== parseFloat(String(item.value))) {
-                            updateOutgoingValue(idx, newVal)
-                          }
-                        }}
-                        onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
-                        className="vault-field w-20 px-1.5 py-0.5 rounded text-xs text-right text-red-400 font-mono"
-                      />
-                      <button type="button" onClick={() => removeOutgoing(idx)} className="p-1 text-pine-500 hover:text-red-400"><X size={12} /></button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-            <div className="px-3 py-2 border-t border-pine-700/30 text-right text-xs text-pine-400">
-              Out: <span className="font-mono text-red-400">${outTotal.toFixed(2)}</span>
-            </div>
+      {/* Vendor margin split panel */}
+      {vendorMode && (
+        <div className="mb-4 vault-panel rounded-xl p-3 flex items-center gap-4">
+          <span className="text-[11px] text-purple-400 uppercase tracking-wider font-medium">Margin Split</span>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              step="1"
+              min="0"
+              max="100"
+              value={marginSplitPct}
+              onChange={(e) => setMarginSplitPct(e.target.value)}
+              className="vault-field w-16 px-2 py-1 rounded-lg text-xs text-center font-mono"
+            />
+            <span className="text-[10px] text-pine-400">% profit split to vendor</span>
           </div>
+          {balance?.margin_split_applied && (
+            <span className="text-[10px] text-purple-400 ml-auto">Applied to cost basis</span>
+          )}
         </div>
+      )}
 
-        {/* Incoming (Their cards) */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* LEFT: Coming In (Their cards) */}
         <div className="space-y-3">
           <h3 className="text-xs font-semibold uppercase tracking-wider text-mint">Coming In (Theirs)</h3>
 
-          {/* Expanded incoming form with labels */}
+          {/* Incoming form */}
           <div className="vault-panel rounded-xl p-3 space-y-2">
             <div className="grid grid-cols-6 gap-2">
               <div className="col-span-2">
@@ -441,34 +491,131 @@ export default function AdminTradePage() {
             </div>
           </div>
         </div>
+
+        {/* RIGHT: Going Out (Our cards) */}
+        <div className="space-y-3">
+          <h3 className="text-xs font-semibold uppercase tracking-wider text-red-400">Going Out (Ours)</h3>
+          <SearchInput value={outSearch} onChange={setOutSearch} placeholder="Search our inventory…" />
+          {outSearch && outResults.length > 0 && (
+            <div className="vault-panel rounded-lg divide-y divide-pine-700/30 max-h-40 overflow-y-auto vault-scroll">
+              {outResults.map((item) => (
+                <button key={item.item_id} type="button" onClick={() => addOutgoing(item)} className="w-full flex items-center justify-between px-3 py-2 hover:bg-pine-800/50 text-left text-xs">
+                  <span className="text-pine-100 truncate">{item.display_name || item.product_name}</span>
+                  <span className="text-pine-400 ml-2"><PriceDisplay value={item.current_market_value} className="text-[10px] inline" /></span>
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="vault-panel rounded-xl overflow-hidden">
+            {outgoing.length === 0 ? (
+              <div className="p-4 text-center text-xs text-pine-500">No items going out yet</div>
+            ) : (
+              <div className="divide-y divide-pine-700/25">
+                {outgoing.map((item, idx) => (
+                  <div key={idx} className="flex items-center justify-between px-3 py-2">
+                    <span className="text-xs text-pine-200 truncate flex-1">{item.name}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-pine-500">$</span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        defaultValue={parseFloat(String(item.value)).toFixed(2)}
+                        onBlur={(e) => {
+                          const newVal = e.target.value
+                          if (newVal && parseFloat(newVal) !== parseFloat(String(item.value))) {
+                            updateOutgoingValue(idx, newVal)
+                          }
+                        }}
+                        onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+                        className="vault-field w-20 px-1.5 py-0.5 rounded text-xs text-right text-red-400 font-mono"
+                      />
+                      <button type="button" onClick={() => removeOutgoing(idx)} className="p-1 text-pine-500 hover:text-red-400"><X size={12} /></button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="px-3 py-2 border-t border-pine-700/30 text-right text-xs text-pine-400">
+              Out: <span className="font-mono text-red-400">${outTotal.toFixed(2)}</span>
+            </div>
+          </div>
+        </div>
       </div>
 
-      {/* Cash + Balance */}
+      {/* Cash Components + Balance */}
       <div className="mt-6 vault-panel rounded-xl p-4">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
-          {/* Cash component */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {/* Multi-asset cash components */}
           <div className="space-y-2">
-            <span className="text-[11px] text-pine-400 uppercase tracking-wider">Cash Component</span>
-            <div className="flex gap-2">
-              <select value={cashDirection} onChange={(e) => setCashDirection(e.target.value as 'we_pay' | 'they_pay')} className="vault-field px-2 py-1.5 rounded-lg text-xs">
-                <option value="they_pay">They pay us</option>
-                <option value="we_pay">We pay them</option>
-              </select>
-              <div className="relative flex-1">
-                <DollarSign size={13} className="absolute left-2 top-1/2 -translate-y-1/2 text-pine-400" />
-                <input type="number" step="0.01" value={cashAmount} onChange={(e) => setCashAmount(e.target.value)} onBlur={updateCash} className="vault-field w-full pl-7 pr-2 py-1.5 rounded-lg text-xs" placeholder="0.00" />
-              </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] text-pine-400 uppercase tracking-wider">Cash Components</span>
+              <button
+                type="button"
+                onClick={addCashComponent}
+                className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium bg-pine-800/60 text-pine-300 border border-pine-700/40 hover:border-pine-600 transition-colors"
+              >
+                <Plus size={10} /> Add
+              </button>
             </div>
+            {cashComponents.length === 0 ? (
+              <p className="text-[10px] text-pine-500">No cash in this trade</p>
+            ) : (
+              <div className="space-y-1.5">
+                {cashComponents.map((comp, idx) => (
+                  <div key={idx} className="flex items-center gap-1.5">
+                    <select
+                      value={comp.direction}
+                      onChange={(e) => updateCashComponent(idx, { direction: e.target.value as CashComponent['direction'] })}
+                      className="vault-field px-1.5 py-1 rounded text-[10px] w-[80px]"
+                    >
+                      <option value="they_pay">They pay</option>
+                      <option value="we_pay">We pay</option>
+                    </select>
+                    <select
+                      value={comp.payment_method}
+                      onChange={(e) => updateCashComponent(idx, { payment_method: e.target.value as CashComponent['payment_method'] })}
+                      className="vault-field px-1.5 py-1 rounded text-[10px] w-[72px]"
+                    >
+                      {PAYMENT_METHOD_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                    <div className="relative flex-1">
+                      <DollarSign size={10} className="absolute left-1.5 top-1/2 -translate-y-1/2 text-pine-500" />
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={comp.amount}
+                        onChange={(e) => updateCashComponent(idx, { amount: e.target.value })}
+                        onBlur={syncCashComponents}
+                        className="vault-field w-full pl-5 pr-1.5 py-1 rounded text-[10px] font-mono"
+                        placeholder="0.00"
+                      />
+                    </div>
+                    <button type="button" onClick={() => { removeCashComponent(idx); syncCashComponents() }} className="p-0.5 text-pine-500 hover:text-red-400">
+                      <X size={10} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {cashComponents.length > 0 && (
+              <div className="text-[10px] text-pine-400 pt-1 border-t border-pine-700/20">
+                Net cash: <span className={`font-mono ${cashNet >= 0 ? 'text-mint' : 'text-red-400'}`}>
+                  {cashNet >= 0 ? '+' : ''}${cashNet.toFixed(2)}
+                </span>
+              </div>
+            )}
           </div>
 
           {/* Balance indicator */}
-          <div className="text-center">
+          <div className="text-center flex flex-col justify-center">
             <span className="text-[11px] text-pine-400 uppercase tracking-wider block mb-1">Balance</span>
             <div className="text-2xl font-mono font-semibold text-pine-100">
               {balance ? (() => {
                 const out = parseFloat(balance.total_out_value)
                 const inc = parseFloat(balance.total_in_value)
-                const cash = parseFloat(balance.cash_delta)
+                const cash = balance.cash_components_net ? parseFloat(balance.cash_components_net) : parseFloat(balance.cash_delta)
                 const net = inc + cash - out
                 return `${net >= 0 ? '+' : ''}$${net.toFixed(2)}`
               })() : '$0.00'}
@@ -480,13 +627,13 @@ export default function AdminTradePage() {
             )}
           </div>
 
-          {/* Profit (admin only) — shows both $ and % */}
+          {/* Profit (admin only) */}
           {!customerView && (
-            <div className="text-right">
+            <div className="text-right flex flex-col justify-center">
               <span className="text-[11px] text-pine-400 uppercase tracking-wider block mb-1">Our Profit</span>
               {balance ? (() => {
                 const totalIn = parseFloat(balance.total_in_value)
-                const cashDelta = parseFloat(balance.cash_delta)
+                const cashDelta = balance.cash_components_net ? parseFloat(balance.cash_components_net) : parseFloat(balance.cash_delta)
                 const costBasis = parseFloat(balance.total_cost_basis)
                 const dollarProfit = totalIn + cashDelta - costBasis
                 const pctProfit = balance.margin_pct ? parseFloat(balance.margin_pct) : null
@@ -536,7 +683,7 @@ export default function AdminTradePage() {
       <ConfirmDialog
         open={showConfirm}
         title="Confirm Trade"
-        description={`Execute trade: ${outgoing.length} card${outgoing.length !== 1 ? 's' : ''} out, ${incoming.length} card${incoming.length !== 1 ? 's' : ''} in${cashAmount ? ` + $${cashAmount} cash (${cashDirection === 'they_pay' ? 'they pay' : 'we pay'})` : ''}?`}
+        description={`Execute trade: ${outgoing.length} card${outgoing.length !== 1 ? 's' : ''} out, ${incoming.length} card${incoming.length !== 1 ? 's' : ''} in${cashComponents.length > 0 ? ` + ${cashComponents.length} cash component${cashComponents.length !== 1 ? 's' : ''}` : ''}${vendorMode ? ' (vendor mode)' : ''}?`}
         confirmLabel="Execute Trade"
         loading={confirming}
         onConfirm={handleConfirm}

@@ -14,6 +14,7 @@ import CardDetailModal from '@/components/admin/shared/CardDetailModal'
 interface SellItem {
   item_id: string
   name: string
+  card_id?: string
   agreed_price: string | number
   original_price?: string | number | null
   cost_basis?: string | number | null
@@ -37,7 +38,6 @@ type PaymentMethodOption = {
   value: string
   icon: typeof Banknote
   label: string
-  hasSubMethods?: boolean
 }
 
 const PAYMENT_METHODS: PaymentMethodOption[] = [
@@ -81,10 +81,18 @@ export default function AdminSellPage() {
   const [feePreview, setFeePreview] = useState<{ fee: string; net: string } | null>(null)
 
   // Image toggle and detail modal
-  const [showImages, setShowImages] = useState(false)
+  const [showImages, setShowImages] = useState(true)
   const [detailItem, setDetailItem] = useState<InventoryItem | null>(null)
-  const cardIds = searchResults.map((i) => i.card_id)
-  const { getImageUrl } = useCardImages(showImages ? cardIds : [])
+
+  // Collect all card_ids from search results and cart items for bulk image resolution
+  const allCardIds = [
+    ...searchResults.map((i) => i.card_id),
+    ...items.map((i) => i.card_id),
+  ]
+  const { getImageUrl } = useCardImages(showImages ? allCardIds : [])
+
+  // Track the selected/highlighted item for large preview
+  const [previewItem, setPreviewItem] = useState<{ name: string; card_id?: string } | null>(null)
 
   // Create session on mount
   useEffect(() => {
@@ -130,7 +138,6 @@ export default function AdminSellPage() {
 
   const addItem = async (inv: InventoryItem) => {
     if (!sellId) return
-    // Default to sticker_price, then market value, then 0
     const sticker = parseFloat(inv.sticker_price ?? '0')
     const market = parseFloat(inv.current_market_value ?? '0')
     const price = sticker > 0 ? sticker : market
@@ -142,14 +149,18 @@ export default function AdminSellPage() {
         agreed_price: price,
         original_price: market || null,
       })
-      setItems((prev) => [...prev, {
+      const newItem: SellItem = {
         item_id: inv.item_id,
         name: inv.display_name || inv.product_name || '',
+        card_id: inv.card_id,
         agreed_price: String(price),
         original_price: inv.current_market_value,
         cost_basis: inv.cost_basis,
         sticker_price: inv.sticker_price,
-      }])
+      }
+      setItems((prev) => [...prev, newItem])
+      // Show the added item in the preview panel
+      setPreviewItem({ name: newItem.name, card_id: inv.card_id })
       setSearch('')
       setSearchResults([])
     } catch (err) {
@@ -178,6 +189,10 @@ export default function AdminSellPage() {
     try {
       await api.del(`/sales/${sellId}/items/${itemId}`)
       setItems((prev) => prev.filter((i) => i.item_id !== itemId))
+      // Clear preview if the removed item was being previewed
+      if (previewItem && items.find((i) => i.item_id === itemId)?.card_id === previewItem.card_id) {
+        setPreviewItem(null)
+      }
     } catch (err) {
       alert(err instanceof AdminApiError ? err.detail : 'Failed to remove item')
     }
@@ -219,6 +234,7 @@ export default function AdminSellPage() {
     setFeePreview(null)
     setBulkDiscount('')
     setSaleDate(new Date().toISOString().split('T')[0])
+    setPreviewItem(null)
   }
 
   // Confirmed state
@@ -255,7 +271,7 @@ export default function AdminSellPage() {
   }
 
   return (
-    <div className="p-6 lg:p-8 max-w-5xl">
+    <div className="p-6 lg:p-8 max-w-6xl">
       {/* Header */}
       <header className="mb-6">
         <span className="font-mono text-[11px] uppercase tracking-[0.22em] text-mint/70">
@@ -264,9 +280,9 @@ export default function AdminSellPage() {
         <h1 className="text-xl font-semibold text-pine-100">New Sale</h1>
       </header>
 
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Left: Search & Add */}
-        <div className="lg:col-span-2 space-y-4">
+        <div className="lg:col-span-4 space-y-4">
           <div className="flex items-center gap-3">
             <SearchInput
               value={search}
@@ -289,6 +305,7 @@ export default function AdminSellPage() {
                     key={item.item_id}
                     type="button"
                     onClick={() => addItem(item)}
+                    onMouseEnter={() => setPreviewItem({ name: item.display_name || item.product_name || '', card_id: item.card_id })}
                     className="w-full flex items-center justify-between px-3 py-2.5 hover:bg-pine-800/50 transition-colors text-left"
                   >
                     <div className="flex items-center gap-2 min-w-0">
@@ -373,8 +390,50 @@ export default function AdminSellPage() {
           </div>
         </div>
 
+        {/* Center: Image Preview */}
+        <div className="lg:col-span-3 flex flex-col items-center">
+          <div className="vault-panel rounded-xl p-4 w-full flex flex-col items-center justify-center min-h-[300px] sticky top-6">
+            {previewItem?.card_id && getImageUrl(previewItem.card_id) ? (
+              <>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={getImageUrl(previewItem.card_id)!}
+                  alt={previewItem.name}
+                  className="rounded-lg border border-pine-700/40 max-h-[240px] w-auto object-contain shadow-lg"
+                />
+                <p className="mt-3 text-xs text-pine-100 font-medium text-center">{previewItem.name}</p>
+                <p className="text-[10px] text-pine-500 mt-0.5">Visual confirmation</p>
+              </>
+            ) : previewItem ? (
+              <div className="text-center">
+                <div className="inline-flex items-center justify-center w-16 h-22 rounded-lg bg-pine-800/40 border border-pine-700/30 mb-3">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-pine-600">
+                    <rect x="3" y="3" width="18" height="18" rx="2" />
+                    <circle cx="8.5" cy="8.5" r="1.5" />
+                    <path d="M21 15l-5-5L5 21" />
+                  </svg>
+                </div>
+                <p className="text-xs text-pine-200">{previewItem.name}</p>
+                <p className="text-[10px] text-pine-500 mt-0.5">No image available</p>
+              </div>
+            ) : (
+              <div className="text-center">
+                <div className="inline-flex items-center justify-center w-16 h-22 rounded-lg bg-pine-800/40 border border-pine-700/30 mb-3">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-pine-600">
+                    <rect x="3" y="3" width="18" height="18" rx="2" />
+                    <circle cx="8.5" cy="8.5" r="1.5" />
+                    <path d="M21 15l-5-5L5 21" />
+                  </svg>
+                </div>
+                <p className="text-[11px] text-pine-500">Hover or select a card</p>
+                <p className="text-[10px] text-pine-600 mt-0.5">Image preview for verification</p>
+              </div>
+            )}
+          </div>
+        </div>
+
         {/* Right: Cart */}
-        <div className="lg:col-span-3">
+        <div className="lg:col-span-5">
           <div className="vault-panel rounded-xl overflow-hidden">
             <div className="px-4 py-3 border-b border-pine-700/40 flex items-center gap-2">
               <ShoppingCart size={16} className="text-mint" />
@@ -388,29 +447,38 @@ export default function AdminSellPage() {
                 Search and add items to start a sale
               </div>
             ) : (
-              <div className="divide-y divide-pine-700/25">
+              <div className="divide-y divide-pine-700/25 max-h-[380px] overflow-y-auto vault-scroll">
                 {items.map((item) => {
                   const cost = parseFloat(String(item.cost_basis || 0))
                   const agreed = parseFloat(String(item.agreed_price || 0))
                   const marginPct = cost > 0 ? (((agreed - cost) / cost) * 100).toFixed(0) : null
                   const marginColor = marginPct && parseFloat(marginPct) >= 0 ? 'text-mint' : 'text-red-400'
                   return (
-                    <div key={item.item_id} className="flex items-center justify-between px-4 py-2.5">
-                      <div className="min-w-0 flex-1">
-                        <div className="text-xs text-pine-100 truncate">{item.name}</div>
-                        <div className="text-[10px] text-pine-500 flex items-center gap-2 flex-wrap">
-                          {item.sticker_price && (
-                            <span className="text-amber-400/80">Sticker: ${parseFloat(String(item.sticker_price)).toFixed(2)}</span>
-                          )}
-                          {item.original_price && (
-                            <span>Market: <PriceDisplay value={item.original_price} className="text-[10px] text-pine-500 inline" /></span>
-                          )}
-                          {item.cost_basis && (
-                            <span>Price Paid: <PriceDisplay value={item.cost_basis} className="text-[10px] text-pine-500 inline" /></span>
-                          )}
-                          {marginPct && (
-                            <span className={`font-mono ${marginColor}`}>{parseFloat(marginPct) >= 0 ? '+' : ''}{marginPct}%</span>
-                          )}
+                    <div
+                      key={item.item_id}
+                      className="flex items-center justify-between px-4 py-2.5 hover:bg-pine-800/30 transition-colors cursor-pointer"
+                      onClick={() => setPreviewItem({ name: item.name, card_id: item.card_id })}
+                    >
+                      <div className="flex items-center gap-2 min-w-0 flex-1">
+                        {showImages && (
+                          <CardImage imageUrl={getImageUrl(item.card_id)} alt={item.name} size="sm" />
+                        )}
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs text-pine-100 truncate">{item.name}</div>
+                          <div className="text-[10px] text-pine-500 flex items-center gap-2 flex-wrap">
+                            {item.sticker_price && (
+                              <span className="text-amber-400/80">Sticker: ${parseFloat(String(item.sticker_price)).toFixed(2)}</span>
+                            )}
+                            {item.original_price && (
+                              <span>Market: <PriceDisplay value={item.original_price} className="text-[10px] text-pine-500 inline" /></span>
+                            )}
+                            {item.cost_basis && (
+                              <span>Paid: <PriceDisplay value={item.cost_basis} className="text-[10px] text-pine-500 inline" /></span>
+                            )}
+                            {marginPct && (
+                              <span className={`font-mono ${marginColor}`}>{parseFloat(marginPct) >= 0 ? '+' : ''}{marginPct}%</span>
+                            )}
+                          </div>
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
@@ -420,11 +488,12 @@ export default function AdminSellPage() {
                           step="0.01"
                           value={item.agreed_price}
                           onChange={(e) => updateItemPrice(item.item_id, e.target.value)}
+                          onClick={(e) => e.stopPropagation()}
                           className="vault-field w-20 px-1.5 py-0.5 rounded text-sm text-right text-mint font-mono"
                         />
                         <button
                           type="button"
-                          onClick={() => removeItem(item.item_id)}
+                          onClick={(e) => { e.stopPropagation(); removeItem(item.item_id) }}
                           className="p-1 rounded text-pine-500 hover:text-red-400 transition-colors"
                         >
                           <X size={14} />
