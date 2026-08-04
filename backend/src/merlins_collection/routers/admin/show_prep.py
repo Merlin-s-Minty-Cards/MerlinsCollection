@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from merlins_collection.dependencies import get_repo
 from merlins_collection.models.inventory import InventoryItemAdapter, ItemStatus
+from merlins_collection.services import locations as locations_service
 from merlins_collection.services.dynamodb import InventoryRepository
 
 router = APIRouter(prefix="/show-prep", tags=["admin-show-prep"])
@@ -111,6 +112,7 @@ def bulk_move_items(
         raise HTTPException(status_code=422, detail="item_ids required")
     if not new_location:
         raise HTTPException(status_code=422, detail="new_location required")
+    locations_service.validate_location(repo, new_location, required=True)
 
     moved = 0
     errors = []

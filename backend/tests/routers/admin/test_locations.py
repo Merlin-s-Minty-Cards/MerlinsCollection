@@ -1,10 +1,27 @@
 """Tests for the admin locations endpoint (``/admin/locations``).
 
-Verifies the canonical location list is served for dropdown population.
+Verifies the canonical location list is served for dropdown population, and
+that it is admin-managed (DB-backed, validated) rather than a hardcoded enum.
 """
+
+from datetime import date
+from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
+
+from merlins_collection.models.inventory import Condition, ItemStatus, RawInventoryItem
+
+
+def _raw(item_id="item-1", *, card_id="sv1-1", location="glass",
+         status=ItemStatus.AVAILABLE):
+    return RawInventoryItem(
+        item_id=item_id, card_id=card_id, finish="holofoil",
+        condition=Condition.NM, location=location, status=status,
+        cost_basis=Decimal("20.00"),
+        current_market_value=Decimal("50.00"),
+        acquired_at=date(2025, 1, 1),
+    )
 
 
 @pytest.fixture
@@ -61,6 +78,91 @@ class TestListLocations:
         client, _ = admin_client
         resp = client.get("/admin/locations")
         assert resp.status_code in (401, 403)
+
+
+class TestLocationsAdminManaged:
+    """DB-backed, admin-managed locations: seeding, add, delete, validation."""
+
+    def test_get_seeds_from_enum_and_inventory(self, admin_client, dynamo_repo):
+        client, token = admin_client
+        dynamo_repo.put_inventory_item(_raw(item_id="seed-1", location="card_show_bin"))
+
+        resp = client.get("/admin/locations", headers=_auth(token))
+        assert resp.status_code == 200
+        values = [o["value"] for o in resp.json()]
+        assert "toploader" in values            # from enum
+        assert "card_show_bin" in values        # discovered from DB
+
+        # second GET returns the persisted config (no re-scan needed): same list
+        second = client.get("/admin/locations", headers=_auth(token))
+        assert second.json() == resp.json()
+
+    def test_post_adds_location(self, admin_client):
+        client, token = admin_client
+        r = client.post(
+            "/admin/locations",
+            json={"value": "show_box_c", "label": "Show Box C"},
+            headers=_auth(token),
+        )
+        assert r.status_code == 201
+        listing = client.get("/admin/locations", headers=_auth(token)).json()
+        assert {"value": "show_box_c", "label": "Show Box C"} in listing
+
+    def test_post_duplicate_409(self, admin_client):
+        client, token = admin_client
+        client.post(
+            "/admin/locations",
+            json={"value": "show_box_d", "label": "Show Box D"},
+            headers=_auth(token),
+        )
+        r = client.post(
+            "/admin/locations",
+            json={"value": "show_box_d", "label": "Show Box D"},
+            headers=_auth(token),
+        )
+        assert r.status_code == 409
+
+    def test_post_bad_slug_422(self, admin_client):
+        client, token = admin_client
+        r = client.post(
+            "/admin/locations",
+            json={"value": "Show Box!", "label": "Bad"},
+            headers=_auth(token),
+        )
+        assert r.status_code == 422
+
+    def test_delete_in_use_409(self, admin_client, dynamo_repo):
+        client, token = admin_client
+        dynamo_repo.put_inventory_item(_raw(item_id="in-use", location="glass"))
+        r = client.delete("/admin/locations/glass", headers=_auth(token))
+        assert r.status_code == 409
+
+    def test_delete_unused_204(self, admin_client):
+        client, token = admin_client
+        client.post(
+            "/admin/locations",
+            json={"value": "temp_box", "label": "Temp Box"},
+            headers=_auth(token),
+        )
+        r = client.delete("/admin/locations/temp_box", headers=_auth(token))
+        assert r.status_code == 204
+        listing = client.get("/admin/locations", headers=_auth(token)).json()
+        assert "temp_box" not in [o["value"] for o in listing]
+
+    def test_delete_unknown_404(self, admin_client):
+        client, token = admin_client
+        r = client.delete("/admin/locations/nonexistent_value", headers=_auth(token))
+        assert r.status_code == 404
+
+    def test_bulk_move_unknown_location_422(self, admin_client, dynamo_repo):
+        client, token = admin_client
+        dynamo_repo.put_inventory_item(_raw(item_id="mv-1", location="glass"))
+        r = client.post(
+            "/admin/show-prep/bulk-move",
+            json={"item_ids": ["mv-1"], "new_location": "narnia"},
+            headers=_auth(token),
+        )
+        assert r.status_code == 422
 
 
 class TestInventoryLocationEnum:

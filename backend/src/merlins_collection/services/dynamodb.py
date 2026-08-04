@@ -1456,3 +1456,23 @@ class InventoryRepository:
             Key={"PK": f"TRADE#{trade_id}", "SK": "META"},
         ).get("Item")
         return item if item else None
+
+    # ---- admin-managed inventory locations ----
+    def put_location_config(self, locations: list[dict[str, str]]) -> None:
+        """Persist the full admin-managed location list (single row)."""
+        record = {
+            "PK": "CONFIG#LOCATIONS",
+            "SK": "META",
+            "entity": "location_config",
+            "locations": _serialize(locations),
+        }
+        self._table.put_item(Item=record)
+
+    def get_location_config(self) -> list[dict[str, str]] | None:
+        """Fetch the persisted location list, or ``None`` if never seeded."""
+        item = self._table.get_item(
+            Key={"PK": "CONFIG#LOCATIONS", "SK": "META"},
+        ).get("Item")
+        if not item:
+            return None
+        return item["locations"]
