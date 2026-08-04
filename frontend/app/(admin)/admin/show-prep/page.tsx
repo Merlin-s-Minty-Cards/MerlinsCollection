@@ -4,12 +4,13 @@ import { useCallback, useEffect, useState } from 'react'
 import { MapPin, AlertTriangle, ArrowRight, Check, ExternalLink, Tag, TrendingUp, TrendingDown } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { useCardImages } from '@/lib/use-card-images'
-import { LOCATION_OPTIONS } from '@/lib/constants'
+import { useLocations } from '@/lib/use-locations'
 import DataTable, { Column } from '@/components/admin/shared/DataTable'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import CardImage from '@/components/admin/shared/CardImage'
 import ImageToggle from '@/components/admin/shared/ImageToggle'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
+import InlineEditCell from '@/components/admin/shared/InlineEditCell'
 
 interface MispricedItem {
   item_id: string
@@ -20,6 +21,7 @@ interface MispricedItem {
   current_market_value: string
   sticker_price?: string | null
   sticker_notes?: string | null
+  tcg_url?: string | null
   delta_pct: string
   delta_dollar?: string
   [key: string]: unknown
@@ -32,6 +34,10 @@ interface LocationData {
 
 export default function AdminShowPrepPage() {
   const api = useAdminApi()
+  const { options: locationOptions } = useLocations()
+
+  // Per-row inline edits (sticker price, TCG link)
+  const [savingItemId, setSavingItemId] = useState<string | null>(null)
 
   // Mispriced
   const [threshold, setThreshold] = useState(20)
@@ -139,6 +145,28 @@ export default function AdminShowPrepPage() {
     fetchMispriced()
   }
 
+  const saveItemStickerPrice = async (itemId: string, rawValue: string) => {
+    const trimmed = rawValue.trim()
+    const price = parseFloat(trimmed)
+    if (trimmed !== '' && (isNaN(price) || price < 0)) return
+    setSavingItemId(itemId)
+    try {
+      await api.put(`/inventory/${itemId}`, { sticker_price: trimmed === '' ? null : trimmed })
+      fetchMispriced()
+    } catch { /* leave the row as-is; the value reverts on next fetch */ }
+    finally { setSavingItemId(null) }
+  }
+
+  const saveItemTcgUrl = async (itemId: string, rawValue: string) => {
+    const trimmed = rawValue.trim()
+    setSavingItemId(itemId)
+    try {
+      await api.put(`/inventory/${itemId}`, { tcg_url: trimmed || null })
+      fetchMispriced()
+    } catch { /* leave the row as-is; the value reverts on next fetch */ }
+    finally { setSavingItemId(null) }
+  }
+
   const handleSort = (key: string) => {
     if (sortKey === key) {
       setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
@@ -219,16 +247,27 @@ export default function AdminShowPrepPage() {
     {
       key: 'sticker_price',
       label: 'Sticker',
-      className: 'text-right',
+      className: 'text-right w-28',
       render: (item) => (
-        <div className="flex items-center justify-end gap-1">
-          {item.sticker_price ? <PriceDisplay value={item.sticker_price} className="text-xs text-amber-400" /> : <span className="text-xs text-pine-600">—</span>}
-          {item.sticker_notes && (
-            <span className="text-[9px] text-pine-500 italic truncate max-w-[60px]" title={item.sticker_notes}>
-              ({item.sticker_notes})
-            </span>
-          )}
-        </div>
+        <InlineEditCell
+          value={item.sticker_price ? String(item.sticker_price) : ''}
+          type="number"
+          step="0.01"
+          placeholder="0.00"
+          saving={savingItemId === item.item_id}
+          aria-label={`Edit sticker price for ${item.name || 'item'}`}
+          onSave={(v) => saveItemStickerPrice(item.item_id, v)}
+          displayValue={
+            <div className="flex items-center justify-end gap-1">
+              {item.sticker_price ? <PriceDisplay value={item.sticker_price} className="text-xs text-amber-400" /> : <span className="text-xs text-pine-600">—</span>}
+              {item.sticker_notes && (
+                <span className="text-[9px] text-pine-500 italic truncate max-w-[60px]" title={item.sticker_notes}>
+                  ({item.sticker_notes})
+                </span>
+              )}
+            </div>
+          }
+        />
       ),
     },
     {
@@ -249,24 +288,35 @@ export default function AdminShowPrepPage() {
     {
       key: '_tcg_url',
       label: 'TCG Price',
-      className: 'w-28',
+      className: 'w-32',
       render: (item) => {
-        // Build a TCGplayer search URL from the card name
+        // Fall back to a generated TCGplayer search URL when no link is stored.
         const searchQuery = encodeURIComponent(item.name || '')
         const tcgSearchUrl = `https://www.tcgplayer.com/search/pokemon/product?q=${searchQuery}&view=grid`
+        const linkHref = item.tcg_url || tcgSearchUrl
 
         return (
-          <a
-            href={tcgSearchUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={(e) => e.stopPropagation()}
-            className="inline-flex items-center gap-1 text-[10px] text-blue-400 hover:text-blue-300 transition-colors"
-            title={`Search TCGplayer for "${item.name}"`}
-          >
-            <ExternalLink size={11} />
-            Check Price
-          </a>
+          <InlineEditCell
+            value={item.tcg_url ?? ''}
+            type="url"
+            placeholder="https://tcgplayer.com/…"
+            saving={savingItemId === item.item_id}
+            aria-label={`Edit stored TCG link for ${item.name || 'item'}`}
+            onSave={(v) => saveItemTcgUrl(item.item_id, v)}
+            displayValue={
+              <a
+                href={linkHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                className="inline-flex items-center gap-1 text-[10px] text-blue-400 hover:text-blue-300 transition-colors"
+                title={item.tcg_url ? item.tcg_url : `Search TCGplayer for "${item.name}"`}
+              >
+                <ExternalLink size={11} />
+                Check Price
+              </a>
+            }
+          />
         )
       },
     },
@@ -407,7 +457,7 @@ export default function AdminShowPrepPage() {
               className="vault-field px-2.5 py-1 rounded-lg text-xs max-w-48"
             >
               <option value="">Move to…</option>
-              {LOCATION_OPTIONS.map((loc) => (
+              {locationOptions.map((loc) => (
                 <option key={loc.value} value={loc.value}>
                   {loc.label}
                 </option>
