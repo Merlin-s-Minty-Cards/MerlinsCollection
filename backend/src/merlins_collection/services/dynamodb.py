@@ -1173,6 +1173,23 @@ class InventoryRepository:
         items = self._query_all(KeyConditionExpression=Key("PK").eq("CONSIGNORLIST"))
         return [Consignor.model_validate(i) for i in items]
 
+    def get_consignor(self, consignor_id: str):
+        """Get a single consignor by id."""
+        items = self._query_all(KeyConditionExpression=Key("PK").eq("CONSIGNORLIST"))
+        for item in items:
+            if item.get("consignor_id") == consignor_id:
+                return Consignor.model_validate(item)
+        return None
+
+    def delete_consignor(self, consignor_id: str):
+        """Delete a consignor by id. Scans SK prefix to find the actual key."""
+        items = self._query_all(KeyConditionExpression=Key("PK").eq("CONSIGNORLIST"))
+        for item in items:
+            if item.get("consignor_id") == consignor_id:
+                self._table.delete_item(Key={"PK": "CONSIGNORLIST", "SK": item["SK"]})
+                return True
+        return False
+
     # ---- config entities (CONFIG partition) ----
     def _put_config(self, sk: str, entity: str, model):
         body = _serialize(model.model_dump(mode="python"))

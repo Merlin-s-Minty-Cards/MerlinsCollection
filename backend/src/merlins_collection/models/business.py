@@ -112,7 +112,11 @@ class Debt(BaseModel):
 class Consignor(BaseModel):
     consignor_id: str = Field(default_factory=new_ulid)
     name: str
-    contact: str | None = None
+    contact: str | None = None  # legacy — kept for backward compat
+    email: str | None = None
+    phone: str | None = None
+    payout_percent: Decimal = Decimal("50")  # default payout % to consignor
+    active: bool = True
     notes: str | None = None
 
 
