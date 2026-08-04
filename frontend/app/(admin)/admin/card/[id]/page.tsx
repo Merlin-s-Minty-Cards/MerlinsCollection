@@ -50,6 +50,7 @@ interface InventoryItem {
   grade?: string
   cosigner_id?: string | null
   consignment_split?: number | null
+  tcg_url?: string | null
   [key: string]: unknown
 }
 
@@ -155,6 +156,8 @@ export default function AdminCardDetailPage() {
   const conditionDisplay = item?.condition
     ? formatCondition(item.condition, item.condition_modifier)
     : null
+  const hasStoredTcgLink =
+    typeof item?.tcg_url === 'string' && item.tcg_url.startsWith('http')
 
   // ---------------------------------------------------------------------------
   // Render
@@ -235,6 +238,17 @@ export default function AdminCardDetailPage() {
 
           {/* Links section */}
           <div className="flex items-center gap-3 flex-wrap">
+            {hasStoredTcgLink && (
+              <a
+                href={item.tcg_url!}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium text-emerald-400 bg-emerald-400/10 border border-emerald-400/20 hover:bg-emerald-400/20 transition-colors"
+              >
+                <ExternalLink size={12} />
+                TCGplayer (stored)
+              </a>
+            )}
             <a
               href={buildTcgPlayerUrl(cardName)}
               target="_blank"
@@ -242,7 +256,7 @@ export default function AdminCardDetailPage() {
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium text-blue-400 bg-blue-400/10 border border-blue-400/20 hover:bg-blue-400/20 transition-colors"
             >
               <ExternalLink size={12} />
-              TCGplayer
+              {hasStoredTcgLink ? 'Search TCGplayer' : 'TCGplayer'}
             </a>
             <a
               href={buildEbayUrl(cardName)}

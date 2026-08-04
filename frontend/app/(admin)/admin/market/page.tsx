@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { TrendingUp, Trash2, Star, RefreshCw } from 'lucide-react'
+import { TrendingUp, Trash2, Star, RefreshCw, PackagePlus } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import SearchInput from '@/components/admin/shared/SearchInput'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
@@ -120,6 +120,28 @@ const IDLE_SYNC_STATUS: SyncStatus = {
   error: null,
 }
 
+// --- Catalog sync status -------------------------------------------------
+
+interface CatalogSyncStatus {
+  state: SyncState
+  started_at: string | null
+  finished_at: string | null
+  sets_checked: number | null
+  new_sets: string[] | null
+  cards_added: number | null
+  error: string | null
+}
+
+const IDLE_CATALOG_SYNC_STATUS: CatalogSyncStatus = {
+  state: 'idle',
+  started_at: null,
+  finished_at: null,
+  sets_checked: null,
+  new_sets: null,
+  cards_added: null,
+  error: null,
+}
+
 // --- Trend confidence ------------------------------------------------------
 
 interface ConfidenceResponse {
@@ -134,6 +156,16 @@ const TREND_CONFIDENCE_STYLES: Record<ConfidenceLevel, { bg: string; text: strin
   high: { bg: 'bg-mint/15 border-mint/30', text: 'text-mint', label: 'High confidence' },
   medium: { bg: 'bg-amber-500/15 border-amber-500/30', text: 'text-amber-400', label: 'Medium confidence' },
   low: { bg: 'bg-pine-700/40 border-pine-600/40', text: 'text-pine-300', label: 'Low confidence' },
+}
+
+// --- Shared poll helper ---------------------------------------------------
+
+/** Clear a poll interval ref. Shared by price-sync and catalog-sync polling. */
+function clearPollRef(ref: { current: ReturnType<typeof setInterval> | null }) {
+  if (ref.current) {
+    clearInterval(ref.current)
+    ref.current = null
+  }
 }
 
 export default function AdminMarketPage() {
@@ -157,36 +189,44 @@ export default function AdminMarketPage() {
   // Coverage banner
   const [coverage, setCoverage] = useState<MarketCoverage | null>(null)
 
-  // Sync
+  // Price sync
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(IDLE_SYNC_STATUS)
   const [syncTriggerError, setSyncTriggerError] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
+  // Catalog sync
+  const [catalogSyncStatus, setCatalogSyncStatus] = useState<CatalogSyncStatus>(IDLE_CATALOG_SYNC_STATUS)
+  const [catalogSyncTriggerError, setCatalogSyncTriggerError] = useState<string | null>(null)
+  const catalogPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // Unmount guard — prevents setState after unmount (React 18 console warning)
+  const unmountedRef = useRef(false)
+
   // Trend confidence
   const [confidence, setConfidence] = useState<ConfidenceResponse | null>(null)
 
-  const stopPolling = useCallback(() => {
-    if (pollRef.current) {
-      clearInterval(pollRef.current)
-      pollRef.current = null
-    }
-  }, [])
+  const stopPolling = useCallback(() => clearPollRef(pollRef), [])
+  const stopCatalogPolling = useCallback(() => clearPollRef(catalogPollRef), [])
 
   const loadCoverage = useCallback(async () => {
     if (!api.isAuthenticated) return
     try {
       const res = await api.get<MarketCoverage>('/market/coverage')
-      setCoverage(res)
-    } catch { setCoverage(null) }
+      if (!unmountedRef.current) setCoverage(res)
+    } catch {
+      if (!unmountedRef.current) setCoverage(null)
+    }
   }, [api])
 
   useEffect(() => {
     loadCoverage()
   }, [loadCoverage])
 
+  // --- Price sync polling ---
   const pollSyncStatus = useCallback(async () => {
     try {
       const status = await api.get<SyncStatus>('/market/sync/status')
+      if (unmountedRef.current) return
       setSyncStatus(status)
       if (status.state !== 'running') {
         stopPolling()
@@ -195,11 +235,35 @@ export default function AdminMarketPage() {
         }
       }
     } catch {
-      stopPolling()
+      if (!unmountedRef.current) stopPolling()
     }
   }, [api, loadCoverage, stopPolling])
 
-  useEffect(() => stopPolling, [stopPolling])
+  // --- Catalog sync polling ---
+  const pollCatalogSyncStatus = useCallback(async () => {
+    try {
+      const status = await api.get<CatalogSyncStatus>('/market/catalog-sync/status')
+      if (unmountedRef.current) return
+      setCatalogSyncStatus(status)
+      if (status.state !== 'running') {
+        stopCatalogPolling()
+        if (status.state === 'completed' && (status.cards_added ?? 0) > 0) {
+          loadCoverage()
+        }
+      }
+    } catch {
+      if (!unmountedRef.current) stopCatalogPolling()
+    }
+  }, [api, loadCoverage, stopCatalogPolling])
+
+  // Clean up both poll intervals on unmount, and set the guard flag
+  useEffect(() => {
+    return () => {
+      unmountedRef.current = true
+      stopPolling()
+      stopCatalogPolling()
+    }
+  }, [stopPolling, stopCatalogPolling])
 
   const triggerSync = async () => {
     setSyncTriggerError(null)
@@ -213,6 +277,22 @@ export default function AdminMarketPage() {
         setSyncTriggerError('A sync is already running')
       } else {
         setSyncTriggerError(err instanceof AdminApiError ? (err.detail ?? 'Failed to start sync') : 'Failed to start sync')
+      }
+    }
+  }
+
+  const triggerCatalogSync = async () => {
+    setCatalogSyncTriggerError(null)
+    try {
+      await api.post('/market/catalog-sync')
+      setCatalogSyncStatus((prev) => ({ ...prev, state: 'running' }))
+      stopCatalogPolling()
+      catalogPollRef.current = setInterval(pollCatalogSyncStatus, 3000)
+    } catch (err) {
+      if (err instanceof AdminApiError && err.status === 409) {
+        setCatalogSyncTriggerError('A catalog sync is already running')
+      } else {
+        setCatalogSyncTriggerError(err instanceof AdminApiError ? (err.detail ?? 'Failed to start catalog sync') : 'Failed to start catalog sync')
       }
     }
   }
@@ -300,16 +380,31 @@ export default function AdminMarketPage() {
           <div className="vault-panel rounded-xl p-3 mb-6 text-xs space-y-2">
             <div className="flex items-center justify-between gap-3">
               <p className="text-pine-300">{banner.summary}</p>
-              <button
-                type="button"
-                onClick={triggerSync}
-                disabled={syncStatus.state === 'running'}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium text-mint bg-mint/10 border border-mint/25 hover:bg-mint/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
-              >
-                <RefreshCw size={12} className={syncStatus.state === 'running' ? 'animate-spin' : ''} />
-                Sync Prices
-              </button>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <button
+                  type="button"
+                  onClick={triggerSync}
+                  disabled={syncStatus.state === 'running'}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium text-mint bg-mint/10 border border-mint/25 hover:bg-mint/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <RefreshCw size={12} className={syncStatus.state === 'running' ? 'animate-spin' : ''} />
+                  Sync Prices
+                </button>
+                <button
+                  type="button"
+                  onClick={triggerCatalogSync}
+                  disabled={catalogSyncStatus.state === 'running'}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium text-mint bg-mint/10 border border-mint/25 hover:bg-mint/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <PackagePlus size={12} className={catalogSyncStatus.state === 'running' ? 'animate-spin' : ''} />
+                  Check for New Sets
+                </button>
+              </div>
             </div>
+
+            <p className="text-pine-500 text-[10px]">
+              Prices refresh values for cards you hold. New Sets adds newly released cards to the catalog.
+            </p>
 
             {banner.catalogEmpty && (
               <p className="text-amber-400">
@@ -318,6 +413,7 @@ export default function AdminMarketPage() {
             )}
 
             {syncTriggerError && <p className="text-red-400">{syncTriggerError}</p>}
+            {catalogSyncTriggerError && <p className="text-red-400">{catalogSyncTriggerError}</p>}
 
             {syncStatus.state === 'completed' && (
               <p className="text-mint">
@@ -327,6 +423,16 @@ export default function AdminMarketPage() {
 
             {syncStatus.state === 'failed' && (
               <p className="text-red-400">{syncStatus.error}</p>
+            )}
+
+            {catalogSyncStatus.state === 'completed' && (
+              <p className="text-mint">
+                Checked {catalogSyncStatus.sets_checked} sets · added {catalogSyncStatus.cards_added} cards from {catalogSyncStatus.new_sets?.length ?? 0} new set(s)
+              </p>
+            )}
+
+            {catalogSyncStatus.state === 'failed' && (
+              <p className="text-red-400">{catalogSyncStatus.error}</p>
             )}
 
             {banner.showUnmatched && banner.unmatchedItems.length > 0 && (
