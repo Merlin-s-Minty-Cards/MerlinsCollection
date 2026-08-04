@@ -203,3 +203,36 @@ def test_card_summary_market_price_absent_without_a_finish_is_none_for_graded():
     from merlins_collection.models.inventory import CardSummary
     card = _catalog_with_prices({"normal": "3.50"})
     assert CardSummary.from_catalog(card, finish=None).market_price is None
+
+
+# --- 2.3: combined condition string -> (tier, modifier) -----------------------
+
+@pytest.mark.parametrize(
+    "raw,tier,mod",
+    [
+        ("LP+", "LP", "+"),
+        ("LP-", "LP", "-"),
+        ("NM", "NM", None),
+        ("lp+", "LP", "+"),
+        ("  MP-  ", "MP", "-"),
+        ("dmg", "DMG", None),
+    ],
+)
+def test_normalize_condition(raw, tier, mod):
+    """The server-side mirror of the frontend ``parseCondition`` helper."""
+    from merlins_collection.models.inventory import normalize_condition
+
+    condition, modifier = normalize_condition(raw)
+    assert condition is Condition(tier)
+    if mod is None:
+        assert modifier is None
+    else:
+        assert modifier is ConditionModifier(mod)
+
+
+@pytest.mark.parametrize("bad", ["SHINY", "", "+", "-", "NM++", "LP*", None])
+def test_normalize_condition_rejects_garbage(bad):
+    from merlins_collection.models.inventory import normalize_condition
+
+    with pytest.raises(ValueError):
+        normalize_condition(bad)

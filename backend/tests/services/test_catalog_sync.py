@@ -1105,6 +1105,56 @@ def test_sync_new_sets_never_overwrites_existing_card(dynamo_repo):
     assert stored.prices["holofoil"].market == Decimal("9.25")
 
 
+def test_sync_new_sets_writer_preserves_a_priced_card_even_when_misclassified_as_new(
+    dynamo_repo, monkeypatch
+):
+    """Fix round 1 finding: the structural per-set skip above
+    (``test_sync_new_sets_never_overwrites_existing_card``) proves the FIRST
+    layer of the no-overwrite guarantee -- a set with any existing card is
+    never walked, so the writer is never even called for it. That test alone
+    would still pass if ``preserve_priced=True`` were deleted from the
+    ``batch_upsert_catalog_cards`` call, or if its ``ConditionExpression``
+    branch were entirely broken, because the writer path is never exercised.
+
+    This test forces the SECOND, independent layer -- the conditional write
+    itself -- to be the only thing standing between a priced row and data
+    loss, by simulating the realistic failure mode that layer exists for: a
+    ``list_cards_by_set``/``build_card_id`` mismatch, or a race with another
+    writer, that makes a set with cards LOOK empty to the "is this set new"
+    check. ``repo.list_cards_by_set`` is stubbed to always report empty even
+    though ``en:swsh1-1`` demonstrably already exists (and is priced), which
+    forces ``sync_new_sets`` to treat ``swsh1`` as new, walk its cards, and
+    hand the pre-existing card's id to ``batch_upsert_catalog_cards(...,
+    preserve_priced=True)`` for real. If that flag or its DynamoDB
+    ``ConditionExpression`` regressed, this test fails.
+    """
+    priced = to_catalog_card_brief_for_test("swsh1", "1", "Celebi V")
+    priced = priced.model_copy(update={
+        "detail": "full",
+        "prices": {"holofoil": FinishPrice(market=Decimal("9.25"))},
+    })
+    dynamo_repo.batch_upsert_catalog_cards([priced])
+    assert dynamo_repo.get_catalog_card("en:swsh1-1") is not None  # sanity: it's really there
+
+    monkeypatch.setattr(dynamo_repo, "list_cards_by_set", lambda set_id: [])
+
+    client = FakeSetsClient(
+        sets_by_language={Language.EN: [SWSH1_SET]},
+        cards_by_language={Language.EN: [SWSH1_CARD_ROW]},
+    )
+
+    summary = sync_new_sets(dynamo_repo, client)
+
+    # misclassified as new by the stubbed (broken) membership check -- the
+    # writer was actually reached, which is the point of this test
+    assert summary["new_sets"] == ["en:swsh1"]
+    assert summary["cards_added"] == 1
+
+    stored = dynamo_repo.get_catalog_card("en:swsh1-1")
+    assert stored.detail == "full"
+    assert stored.prices["holofoil"].market == Decimal("9.25")  # untouched, not overwritten
+
+
 def test_sync_new_sets_dry_run_writes_nothing(dynamo_repo):
     client = FakeSetsClient(
         sets_by_language={Language.EN: [SWSH2_SET]},

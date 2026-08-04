@@ -10,7 +10,7 @@ Unlike the customer ``/inventory/search``, this surface:
 from __future__ import annotations
 
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -19,12 +19,17 @@ from pydantic import BaseModel
 from merlins_collection.dependencies import get_repo
 from merlins_collection.models.inventory import (
     Condition,
+    ConditionModifier,
     InventoryItem,
     InventoryItemAdapter,
     ItemStatus,
+    _market_price,
     new_ulid,
+    normalize_condition,
 )
+from merlins_collection.services.condition_pricing import apply_condition_adjustment
 from merlins_collection.services.dynamodb import InventoryRepository
+from merlins_collection.services.locations import validate_location
 
 router = APIRouter(prefix="/inventory", tags=["admin-inventory"])
 
@@ -79,10 +84,13 @@ def admin_search_inventory(
     name: str | None = Query(None, max_length=200),
     status: ItemStatus | None = Query(None),
     location: str | None = Query(None),
-    condition: Condition | None = Query(None),
+    condition: str | None = Query(None, max_length=8),
     kind: str | None = Query(None),
     card_number: str | None = Query(None, max_length=20),
     artist: str | None = Query(None, max_length=200),
+    set_name: str | None = Query(None, max_length=200),
+    ownership: str | None = Query(None),
+    missing_sticker: bool = Query(False),
     min_price: Decimal | None = Query(None, ge=0),
     max_price: Decimal | None = Query(None, ge=0),
     sort: str | None = Query(None),
@@ -102,10 +110,21 @@ def admin_search_inventory(
 
     if location is not None:
         location_lower = location.lower()
-        items = [i for i in items if (getattr(i, "location", None) or "").lower().find(location_lower) >= 0]
+        items = [
+            i for i in items
+            if location_lower in (getattr(i, "location", None) or "").lower()
+        ]
 
     if condition is not None:
-        items = [i for i in items if i.kind == "raw" and i.condition == condition]
+        tier, modifier = _parse_condition_query(condition)
+        items = [
+            i for i in items
+            if i.kind == "raw"
+            and i.condition == tier
+            # A bare tier ("LP") is the whole tier including LP+/LP-; a query
+            # that names a modifier ("LP+") narrows to exactly that grade.
+            and (modifier is None or i.condition_modifier == modifier)
+        ]
 
     if kind is not None:
         items = [i for i in items if i.kind == kind]
@@ -117,16 +136,41 @@ def admin_search_inventory(
             if _item_matches_name(i, name_lower)
         ]
 
-    # A5: Price range filters (cost_basis)
+    if ownership is not None:
+        if ownership == "owned":
+            items = [i for i in items if i.consignment is None]
+        elif ownership == "cosigned":
+            items = [i for i in items if i.consignment is not None]
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid ownership '{ownership}'. Expected 'owned' or 'cosigned'.",
+            )
+
+    # Show-prep queue: everything still waiting for a price sticker.
+    if missing_sticker:
+        items = [i for i in items if i.sticker_price is None]
+
+    # Price range filters compare against what the item is worth NOW, falling
+    # back to what it cost only when no market figure is known. Filtering on
+    # cost alone made "show me my $100+ cards" answer a different question.
     if min_price is not None:
-        items = [i for i in items if i.cost_basis is not None and i.cost_basis >= min_price]
+        items = [
+            i for i in items
+            if (v := _effective_price(i)) is not None and v >= min_price
+        ]
 
     if max_price is not None:
-        items = [i for i in items if i.cost_basis is not None and i.cost_basis <= max_price]
+        items = [
+            i for i in items
+            if (v := _effective_price(i)) is not None and v <= max_price
+        ]
 
-    # A5: Catalog-based filters (card_number, artist) — requires joining with catalog
-    if card_number is not None or artist is not None:
-        items = _filter_by_catalog(items, repo, card_number=card_number, artist=artist)
+    # A5: Catalog-based filters (card_number, artist, set_name) — joins the catalog
+    if card_number is not None or artist is not None or set_name is not None:
+        items = _filter_by_catalog(
+            items, repo, card_number=card_number, artist=artist, set_name=set_name,
+        )
 
     # Sort
     items = _sort_admin_results(items, sort)
@@ -168,6 +212,10 @@ def admin_create_item(
     if kind not in ("raw", "graded", "sealed", "bulk"):
         raise HTTPException(status_code=422, detail=f"Invalid kind: {kind}")
 
+    body = _split_combined_condition(body)
+    if "location" in body:
+        validate_location(repo, body.get("location"))
+
     # Assign a new item_id
     body.setdefault("item_id", new_ulid())
     body.setdefault("status", "available")
@@ -195,6 +243,10 @@ def admin_update_item(
     existing = repo.get_inventory_item(item_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Item not found")
+
+    body = _split_combined_condition(body)
+    if "location" in body:
+        validate_location(repo, body.get("location"))
 
     # Merge: dump existing to dict, overlay with update body, re-validate
     current_data = existing.model_dump(mode="python")
@@ -346,18 +398,13 @@ def admin_item_lineage(
     ]
 
     # Walk from root forward
-    chain = []
+    ordered: list[InventoryItem] = []
     if roots:
         current = roots[0]
         visited = set()
         while current and current.item_id not in visited:
             visited.add(current.item_id)
-            chain.append({
-                "item_id": current.item_id,
-                "name": getattr(current, "display_name", None) or getattr(current, "product_name", None) or "",
-                "acquired_cost": str(current.cost_basis),
-                "status": current.status.value,
-            })
+            ordered.append(current)
             # Find next in chain (item whose predecessor is current)
             next_item = None
             for i in lineage_items:
@@ -366,16 +413,56 @@ def admin_item_lineage(
                     break
             current = next_item
     else:
+        ordered.append(item)
+
+    # Profit is only knowable per NODE: a trade chain's value is the sum of what
+    # each link was disposed for minus what it cost to acquire. Disposal comes
+    # from the item's own timeline (the same events the /timeline endpoint
+    # reads), not from status, because a trade-out and a cash sale are both
+    # "gone" but only one of them ends the chain.
+    chain: list[dict[str, Any]] = []
+    cumulative = Decimal("0")
+    last_exit_event: dict[str, Any] | None = None
+
+    for node in ordered:
+        disposal = _disposal_event(repo.get_timeline_events(node.item_id))
+        last_exit_event = disposal
+
+        disposed_via = disposal["type"] if disposal else None
+        disposed_value = _event_amount(disposal) if disposal else None
+
+        step_profit: Decimal | None = None
+        if disposed_value is not None:
+            step_profit = (disposed_value - node.cost_basis).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP,
+            )
+            cumulative += step_profit
+
         chain.append({
-            "item_id": item.item_id,
-            "name": getattr(item, "display_name", None) or "",
-            "acquired_cost": str(item.cost_basis),
-            "status": item.status.value,
+            "item_id": node.item_id,
+            "name": _node_name(node),
+            "acquired_cost": str(node.cost_basis),
+            "status": node.status.value,
+            "disposed_via": disposed_via,
+            "disposed_value": None if disposed_value is None else str(disposed_value),
+            "step_profit": None if step_profit is None else str(step_profit),
+            "cumulative_profit": str(
+                cumulative.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            ),
         })
+
+    # The chain is only CLOSED when the final link left for money. A trade-out
+    # (or a "sale" settled in trade) just hands the value to the next link.
+    chain_complete = bool(
+        last_exit_event
+        and last_exit_event.get("type") == "sale"
+        and str(last_exit_event.get("payment_method") or "") != "trade"
+    )
 
     return {
         "lineage_id": lineage_id,
         "chain": chain,
+        "chain_complete": chain_complete,
     }
 
 
@@ -479,53 +566,61 @@ def admin_item_price_chart(
 def admin_refresh_market_prices(
     repo: InventoryRepository = Depends(get_repo),
 ) -> dict[str, Any]:
-    """Refresh current_market_value for items missing it or linked to catalog.
+    """Refresh current_market_value for available RAW items linked to the catalog.
 
-    Iterates available items with a card_id, looks up the catalog card's latest
-    market price for the item's finish, and updates the item if the catalog
-    has a newer price. Returns count of items checked and updated.
+    This is the admin's on-demand version of the nightly
+    ``catalog_sync.refresh_inventory_market_values`` pass, and it must agree
+    with it card-for-card: it uses the SAME shared finish-aware lookup
+    (``models.inventory._market_price``) and the SAME condition multiplier
+    (``services.condition_pricing.apply_condition_adjustment``). It previously
+    hand-rolled its own finish walk — a bare ``card.prices.get(item.finish)``
+    with an arbitrary "first finish" fallback and no condition adjustment — so
+    the two paths quoted different numbers for the same card, and it called a
+    ``repo.update_item`` that does not exist (every would-be update raised).
+
+    Graded slabs are skipped on purpose: catalog figures are UNGRADED prices,
+    and a slab's value comes from its manual graded figure instead.
     """
     items = repo.list_inventory()
-    # Only process available items with a card_id
+    # Only process available raw items with a card_id — the catalog price is an
+    # ungraded, per-finish figure, so only raw singles can consume it.
     eligible = [
         i for i in items
         if i.status == ItemStatus.AVAILABLE
+        and i.kind == "raw"
         and getattr(i, "card_id", None) is not None
     ]
 
     checked = 0
     updated = 0
+    catalog_cache: dict[str, Any] = {}
 
     for item in eligible:
-        card_id = getattr(item, "card_id", None)
-        if not card_id:
-            continue
-
-        card = repo.get_catalog_card(card_id)
-        if card is None or not card.prices:
-            checked += 1
-            continue
-
-        # Find the best market price for this item's finish
-        finish = getattr(item, "finish", "normal")
-        finish_price = card.prices.get(finish)
-        if finish_price is None:
-            # Try first available finish
-            finish_price = next(iter(card.prices.values()), None)
-
-        if finish_price is None or finish_price.market is None:
-            checked += 1
-            continue
-
-        new_market = finish_price.market
-        current = item.current_market_value
-
-        # Update if missing or different
-        if current is None or current != new_market:
-            repo.update_item(item.item_id, {"current_market_value": new_market})
-            updated += 1
-
         checked += 1
+        card_id = item.card_id
+
+        if card_id not in catalog_cache:
+            catalog_cache[card_id] = repo.get_catalog_card(card_id)
+        card = catalog_cache[card_id]
+        if card is None:
+            continue
+
+        value = _market_price(card, item.finish)
+        if value is None:
+            continue
+
+        value, value_note = apply_condition_adjustment(
+            value, item.condition, item.condition_modifier,
+        )
+
+        if value == item.current_market_value:
+            continue
+
+        update_fields: dict[str, Any] = {"current_market_value": value}
+        if value_note is not None:
+            update_fields["value_note"] = value_note
+        repo.put_inventory_item(item.model_copy(update=update_fields))
+        updated += 1
 
     return {
         "checked": checked,
@@ -566,14 +661,96 @@ def admin_resolve_card_images(
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _node_name(item: InventoryItem) -> str:
+    """Best human label for an item, whatever kind it is."""
+    return (
+        getattr(item, "display_name", None)
+        or getattr(item, "product_name", None)
+        or ""
+    )
+
+
+_DISPOSAL_TYPES = ("sale", "trade_out")
+
+
+def _disposal_event(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The LAST event that took an item out of stock, or ``None`` if still held.
+
+    ``get_timeline_events`` already returns events in date order, so the last
+    disposal wins — an item that was sold, returned and sold again reports the
+    disposal that actually stuck.
+    """
+    disposals = [e for e in events if e.get("type") in _DISPOSAL_TYPES]
+    return disposals[-1] if disposals else None
+
+
+def _event_amount(event: dict[str, Any]) -> Decimal | None:
+    """The event's amount as a Decimal (DynamoDB may hand back str or Decimal)."""
+    amount = event.get("amount")
+    if amount is None:
+        return None
+    try:
+        return Decimal(str(amount)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _split_combined_condition(body: dict[str, Any]) -> dict[str, Any]:
+    """Expand a display ``condition`` (``"LP-"``) into the two stored fields.
+
+    Every human-facing surface speaks one combined string; storage is always
+    ``condition`` + ``condition_modifier``. Splitting here means the admin UI
+    can POST/PUT exactly what it renders. A body carrying a bare tier is
+    untouched apart from normalization, and an explicit ``condition_modifier``
+    in the same body still wins (the caller was explicit).
+    """
+    raw = body.get("condition")
+    if not isinstance(raw, str):
+        return body
+
+    try:
+        tier, modifier = normalize_condition(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid condition: {raw!r}") from exc
+
+    updated = dict(body)
+    updated["condition"] = tier.value
+    if "condition_modifier" not in updated:
+        updated["condition_modifier"] = modifier.value if modifier else None
+    return updated
+
+
+def _parse_condition_query(value: str) -> tuple[Condition, ConditionModifier | None]:
+    """Parse a ``condition`` query value, 422-ing instead of 500-ing on garbage.
+
+    The param used to be typed ``Condition``, which made the perfectly ordinary
+    display values ``LP+``/``LP-`` a validation error the admin UI could not
+    recover from.
+    """
+    try:
+        return normalize_condition(value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid condition '{value}'. Expected one of NM, LP+, LP, LP-, MP, HP, DMG.",
+        ) from exc
+
+
+def _effective_price(item: InventoryItem) -> Decimal | None:
+    """What an item is worth for filtering: market value, else what it cost."""
+    market = item.current_market_value
+    return market if market is not None else item.cost_basis
+
+
 def _filter_by_catalog(
     items: list[InventoryItem],
     repo: InventoryRepository,
     *,
     card_number: str | None = None,
     artist: str | None = None,
+    set_name: str | None = None,
 ) -> list[InventoryItem]:
-    """Filter items by catalog card attributes (card_number, artist).
+    """Filter items by catalog card attributes (card_number, artist, set_name).
 
     Items without a card_id are excluded when these filters are active.
     Catalog cards are fetched in batch to avoid N+1 queries.
@@ -613,6 +790,12 @@ def _filter_by_catalog(
         if artist is not None:
             card_artist = getattr(card, "artist", None) or ""
             if artist.lower() not in card_artist.lower():
+                continue
+
+        # Apply set_name filter (case-insensitive substring)
+        if set_name is not None:
+            card_set_name = getattr(card, "set_name", None) or ""
+            if set_name.lower() not in card_set_name.lower():
                 continue
 
         result.append(item)
@@ -674,8 +857,7 @@ def _sort_admin_results(
                 return float("inf") if not reverse else float("-inf")
             return float(val)
         elif field in ("name", "display_name"):
-            display = getattr(item, "display_name", None) or getattr(item, "product_name", None) or ""
-            return display.lower()
+            return _node_name(item).lower()
         elif field == "status":
             return str(item.status)
         elif field == "location":

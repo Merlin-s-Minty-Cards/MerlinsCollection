@@ -73,6 +73,37 @@ class ConditionModifier(StrEnum):
     MINUS = "-"
 
 
+def normalize_condition(value: str) -> tuple[Condition, ConditionModifier | None]:
+    """Split a display condition string (``"LP+"``) into its two stored fields.
+
+    Storage is ALWAYS two fields — ``condition`` (the tier) plus
+    ``condition_modifier`` — but every human-facing surface writes and reads one
+    combined string (spec §14). This is the server-side mirror of the frontend's
+    ``parseCondition`` (``frontend/lib/constants.ts``): a trailing ``+``/``-`` is
+    the modifier, everything before it is the tier. Casing and surrounding
+    whitespace are forgiving; anything else raises ``ValueError`` rather than
+    silently degrading to a tier the admin did not pick.
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"Invalid condition: {value!r}")
+
+    text = value.strip().upper()
+    if not text:
+        raise ValueError("Condition must not be empty")
+
+    modifier: ConditionModifier | None = None
+    if text[-1] in ("+", "-"):
+        modifier = ConditionModifier(text[-1])
+        text = text[:-1].strip()
+
+    try:
+        condition = Condition(text)
+    except ValueError as exc:
+        raise ValueError(f"Invalid condition: {value!r}") from exc
+
+    return condition, modifier
+
+
 class GradingCompany(StrEnum):
     """Third-party grading companies we track for slabbed cards."""
 
