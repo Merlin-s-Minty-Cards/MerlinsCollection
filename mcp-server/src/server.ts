@@ -45,7 +45,7 @@ export function buildServer(repo: InventoryRepository): McpServer {
       inputSchema: {
         name: z.string().optional().describe("Partial card name to match"),
         set_id: z.string().optional().describe("Set identifier (e.g. sv1)"),
-        condition: z.string().optional().describe("NM, LP, MP, HP, or DMG"),
+        condition: z.string().optional().describe("NM, LP+, LP, LP-, MP, HP, or DMG"),
         min_value: z.number().optional(),
         max_value: z.number().optional(),
         language: z.string().optional().describe("Print language: EN or JP"),
