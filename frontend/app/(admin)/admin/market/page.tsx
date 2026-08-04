@@ -1,7 +1,7 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
-import { TrendingUp, Plus, Trash2, Star, Search as SearchIcon } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { TrendingUp, Trash2, Star, RefreshCw } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import SearchInput from '@/components/admin/shared/SearchInput'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
@@ -54,6 +54,88 @@ const CONFIDENCE_STYLES: Record<ConfidenceLevel, { bg: string; text: string; lab
   low: { bg: 'bg-red-500/15 border-red-500/30', text: 'text-red-400', label: 'Low' },
 }
 
+// --- Coverage banner ---------------------------------------------------
+
+export interface UnmatchedItem {
+  item_id: string
+  name: string
+}
+
+export interface MarketCoverage {
+  total_items: number
+  items_with_market_value: number
+  catalog_cards: number
+  catalog_cards_with_prices: number
+  unmatched_sample: UnmatchedItem[]
+}
+
+export interface CoverageBannerState {
+  summary: string
+  catalogEmpty: boolean
+  showUnmatched: boolean
+  unmatchedItems: UnmatchedItem[]
+}
+
+/** Pure decision logic for the coverage banner — extracted so it's testable without mounting the page. */
+export function getCoverageBannerState(coverage: MarketCoverage): CoverageBannerState {
+  const {
+    items_with_market_value,
+    total_items,
+    catalog_cards_with_prices,
+    catalog_cards,
+    unmatched_sample,
+  } = coverage
+
+  const summary = `${items_with_market_value}/${total_items} items priced · catalog ${catalog_cards_with_prices}/${catalog_cards} cards priced`
+  const catalogEmpty = catalog_cards === 0
+  const ratio = total_items > 0 ? items_with_market_value / total_items : 0
+
+  return {
+    summary,
+    catalogEmpty,
+    showUnmatched: ratio < 0.5,
+    unmatchedItems: (unmatched_sample ?? []).slice(0, 10),
+  }
+}
+
+// --- Sync status ---------------------------------------------------------
+
+type SyncState = 'idle' | 'running' | 'completed' | 'failed'
+
+interface SyncStatus {
+  state: SyncState
+  started_at: string | null
+  finished_at: string | null
+  priced_cards: number | null
+  updated_items: number | null
+  error: string | null
+}
+
+const IDLE_SYNC_STATUS: SyncStatus = {
+  state: 'idle',
+  started_at: null,
+  finished_at: null,
+  priced_cards: null,
+  updated_items: null,
+  error: null,
+}
+
+// --- Trend confidence ------------------------------------------------------
+
+interface ConfidenceResponse {
+  level: ConfidenceLevel
+  points: number
+  volatility_pct: string
+  trend_pct: string
+  reason: string
+}
+
+const TREND_CONFIDENCE_STYLES: Record<ConfidenceLevel, { bg: string; text: string; label: string }> = {
+  high: { bg: 'bg-mint/15 border-mint/30', text: 'text-mint', label: 'High confidence' },
+  medium: { bg: 'bg-amber-500/15 border-amber-500/30', text: 'text-amber-400', label: 'Medium confidence' },
+  low: { bg: 'bg-pine-700/40 border-pine-600/40', text: 'text-pine-300', label: 'Low confidence' },
+}
+
 export default function AdminMarketPage() {
   const api = useAdminApi()
   const [activeTab, setActiveTab] = useState<Tab>('search')
@@ -71,6 +153,69 @@ export default function AdminMarketPage() {
   // Watchlist
   const [watchlist, setWatchlist] = useState<WatchlistEntry[]>([])
   const [loadingWatchlist, setLoadingWatchlist] = useState(false)
+
+  // Coverage banner
+  const [coverage, setCoverage] = useState<MarketCoverage | null>(null)
+
+  // Sync
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>(IDLE_SYNC_STATUS)
+  const [syncTriggerError, setSyncTriggerError] = useState<string | null>(null)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // Trend confidence
+  const [confidence, setConfidence] = useState<ConfidenceResponse | null>(null)
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current)
+      pollRef.current = null
+    }
+  }, [])
+
+  const loadCoverage = useCallback(async () => {
+    if (!api.isAuthenticated) return
+    try {
+      const res = await api.get<MarketCoverage>('/market/coverage')
+      setCoverage(res)
+    } catch { setCoverage(null) }
+  }, [api])
+
+  useEffect(() => {
+    loadCoverage()
+  }, [loadCoverage])
+
+  const pollSyncStatus = useCallback(async () => {
+    try {
+      const status = await api.get<SyncStatus>('/market/sync/status')
+      setSyncStatus(status)
+      if (status.state !== 'running') {
+        stopPolling()
+        if (status.state === 'completed') {
+          loadCoverage()
+        }
+      }
+    } catch {
+      stopPolling()
+    }
+  }, [api, loadCoverage, stopPolling])
+
+  useEffect(() => stopPolling, [stopPolling])
+
+  const triggerSync = async () => {
+    setSyncTriggerError(null)
+    try {
+      await api.post('/market/sync')
+      setSyncStatus((prev) => ({ ...prev, state: 'running' }))
+      stopPolling()
+      pollRef.current = setInterval(pollSyncStatus, 3000)
+    } catch (err) {
+      if (err instanceof AdminApiError && err.status === 409) {
+        setSyncTriggerError('A sync is already running')
+      } else {
+        setSyncTriggerError(err instanceof AdminApiError ? (err.detail ?? 'Failed to start sync') : 'Failed to start sync')
+      }
+    }
+  }
 
   const searchCatalog = useCallback(async (q: string) => {
     if (!q.trim() || !api.isAuthenticated) { setResults([]); return }
@@ -90,11 +235,17 @@ export default function AdminMarketPage() {
   const loadPriceHistory = async (card: CatalogCard) => {
     setSelectedCard(card)
     setLoadingHistory(true)
+    setConfidence(null)
     try {
       const res = await api.get<{ card_id: string; points: PricePoint[] }>(`/market/card/${card.card_id}/trend`, { days: 90 })
       setPriceHistory(res.points)
     } catch { setPriceHistory([]) }
     finally { setLoadingHistory(false) }
+
+    try {
+      const conf = await api.get<ConfidenceResponse>(`/market/card/${card.card_id}/confidence`, { days: 90 })
+      setConfidence(conf)
+    } catch { setConfidence(null) }
   }
 
   const addToWatchlist = async (card: CatalogCard) => {
@@ -142,6 +293,56 @@ export default function AdminMarketPage() {
         <h1 className="text-xl font-semibold text-pine-100">Catalog & Watchlist</h1>
       </header>
 
+      {/* Coverage banner */}
+      {coverage && (() => {
+        const banner = getCoverageBannerState(coverage)
+        return (
+          <div className="vault-panel rounded-xl p-3 mb-6 text-xs space-y-2">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-pine-300">{banner.summary}</p>
+              <button
+                type="button"
+                onClick={triggerSync}
+                disabled={syncStatus.state === 'running'}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium text-mint bg-mint/10 border border-mint/25 hover:bg-mint/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
+              >
+                <RefreshCw size={12} className={syncStatus.state === 'running' ? 'animate-spin' : ''} />
+                Sync Prices
+              </button>
+            </div>
+
+            {banner.catalogEmpty && (
+              <p className="text-amber-400">
+                Catalog is empty — run backend/scripts/seed_catalog.py once, then press Sync Prices.
+              </p>
+            )}
+
+            {syncTriggerError && <p className="text-red-400">{syncTriggerError}</p>}
+
+            {syncStatus.state === 'completed' && (
+              <p className="text-mint">
+                Priced {syncStatus.priced_cards} cards, updated {syncStatus.updated_items} items
+              </p>
+            )}
+
+            {syncStatus.state === 'failed' && (
+              <p className="text-red-400">{syncStatus.error}</p>
+            )}
+
+            {banner.showUnmatched && banner.unmatchedItems.length > 0 && (
+              <details>
+                <summary className="cursor-pointer text-pine-400 select-none">Unmatched items</summary>
+                <ul className="mt-1.5 space-y-0.5 text-pine-500 pl-3">
+                  {banner.unmatchedItems.map((item) => (
+                    <li key={item.item_id}>{item.name}</li>
+                  ))}
+                </ul>
+              </details>
+            )}
+          </div>
+        )
+      })()}
+
       {/* Tabs */}
       <div className="flex gap-1 mb-6 border-b border-pine-700/40 pb-px">
         {([['search', 'Search'], ['watchlist', 'Watchlist']] as [Tab, string][]).map(([key, label]) => (
@@ -173,8 +374,8 @@ export default function AdminMarketPage() {
               ) : (
                 <div className="divide-y divide-pine-700/25">
                   {results.map((card) => {
-                    const confidence = getMatchConfidence(query, card.name)
-                    const style = CONFIDENCE_STYLES[confidence]
+                    const matchConfidence = getMatchConfidence(query, card.name)
+                    const style = CONFIDENCE_STYLES[matchConfidence]
                     return (
                       <button
                         key={card.card_id}
@@ -185,7 +386,10 @@ export default function AdminMarketPage() {
                         <div className="min-w-0 flex-1">
                           <div className="text-xs text-pine-100 truncate flex items-center gap-2">
                             {card.name}
-                            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${style.bg} ${style.text} flex-shrink-0`}>
+                            <span
+                              title="name match quality"
+                              className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${style.bg} ${style.text} flex-shrink-0`}
+                            >
                               {style.label}
                             </span>
                           </div>
@@ -224,7 +428,17 @@ export default function AdminMarketPage() {
 
                 {/* Price History Table */}
                 <div>
-                  <h4 className="text-[11px] text-pine-400 uppercase tracking-wider mb-2">Price History (90d)</h4>
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-[11px] text-pine-400 uppercase tracking-wider">Price History (90d)</h4>
+                    {confidence && (
+                      <span
+                        title={confidence.reason}
+                        className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${TREND_CONFIDENCE_STYLES[confidence.level].bg} ${TREND_CONFIDENCE_STYLES[confidence.level].text}`}
+                      >
+                        {TREND_CONFIDENCE_STYLES[confidence.level].label}
+                      </span>
+                    )}
+                  </div>
                   {loadingHistory ? (
                     <div className="text-xs text-pine-400">Loading…</div>
                   ) : priceHistory.length === 0 ? (
