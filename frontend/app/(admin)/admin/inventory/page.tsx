@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { Plus, Trash2, Pencil } from 'lucide-react'
+import { Plus, Trash2, Pencil, RefreshCw } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { CONDITION_OPTIONS as COND_VALUES, LOCATION_OPTIONS as LOC_VALUES } from '@/lib/constants'
 import { useCardImages } from '@/lib/use-card-images'
@@ -69,6 +69,10 @@ export default function AdminInventoryPage() {
 
   // Detail modal
   const [detailItem, setDetailItem] = useState<InventoryItem | null>(null)
+
+  // Market price refresh
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshResult, setRefreshResult] = useState<string | null>(null)
 
   // Resolve card images
   const cardIds = items.map((i) => i.card_id as string | undefined)
@@ -146,6 +150,20 @@ export default function AdminInventoryPage() {
     }
   }
 
+  const handleRefreshPrices = async () => {
+    setRefreshing(true)
+    setRefreshResult(null)
+    try {
+      const res = await api.post<{ checked: number; updated: number; total_eligible: number }>('/inventory/refresh-prices', {})
+      setRefreshResult(`Updated ${res.updated} of ${res.checked} items checked (${res.total_eligible} eligible)`)
+      if (res.updated > 0) fetchItems()
+    } catch (err) {
+      setRefreshResult(err instanceof AdminApiError ? (err.detail ?? 'Refresh failed') : 'Refresh failed')
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
   const columns: Column<InventoryItem>[] = [
     // Image column (conditionally shown)
     ...(showImages
@@ -153,12 +171,12 @@ export default function AdminInventoryPage() {
           {
             key: '_image',
             label: '',
-            className: 'w-12',
+            className: 'w-24',
             render: (item: InventoryItem) => (
               <CardImage
                 imageUrl={getImageUrl(item.card_id)}
                 alt={item.display_name || item.product_name || 'card'}
-                size="sm"
+                size="md"
               />
             ),
           },
@@ -314,14 +332,25 @@ export default function AdminInventoryPage() {
             <span className="ml-2 text-sm font-normal text-pine-400">({total})</span>
           </h1>
         </div>
-        <button
-          type="button"
-          onClick={() => setShowCreate(true)}
-          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium bg-mint/15 text-mint border border-mint/30 hover:bg-mint/25 transition-colors"
-        >
-          <Plus size={14} />
-          Add Item
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleRefreshPrices}
+            disabled={refreshing}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium text-pine-300 border border-pine-700/40 hover:border-pine-600 hover:text-pine-100 disabled:opacity-40 transition-colors"
+          >
+            <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
+            {refreshing ? 'Refreshing…' : 'Refresh Prices'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowCreate(true)}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium bg-mint/15 text-mint border border-mint/30 hover:bg-mint/25 transition-colors"
+          >
+            <Plus size={14} />
+            Add Item
+          </button>
+        </div>
       </header>
 
       {/* Filters */}
@@ -346,6 +375,22 @@ export default function AdminInventoryPage() {
           <ImageToggle showImages={showImages} onToggle={() => setShowImages(!showImages)} label="Images" />
         </div>
       </div>
+
+      {/* Refresh result toast */}
+      {refreshResult && (
+        <div className="flex items-center gap-2 text-xs text-mint bg-mint/5 border border-mint/20 rounded-lg px-3 py-2 mb-4">
+          <RefreshCw size={14} />
+          {refreshResult}
+          <button
+            type="button"
+            onClick={() => setRefreshResult(null)}
+            className="ml-auto text-pine-500 hover:text-pine-300"
+            aria-label="Dismiss"
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       {/* Table */}
       <DataTable

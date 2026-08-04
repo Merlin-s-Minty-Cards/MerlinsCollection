@@ -310,7 +310,7 @@ export default function AdminSellPage() {
                   >
                     <div className="flex items-center gap-2 min-w-0">
                       {showImages && (
-                        <CardImage imageUrl={getImageUrl(item.card_id)} alt={item.display_name || 'card'} size="sm" />
+                        <CardImage imageUrl={getImageUrl(item.card_id)} alt={item.display_name || 'card'} size="md" />
                       )}
                       <div className="min-w-0">
                         <div className="text-xs text-pine-100 truncate">
@@ -461,7 +461,7 @@ export default function AdminSellPage() {
                     >
                       <div className="flex items-center gap-2 min-w-0 flex-1">
                         {showImages && (
-                          <CardImage imageUrl={getImageUrl(item.card_id)} alt={item.name} size="sm" />
+                          <CardImage imageUrl={getImageUrl(item.card_id)} alt={item.name} size="md" />
                         )}
                         <div className="min-w-0 flex-1">
                           <div className="text-xs text-pine-100 truncate">{item.name}</div>

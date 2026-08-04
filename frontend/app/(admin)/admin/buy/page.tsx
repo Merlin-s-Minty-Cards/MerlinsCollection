@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { ShoppingBag, Plus, X, Check, Banknote, CreditCard, Smartphone, DollarSign, Calendar, Search } from 'lucide-react'
+import { ShoppingBag, Plus, X, Check, Banknote, CreditCard, Smartphone, DollarSign, Calendar, Search, AlertTriangle } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { CONDITION_OPTIONS, LOCATION_OPTIONS, parseCondition } from '@/lib/constants'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
@@ -18,6 +18,7 @@ interface BuyItem {
   card_number: string
   buy_pct: string
   image_url?: string | null
+  is_catalog_match?: boolean
 }
 
 interface CatalogCard {
@@ -49,6 +50,7 @@ export default function AdminBuyPage() {
   const [catalogResults, setCatalogResults] = useState<CatalogCard[]>([])
   const [searchingCatalog, setSearchingCatalog] = useState(false)
   const [selectedCard, setSelectedCard] = useState<CatalogCard | null>(null)
+  const [catalogSearchDone, setCatalogSearchDone] = useState(false)
 
   // Form for adding
   const [form, setForm] = useState<BuyItem>({
@@ -67,14 +69,17 @@ export default function AdminBuyPage() {
   const searchCatalog = useCallback(async (q: string) => {
     if (!q.trim() || !api.isAuthenticated) {
       setCatalogResults([])
+      setCatalogSearchDone(false)
       return
     }
     setSearchingCatalog(true)
     try {
       const res = await api.get<{ items: CatalogCard[]; total: number }>('/market/search', { name: q })
       setCatalogResults(res.items.slice(0, 12))
+      setCatalogSearchDone(true)
     } catch {
       setCatalogResults([])
+      setCatalogSearchDone(true)
     } finally {
       setSearchingCatalog(false)
     }
@@ -92,6 +97,7 @@ export default function AdminBuyPage() {
   // Select a catalog card to pre-fill form
   const selectCatalogCard = (card: CatalogCard) => {
     setSelectedCard(card)
+    setCatalogSearchDone(false)
     // Extract best market price from prices dict
     let marketPrice = ''
     if (card.prices) {
@@ -182,9 +188,10 @@ export default function AdminBuyPage() {
         location: form.location,
         number: form.card_number || null,
       })
-      setItems((prev) => [...prev, { ...form }])
+      setItems((prev) => [...prev, { ...form, is_catalog_match: !!selectedCard }])
       setForm({ name: '', condition: 'NM', buy_price: '', market_value: '', set_name: '', location: 'toploader', card_number: '', buy_pct: '', image_url: null })
       setSelectedCard(null)
+      setCatalogSearchDone(false)
     } catch (err) {
       alert(err instanceof AdminApiError ? err.detail : 'Failed to add item')
     }
@@ -319,6 +326,16 @@ export default function AdminBuyPage() {
                   {searchingCatalog && (
                     <div className="px-3 py-2 text-[10px] text-pine-500">Searching…</div>
                   )}
+                </div>
+              )}
+
+              {/* Unknown card warning */}
+              {!selectedCard && form.name.trim().length >= 3 && catalogSearchDone && catalogResults.length === 0 && !searchingCatalog && (
+                <div className="flex items-center gap-1.5 mt-1.5 px-2 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/20">
+                  <AlertTriangle size={12} className="text-amber-400 flex-shrink-0" />
+                  <span className="text-[10px] text-amber-400">
+                    Unknown card — not found in catalog. You can still add it manually.
+                  </span>
                 </div>
               )}
             </div>
@@ -484,10 +501,18 @@ export default function AdminBuyPage() {
                     <div key={idx} className="flex items-center justify-between px-4 py-2.5">
                       <div className="flex items-center gap-2 min-w-0 flex-1">
                         {item.image_url && (
-                          <CardImage imageUrl={item.image_url} alt={item.name} size="sm" />
+                          <CardImage imageUrl={item.image_url} alt={item.name} size="md" />
                         )}
                         <div className="min-w-0 flex-1">
-                          <div className="text-xs text-pine-100 truncate">{item.name}</div>
+                          <div className="text-xs text-pine-100 truncate flex items-center gap-1.5">
+                            {item.name}
+                            {!item.is_catalog_match && (
+                              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/20 text-[9px] text-amber-400 font-medium flex-shrink-0">
+                                <AlertTriangle size={9} />
+                                Unknown
+                              </span>
+                            )}
+                          </div>
                           <div className="text-[10px] text-pine-400">
                             {item.condition} {item.set_name && `· ${item.set_name}`}
                             {item.card_number && ` · #${item.card_number}`}

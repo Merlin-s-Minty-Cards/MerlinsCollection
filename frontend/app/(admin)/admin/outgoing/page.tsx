@@ -227,12 +227,12 @@ export default function AdminOutgoingPage() {
           {
             key: '_image',
             label: '',
-            className: 'w-12',
+            className: 'w-24',
             render: (item: OutgoingItem) => (
               <CardImage
                 imageUrl={getImageUrl(item.card_id)}
                 alt={getItemName(item)}
-                size="sm"
+                size="md"
               />
             ),
           },

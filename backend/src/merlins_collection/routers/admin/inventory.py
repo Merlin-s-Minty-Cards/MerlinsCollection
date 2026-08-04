@@ -475,6 +475,65 @@ def admin_item_price_chart(
 # Card images (bulk resolve)
 # ---------------------------------------------------------------------------
 
+@router.post("/refresh-prices")
+def admin_refresh_market_prices(
+    repo: InventoryRepository = Depends(get_repo),
+) -> dict[str, Any]:
+    """Refresh current_market_value for items missing it or linked to catalog.
+
+    Iterates available items with a card_id, looks up the catalog card's latest
+    market price for the item's finish, and updates the item if the catalog
+    has a newer price. Returns count of items checked and updated.
+    """
+    items = repo.list_inventory()
+    # Only process available items with a card_id
+    eligible = [
+        i for i in items
+        if i.status == ItemStatus.AVAILABLE
+        and getattr(i, "card_id", None) is not None
+    ]
+
+    checked = 0
+    updated = 0
+
+    for item in eligible:
+        card_id = getattr(item, "card_id", None)
+        if not card_id:
+            continue
+
+        card = repo.get_catalog_card(card_id)
+        if card is None or not card.prices:
+            checked += 1
+            continue
+
+        # Find the best market price for this item's finish
+        finish = getattr(item, "finish", "normal")
+        finish_price = card.prices.get(finish)
+        if finish_price is None:
+            # Try first available finish
+            finish_price = next(iter(card.prices.values()), None)
+
+        if finish_price is None or finish_price.market is None:
+            checked += 1
+            continue
+
+        new_market = finish_price.market
+        current = item.current_market_value
+
+        # Update if missing or different
+        if current is None or current != new_market:
+            repo.update_item(item.item_id, {"current_market_value": new_market})
+            updated += 1
+
+        checked += 1
+
+    return {
+        "checked": checked,
+        "updated": updated,
+        "total_eligible": len(eligible),
+    }
+
+
 @router.post("/card-images")
 def admin_resolve_card_images(
     body: dict[str, Any],

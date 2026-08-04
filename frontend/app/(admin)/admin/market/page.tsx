@@ -34,6 +34,26 @@ interface WatchlistEntry {
 
 type Tab = 'search' | 'watchlist'
 
+type ConfidenceLevel = 'high' | 'medium' | 'low'
+
+function getMatchConfidence(query: string, cardName: string): ConfidenceLevel {
+  const q = query.trim().toLowerCase()
+  const name = cardName.toLowerCase()
+  if (name === q) return 'high'
+  if (name.startsWith(q) || q.startsWith(name)) return 'high'
+  // Check if the query words all appear in the name
+  const qWords = q.split(/\s+/).filter(Boolean)
+  const allWordsMatch = qWords.every((w) => name.includes(w))
+  if (allWordsMatch && qWords.length > 0) return 'medium'
+  return 'low'
+}
+
+const CONFIDENCE_STYLES: Record<ConfidenceLevel, { bg: string; text: string; label: string }> = {
+  high: { bg: 'bg-mint/15 border-mint/30', text: 'text-mint', label: 'High' },
+  medium: { bg: 'bg-amber-500/15 border-amber-500/30', text: 'text-amber-400', label: 'Med' },
+  low: { bg: 'bg-red-500/15 border-red-500/30', text: 'text-red-400', label: 'Low' },
+}
+
 export default function AdminMarketPage() {
   const api = useAdminApi()
   const [activeTab, setActiveTab] = useState<Tab>('search')
@@ -152,27 +172,36 @@ export default function AdminMarketPage() {
                 <div className="p-4 text-xs text-pine-500">No cards found in catalog</div>
               ) : (
                 <div className="divide-y divide-pine-700/25">
-                  {results.map((card) => (
-                    <button
-                      key={card.card_id}
-                      type="button"
-                      onClick={() => loadPriceHistory(card)}
-                      className={`w-full flex items-center justify-between px-3 py-2.5 text-left hover:bg-pine-800/50 transition-colors ${selectedCard?.card_id === card.card_id ? 'bg-pine-800/60' : ''}`}
-                    >
-                      <div className="min-w-0">
-                        <div className="text-xs text-pine-100 truncate">{card.name}</div>
-                        <div className="text-[10px] text-pine-400">{card.set_name || card.set_id} {card.rarity && `· ${card.rarity}`}</div>
-                      </div>
+                  {results.map((card) => {
+                    const confidence = getMatchConfidence(query, card.name)
+                    const style = CONFIDENCE_STYLES[confidence]
+                    return (
                       <button
+                        key={card.card_id}
                         type="button"
-                        onClick={(e) => { e.stopPropagation(); addToWatchlist(card) }}
-                        className="p-1 text-pine-500 hover:text-amber-400 transition-colors shrink-0"
-                        title="Add to watchlist"
+                        onClick={() => loadPriceHistory(card)}
+                        className={`w-full flex items-center justify-between px-3 py-2.5 text-left hover:bg-pine-800/50 transition-colors ${selectedCard?.card_id === card.card_id ? 'bg-pine-800/60' : ''}`}
                       >
-                        <Star size={13} />
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs text-pine-100 truncate flex items-center gap-2">
+                            {card.name}
+                            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${style.bg} ${style.text} flex-shrink-0`}>
+                              {style.label}
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-pine-400">{card.set_name || card.set_id} {card.rarity && `· ${card.rarity}`}</div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); addToWatchlist(card) }}
+                          className="p-1 text-pine-500 hover:text-amber-400 transition-colors shrink-0"
+                          title="Add to watchlist"
+                        >
+                          <Star size={13} />
+                        </button>
                       </button>
-                    </button>
-                  ))}
+                    )
+                  })}
                 </div>
               )}
             </div>

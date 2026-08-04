@@ -180,12 +180,12 @@ export default function AdminShowPrepPage() {
           {
             key: '_image',
             label: '',
-            className: 'w-12',
+            className: 'w-24',
             render: (item: MispricedItem) => (
               <CardImage
                 imageUrl={getImageUrl(item.card_id)}
                 alt={item.name || 'card'}
-                size="sm"
+                size="md"
               />
             ),
           },

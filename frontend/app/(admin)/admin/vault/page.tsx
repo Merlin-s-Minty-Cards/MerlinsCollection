@@ -190,7 +190,7 @@ export default function AdminVaultPage() {
                     <tr key={item.item_id} className="hover:bg-pine-800/30 transition-colors cursor-pointer" onClick={() => setDetailItem(item)}>
                       {showImages && (
                         <td className="px-2 py-2.5">
-                          <CardImage imageUrl={getImageUrl(item.card_id)} alt={item.name || 'card'} size="sm" />
+                          <CardImage imageUrl={getImageUrl(item.card_id)} alt={item.name || 'card'} size="md" />
                         </td>
                       )}
                       <td className="px-4 py-2.5">

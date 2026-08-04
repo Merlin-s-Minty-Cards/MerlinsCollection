@@ -5,14 +5,15 @@ import { useState } from 'react'
 interface CardImageProps {
   imageUrl?: string | null
   alt: string
-  size?: 'sm' | 'md' | 'lg'
+  size?: 'sm' | 'md' | 'lg' | 'xl'
   className?: string
 }
 
 const SIZE_CLASSES = {
-  sm: 'w-10 h-14',
-  md: 'w-16 h-22',
-  lg: 'w-24 h-34',
+  sm: 'w-12 h-[4.25rem]',
+  md: 'w-20 h-28',
+  lg: 'w-32 h-44',
+  xl: 'w-48 h-[16.5rem]',
 }
 
 /**

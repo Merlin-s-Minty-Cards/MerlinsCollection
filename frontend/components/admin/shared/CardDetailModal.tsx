@@ -124,17 +124,14 @@ export default function CardDetailModal({
       aria-label={`Details for ${name}`}
     >
       <div
-        className="relative w-full max-w-2xl max-h-[90vh] overflow-y-auto vault-panel rounded-2xl border border-pine-700/50 shadow-2xl mx-4"
+        className="relative w-full max-w-4xl max-h-[90vh] overflow-y-auto vault-panel rounded-2xl border border-pine-700/50 shadow-2xl mx-4"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div className="sticky top-0 z-10 flex items-center justify-between border-b border-pine-700/40 bg-pine-900/95 backdrop-blur px-5 py-4 rounded-t-2xl">
-          <div className="flex items-center gap-3 min-w-0">
-            <CardImage imageUrl={imageUrl} alt={name} size="sm" />
-            <div className="min-w-0">
-              <h2 className="text-base font-semibold text-pine-100 truncate">{name}</h2>
-              <p className="text-[10px] text-pine-500 font-mono">{kind} &middot; {itemId}</p>
-            </div>
+          <div className="min-w-0">
+            <h2 className="text-base font-semibold text-pine-100 truncate">{name}</h2>
+            <p className="text-[10px] text-pine-500 font-mono">{kind} &middot; {itemId}</p>
           </div>
           <button
             type="button"
@@ -146,7 +143,14 @@ export default function CardDetailModal({
           </button>
         </div>
 
-        <div className="p-5 space-y-5">
+        <div className="p-5 flex flex-col md:flex-row gap-6">
+          {/* Left: Large Card Image */}
+          <div className="flex-shrink-0 flex items-start justify-center">
+            <CardImage imageUrl={imageUrl} alt={name} size="xl" className="rounded-xl shadow-lg" />
+          </div>
+
+          {/* Right: Details */}
+          <div className="flex-1 min-w-0 space-y-5">
           {/* Error banner */}
           {error && (
             <div className="text-xs text-red-400 bg-red-400/10 border border-red-400/20 rounded px-3 py-2">
@@ -288,6 +292,7 @@ export default function CardDetailModal({
               </a>
             ) : null}
           </section>
+          </div>
         </div>
       </div>
     </div>
