@@ -3,6 +3,10 @@
 POST /admin/shows/{show_id}/analytics/generate
 GET /admin/shows/{show_id}/analytics
 GET /admin/analytics/by-date
+GET /admin/shows
+GET /admin/analytics/dates
+GET /admin/analytics/daily
+GET /admin/transactions
 """
 
 from datetime import date
@@ -17,6 +21,7 @@ from merlins_collection.models.business import (
     Transaction,
     TransactionType,
 )
+from merlins_collection.models.catalog import PricePoint
 
 
 # ---- fixtures ----
@@ -181,3 +186,53 @@ class TestAnalyticsByDate:
         )
         assert resp.status_code == 200
         assert resp.json() == []
+
+
+# ===========================================================================
+# Repository bug fix: get_price_history date range with finish unspecified
+# ===========================================================================
+# Lives here because test_analytics.py is this task's owned test file; the
+# endpoint it silently breaks (GET /admin/market/card/{id}/trend) omits
+# `finish` by default.
+
+class TestPriceHistoryDateRange:
+    def test_get_price_history_date_range_without_finish(self, dynamo_repo):
+        """Raw price keys are ``PRICE#RAW#<finish>#<date>``.
+
+        With ``finish=None`` the date bound must still be applied to the *date*
+        component; previously it was compared against ``PRICE#RAW#<date>``,
+        which sorts before every real key and returned zero points.
+        """
+        repo = dynamo_repo
+        repo.append_price_points([
+            PricePoint(card_id="c1", date=date(2026, 7, 1), source="tcgplayer",
+                       kind="raw", finish="normal", market=Decimal("1.00")),
+            PricePoint(card_id="c1", date=date(2026, 7, 15), source="tcgplayer",
+                       kind="raw", finish="holofoil", market=Decimal("2.00")),
+            PricePoint(card_id="c1", date=date(2026, 6, 1), source="tcgplayer",
+                       kind="raw", finish="normal", market=Decimal("3.00")),
+            PricePoint(card_id="c1", date=date(2026, 8, 1), source="tcgplayer",
+                       kind="raw", finish="holofoil", market=Decimal("4.00")),
+        ])
+
+        got = repo.get_price_history(
+            "c1", start=date(2026, 7, 1), end=date(2026, 7, 31))
+
+        assert {(p.finish, p.date) for p in got} == {
+            ("normal", date(2026, 7, 1)),
+            ("holofoil", date(2026, 7, 15)),
+        }
+
+    def test_get_price_history_date_range_with_finish_still_works(self, dynamo_repo):
+        repo = dynamo_repo
+        repo.append_price_points([
+            PricePoint(card_id="c2", date=date(2026, 7, 5), source="tcgplayer",
+                       kind="raw", finish="normal", market=Decimal("1.00")),
+            PricePoint(card_id="c2", date=date(2026, 8, 5), source="tcgplayer",
+                       kind="raw", finish="normal", market=Decimal("2.00")),
+            PricePoint(card_id="c2", date=date(2026, 7, 6), source="tcgplayer",
+                       kind="raw", finish="holofoil", market=Decimal("9.00")),
+        ])
+        got = repo.get_price_history(
+            "c2", finish="normal", start=date(2026, 7, 1), end=date(2026, 7, 31))
+        assert [(p.finish, p.date) for p in got] == [("normal", date(2026, 7, 5))]

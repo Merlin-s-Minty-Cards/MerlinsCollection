@@ -1332,7 +1332,15 @@ class InventoryRepository:
         ``start``/``end`` bound the date range. For a *graded* range query
         ``grade`` is required — without it the ``SK`` prefix spans grades and the
         ``between`` bounds won't line up with the grade-segmented keys.
+
+        Raw keys are ``PRICE#RAW#<finish>#<date>``, so a ``between`` on the date
+        only lines up when ``finish`` pins the segment before it. With
+        ``finish=None`` the prefix stops at ``PRICE#RAW#`` and every real key
+        sorts *after* ``PRICE#RAW#<date>`` — which is why the range query used to
+        return nothing at all (silently emptying the market price-trend view).
+        In that case the range is filtered on the parsed date instead.
         """
+        date_filter_in_python = False
         if company is not None:
             if grade is not None:
                 prefix = f"PRICE#GRADED#{company}#{_grade_key(grade)}#"
@@ -1342,8 +1350,10 @@ class InventoryRepository:
             prefix = f"PRICE#RAW#{finish}#"
         else:
             prefix = "PRICE#RAW#"
+            date_filter_in_python = True
         pk = Key("PK").eq(f"CARD#{card_id}")
-        if start is not None or end is not None:
+        bounded = start is not None or end is not None
+        if bounded and not date_filter_in_python:
             if company is not None and grade is None:
                 raise ValueError("graded range queries require 'grade'")
             lo = (start or date.min).isoformat()
@@ -1352,7 +1362,12 @@ class InventoryRepository:
         else:
             cond = pk & Key("SK").begins_with(prefix)
         items = self._query_all(KeyConditionExpression=cond)
-        return [PricePoint.model_validate(i) for i in items]
+        points = [PricePoint.model_validate(i) for i in items]
+        if bounded and date_filter_in_python:
+            lo_d = start or date.min
+            hi_d = end or date.max
+            points = [p for p in points if lo_d <= p.date <= hi_d]
+        return points
 
     # ---- catalog full list (admin market search) ----
     def list_all_catalog_cards(self):
