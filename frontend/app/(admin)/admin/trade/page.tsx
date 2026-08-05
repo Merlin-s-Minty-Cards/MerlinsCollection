@@ -1,12 +1,14 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { Plus, X, Check, Eye, EyeOff, DollarSign, Calendar, Banknote, CreditCard, Smartphone, ArrowLeftRight } from 'lucide-react'
+import { Plus, X, Check, Eye, EyeOff, DollarSign, Calendar, Banknote, CreditCard, Smartphone, ArrowLeftRight, Search, AlertTriangle } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
+import CardImage from '@/components/admin/shared/CardImage'
 import SearchInput from '@/components/admin/shared/SearchInput'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
 import { availableModes, canConfirmBasis, type BasisMode } from '@/lib/trade-basis'
+import { buildIncomingLegBody } from '@/lib/trade-incoming-form'
 
 interface TradeLeg {
   item_id?: string
@@ -44,6 +46,17 @@ interface InventoryItem {
   product_name?: string
   current_market_value?: string
   condition?: string
+  [key: string]: unknown
+}
+
+interface IncomingCatalogCard {
+  card_id: string
+  name: string
+  set_id?: string
+  set_name?: string
+  number?: string
+  images?: { small?: string; large?: string }
+  prices?: Record<string, { market?: number | string | null }>
   [key: string]: unknown
 }
 
@@ -91,6 +104,16 @@ export default function AdminTradePage() {
     percentage: '',
   })
 
+  // Catalog lookup for the incoming-leg Name field
+  const [incomingCatalogResults, setIncomingCatalogResults] = useState<IncomingCatalogCard[]>([])
+  const [searchingIncomingCatalog, setSearchingIncomingCatalog] = useState(false)
+  const [selectedIncomingCard, setSelectedIncomingCard] = useState<IncomingCatalogCard | null>(null)
+
+  // Catalog lookup for the incoming-leg Name field
+  const [incomingCatalogResults, setIncomingCatalogResults] = useState<IncomingCatalogCard[]>([])
+  const [searchingIncomingCatalog, setSearchingIncomingCatalog] = useState(false)
+  const [selectedIncomingCard, setSelectedIncomingCard] = useState<IncomingCatalogCard | null>(null)
+
   // Confirm
   const [showConfirm, setShowConfirm] = useState(false)
   const [confirming, setConfirming] = useState(false)
@@ -116,6 +139,28 @@ export default function AdminTradePage() {
     }, 300)
     return () => clearTimeout(timeout)
   }, [outSearch, api.isAuthenticated]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Search catalog for incoming-leg name autofill (round7-handoff §"set not
+  // auto filling for coming in"). Skipped once a card is selected so the
+  // resulting name-fill doesn't immediately re-trigger its own search.
+  useEffect(() => {
+    if (!inForm.name.trim() || !api.isAuthenticated || selectedIncomingCard) {
+      setIncomingCatalogResults([])
+      return
+    }
+    const timeout = setTimeout(async () => {
+      setSearchingIncomingCatalog(true)
+      try {
+        const res = await api.get<{ items: IncomingCatalogCard[] }>('/market/search', { name: inForm.name })
+        setIncomingCatalogResults(res.items.slice(0, 8))
+      } catch {
+        setIncomingCatalogResults([])
+      } finally {
+        setSearchingIncomingCatalog(false)
+      }
+    }, 300)
+    return () => clearTimeout(timeout)
+  }, [inForm.name, selectedIncomingCard, api.isAuthenticated]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch balance
   const fetchBalance = useCallback(async () => {
@@ -193,16 +238,29 @@ export default function AdminTradePage() {
     setInForm((f) => ({ ...f, percentage: newPct, value: val }))
   }
 
+  const selectIncomingCatalogCard = (card: IncomingCatalogCard) => {
+    setSelectedIncomingCard(card)
+    let marketPrice = ''
+    if (card.prices) {
+      for (const finish of Object.values(card.prices)) {
+        if (finish?.market) { marketPrice = String(finish.market); break }
+      }
+    }
+    setInForm((f) => ({
+      ...f,
+      name: card.name,
+      set_name: card.set_name || card.set_id || '',
+      card_number: card.number || '',
+      market_value: marketPrice,
+    }))
+    setIncomingCatalogResults([])
+  }
+
   const addIncoming = async () => {
     if (!tradeId || !inForm.name.trim() || !inForm.value) return
     try {
-      await api.post(`/trades/${tradeId}/incoming`, {
-        name: inForm.name.trim(),
-        card_number: inForm.card_number.trim() || undefined,
-        set_name: inForm.set_name.trim() || undefined,
-        market_value: inForm.market_value ? parseFloat(inForm.market_value) : undefined,
-        agreed_value: parseFloat(inForm.value),
-      })
+      const body = buildIncomingLegBody(inForm, selectedIncomingCard)
+      await api.post(`/trades/${tradeId}/incoming`, body)
       setIncoming((prev) => [...prev, {
         name: inForm.name.trim(),
         card_number: inForm.card_number.trim(),
@@ -211,6 +269,8 @@ export default function AdminTradePage() {
         value: inForm.value,
       }])
       setInForm({ name: '', card_number: '', set_name: '', market_value: '', value: '', percentage: '' })
+      setSelectedIncomingCard(null)
+      setIncomingCatalogResults([])
     } catch (err) {
       alert(err instanceof AdminApiError ? err.detail : 'Failed to add')
     }
@@ -312,6 +372,8 @@ export default function AdminTradePage() {
     setVendorMode(false)
     setBasisMode('transfer')
     setManualBasis('')
+    setSelectedIncomingCard(null)
+    setIncomingCatalogResults([])
   }
 
   const outTotal = outgoing.reduce((s, i) => s + parseFloat(String(i.value || 0)), 0)
@@ -431,14 +493,54 @@ export default function AdminTradePage() {
           {/* Incoming form */}
           <div className="vault-panel rounded-xl p-3 space-y-2">
             <div className="grid grid-cols-6 gap-2">
-              <div className="col-span-2">
+              <div className="col-span-2 relative">
                 <label className="text-[10px] text-pine-400 uppercase tracking-wider block mb-0.5">Card Name</label>
-                <input
-                  value={inForm.name}
-                  onChange={(e) => setInForm((f) => ({ ...f, name: e.target.value }))}
-                  placeholder="Name"
-                  className="vault-field w-full px-2 py-1.5 rounded-lg text-xs"
-                />
+                <div className="relative">
+                  <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-pine-500 pointer-events-none" />
+                  <input
+                    value={inForm.name}
+                    onChange={(e) => {
+                      const val = e.target.value
+                      setInForm((f) => ({ ...f, name: val }))
+                      if (selectedIncomingCard) setSelectedIncomingCard(null)
+                    }}
+                    placeholder="Name"
+                    className="vault-field w-full pl-6 pr-2 py-1.5 rounded-lg text-xs"
+                    autoComplete="off"
+                  />
+                </div>
+                {!selectedIncomingCard && incomingCatalogResults.length > 0 && (
+                  <div className="absolute z-20 left-0 right-0 mt-1 vault-panel rounded-lg border border-pine-700/50 max-h-56 overflow-y-auto vault-scroll shadow-xl">
+                    {incomingCatalogResults.map((card) => (
+                      <button
+                        key={card.card_id}
+                        type="button"
+                        onClick={() => selectIncomingCatalogCard(card)}
+                        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-pine-800/60 transition-colors text-left"
+                      >
+                        {card.images?.small && (
+                          <CardImage imageUrl={card.images.small} alt={card.name} size="sm" />
+                        )}
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs text-pine-100 truncate">{card.name}</div>
+                          <div className="text-[10px] text-pine-400">
+                            {card.set_name || card.set_id}
+                            {card.number && ` · #${card.number}`}
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                    {searchingIncomingCatalog && (
+                      <div className="px-3 py-2 text-[10px] text-pine-500">Searching&hellip;</div>
+                    )}
+                  </div>
+                )}
+                {!selectedIncomingCard && !searchingIncomingCatalog && incomingCatalogResults.length === 0 && inForm.name.trim().length >= 3 && (
+                  <div className="mt-1 flex items-center gap-1.5 text-[10px] text-amber-400">
+                    <AlertTriangle size={11} className="flex-shrink-0" />
+                    No catalog match — fields below can still be filled in manually.
+                  </div>
+                )}
               </div>
               <div>
                 <label className="text-[10px] text-pine-400 uppercase tracking-wider block mb-0.5">Number</label>
