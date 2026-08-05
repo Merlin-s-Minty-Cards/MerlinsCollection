@@ -41,7 +41,86 @@ Merlin's Minty Cards — a Pokemon card business website.
 | `/articles`          | No            | Article listing (Cluster Hub)        |
 | `/articles/[slug]`   | No            | Individual article (SSG via Sanity)  |
 | `/inventory`         | Yes           | Inventory search (filter + chat)     |
-| `/admin`             | Yes (admin)   | Admin panel — inventory CRUD, sales, buys, trades, show prep, market |
+| `/admin`             | Yes (admin)   | Admin panel — see Admin Panel below  |
+
+# Admin Panel
+
+`/admin` (gated by admin Cognito group) covers inventory ops end to end. Sidebar
+order (`frontend/components/admin/AdminShell.tsx`):
+
+| Route                  | Label          | Purpose                              |
+|------------------------|----------------|---------------------------------------|
+| `/admin`               | Dashboard      | Landing overview                      |
+| `/admin/inventory`     | Inventory      | Inventory CRUD, granular filters, ownership column |
+| `/admin/sell`          | Sell           | Sale flow, large image preview        |
+| `/admin/buy`           | Buy            | Purchase flow, catalog-linked autocomplete, manual-entry mode |
+| `/admin/trade`         | Trade          | Trade flow — Coming In / Going Out, basis modes (see below) |
+| `/admin/vault`         | Vault          | Sortable inventory table, ownership column |
+| `/admin/market`        | Market         | Prices, sync trigger, coverage/confidence, "check for new sets" |
+| `/admin/show-prep`     | Show Prep      | Bulk-move to a show location, inline sticker/TCG-link editing |
+| `/admin/outgoing`      | **Prep Queue** | See "Prep Queue" below — route path is unchanged, the UI/purpose is not |
+| `/admin/analytics`     | Show Analytics | Tabbed Daily / Shows dashboard (see below) |
+| `/admin/history`       | History        | Transaction history with profit visibility (see below) |
+| `/admin/cosigners`     | Cosigners      | Cosigner CRUD + payout link tool     |
+| `/admin/card/[id]`     | (card detail)  | Single-item detail, price chart, timeline — not in sidebar, reached via links |
+
+**Prep Queue gotcha:** the route path is still `/admin/outgoing` (unchanged
+since before Round 3) but the page itself was repurposed in Task 3.4 from a
+sold/shipment tracker into a queue of unstickered available inventory
+(`GET` filtered to `status=available, missing_sticker=true`). Reading the URL
+alone will mislead — it no longer tracks outgoing shipments. Pricing an item
+inline removes it from the queue immediately ("Priced → removed" toast).
+
+**Show Analytics** (`/admin/analytics`) — tabbed `Daily` / `Shows` view. Daily
+tab shows a single day's dashboard (`GET /analytics/daily`); Shows tab lists
+the show archive (`GET /admin/shows`) with a detail drill-in per show.
+
+**History** (`/admin/history`) — searches an item's full transaction timeline
+and trade lineage. Shows `step_profit` per lineage hop (color-coded, guarded
+against a $0 cost-basis overstating profit on consigned items) and a rolled-up
+"Chain Profit" summary when a chain has more than one hop; lineage nodes are
+clickable to navigate the chain.
+
+**Cosigners** (`/admin/cosigners`) — CRUD + payout-link tool for consignors;
+card assignment is still raw item-ID entry (no picker UI, deliberately out of
+scope).
+
+**Condition vocabulary.** Display strings are `NM, LP+, LP, LP-, MP, HP, DMG`,
+but storage is ALWAYS two separate fields — `condition` (the tier: `NM/LP/MP/
+HP/DMG`, `Condition` enum) plus `condition_modifier` (`ConditionModifier`:
+`"+"`/`"-"`/`null`) — never a combined `"LP+"` enum value. That combined form
+used to be sent straight to the backend and failed enum validation (the Round 1
+bug); `normalize_condition()` (`backend/src/merlins_collection/models/
+inventory.py`) now splits a display string into the two stored fields, mirrored
+on the frontend by `parseCondition`/`formatCondition` (`frontend/lib/
+constants.ts`).
+
+**Locations.** Admin-managed, DB-backed list — not a hardcoded enum. Seeded
+once from the legacy `InventoryLocation` enum unioned with distinct location
+values already present on inventory, then editable by admins. Endpoints
+(`backend/src/merlins_collection/routers/admin/locations.py`):
+`GET /admin/locations`, `POST /admin/locations`, `DELETE /admin/locations/
+{value}` (blocked with 409 if the location is still in use by any item).
+Frontend reads it via `useLocations()`; never hardcode a location list in new
+code.
+
+# Ops
+
+**Catalog seed + sync (one-time owner action, not scheduled).** The live
+`merlins-cards` DynamoDB table currently has an empty card catalog, which is
+why market prices show nothing and the Buy page's catalog search returns no
+matches — both read from the same catalog. This must be run once, with AWS
+creds, from `backend/`, before either will work:
+
+```bash
+python scripts/seed_catalog.py --help    # read the rails; it is dry-run by default
+python scripts/seed_catalog.py --execute --confirm-table merlins-cards
+```
+
+then press **Sync Prices** on `/admin/market`, or run `python scripts/
+daily_sync.py`. This is not part of the scheduled daily sync — the daily sync
+refreshes prices for cards already in the catalog, it does not seed the
+catalog itself.
 
 # Test Commands
 
