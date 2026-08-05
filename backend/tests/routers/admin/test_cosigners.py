@@ -240,6 +240,70 @@ class TestCosignerAssets:
         assert item_a.consignment.split_percent == Decimal("0.30")
 
 
+class TestCosignerLinkErrors:
+    def test_link_reports_failed_item_ids(self, admin_client):
+        client, repo, token = admin_client
+        cosigner_resp = client.post("/admin/cosigners", json={"name": "Alice"}, headers=_auth(token))
+        consignor_id = cosigner_resp.json()["consignor_id"]
+        repo.put_inventory_item(_raw(item_id="item-1"))
+
+        resp = client.post(
+            f"/admin/cosigners/{consignor_id}/link",
+            json={"item_ids": ["item-1", "does-not-exist"]},
+            headers=_auth(token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["linked"] == 1
+        assert data["failed_item_ids"] == ["does-not-exist"]
+
+
+class TestCosignerUnlink:
+    def test_unlink_clears_consignment(self, admin_client):
+        client, repo, token = admin_client
+        cosigner_resp = client.post("/admin/cosigners", json={"name": "Alice"}, headers=_auth(token))
+        consignor_id = cosigner_resp.json()["consignor_id"]
+        repo.put_inventory_item(_raw(
+            item_id="item-1",
+            consignment=ConsignmentTerms(consignor_id=consignor_id, split_percent=Decimal("0.5")),
+        ))
+
+        resp = client.delete(
+            f"/admin/cosigners/{consignor_id}/assets/item-1",
+            headers=_auth(token),
+        )
+        assert resp.status_code == 200
+        assert repo.get_inventory_item("item-1").consignment is None
+
+    def test_unlink_nonexistent_item_returns_404(self, admin_client):
+        client, repo, token = admin_client
+        cosigner_resp = client.post("/admin/cosigners", json={"name": "Alice"}, headers=_auth(token))
+        consignor_id = cosigner_resp.json()["consignor_id"]
+
+        resp = client.delete(
+            f"/admin/cosigners/{consignor_id}/assets/no-such-item",
+            headers=_auth(token),
+        )
+        assert resp.status_code == 404
+
+    def test_unlink_item_linked_to_a_different_consignor_returns_404(self, admin_client):
+        client, repo, token = admin_client
+        alice = client.post("/admin/cosigners", json={"name": "Alice"}, headers=_auth(token)).json()
+        bob = client.post("/admin/cosigners", json={"name": "Bob"}, headers=_auth(token)).json()
+        repo.put_inventory_item(_raw(
+            item_id="item-1",
+            consignment=ConsignmentTerms(consignor_id=alice["consignor_id"], split_percent=Decimal("0.5")),
+        ))
+
+        resp = client.delete(
+            f"/admin/cosigners/{bob['consignor_id']}/assets/item-1",
+            headers=_auth(token),
+        )
+        assert resp.status_code == 404
+        # Alice's link must be untouched.
+        assert repo.get_inventory_item("item-1").consignment.consignor_id == alice["consignor_id"]
+
+
 # ===========================================================================
 # Analytics
 # ===========================================================================

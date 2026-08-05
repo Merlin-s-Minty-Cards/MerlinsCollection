@@ -223,16 +223,32 @@ export default function AdminCosignersPage() {
       if (linkSplit.trim()) payload.split_percent = parseFloat(linkSplit) / 100
       if (linkMinPrice.trim()) payload.minimum_price = linkMinPrice.trim()
 
-      await api.post(`/cosigners/${selectedCosigner.consignor_id}/link`, payload)
+      const result = await api.post<{ linked: number; failed_item_ids: string[] }>(
+        `/cosigners/${selectedCosigner.consignor_id}/link`,
+        payload,
+      )
       setLinkOpen(false)
       setLinkItemIds('')
       setLinkSplit('')
       setLinkMinPrice('')
+      if (result.failed_item_ids.length > 0) {
+        alert(`Linked ${result.linked} item(s). Not found: ${result.failed_item_ids.join(', ')}`)
+      }
       fetchDetail(selectedCosigner)
     } catch (err) {
       alert(err instanceof AdminApiError ? err.detail : 'Failed to link items')
     } finally {
       setLinking(false)
+    }
+  }
+
+  const handleUnlink = async (item: CosignerAsset) => {
+    if (!selectedCosigner) return
+    try {
+      await api.del(`/cosigners/${selectedCosigner.consignor_id}/assets/${item.item_id}`)
+      fetchDetail(selectedCosigner)
+    } catch (err) {
+      alert(err instanceof AdminApiError ? err.detail : 'Failed to unlink item')
     }
   }
 
@@ -351,6 +367,21 @@ export default function AdminCosignersPage() {
       label: 'Location',
       render: (item) => (
         <span className="text-xs text-pine-300 capitalize">{item.location || '—'}</span>
+      ),
+    },
+    {
+      key: '_actions',
+      label: '',
+      className: 'w-10',
+      render: (item) => (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); handleUnlink(item) }}
+          className="p-1 rounded text-pine-400 hover:text-red-400 transition-colors"
+          aria-label={`Unlink ${item.display_name || item.product_name || item.name || item.item_id}`}
+        >
+          <X size={13} />
+        </button>
       ),
     },
   ]

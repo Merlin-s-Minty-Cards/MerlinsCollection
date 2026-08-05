@@ -149,9 +149,11 @@ def link_items_to_cosigner(
     minimum_price = Decimal(str(body["minimum_price"])) if body.get("minimum_price") else None
 
     linked = 0
+    failed_item_ids: list[str] = []
     for item_id in item_ids:
         item = repo.get_inventory_item(item_id)
         if item is None:
+            failed_item_ids.append(item_id)
             continue
         # Set consignment terms
         item_data = item.model_dump(mode="python")
@@ -164,7 +166,26 @@ def link_items_to_cosigner(
         repo.put_inventory_item(updated_item)
         linked += 1
 
-    return {"linked": linked, "consignor_id": consignor_id}
+    return {"linked": linked, "consignor_id": consignor_id, "failed_item_ids": failed_item_ids}
+
+
+@router.delete("/{consignor_id}/assets/{item_id}")
+def unlink_item_from_cosigner(
+    consignor_id: str,
+    item_id: str,
+    repo: InventoryRepository = Depends(get_repo),
+) -> dict[str, Any]:
+    """Clear an item's consignment terms, returning it to owned stock."""
+    item = repo.get_inventory_item(item_id)
+    if item is None or item.consignment is None or item.consignment.consignor_id != consignor_id:
+        raise HTTPException(status_code=404, detail="Linked item not found for this cosigner")
+
+    item_data = item.model_dump(mode="python")
+    item_data["consignment"] = None
+    updated_item = InventoryItemAdapter.validate_python(item_data)
+    repo.put_inventory_item(updated_item)
+
+    return {"status": "unlinked", "item_id": item_id}
 
 
 # ---------------------------------------------------------------------------
