@@ -57,6 +57,7 @@ export default function AdminInventoryPage() {
   const [minPriceFilter, setMinPriceFilter] = useState('')
   const [maxPriceFilter, setMaxPriceFilter] = useState('')
   const [ownershipFilter, setOwnershipFilter] = useState('')
+  const [needsReviewFilter, setNeedsReviewFilter] = useState('')
   const [sortKey, setSortKey] = useState<string | null>(null)
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
@@ -107,6 +108,7 @@ export default function AdminInventoryPage() {
       if (minPriceFilter) params.min_price = minPriceFilter
       if (maxPriceFilter) params.max_price = maxPriceFilter
       if (ownershipFilter) params.ownership = ownershipFilter
+      if (needsReviewFilter) params.needs_review = needsReviewFilter
       if (sortKey) params.sort = `${sortKey}_${sortDir}`
 
       const res = await api.get<{ items: InventoryItem[]; total: number }>('/inventory/search', params)
@@ -117,7 +119,7 @@ export default function AdminInventoryPage() {
     } finally {
       setLoading(false)
     }
-  }, [api, search, statusFilter, conditionFilter, kindFilter, locationFilter, setNameFilter, cardNumberFilter, artistFilter, minPriceFilter, maxPriceFilter, ownershipFilter, sortKey, sortDir])
+  }, [api, search, statusFilter, conditionFilter, kindFilter, locationFilter, setNameFilter, cardNumberFilter, artistFilter, minPriceFilter, maxPriceFilter, ownershipFilter, needsReviewFilter, sortKey, sortDir])
 
   useEffect(() => {
     fetchItems()
@@ -441,6 +443,16 @@ export default function AdminInventoryPage() {
           <option value="">Ownership</option>
           <option value="owned">Owned</option>
           <option value="consigned">Cosigned</option>
+        </select>
+        <select
+          aria-label="Needs Review"
+          value={needsReviewFilter}
+          onChange={(e) => setNeedsReviewFilter(e.target.value)}
+          className="vault-field px-2.5 py-1.5 rounded-lg text-xs appearance-none cursor-pointer"
+        >
+          <option value="">Needs Review</option>
+          <option value="true">Flagged</option>
+          <option value="false">Clear</option>
         </select>
         <div className="flex items-center">
           <ImageToggle showImages={showImages} onToggle={() => setShowImages(!showImages)} label="Images" />

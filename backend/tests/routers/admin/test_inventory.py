@@ -1016,6 +1016,20 @@ class TestAdminInventorySearch23:
                           headers=_auth_header(admin_token))
         assert resp.json()["total"] == 2
 
+    def test_search_needs_review_filter(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="reviewed-1", needs_review=False))
+        repo.put_inventory_item(_raw(item_id="flagged-1", card_id="sv1-2", needs_review=True))
+
+        resp = client.get(
+            "/admin/inventory/search",
+            params={"needs_review": "true"},
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        ids = {i["item_id"] for i in resp.json()["items"]}
+        assert ids == {"flagged-1"}
+
     def test_price_range_uses_market_value(self, admin_client):
         """The price bound compares against current_market_value when present,
         falling back to cost_basis only when it is null."""

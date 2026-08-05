@@ -90,6 +90,7 @@ def admin_search_inventory(
     artist: str | None = Query(None, max_length=200),
     set_name: str | None = Query(None, max_length=200),
     ownership: str | None = Query(None),
+    needs_review: bool | None = Query(None),
     missing_sticker: bool = Query(False),
     min_price: Decimal | None = Query(None, ge=0),
     max_price: Decimal | None = Query(None, ge=0),
@@ -148,6 +149,9 @@ def admin_search_inventory(
                 status_code=422,
                 detail=f"Invalid ownership '{ownership}'. Expected 'owned' or 'cosigned'.",
             )
+
+    if needs_review is not None:
+        items = [i for i in items if i.needs_review == needs_review]
 
     # Show-prep queue: everything still waiting for a price sticker.
     if missing_sticker:

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, act, within } from '@testing-library/react'
+import { render, screen, fireEvent, act, within, waitFor } from '@testing-library/react'
 import AdminInventoryPage from '../page'
 
 const getMock = vi.fn()
@@ -56,5 +56,19 @@ describe('AdminInventoryPage location pickers use the live location list', () =>
     // longer sourced from the static list (mirrors the negative check used in
     // CardDetailModal.test.tsx).
     expect(within(dialog).queryByRole('option', { name: /Toploader/i })).not.toBeInTheDocument()
+  })
+
+  it('filters by needs_review via the Needs Review select', async () => {
+    render(<AdminInventoryPage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.change(screen.getByLabelText(/needs review/i), { target: { value: 'true' } })
+
+    await waitFor(() =>
+      expect(getMock).toHaveBeenCalledWith(
+        '/inventory/search',
+        expect.objectContaining({ needs_review: 'true' }),
+      )
+    )
   })
 })
