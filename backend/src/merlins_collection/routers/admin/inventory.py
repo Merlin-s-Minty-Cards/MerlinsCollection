@@ -93,6 +93,8 @@ def admin_search_inventory(
     missing_sticker: bool = Query(False),
     min_price: Decimal | None = Query(None, ge=0),
     max_price: Decimal | None = Query(None, ge=0),
+    min_profit: Decimal | None = Query(None),
+    max_profit: Decimal | None = Query(None),
     sort: str | None = Query(None),
     repo: InventoryRepository = Depends(get_repo),
 ) -> AdminInventorySearchResult:
@@ -164,6 +166,20 @@ def admin_search_inventory(
         items = [
             i for i in items
             if (v := _effective_price(i)) is not None and v <= max_price
+        ]
+
+    # Lifetime profit needs the FULL lineage — a chain member may already
+    # have been filtered out above (e.g. a SOLD predecessor when this search
+    # is scoped to status=available), so this refetches the whole table
+    # rather than reusing `items`, or the chain walk below would silently
+    # under-count. Only paid when the filter is actually requested.
+    if min_profit is not None or max_profit is not None:
+        items_by_id = {i.item_id: i for i in repo.list_inventory()}
+        items = [
+            i for i in items
+            if (profit := _lifetime_profit(i.item_id, items_by_id, repo)) is not None
+            and (min_profit is None or profit >= min_profit)
+            and (max_profit is None or profit <= max_profit)
         ]
 
     # A5: Catalog-based filters (card_number, artist, set_name) — joins the catalog
@@ -402,33 +418,8 @@ def admin_item_lineage(
     if not lineage_items:
         lineage_items = [item]
 
-    # Build chain by walking predecessor links
-    # Create a map of item_id -> item
     item_map = {i.item_id: i for i in lineage_items}
-
-    # Find the root (item with no predecessor or predecessor not in set)
-    roots = [
-        i for i in lineage_items
-        if i.predecessor_item_id is None or i.predecessor_item_id not in item_map
-    ]
-
-    # Walk from root forward
-    ordered: list[InventoryItem] = []
-    if roots:
-        current = roots[0]
-        visited = set()
-        while current and current.item_id not in visited:
-            visited.add(current.item_id)
-            ordered.append(current)
-            # Find next in chain (item whose predecessor is current)
-            next_item = None
-            for i in lineage_items:
-                if i.predecessor_item_id == current.item_id and i.item_id not in visited:
-                    next_item = i
-                    break
-            current = next_item
-    else:
-        ordered.append(item)
+    ordered = _build_lineage_chain(item, item_map)
 
     # Profit is only knowable per NODE: a trade chain's value is the sum of what
     # each link was disposed for minus what it cost to acquire. Disposal comes
@@ -708,6 +699,59 @@ def _event_amount(event: dict[str, Any]) -> Decimal | None:
         return Decimal(str(amount)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     except (InvalidOperation, ValueError):
         return None
+
+
+def _build_lineage_chain(
+    item: InventoryItem, items_by_id: dict[str, InventoryItem],
+) -> list[InventoryItem]:
+    """Order an item's trade chain from root to tip by walking predecessor_item_id.
+
+    ``items_by_id`` should already be scoped to items sharing ``item``'s
+    lineage_id (or be item_id-keyed broadly — entries unreachable from the
+    root by predecessor links are simply not included in the result).
+    """
+    lineage_id = item.lineage_id or item.item_id
+    lineage_items = [
+        i for i in items_by_id.values()
+        if (i.lineage_id == lineage_id) or (i.item_id == lineage_id and i.lineage_id is None)
+    ] or [item]
+    chain_map = {i.item_id: i for i in lineage_items}
+    roots = [i for i in lineage_items if i.predecessor_item_id is None or i.predecessor_item_id not in chain_map]
+
+    ordered: list[InventoryItem] = []
+    current: InventoryItem | None = roots[0] if roots else item
+    visited: set[str] = set()
+    while current and current.item_id not in visited:
+        visited.add(current.item_id)
+        ordered.append(current)
+        current = next(
+            (i for i in lineage_items if i.predecessor_item_id == current.item_id and i.item_id not in visited),
+            None,
+        )
+    return ordered
+
+
+def _lifetime_profit(
+    item_id: str, items_by_id: dict[str, InventoryItem], repo: InventoryRepository,
+) -> Decimal:
+    """Cumulative profit through ``item_id``'s position in its trade chain.
+
+    Same walk and same figure as ``cumulative_profit`` in ``admin_item_lineage``,
+    stopped at the target node — 0 for an item that was never disposed of and
+    has no disposed predecessors.
+    """
+    ordered = _build_lineage_chain(items_by_id[item_id], items_by_id)
+    cumulative = Decimal("0")
+    for node in ordered:
+        disposal = _disposal_event(repo.get_timeline_events(node.item_id))
+        disposed_value = _event_amount(disposal) if disposal else None
+        if disposed_value is not None:
+            cumulative += (disposed_value - node.cost_basis).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP,
+            )
+        if node.item_id == item_id:
+            break
+    return cumulative
 
 
 def _split_combined_condition(body: dict[str, Any]) -> dict[str, Any]:

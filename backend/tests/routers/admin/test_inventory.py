@@ -1192,6 +1192,85 @@ class TestAdminLineageProfit:
         assert resp.json()["chain_complete"] is False
 
 
+class TestAdminSearchByLifetimeProfit:
+    """GET /admin/inventory/search — filtering by cumulative lifetime profit."""
+
+    def test_filters_by_min_profit(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        # chain-a: bought 10, traded out at 40 -> step profit 30 (still available/current node not evaluated here)
+        repo.put_inventory_item(_raw(
+            item_id="chain-a", cost_basis="10.00", status=ItemStatus.SOLD, lineage_id="chain-a",
+        ))
+        repo.put_inventory_item(_raw(
+            item_id="chain-b", card_id="sv1-2", cost_basis="30.00", status=ItemStatus.SOLD,
+            lineage_id="chain-a", predecessor_item_id="chain-a",
+        ))
+        repo.put_timeline_event("chain-a", {
+            "item_id": "chain-a", "txn_id": "t-1", "type": "trade_out",
+            "date": "2025-03-01", "amount": "40.00", "payment_method": "trade",
+        })
+        repo.put_timeline_event("chain-b", {
+            "item_id": "chain-b", "txn_id": "t-2", "type": "sale",
+            "date": "2025-05-01", "amount": "75.00", "payment_method": "cash",
+        })
+        # low-profit-1: bought 10, sold for 12 -> cumulative 2.00
+        repo.put_inventory_item(_raw(item_id="low-1", card_id="sv1-3", cost_basis="10.00",
+                                      status=ItemStatus.SOLD, lineage_id="low-1"))
+        repo.put_timeline_event("low-1", {
+            "item_id": "low-1", "txn_id": "t-3", "type": "sale",
+            "date": "2025-04-01", "amount": "12.00", "payment_method": "cash",
+        })
+
+        resp = client.get(
+            "/admin/inventory/search",
+            params={"min_profit": "10"},
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        ids = {i["item_id"] for i in resp.json()["items"]}
+        assert "chain-a" in ids  # cumulative through chain-a is 30.00
+        assert "chain-b" in ids  # cumulative through chain-b is 75.00
+        assert "low-1" not in ids  # cumulative is only 2.00
+
+    def test_filters_by_max_profit(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="low-1", cost_basis="10.00",
+                                      status=ItemStatus.SOLD, lineage_id="low-1"))
+        repo.put_timeline_event("low-1", {
+            "item_id": "low-1", "txn_id": "t-1", "type": "sale",
+            "date": "2025-04-01", "amount": "12.00", "payment_method": "cash",
+        })
+        repo.put_inventory_item(_raw(item_id="high-1", card_id="sv1-2", cost_basis="10.00",
+                                      status=ItemStatus.SOLD, lineage_id="high-1"))
+        repo.put_timeline_event("high-1", {
+            "item_id": "high-1", "txn_id": "t-2", "type": "sale",
+            "date": "2025-04-01", "amount": "500.00", "payment_method": "cash",
+        })
+
+        resp = client.get(
+            "/admin/inventory/search",
+            params={"max_profit": "10"},
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        ids = {i["item_id"] for i in resp.json()["items"]}
+        assert "low-1" in ids
+        assert "high-1" not in ids
+
+    def test_never_disposed_item_has_zero_lifetime_profit(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="held-1", cost_basis="10.00"))
+
+        resp = client.get(
+            "/admin/inventory/search",
+            params={"min_profit": "0", "max_profit": "0"},
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        ids = {i["item_id"] for i in resp.json()["items"]}
+        assert "held-1" in ids
+
+
 class TestAdminRefreshPrices:
     """POST /admin/inventory/refresh-prices agrees with catalog_sync."""
 

@@ -71,6 +71,8 @@ export default function AdminHistoryPage() {
   const [searchQuery, setSearchQuery] = useState('')
   const [minPrice, setMinPrice] = useState('')
   const [maxPrice, setMaxPrice] = useState('')
+  const [minProfit, setMinProfit] = useState('')
+  const [maxProfit, setMaxProfit] = useState('')
   const [searchResults, setSearchResults] = useState<InventorySearchResult[]>([])
   const [searching, setSearching] = useState(false)
 
@@ -103,6 +105,8 @@ export default function AdminHistoryPage() {
         const params: Record<string, string> = { name: query.trim() }
         if (minPrice) params.min_price = minPrice
         if (maxPrice) params.max_price = maxPrice
+        if (minProfit) params.min_profit = minProfit
+        if (maxProfit) params.max_profit = maxProfit
         const res = await api.get<{ items: InventorySearchResult[]; total: number }>(
           '/inventory/search',
           params,
@@ -114,7 +118,7 @@ export default function AdminHistoryPage() {
         setSearching(false)
       }
     },
-    [api, minPrice, maxPrice],
+    [api, minPrice, maxPrice, minProfit, maxProfit],
   )
 
   // ---------------------------------------------------------------------------
@@ -283,6 +287,28 @@ export default function AdminHistoryPage() {
                 step="0.01"
                 value={maxPrice}
                 onChange={(e) => setMaxPrice(e.target.value)}
+                placeholder="0.00"
+                className="vault-field w-24 px-2.5 py-2 rounded-lg text-sm"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] text-pine-400 block mb-1">Min Profit</label>
+              <input
+                type="number"
+                step="0.01"
+                value={minProfit}
+                onChange={(e) => setMinProfit(e.target.value)}
+                placeholder="0.00"
+                className="vault-field w-24 px-2.5 py-2 rounded-lg text-sm"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] text-pine-400 block mb-1">Max Profit</label>
+              <input
+                type="number"
+                step="0.01"
+                value={maxProfit}
+                onChange={(e) => setMaxProfit(e.target.value)}
                 placeholder="0.00"
                 className="vault-field w-24 px-2.5 py-2 rounded-lg text-sm"
               />
