@@ -9,6 +9,7 @@ import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
 interface LocationOption {
   value: string
   label: string
+  [key: string]: unknown
 }
 
 export default function AdminLocationsPage() {

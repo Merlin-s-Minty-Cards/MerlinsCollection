@@ -109,11 +109,6 @@ export default function AdminTradePage() {
   const [searchingIncomingCatalog, setSearchingIncomingCatalog] = useState(false)
   const [selectedIncomingCard, setSelectedIncomingCard] = useState<IncomingCatalogCard | null>(null)
 
-  // Catalog lookup for the incoming-leg Name field
-  const [incomingCatalogResults, setIncomingCatalogResults] = useState<IncomingCatalogCard[]>([])
-  const [searchingIncomingCatalog, setSearchingIncomingCatalog] = useState(false)
-  const [selectedIncomingCard, setSelectedIncomingCard] = useState<IncomingCatalogCard | null>(null)
-
   // Confirm
   const [showConfirm, setShowConfirm] = useState(false)
   const [confirming, setConfirming] = useState(false)
