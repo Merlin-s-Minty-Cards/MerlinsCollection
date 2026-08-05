@@ -212,4 +212,7 @@ class TestTradeConfirmTimeline:
         timeline = repo.get_timeline_events("our-1")
         assert len(timeline) == 1
         assert timeline[0]["type"] == "trade_out"
-        assert timeline[0]["amount"] == "50.00"
+        # Task 3.0: card-only trades in transfer mode record outgoing sales at
+        # basis_pool (cost_basis), not agreed_value — the invariant is:
+        # Σ outgoing sale amounts == Σ incoming bases == basis_pool.
+        assert timeline[0]["amount"] == "20.00"
