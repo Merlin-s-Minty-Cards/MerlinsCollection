@@ -1,9 +1,6 @@
 import httpx
 import pytest
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
-
-from merlins_collection.models.auth import AuthenticatedUser
 
 
 @pytest.fixture
@@ -77,20 +74,57 @@ def test_me_returns_503_when_jwks_unavailable(authed, mint_token, cognito_config
     assert resp.status_code == 503
 
 
-# --- require_admin dependency (unit-level; no admin routes exist yet) -----
+# --- require_admin: static ADMIN_API_KEY bypass path -----------------------
+# The Cognito-JWT path of require_admin is already covered end-to-end by every
+# admin router's TestAdminAuthGate-style tests (e.g. test_inventory.py). Only
+# the API-key bypass (for Retool/external tools) had zero coverage anywhere.
 
 
-def test_require_admin_allows_admin_user():
-    from merlins_collection.dependencies import require_admin
+def test_require_admin_accepts_configured_api_key(monkeypatch, cognito_config, jwks):
+    from merlins_collection import dependencies
+    from merlins_collection.main import app
+    from merlins_collection.services.cognito import CognitoJwtVerifier
 
-    admin = AuthenticatedUser(sub="u", is_admin=True)
-    assert require_admin(user=admin) is admin
+    monkeypatch.setattr(dependencies.settings, "admin_api_key", "test-retool-key")
+    # require_admin's `verifier` sub-dependency is resolved by FastAPI before
+    # the handler body runs, even on the API-key success path — so it must be
+    # overridden the same way admin_client is, or get_verifier() 500s on the
+    # test env's empty Cognito config.
+    app.dependency_overrides[dependencies.get_verifier] = lambda: CognitoJwtVerifier(
+        region=cognito_config["region"],
+        user_pool_id=cognito_config["user_pool_id"],
+        client_id=cognito_config["client_id"],
+        jwks=jwks,
+    )
+    client = TestClient(app)
+    try:
+        resp = client.get(
+            "/admin/health",
+            headers={"Authorization": "Bearer test-retool-key"},
+        )
+        assert resp.status_code == 200
+    finally:
+        app.dependency_overrides.clear()
 
 
-def test_require_admin_blocks_non_admin_user():
-    from merlins_collection.dependencies import require_admin
+def test_require_admin_rejects_wrong_api_key(monkeypatch, cognito_config, jwks):
+    from merlins_collection import dependencies
+    from merlins_collection.main import app
+    from merlins_collection.services.cognito import CognitoJwtVerifier
 
-    customer = AuthenticatedUser(sub="u", is_admin=False)
-    with pytest.raises(HTTPException) as exc:
-        require_admin(user=customer)
-    assert exc.value.status_code == 403
+    monkeypatch.setattr(dependencies.settings, "admin_api_key", "test-retool-key")
+    app.dependency_overrides[dependencies.get_verifier] = lambda: CognitoJwtVerifier(
+        region=cognito_config["region"],
+        user_pool_id=cognito_config["user_pool_id"],
+        client_id=cognito_config["client_id"],
+        jwks=jwks,
+    )
+    client = TestClient(app)
+    try:
+        resp = client.get(
+            "/admin/health",
+            headers={"Authorization": "Bearer not-the-right-key"},
+        )
+        assert resp.status_code == 401
+    finally:
+        app.dependency_overrides.clear()
