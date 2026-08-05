@@ -6,14 +6,16 @@ Always follow the outside-in Test-Driven Development (TDD) process.
 Never combine phases. Wait for user confirmation after confirming tests fail.
 
 # Agent Workflow
-Custom sub-agents live in `.claude/agents/`. The `orchestrator` agent conducts this whole flow — deciding what's trivial vs. non-trivial and routing each piece to the right specialist. **Reference it into the main chat with `@orchestrator` (or `/`); never spawn it as a sub-agent.** Referencing loads its instructions into the main thread, which is the only thread that can spawn other agents — spawning the orchestrator instead would trap it in a sub-agent that cannot delegate, defeating its purpose.
+Development stays in the main thread — no subagent-driven orchestration. Custom skills live in `.claude/skills/`; the two remaining custom agents (`.claude/agents/test-qa.md`, `.claude/agents/web-browser.md`) exist only because their output is long-running or heavy and belongs off the main thread, not because they get orchestrated.
 
-For **non-trivial feature work** (new functionality, multi-step changes, anything that will touch more than a couple of files), default to this flow without waiting to be asked:
-1. Start with the `initializer` agent to audit the workspace and create/update `progress.txt`, unless one already exists and is current for the active feature.
-2. Route each roadmap item to the appropriate agent (`design-doc`, `code-writer`, `test-qa`, `doc-writer`, `pull-request`, `web-browser`) based on its own description.
-3. Every `code-writer` submission must clear the Council Loop (`advisor-contrarian`, `advisor-security`, `advisor-chaos`, `advisor-architect` → `council-judge`) before being considered done.
+For **non-trivial feature work** (new functionality, multi-step changes, anything touching more than a couple of files), default to this flow without waiting to be asked:
+1. `initialize-roadmap` skill — audit the workspace, create/update `claude-progress.txt`, unless one already exists and is current for the active feature.
+2. `design-doc` skill for architecture/schema/contract design on substantial features.
+3. `tdd` skill for implementation — it nests `adversarial-review` as an inline pre- and post-change critique step (logic, security, chaos, bloat), no subagent spawn.
+4. `sync-docs` then `pr-description` skills to close out.
+5. `test-qa` and `web-browser` agents dispatch only when their isolation is actually needed (a long test run, heavy research output).
 
-Skip this default for small fixes, one-off questions, or anything the user frames as quick — go straight to the relevant single agent (or no agent) instead. The user can also override explicitly at any time (e.g. "skip the initializer", "just write the code").
+Skip this default for small fixes, one-off questions, or anything the user frames as quick — go straight to the relevant skill (or none) instead. The user can also override explicitly at any time (e.g. "skip the roadmap step", "just write the code").
 
 # Project Overview
 Merlin's Minty Cards — a Pokemon card business website.
