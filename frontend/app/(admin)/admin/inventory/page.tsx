@@ -507,7 +507,6 @@ export default function AdminInventoryPage() {
         item={detailItem}
         onClose={() => setDetailItem(null)}
         onUpdated={fetchItems}
-        imageUrl={detailItem?.card_id ? getImageUrl(detailItem.card_id) : null}
       />
     </div>
   )

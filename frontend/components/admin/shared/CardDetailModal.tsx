@@ -4,8 +4,8 @@ import { useCallback, useEffect, useState } from 'react'
 import { X, Pencil, Check, XCircle } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { CONDITION_OPTIONS, LOCATION_OPTIONS, parseCondition, formatCondition } from '@/lib/constants'
+import { useCardImages } from '@/lib/use-card-images'
 import PriceDisplay from './PriceDisplay'
-import CardImage from './CardImage'
 import PriceChart from './PriceChart'
 
 interface CardDetailModalProps {
@@ -15,8 +15,6 @@ interface CardDetailModalProps {
   onClose: () => void
   /** Called after a successful edit so the parent can refresh data */
   onUpdated?: () => void
-  /** Resolved image URL for the card (or null) */
-  imageUrl?: string | null
 }
 
 /** Fixed location options for dropdown — imported from lib/constants */
@@ -46,13 +44,19 @@ export default function CardDetailModal({
   item,
   onClose,
   onUpdated,
-  imageUrl,
 }: CardDetailModalProps) {
   const api = useAdminApi()
   const [editingField, setEditingField] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // Resolve this card's image independently of any page-level toggle —
+  // the modal is a detail view, not a lazy list row, so it always wants
+  // the real image if one exists (Round 6 audit item 1).
+  const cardId = typeof item?.card_id === 'string' ? item.card_id : null
+  const { getImageUrl } = useCardImages(cardId ? [cardId] : [])
+  const imageUrl = cardId ? getImageUrl(cardId) : null
 
   // Reset editing state when item changes
   useEffect(() => {
@@ -161,7 +165,29 @@ export default function CardDetailModal({
                 className="h-64 md:h-full w-auto object-contain rounded-xl shadow-lg"
               />
             ) : (
-              <CardImage imageUrl={null} alt="No image" size="xl" className="rounded-xl" />
+              // Not <CardImage alt="No image" />: that component always labels
+              // its fallback "No image for {alt}", which is meant for list rows
+              // that need to say which card is missing an image. The detail
+              // modal already names the card in its header, so its own fallback
+              // is labeled exactly "No image".
+              <div
+                className="w-72 h-[25.75rem] rounded-xl bg-pine-800/60 border border-pine-700/40 flex items-center justify-center flex-shrink-0"
+                aria-label="No image"
+              >
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  className="text-pine-600"
+                >
+                  <rect x="3" y="3" width="18" height="18" rx="2" />
+                  <circle cx="8.5" cy="8.5" r="1.5" />
+                  <path d="M21 15l-5-5L5 21" />
+                </svg>
+              </div>
             )}
           </div>
 

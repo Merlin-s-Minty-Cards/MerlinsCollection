@@ -322,7 +322,6 @@ export default function AdminVaultPage() {
         item={detailItem as Record<string, unknown> | null}
         onClose={() => setDetailItem(null)}
         onUpdated={fetchVault}
-        imageUrl={detailItem?.card_id ? getImageUrl(detailItem.card_id) : null}
       />
     </div>
   )
