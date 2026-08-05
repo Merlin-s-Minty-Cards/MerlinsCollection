@@ -172,12 +172,17 @@ def admin_search_inventory(
     # have been filtered out above (e.g. a SOLD predecessor when this search
     # is scoped to status=available), so this refetches the whole table
     # rather than reusing `items`, or the chain walk below would silently
-    # under-count. Only paid when the filter is actually requested.
+    # under-count. Only paid when the filter is actually requested. The
+    # per-item cumulative profit is computed in one batched pass
+    # (`_lifetime_profit_map`) rather than one chain walk per candidate item,
+    # since candidates sharing a lineage would otherwise re-walk and
+    # re-fetch timeline events for the same chain over and over.
     if min_profit is not None or max_profit is not None:
         items_by_id = {i.item_id: i for i in repo.list_inventory()}
+        profit_map = _lifetime_profit_map(items_by_id, repo)
         items = [
             i for i in items
-            if (profit := _lifetime_profit(i.item_id, items_by_id, repo)) is not None
+            if (profit := profit_map.get(i.item_id, Decimal("0"))) is not None
             and (min_profit is None or profit >= min_profit)
             and (max_profit is None or profit <= max_profit)
         ]
@@ -731,27 +736,37 @@ def _build_lineage_chain(
     return ordered
 
 
-def _lifetime_profit(
-    item_id: str, items_by_id: dict[str, InventoryItem], repo: InventoryRepository,
-) -> Decimal:
-    """Cumulative profit through ``item_id``'s position in its trade chain.
+def _lifetime_profit_map(
+    items_by_id: dict[str, InventoryItem], repo: InventoryRepository,
+) -> dict[str, Decimal]:
+    """Cumulative profit for every item in items_by_id, one walk per lineage.
 
-    Same walk and same figure as ``cumulative_profit`` in ``admin_item_lineage``,
-    stopped at the target node — 0 for an item that was never disposed of and
-    has no disposed predecessors.
+    A naive per-item chain walk is O(chain-length^2) timeline fetches when
+    called once per candidate item in a filter over many items sharing
+    chains (each item at chain position k re-walks and re-fetches k+1
+    nodes). This groups by lineage first and walks each distinct chain
+    exactly once, same figure as ``cumulative_profit`` in
+    ``admin_item_lineage`` computed for every node along the way.
     """
-    ordered = _build_lineage_chain(items_by_id[item_id], items_by_id)
-    cumulative = Decimal("0")
-    for node in ordered:
-        disposal = _disposal_event(repo.get_timeline_events(node.item_id))
-        disposed_value = _event_amount(disposal) if disposal else None
-        if disposed_value is not None:
-            cumulative += (disposed_value - node.cost_basis).quantize(
-                Decimal("0.01"), rounding=ROUND_HALF_UP,
-            )
-        if node.item_id == item_id:
-            break
-    return cumulative
+    groups: dict[str, list[InventoryItem]] = {}
+    for i in items_by_id.values():
+        key = i.lineage_id or i.item_id
+        groups.setdefault(key, []).append(i)
+
+    result: dict[str, Decimal] = {}
+    for members in groups.values():
+        member_map = {m.item_id: m for m in members}
+        ordered = _build_lineage_chain(members[0], member_map)
+        cumulative = Decimal("0")
+        for node in ordered:
+            disposal = _disposal_event(repo.get_timeline_events(node.item_id))
+            disposed_value = _event_amount(disposal) if disposal else None
+            if disposed_value is not None:
+                cumulative += (disposed_value - node.cost_basis).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP,
+                )
+            result[node.item_id] = cumulative
+    return result
 
 
 def _split_combined_condition(body: dict[str, Any]) -> dict[str, Any]:
