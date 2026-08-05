@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, act } from '@testing-library/react'
-import AdminMarketPage, { getCoverageBannerState, type MarketCoverage } from '../page'
+import AdminMarketPage from '../page'
+import { getCoverageBannerState, type MarketCoverage } from '@/lib/market-coverage'
 
 const getMock = vi.fn()
 const postMock = vi.fn()

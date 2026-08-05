@@ -573,7 +573,7 @@ export default function AdminAnalyticsPage() {
                   ) : (
                     <DataTable
                       columns={txnColumns}
-                      data={transactions as unknown as Record<string, unknown>[]}
+                      data={transactions}
                       keyField="txn_id"
                       emptyMessage="No transactions for this date"
                     />
