@@ -87,3 +87,32 @@ describe('CardDetailModal image resolution', () => {
     expect(screen.queryByRole('option', { name: /Toploader/i })).not.toBeInTheDocument()
   })
 })
+
+describe('CardDetailModal TCGplayer link', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    putMock.mockReset()
+    getMock.mockResolvedValue(null)
+    postMock.mockResolvedValue({})
+  })
+
+  it('links directly to a stored tcg_url when one is set', async () => {
+    render(<CardDetailModal item={{ ...item, tcg_url: 'https://www.tcgplayer.com/product/12345' }} onClose={vi.fn()} />)
+
+    const link = await screen.findByRole('link', { name: /TCGplayer/i })
+    expect(link).toHaveAttribute('href', 'https://www.tcgplayer.com/product/12345')
+  })
+
+  it('falls back to a generated TCGplayer search link when no tcg_url is stored', async () => {
+    // Mirrors show-prep/page.tsx's `_tcg_url` column fallback — without this,
+    // items that never had tcg_url set show no link at all (round7-handoff §10).
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+
+    const link = await screen.findByRole('link', { name: /TCGplayer/i })
+    expect(link).toHaveAttribute(
+      'href',
+      'https://www.tcgplayer.com/search/pokemon/product?q=Pikachu&view=grid',
+    )
+  })
+})

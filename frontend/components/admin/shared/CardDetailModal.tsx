@@ -332,11 +332,18 @@ export default function CardDetailModal({
             {item.company ? (
               <span>Grade: <span className="text-pine-300">{String(item.company)} {String(item.grade ?? '')}</span></span>
             ) : null}
-            {item.tcg_url ? (
-              <a href={String(item.tcg_url)} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300">
-                TCGplayer Link ↗
-              </a>
-            ) : null}
+            <a
+              href={
+                item.tcg_url
+                  ? String(item.tcg_url)
+                  : `https://www.tcgplayer.com/search/pokemon/product?q=${encodeURIComponent(name)}&view=grid`
+              }
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-blue-400 hover:text-blue-300"
+            >
+              TCGplayer {item.tcg_url ? 'Link' : 'Search'} ↗
+            </a>
           </section>
           </div>
         </div>
