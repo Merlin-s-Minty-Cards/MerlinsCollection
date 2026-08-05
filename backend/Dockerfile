@@ -39,6 +39,10 @@ COPY --from=mcp-build /usr/local/bin/node /usr/local/bin/node
 WORKDIR /app
 COPY backend/pyproject.toml backend/pyproject.toml
 COPY backend/src backend/src
+# scripts/ is a namespace package run as `python -m scripts.<name>` (ECS
+# scheduled syncs) and loaded off disk by tests/scripts/*.py — both stages
+# built from base need it, so it is copied here rather than in either one.
+COPY backend/scripts backend/scripts
 RUN pip install --no-cache-dir ./backend
 # package.json carries "type": "module" — Node needs it to load dist/ as ESM.
 COPY mcp-server/package.json mcp-server/package.json
@@ -55,6 +59,11 @@ CMD ["pytest", "-q", "--tb=short"]
 
 # ---- Production runtime (LAST stage = default build target) ----
 FROM base AS runtime
+# CWD must be the parent of scripts/ so the ECS scheduled-sync overrides in
+# docs/aws-setup.md (`python -m scripts.scheduled_sync --job prices`) resolve
+# the namespace package. Safe for the CMD below: merlins_collection is pip
+# installed into site-packages, so uvicorn does not depend on the CWD.
+WORKDIR /app/backend
 RUN useradd --create-home appuser
 USER appuser
 EXPOSE 8000
