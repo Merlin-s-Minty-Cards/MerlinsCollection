@@ -10,6 +10,7 @@ import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
 import CardImage from '@/components/admin/shared/CardImage'
 import ImageToggle from '@/components/admin/shared/ImageToggle'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
+import OwnershipBadge from '@/components/admin/shared/OwnershipBadge'
 
 interface SellItem {
   item_id: string
@@ -31,6 +32,7 @@ interface InventoryItem {
   sticker_price?: string
   condition?: string
   status: string
+  consignment?: { consignor_id: string; split_percent: string; minimum_price?: string | null; paid_out: boolean } | null
   [key: string]: unknown
 }
 
@@ -313,8 +315,9 @@ export default function AdminSellPage() {
                         <CardImage imageUrl={getImageUrl(item.card_id)} alt={item.display_name || 'card'} size="md" />
                       )}
                       <div className="min-w-0">
-                        <div className="text-xs text-pine-100 truncate">
+                        <div className="text-xs text-pine-100 truncate flex items-center gap-1.5">
                           {item.display_name || item.product_name}
+                          <OwnershipBadge consigned={item.consignment != null} />
                         </div>
                         <div className="text-[10px] text-pine-400 flex items-center gap-2">
                           <span>{item.condition}</span>
