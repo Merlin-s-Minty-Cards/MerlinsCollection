@@ -11,6 +11,7 @@ import {
   ArrowRightLeft,
   TrendingUp,
   MapPin,
+  MapPinned,
   Lock,
   Tags,
   BarChart3,
@@ -35,6 +36,7 @@ const navItems = [
   { href: '/admin/analytics', label: 'Show Analytics', icon: BarChart3 },
   { href: '/admin/history', label: 'History', icon: History },
   { href: '/admin/cosigners', label: 'Cosigners', icon: Users },
+  { href: '/admin/locations', label: 'Locations', icon: MapPinned },
 ]
 
 export default function AdminShell({ children }: { children: React.ReactNode }) {

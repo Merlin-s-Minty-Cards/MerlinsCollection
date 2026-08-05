@@ -64,3 +64,22 @@ class IntersectionObserverStub {
   IntersectionObserverStub
 ;(window as unknown as { IntersectionObserver: unknown }).IntersectionObserver =
   IntersectionObserverStub
+
+// jsdom recognizes <dialog> as HTMLDialogElement but doesn't implement its
+// showModal()/close() methods (longstanding jsdom gap). Components using the
+// native <dialog> element (e.g. ConfirmDialog) call showModal() to open, so
+// without this stub every test that opens one throws "showModal is not a
+// function". Mirror the real element's open-attribute contract closely enough
+// for tests: showModal sets `open` + dispatches nothing (matches spec — no
+// open event), close clears `open` and fires the `close` event ConfirmDialog
+// listens for isn't needed here, but matches native behavior for any consumer
+// that does.
+if (typeof HTMLDialogElement !== 'undefined' && !HTMLDialogElement.prototype.showModal) {
+  HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) {
+    this.setAttribute('open', '')
+  }
+  HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
+    this.removeAttribute('open')
+    this.dispatchEvent(new Event('close'))
+  }
+}
