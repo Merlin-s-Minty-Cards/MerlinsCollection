@@ -246,10 +246,11 @@ def admin_update_item(
 
     body = _split_combined_condition(body)
     if "location" in body:
-        validate_location(repo, body.get("location"))
+        validate_location(repo, body.get("location"), required=True)
 
     # Merge: dump existing to dict, overlay with update body, re-validate
     current_data = existing.model_dump(mode="python")
+    changed_fields = _diff_fields(current_data, body)
     current_data.update(body)
     # Ensure item_id cannot be changed
     current_data["item_id"] = item_id
@@ -260,6 +261,19 @@ def admin_update_item(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     repo.put_inventory_item(updated_item)
+
+    # A manual edit is the only mutation path with no built-in transaction
+    # record (purchases/sales/trades all write one) — without this, the
+    # prior value is unrecoverably overwritten with no audit trail.
+    if changed_fields:
+        repo.put_timeline_event(item_id, {
+            "item_id": item_id,
+            "txn_id": new_ulid(),
+            "type": "edit",
+            "date": date.today().isoformat(),
+            "changed_fields": changed_fields,
+        })
+
     return _serialize_item(updated_item)
 
 
@@ -351,6 +365,7 @@ def admin_item_timeline(
             "trade_id": e.get("trade_id"),
             "counterpart_item_id": e.get("counterpart_item_id"),
             "show_id": e.get("show_id"),
+            "changed_fields": e.get("changed_fields"),
         })
 
     return {"item_id": item_id, "events": clean_events}
@@ -718,6 +733,30 @@ def _split_combined_condition(body: dict[str, Any]) -> dict[str, Any]:
     if "condition_modifier" not in updated:
         updated["condition_modifier"] = modifier.value if modifier else None
     return updated
+
+
+def _diff_fields(
+    before: dict[str, Any], updates: dict[str, Any],
+) -> dict[str, dict[str, str | None]]:
+    """Which fields actually changed value, as ``{field: {"old": ..., "new": ...}}``.
+
+    Compared as strings — ``before`` holds Python-native types (Decimal, date,
+    enum) from ``model_dump(mode="python")`` while ``updates`` holds raw
+    request-body values, so an exact-type comparison would treat e.g.
+    ``Decimal("10.00")`` vs the (identical) incoming ``"10.00"`` as different.
+    String comparison accepts the rare false-positive (a value re-typed in a
+    different literal form) in exchange for never missing a real change.
+    """
+    changed: dict[str, dict[str, str | None]] = {}
+    for key, new_value in updates.items():
+        if key == "item_id":
+            continue
+        old_value = before.get(key)
+        old_str = None if old_value is None else str(old_value)
+        new_str = None if new_value is None else str(new_value)
+        if old_str != new_str:
+            changed[key] = {"old": old_str, "new": new_str}
+    return changed
 
 
 def _parse_condition_query(value: str) -> tuple[Condition, ConditionModifier | None]:

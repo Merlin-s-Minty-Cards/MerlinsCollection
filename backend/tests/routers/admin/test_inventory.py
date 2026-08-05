@@ -589,6 +589,51 @@ class TestAdminUpdateItem:
         stored = repo.get_inventory_item("item-1")
         assert stored.status == ItemStatus.ON_HOLD
 
+    def test_update_writes_audit_timeline_event(self, admin_client):
+        """A manual field edit must write an 'edit' timeline event with old/new values."""
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="item-1", location="toploader", cost_basis="10.00"))
+
+        resp = client.put(
+            "/admin/inventory/item-1",
+            json={"location": "glass", "cost_basis": "15.00"},
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+
+        events = repo.get_timeline_events("item-1")
+        edit_events = [e for e in events if e.get("type") == "edit"]
+        assert len(edit_events) == 1
+        changed = edit_events[0]["changed_fields"]
+        assert changed["location"] == {"old": "toploader", "new": "glass"}
+        assert changed["cost_basis"] == {"old": "10.00", "new": "15.00"}
+
+    def test_update_with_no_actual_change_writes_no_edit_event(self, admin_client):
+        """Re-submitting the same value must not spam the audit trail."""
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="item-1", location="glass"))
+
+        resp = client.put(
+            "/admin/inventory/item-1",
+            json={"location": "glass"},
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        events = [e for e in repo.get_timeline_events("item-1") if e.get("type") == "edit"]
+        assert events == []
+
+    def test_timeline_endpoint_returns_changed_fields_for_edit_events(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="item-1", location="toploader"))
+        client.put("/admin/inventory/item-1", json={"location": "glass"}, headers=_auth_header(admin_token))
+
+        resp = client.get("/admin/inventory/item-1/timeline", headers=_auth_header(admin_token))
+        assert resp.status_code == 200
+        events = resp.json()["events"]
+        edit_events = [e for e in events if e["type"] == "edit"]
+        assert len(edit_events) == 1
+        assert edit_events[0]["changed_fields"]["location"] == {"old": "toploader", "new": "glass"}
+
 
 # ===========================================================================
 # Delete item

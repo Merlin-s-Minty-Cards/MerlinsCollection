@@ -12,6 +12,7 @@ import {
   DollarSign,
   User,
   Layers,
+  Pencil,
 } from 'lucide-react'
 import { useAdminApi } from '@/lib/admin-api'
 import { useCardImages } from '@/lib/use-card-images'
@@ -61,6 +62,7 @@ interface TimelineEvent {
   amount?: string | null
   payment_method?: string | null
   counterparty?: string | null
+  changed_fields?: Record<string, { old: string | null; new: string | null }> | null
   [key: string]: unknown
 }
 
@@ -369,6 +371,15 @@ export default function AdminCardDetailPage() {
                     {event.payment_method && <span>• {event.payment_method}</span>}
                     {event.counterparty && <span>• {event.counterparty}</span>}
                   </div>
+                  {event.changed_fields && (
+                    <div className="mt-1 space-y-0.5">
+                      {Object.entries(event.changed_fields).map(([field, diff]) => (
+                        <div key={field} className="text-[10px] text-pine-400 font-mono">
+                          {field}: {diff.old ?? '—'} → {diff.new ?? '—'}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             ))}
@@ -437,6 +448,8 @@ function TimelineIcon({ type }: { type: string }) {
       return <Layers size={13} className="text-purple-400 mt-0.5" />
     case 'consignment':
       return <User size={13} className="text-amber-400 mt-0.5" />
+    case 'edit':
+      return <Pencil size={13} className="text-amber-400 mt-0.5" />
     default:
       return <Clock size={13} className={`${iconClass} mt-0.5`} />
   }

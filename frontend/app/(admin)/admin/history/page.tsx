@@ -13,6 +13,7 @@ import {
   DollarSign,
   ExternalLink,
   AlertTriangle,
+  Pencil,
 } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import SearchInput from '@/components/admin/shared/SearchInput'
@@ -32,6 +33,7 @@ interface TimelineEvent {
   trade_id?: string | null
   counterpart_item_id?: string | null
   show_id?: string | null
+  changed_fields?: Record<string, { old: string | null; new: string | null }> | null
 }
 
 interface LineageNode {
@@ -174,6 +176,8 @@ export default function AdminHistoryPage() {
       case 'trade_out':
       case 'trade':
         return <ArrowRightLeft size={14} className="text-blue-400" />
+      case 'edit':
+        return <Pencil size={14} className="text-amber-400" />
       default:
         return <Clock size={14} className="text-pine-400" />
     }
@@ -193,6 +197,8 @@ export default function AdminHistoryPage() {
         return 'Traded Out'
       case 'trade':
         return 'Trade'
+      case 'edit':
+        return 'Edited'
       default:
         return type.replace(/_/g, ' ')
     }
@@ -451,6 +457,17 @@ export default function AdminHistoryPage() {
                             </span>
                           )}
                         </div>
+                        {event.changed_fields && (
+                          <div className="mt-1.5 space-y-0.5">
+                            {Object.entries(event.changed_fields).map(([field, diff]) => (
+                              <div key={field} className="text-[10px] text-pine-400 font-mono">
+                                {field}: <span className="text-pine-500">{diff.old ?? '—'}</span>
+                                {' → '}
+                                <span className="text-pine-200">{diff.new ?? '—'}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     </div>
                   ))}
