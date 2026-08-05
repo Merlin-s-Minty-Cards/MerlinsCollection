@@ -180,10 +180,17 @@ def admin_search_inventory(
     # per-item cumulative profit is computed in one batched pass
     # (`_lifetime_profit_map`) rather than one chain walk per candidate item,
     # since candidates sharing a lineage would otherwise re-walk and
-    # re-fetch timeline events for the same chain over and over.
+    # re-fetch timeline events for the same chain over and over. The walk
+    # itself is further scoped to only the lineages `items` (the
+    # already-filtered candidates, e.g. after `name` narrowed the table down
+    # to a handful of rows) actually belong to — membership within each
+    # walked group still comes from the full `items_by_id` map, so a chain
+    # member excluded by an earlier filter is still counted, but a lineage
+    # nothing in `items` belongs to is never fetched at all.
     if min_profit is not None or max_profit is not None:
         items_by_id = {i.item_id: i for i in repo.list_inventory()}
-        profit_map = _lifetime_profit_map(items_by_id, repo)
+        needed_lineage_ids = {i.lineage_id or i.item_id for i in items}
+        profit_map = _lifetime_profit_map(items_by_id, repo, only_lineages=needed_lineage_ids)
         items = [
             i for i in items
             if (profit := profit_map.get(i.item_id, Decimal("0"))) is not None
@@ -274,7 +281,6 @@ def admin_update_item(
 
     # Merge: dump existing to dict, overlay with update body, re-validate
     current_data = existing.model_dump(mode="python")
-    changed_fields = _diff_fields(current_data, body)
     current_data.update(body)
     # Ensure item_id cannot be changed
     current_data["item_id"] = item_id
@@ -283,6 +289,18 @@ def admin_update_item(
         updated_item = InventoryItemAdapter.validate_python(current_data)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # Diff the VALIDATED before/after dumps, not the raw request body, and
+    # only after validation succeeds. Diffing the raw body would (a) record
+    # an unknown/typo'd key (e.g. "locaton") as a change even though
+    # Pydantic's extra='ignore' silently dropped it and nothing was actually
+    # stored, and (b) show a spurious diff for a value re-typed in a
+    # different but equal literal form (e.g. "10.0" vs stored "10.00").
+    # Running this after validation also means a rejected update (422 above)
+    # writes no audit event at all.
+    changed_fields = _diff_fields(
+        existing.model_dump(mode="python"), updated_item.model_dump(mode="python"),
+    )
 
     repo.put_inventory_item(updated_item)
 
@@ -724,7 +742,10 @@ def _build_lineage_chain(
         if (i.lineage_id == lineage_id) or (i.item_id == lineage_id and i.lineage_id is None)
     ] or [item]
     chain_map = {i.item_id: i for i in lineage_items}
-    roots = [i for i in lineage_items if i.predecessor_item_id is None or i.predecessor_item_id not in chain_map]
+    roots = [
+        i for i in lineage_items
+        if i.predecessor_item_id is None or i.predecessor_item_id not in chain_map
+    ]
 
     ordered: list[InventoryItem] = []
     current: InventoryItem | None = roots[0] if roots else item
@@ -733,14 +754,19 @@ def _build_lineage_chain(
         visited.add(current.item_id)
         ordered.append(current)
         current = next(
-            (i for i in lineage_items if i.predecessor_item_id == current.item_id and i.item_id not in visited),
+            (
+                i for i in lineage_items
+                if i.predecessor_item_id == current.item_id and i.item_id not in visited
+            ),
             None,
         )
     return ordered
 
 
 def _lifetime_profit_map(
-    items_by_id: dict[str, InventoryItem], repo: InventoryRepository,
+    items_by_id: dict[str, InventoryItem],
+    repo: InventoryRepository,
+    only_lineages: set[str] | None = None,
 ) -> dict[str, Decimal]:
     """Cumulative profit for every item in items_by_id, one walk per lineage.
 
@@ -750,10 +776,19 @@ def _lifetime_profit_map(
     nodes). This groups by lineage first and walks each distinct chain
     exactly once, same figure as ``cumulative_profit`` in
     ``admin_item_lineage`` computed for every node along the way.
+
+    ``only_lineages``, when given, skips walking (and fetching timeline
+    events for) any lineage group whose key isn't in the set — the caller
+    already knows which lineages its candidates belong to and there is no
+    reason to pay for chains nothing in the result set is a member of.
+    Group membership itself still comes from the full ``items_by_id`` map
+    regardless of this filter, so a walked chain's members are complete.
     """
     groups: dict[str, list[InventoryItem]] = {}
     for i in items_by_id.values():
         key = i.lineage_id or i.item_id
+        if only_lineages is not None and key not in only_lineages:
+            continue
         groups.setdefault(key, []).append(i)
 
     result: dict[str, Decimal] = {}
@@ -798,25 +833,29 @@ def _split_combined_condition(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _diff_fields(
-    before: dict[str, Any], updates: dict[str, Any],
+    before: dict[str, Any], after: dict[str, Any],
 ) -> dict[str, dict[str, str | None]]:
     """Which fields actually changed value, as ``{field: {"old": ..., "new": ...}}``.
 
-    Compared as strings — ``before`` holds Python-native types (Decimal, date,
-    enum) from ``model_dump(mode="python")`` while ``updates`` holds raw
-    request-body values, so an exact-type comparison would treat e.g.
-    ``Decimal("10.00")`` vs the (identical) incoming ``"10.00"`` as different.
-    String comparison accepts the rare false-positive (a value re-typed in a
-    different literal form) in exchange for never missing a real change.
+    Both ``before`` and ``after`` must be ``model_dump(mode="python")`` of
+    the pre- and post-update model — never the raw request body. Comparing
+    validated dumps (not raw input) means a field Pydantic's ``extra=
+    'ignore'`` silently dropped (an unknown/typo'd key) never reaches
+    ``after`` and is correctly not recorded as a change. Values are compared
+    as their native Python types (Decimal, date, enum) so e.g.
+    ``Decimal("10.00") == Decimal("10.0")`` is correctly seen as unchanged,
+    instead of a spurious diff from comparing differently-formatted literal
+    strings. The recorded old/new are stringified afterward only for the
+    audit trail / API response.
     """
     changed: dict[str, dict[str, str | None]] = {}
-    for key, new_value in updates.items():
+    for key, new_value in after.items():
         if key == "item_id":
             continue
         old_value = before.get(key)
-        old_str = None if old_value is None else str(old_value)
-        new_str = None if new_value is None else str(new_value)
-        if old_str != new_str:
+        if old_value != new_value:
+            old_str = None if old_value is None else str(old_value)
+            new_str = None if new_value is None else str(new_value)
             changed[key] = {"old": old_str, "new": new_str}
     return changed
 

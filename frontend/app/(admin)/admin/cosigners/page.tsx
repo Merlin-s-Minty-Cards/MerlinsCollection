@@ -93,6 +93,10 @@ export default function AdminCosignersPage() {
   // Delete confirmation
   const [deleteTarget, setDeleteTarget] = useState<Cosigner | null>(null)
 
+  // Unlink confirmation
+  const [unlinkTarget, setUnlinkTarget] = useState<CosignerAsset | null>(null)
+  const [unlinking, setUnlinking] = useState(false)
+
   // ---------------------------------------------------------------------------
   // Data fetching
   // ---------------------------------------------------------------------------
@@ -242,13 +246,17 @@ export default function AdminCosignersPage() {
     }
   }
 
-  const handleUnlink = async (item: CosignerAsset) => {
-    if (!selectedCosigner) return
+  const handleUnlink = async () => {
+    if (!selectedCosigner || !unlinkTarget) return
+    setUnlinking(true)
     try {
-      await api.del(`/cosigners/${selectedCosigner.consignor_id}/assets/${item.item_id}`)
+      await api.del(`/cosigners/${selectedCosigner.consignor_id}/assets/${unlinkTarget.item_id}`)
+      setUnlinkTarget(null)
       fetchDetail(selectedCosigner)
     } catch (err) {
       alert(err instanceof AdminApiError ? err.detail : 'Failed to unlink item')
+    } finally {
+      setUnlinking(false)
     }
   }
 
@@ -376,7 +384,7 @@ export default function AdminCosignersPage() {
       render: (item) => (
         <button
           type="button"
-          onClick={(e) => { e.stopPropagation(); handleUnlink(item) }}
+          onClick={(e) => { e.stopPropagation(); setUnlinkTarget(item) }}
           className="p-1 rounded text-pine-400 hover:text-red-400 transition-colors"
           aria-label={`Unlink ${item.display_name || item.product_name || item.name || item.item_id}`}
         >
@@ -717,6 +725,21 @@ export default function AdminCosignersPage() {
         confirmLabel="Deactivate"
         onConfirm={handleDelete}
         onCancel={() => setDeleteTarget(null)}
+      />
+
+      {/* Unlink confirmation — every other destructive action touched or
+          added in this round (Locations delete, cosigner delete above)
+          already goes through ConfirmDialog; unlink was the one click that
+          fired immediately (Round 6 audit finding 4). */}
+      <ConfirmDialog
+        open={!!unlinkTarget}
+        title="Unlink Item"
+        description={`Remove "${unlinkTarget?.display_name || unlinkTarget?.product_name || unlinkTarget?.name || 'this item'}" from ${selectedCosigner?.name}'s consigned assets?`}
+        confirmLabel="Unlink"
+        variant="danger"
+        loading={unlinking}
+        onConfirm={handleUnlink}
+        onCancel={() => setUnlinkTarget(null)}
       />
     </div>
   )

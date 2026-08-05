@@ -634,6 +634,40 @@ class TestAdminUpdateItem:
         assert len(edit_events) == 1
         assert edit_events[0]["changed_fields"]["location"] == {"old": "toploader", "new": "glass"}
 
+    def test_unknown_key_in_body_writes_no_spurious_audit_entry(self, admin_client):
+        """A typo'd/unknown key that Pydantic's ``extra='ignore'`` silently
+        drops must not show up in the audit trail as a change that never
+        actually happened to the stored item (finding 7a)."""
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="item-1", location="glass"))
+
+        resp = client.put(
+            "/admin/inventory/item-1",
+            json={"locaton": "toploader"},  # typo — not a real field
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        stored = repo.get_inventory_item("item-1")
+        assert stored.location == "glass"  # untouched — the typo'd key was ignored
+
+        events = [e for e in repo.get_timeline_events("item-1") if e.get("type") == "edit"]
+        assert events == []
+
+    def test_equal_value_in_different_literal_form_writes_no_spurious_diff(self, admin_client):
+        """Re-typing ``cost_basis`` as ``"10.0"`` against a stored ``"10.00"``
+        is the same value and must not show as a changed field (finding 7b)."""
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="item-1", cost_basis="10.00"))
+
+        resp = client.put(
+            "/admin/inventory/item-1",
+            json={"cost_basis": "10.0"},
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        events = [e for e in repo.get_timeline_events("item-1") if e.get("type") == "edit"]
+        assert events == []
+
 
 # ===========================================================================
 # Delete item
@@ -1309,6 +1343,52 @@ class TestAdminSearchByLifetimeProfit:
         assert resp.status_code == 200
         ids = {i["item_id"] for i in resp.json()["items"]}
         assert "held-1" in ids
+
+    def test_min_profit_scoped_to_name_filter_does_not_walk_unrelated_lineages(
+        self, admin_client, monkeypatch,
+    ):
+        """A name-scoped profit search must only fetch timeline events for
+        lineages actually present in the name-filtered candidate set — not
+        re-walk every chain in the whole table (finding 3)."""
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(
+            item_id="target-1", display_name="Pikachu",
+            cost_basis="10.00", status=ItemStatus.SOLD, lineage_id="target-1",
+        ))
+        repo.put_timeline_event("target-1", {
+            "item_id": "target-1", "txn_id": "t-1", "type": "sale",
+            "date": "2025-04-01", "amount": "50.00", "payment_method": "cash",
+        })
+        # An unrelated item/chain that does NOT match the name filter — its
+        # timeline must never be fetched by a name-scoped profit search.
+        repo.put_inventory_item(_raw(
+            item_id="other-1", display_name="Charizard", card_id="sv1-2",
+            cost_basis="10.00", status=ItemStatus.SOLD, lineage_id="other-1",
+        ))
+        repo.put_timeline_event("other-1", {
+            "item_id": "other-1", "txn_id": "t-2", "type": "sale",
+            "date": "2025-04-01", "amount": "999.00", "payment_method": "cash",
+        })
+
+        calls: list[str] = []
+        original = repo.get_timeline_events
+
+        def _tracking(item_id):
+            calls.append(item_id)
+            return original(item_id)
+
+        monkeypatch.setattr(repo, "get_timeline_events", _tracking)
+
+        resp = client.get(
+            "/admin/inventory/search",
+            params={"name": "Pikachu", "min_profit": "0"},
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        ids = {i["item_id"] for i in resp.json()["items"]}
+        assert ids == {"target-1"}
+        assert "target-1" in calls
+        assert "other-1" not in calls
 
 
 class TestAdminRefreshPrices:

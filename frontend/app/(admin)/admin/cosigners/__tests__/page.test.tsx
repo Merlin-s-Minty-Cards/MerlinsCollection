@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import AdminCosignersPage from '../page'
 
 const getMock = vi.fn()
@@ -62,11 +62,24 @@ describe('AdminCosignersPage', () => {
     })
   })
 
-  it('unlinks an item via DELETE /cosigners/{id}/assets/{item_id}', async () => {
+  it('does not unlink immediately — clicking Unlink opens a confirmation dialog first', async () => {
+    // Round 6 audit finding 4: unlink used to fire on a single click, unlike
+    // every other destructive action in the app (Locations delete, cosigner
+    // delete). Confirm the dialog gates the call rather than firing it.
+    await selectCosigner()
+
+    fireEvent.click(screen.getByLabelText('Unlink Pikachu'))
+
+    expect(delMock).not.toHaveBeenCalled()
+    expect(await screen.findByRole('button', { name: /^unlink$/i })).toBeInTheDocument()
+  })
+
+  it('unlinks an item via DELETE /cosigners/{id}/assets/{item_id} after confirming', async () => {
     delMock.mockResolvedValueOnce({ status: 'unlinked', item_id: asset.item_id })
     await selectCosigner()
 
     fireEvent.click(screen.getByLabelText('Unlink Pikachu'))
+    fireEvent.click(await screen.findByRole('button', { name: /^unlink$/i }))
 
     await waitFor(() =>
       expect(delMock).toHaveBeenCalledWith(
@@ -75,12 +88,23 @@ describe('AdminCosignersPage', () => {
     )
   })
 
+  it('does not call DELETE when the unlink confirmation is cancelled', async () => {
+    await selectCosigner()
+
+    fireEvent.click(screen.getByLabelText('Unlink Pikachu'))
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+
+    await act(async () => { await Promise.resolve() })
+    expect(delMock).not.toHaveBeenCalled()
+  })
+
   it('refreshes the asset list after a successful unlink', async () => {
     delMock.mockResolvedValueOnce({ status: 'unlinked', item_id: asset.item_id })
     await selectCosigner()
     const callsBefore = getMock.mock.calls.length
 
     fireEvent.click(screen.getByLabelText('Unlink Pikachu'))
+    fireEvent.click(await screen.findByRole('button', { name: /^unlink$/i }))
 
     await waitFor(() => expect(getMock.mock.calls.length).toBeGreaterThan(callsBefore))
   })

@@ -3,8 +3,10 @@ import { render, screen, fireEvent, act, within, waitFor } from '@testing-librar
 import AdminInventoryPage from '../page'
 
 const getMock = vi.fn()
+const postMock = vi.fn()
+const putMock = vi.fn()
 const mockApi = {
-  get: getMock, post: vi.fn(), put: vi.fn(), patch: vi.fn(), del: vi.fn(),
+  get: getMock, post: postMock, put: putMock, patch: vi.fn(), del: vi.fn(),
   isAuthenticated: true, isLoading: false,
 }
 
@@ -16,6 +18,10 @@ vi.mock('@/lib/admin-api', async () => {
 describe('AdminInventoryPage location pickers use the live location list', () => {
   beforeEach(() => {
     getMock.mockReset()
+    postMock.mockReset()
+    putMock.mockReset()
+    postMock.mockResolvedValue({ item_id: 'new-1' })
+    putMock.mockResolvedValue({})
     getMock.mockImplementation((path: string) => {
       if (path === '/locations') {
         return Promise.resolve([{ value: 'custom_shelf', label: 'Custom Shelf' }])
@@ -70,5 +76,63 @@ describe('AdminInventoryPage location pickers use the live location list', () =>
         expect.objectContaining({ needs_review: 'true' }),
       )
     )
+  })
+
+  it('create-form defaults location to the first live option, not a hardcoded "toploader" (finding 2)', async () => {
+    // "toploader" is deletable via DELETE /admin/locations/{value} once no
+    // item uses it (Task 7's whole point) — a hardcoded default that
+    // survives its deletion 422s "Unknown location" on submit unless the
+    // admin happens to touch the dropdown themselves.
+    render(<AdminInventoryPage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.click(screen.getByRole('button', { name: /add item/i }))
+    const dialog = await screen.findByRole('dialog', { name: /add new item/i })
+
+    fireEvent.change(within(dialog).getByLabelText(/^name$/i), { target: { value: 'Pikachu' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: /^create$/i }))
+
+    await waitFor(() =>
+      expect(postMock).toHaveBeenCalledWith(
+        '/inventory',
+        expect.objectContaining({ location: 'custom_shelf' }),
+      )
+    )
+  })
+})
+
+describe('AdminInventoryPage inline location edit no-op guard', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    putMock.mockReset()
+    putMock.mockResolvedValue({})
+    getMock.mockImplementation((path: string) => {
+      if (path === '/locations') {
+        return Promise.resolve([{ value: 'glass', label: 'Glass' }])
+      }
+      if (path === '/inventory/search') {
+        // A null-location item — Buy/Trade can leave location unset by
+        // design, and the inline editor no longer has a "— None —" option
+        // to explicitly re-select once location became required (finding 6).
+        return Promise.resolve({
+          items: [{ item_id: 'item-1', display_name: 'Pikachu', location: null, status: 'available' }],
+          total: 1,
+        })
+      }
+      return Promise.resolve({})
+    })
+  })
+
+  it('does not PUT when the location editor is opened and blurred without a change', async () => {
+    render(<AdminInventoryPage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.click(screen.getByTitle('Click to edit'))
+    const select = screen.getByRole('combobox', { name: /edit location/i })
+    fireEvent.blur(select)
+
+    await act(async () => { await Promise.resolve() })
+    expect(putMock).not.toHaveBeenCalled()
   })
 })

@@ -47,6 +47,7 @@ export default function AdminPrepQueuePage() {
   // Inline location editing (select — not handled by InlineEditCell)
   const [editingLocation, setEditingLocation] = useState<string | null>(null)
   const [editLocationValue, setEditLocationValue] = useState('')
+  const [editLocationOriginal, setEditLocationOriginal] = useState('')
   const [saving, setSaving] = useState(false)
 
   // Bulk pricing (Round 6 audit item 10 — Prep Queue had no bulk-apply UI)
@@ -133,6 +134,12 @@ export default function AdminPrepQueuePage() {
 
   const handleBulkStickerApply = async () => {
     if (selectedIds.size === 0 || !bulkStickerValue.trim()) return
+    const price = parseFloat(bulkStickerValue)
+    // Same guard Show Prep's handleBulkStickerUpdate uses — without it a
+    // negative/NaN value silently applies to every selected item and drops
+    // them all from the queue (its whole criterion is "no sticker price
+    // yet"), per Round 6 audit finding 5.
+    if (isNaN(price) || price < 0) return
     setBulkUpdating(true)
     let updated = 0
     for (const id of selectedIds) {
@@ -155,14 +162,25 @@ export default function AdminPrepQueuePage() {
   const startLocationEdit = (itemId: string, currentLocation: string | undefined) => {
     setEditingLocation(itemId)
     setEditLocationValue(currentLocation ?? '')
+    setEditLocationOriginal(currentLocation ?? '')
   }
 
   const cancelLocationEdit = () => {
     setEditingLocation(null)
     setEditLocationValue('')
+    setEditLocationOriginal('')
   }
 
   const saveLocationEdit = async (itemId: string) => {
+    // No-op guard: skip the PUT entirely when nothing actually changed. This
+    // also protects null-location items — the inline editor lost its
+    // "— None —" option once location became required (Task 8), so opening
+    // the editor on such an item and blurring without picking anything used
+    // to always send `location: null` and 422 (Round 6 audit finding 6).
+    if (editLocationValue === editLocationOriginal) {
+      cancelLocationEdit()
+      return
+    }
     setSaving(true)
     try {
       const location = editLocationValue.trim() === '' ? null : editLocationValue.trim()
@@ -276,6 +294,7 @@ export default function AdminPrepQueuePage() {
           return (
             <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
               <select
+                aria-label={`Edit location for ${getItemName(item)}`}
                 value={editLocationValue}
                 onChange={(e) => setEditLocationValue(e.target.value)}
                 onBlur={() => saveLocationEdit(item.item_id)}
@@ -406,6 +425,7 @@ export default function AdminPrepQueuePage() {
             <input
               type="number"
               step="0.01"
+              min="0"
               value={bulkStickerValue}
               onChange={(e) => setBulkStickerValue(e.target.value)}
               placeholder="0.00"

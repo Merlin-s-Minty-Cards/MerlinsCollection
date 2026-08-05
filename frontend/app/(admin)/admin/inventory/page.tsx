@@ -65,6 +65,7 @@ export default function AdminInventoryPage() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editField, setEditField] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
+  const [editOriginalValue, setEditOriginalValue] = useState('')
 
   // Delete dialog
   const [deleteTarget, setDeleteTarget] = useState<InventoryItem | null>(null)
@@ -137,11 +138,23 @@ export default function AdminInventoryPage() {
   const startEdit = (item: InventoryItem, field: string) => {
     setEditingId(item.item_id)
     setEditField(field)
-    setEditValue(String((item as Record<string, unknown>)[field] ?? ''))
+    const value = String((item as Record<string, unknown>)[field] ?? '')
+    setEditValue(value)
+    setEditOriginalValue(value)
   }
 
   const saveEdit = async () => {
     if (!editingId || !editField) return
+    // No-op guard: skip the PUT entirely when nothing actually changed. This
+    // also protects null-location items — the inline editor lost its
+    // "— None —" option once location became required (Task 8), so opening
+    // the editor on such an item and blurring without picking anything used
+    // to always send `location: null` and 422 (Round 6 audit finding 6).
+    if (editValue === editOriginalValue) {
+      setEditingId(null)
+      setEditField(null)
+      return
+    }
     try {
       await api.put(`/inventory/${editingId}`, { [editField]: editValue || null })
       setEditingId(null)
@@ -242,6 +255,7 @@ export default function AdminInventoryPage() {
         if (editingId === item.item_id && editField === 'location') {
           return (
             <select
+              aria-label={`Edit location for ${item.display_name || item.product_name || item.item_id}`}
               value={editValue}
               onChange={(e) => { setEditValue(e.target.value); }}
               onBlur={saveEdit}
@@ -557,20 +571,37 @@ function CreateItemModal({
   onCreated: () => void
 }) {
   const api = useAdminApi()
-  const { options: locationOptions } = useLocations()
+  const { options: locationOptions, loading: locationsLoading } = useLocations()
   const [form, setForm] = useState({
     kind: 'raw',
     display_name: '',
     condition: 'NM',
     finish: 'normal',
     language: 'EN',
-    location: 'toploader',
+    location: '',
     cost_basis: '',
     current_market_value: '',
     notes: '',
   })
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // Seed the location default from the live list once it loads, instead of
+  // a hardcoded string — a hardcoded default (e.g. "toploader") can point at
+  // a location an admin has since deleted via DELETE /admin/locations/{value}
+  // (allowed once no item uses it), which then 422s "Unknown location" on
+  // submit unless the admin happens to touch the dropdown themselves
+  // (Round 6 audit finding 2). Waits for `loading` to clear rather than just
+  // "options non-empty" — useLocations() starts synchronously populated with
+  // its static offline-fallback list (see use-locations.ts), so seeding on
+  // the first non-empty render would grab that fallback instead of the real
+  // list once it lands. Only seeds while still empty, so it never clobbers
+  // an explicit pick.
+  useEffect(() => {
+    if (!form.location && !locationsLoading && locationOptions.length > 0) {
+      setForm((f) => (f.location ? f : { ...f, location: locationOptions[0].value }))
+    }
+  }, [locationOptions, locationsLoading, form.location])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
