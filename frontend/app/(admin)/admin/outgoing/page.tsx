@@ -49,6 +49,11 @@ export default function AdminPrepQueuePage() {
   const [editLocationValue, setEditLocationValue] = useState('')
   const [saving, setSaving] = useState(false)
 
+  // Bulk pricing (Round 6 audit item 10 — Prep Queue had no bulk-apply UI)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [bulkStickerValue, setBulkStickerValue] = useState('')
+  const [bulkUpdating, setBulkUpdating] = useState(false)
+
   // Images — default ON per spec
   const [showImages, setShowImages] = useState(true)
   const cardIds = items.map((i) => i.card_id)
@@ -107,6 +112,41 @@ export default function AdminPrepQueuePage() {
     },
     [],
   )
+
+  // ---------------------------------------------------------------------------
+  // Bulk sticker pricing
+  // ---------------------------------------------------------------------------
+
+  const handleSelect = (id: string, checked: boolean) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (checked) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
+
+  const handleSelectAll = (checked: boolean) => {
+    if (checked) setSelectedIds(new Set(items.map((i) => i.item_id)))
+    else setSelectedIds(new Set())
+  }
+
+  const handleBulkStickerApply = async () => {
+    if (selectedIds.size === 0 || !bulkStickerValue.trim()) return
+    setBulkUpdating(true)
+    let updated = 0
+    for (const id of selectedIds) {
+      try {
+        await api.put(`/inventory/${id}`, { sticker_price: bulkStickerValue })
+        updated++
+      } catch { /* continue on error, matches show-prep's bulk pattern */ }
+    }
+    setMessage(`Priced ${updated} item${updated !== 1 ? 's' : ''} → removed from queue`)
+    setBulkStickerValue('')
+    setSelectedIds(new Set())
+    setBulkUpdating(false)
+    fetchItems()
+  }
 
   // ---------------------------------------------------------------------------
   // Inline location editing
@@ -173,6 +213,7 @@ export default function AdminPrepQueuePage() {
                 imageUrl={getImageUrl(item.card_id)}
                 alt={getItemName(item)}
                 size="lg"
+                loading="eager"
               />
             ),
           },
@@ -354,6 +395,34 @@ export default function AdminPrepQueuePage() {
         </div>
       )}
 
+      {/* Bulk action bar */}
+      {selectedIds.size > 0 && (
+        <div className="vault-panel rounded-lg px-4 py-2.5 flex items-center gap-3 flex-wrap mb-4">
+          <span className="text-xs text-pine-200">
+            <span className="font-mono text-mint">{selectedIds.size}</span> selected
+          </span>
+          <div className="relative">
+            <span className="absolute left-1.5 top-1/2 -translate-y-1/2 text-[10px] text-pine-500">$</span>
+            <input
+              type="number"
+              step="0.01"
+              value={bulkStickerValue}
+              onChange={(e) => setBulkStickerValue(e.target.value)}
+              placeholder="0.00"
+              className="vault-field w-20 pl-4 pr-1.5 py-1 rounded-lg text-xs font-mono"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={handleBulkStickerApply}
+            disabled={!bulkStickerValue.trim() || bulkUpdating}
+            className="px-3 py-1.5 rounded-lg text-[11px] font-medium bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25 disabled:opacity-40 transition-colors"
+          >
+            {bulkUpdating ? 'Updating…' : 'Set Sticker'}
+          </button>
+        </div>
+      )}
+
       {/* Data table */}
       <DataTable
         columns={columns}
@@ -362,6 +431,9 @@ export default function AdminPrepQueuePage() {
         loading={loading}
         emptyMessage="No items awaiting sticker prices"
         onRowClick={(item) => setDetailItem(item)}
+        selectedIds={selectedIds}
+        onSelect={handleSelect}
+        onSelectAll={handleSelectAll}
       />
 
       {/* Detail modal */}

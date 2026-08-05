@@ -7,6 +7,7 @@ interface CardImageProps {
   alt: string
   size?: 'sm' | 'md' | 'lg' | 'xl'
   className?: string
+  loading?: 'lazy' | 'eager'
 }
 
 const SIZE_CLASSES = {
@@ -20,7 +21,7 @@ const SIZE_CLASSES = {
  * Lazy-loaded card image with fallback placeholder.
  * Renders a Pokemon card thumbnail from TCGdex image URL.
  */
-export default function CardImage({ imageUrl, alt, size = 'sm', className = '' }: CardImageProps) {
+export default function CardImage({ imageUrl, alt, size = 'sm', className = '', loading = 'lazy' }: CardImageProps) {
   const [error, setError] = useState(false)
   const sizeClass = SIZE_CLASSES[size]
 
@@ -52,7 +53,7 @@ export default function CardImage({ imageUrl, alt, size = 'sm', className = '' }
     <img
       src={imageUrl}
       alt={alt}
-      loading="lazy"
+      loading={loading}
       onError={() => setError(true)}
       className={`${sizeClass} rounded object-cover border border-pine-700/40 flex-shrink-0 ${className}`}
     />

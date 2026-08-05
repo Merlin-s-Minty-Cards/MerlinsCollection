@@ -18,4 +18,14 @@ describe('CardImage', () => {
     expect(fallback.className).toContain('w-40')
     expect(fallback.className).toContain('h-56')
   })
+
+  it('renders eager loading when loading="eager" is passed', () => {
+    render(<CardImage imageUrl="https://example.com/card.png" alt="Pikachu" loading="eager" />)
+    expect(screen.getByAltText('Pikachu')).toHaveAttribute('loading', 'eager')
+  })
+
+  it('defaults to lazy loading when no loading prop is passed', () => {
+    render(<CardImage imageUrl="https://example.com/card.png" alt="Pikachu" />)
+    expect(screen.getByAltText('Pikachu')).toHaveAttribute('loading', 'lazy')
+  })
 })
