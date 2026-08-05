@@ -141,6 +141,28 @@ aws ecs update-service --cluster merlins --service merlins-frontend --force-new-
 
 See `frontend/README.md` and `backend/README.md` for single-service deploy commands and environment variable details.
 
+### Checking Deployment Status
+
+```bash
+# Rollout status (COMPLETED / IN_PROGRESS / FAILED)
+aws ecs describe-services --cluster merlins --services merlins-backend --region us-east-1 \
+  --query 'services[0].deployments'
+
+aws ecs describe-services --cluster merlins --services merlins-frontend --region us-east-1 \
+  --query 'services[0].deployments'
+
+# Block until a deployment stabilizes (or times out)
+aws ecs wait services-stable --cluster merlins --services merlins-backend --region us-east-1
+aws ecs wait services-stable --cluster merlins --services merlins-frontend --region us-east-1
+
+# Confirm the running task is on the image you just pushed
+aws ecs describe-tasks --cluster merlins --region us-east-1 \
+  --tasks $(aws ecs list-tasks --cluster merlins --service-name merlins-backend --region us-east-1 --query 'taskArns[0]' --output text) \
+  --query 'tasks[0].containers[0].image'
+```
+
+Or check the ECS console: Clusters → `merlins` → Services → `merlins-backend` / `merlins-frontend` → **Deployments** tab for rollout status, **Tasks** tab for task health.
+
 ## Contributing
 
 All PRs require review. See CLAUDE.md for TDD guidelines and branch protection requirements.
