@@ -594,7 +594,13 @@ function CreateItemModal({
   const update = (field: string, value: string) => setForm((f) => ({ ...f, [field]: value }))
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Add New Item"
+    >
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={handleSubmit}

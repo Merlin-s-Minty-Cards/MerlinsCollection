@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, act } from '@testing-library/react'
+import { render, screen, fireEvent, act, within } from '@testing-library/react'
 import AdminInventoryPage from '../page'
 
 const getMock = vi.fn()
@@ -38,13 +38,23 @@ describe('AdminInventoryPage location pickers use the live location list', () =>
     // button: it reads "Add Item" (with a Plus icon), not "New Item".
     fireEvent.click(screen.getByRole('button', { name: /add item/i }))
 
-    expect(await screen.findByRole('option', { name: 'Custom Shelf' })).toBeInTheDocument()
+    // Scope to the create-form dialog itself, not the whole document. The
+    // filter-bar location <select> (page.tsx, already wired to useLocations()
+    // before this task) also renders a "Custom Shelf" <option> once its own
+    // useLocations() call resolves, so an unscoped screen.findByRole('option',
+    // { name: 'Custom Shelf' }) can pass on the filter bar's option alone —
+    // proving nothing about CreateItemModal's own select. Scoping via
+    // within(dialog) makes both the positive and negative assertions actually
+    // exercise CreateItemModal's dropdown.
+    const dialog = await screen.findByRole('dialog', { name: /add new item/i })
+
+    expect(await within(dialog).findByRole('option', { name: 'Custom Shelf' })).toBeInTheDocument()
     // "Glass Case" is not an actual LOCATION_OPTIONS label (the static list has
     // "Glass" and "Display Case" as separate entries), so it would never appear
     // either way — that assertion wouldn't catch a regression. "Toploader" is a
     // real static-list label, so its absence actually proves the dropdown is no
     // longer sourced from the static list (mirrors the negative check used in
     // CardDetailModal.test.tsx).
-    expect(screen.queryByRole('option', { name: /Toploader/i })).not.toBeInTheDocument()
+    expect(within(dialog).queryByRole('option', { name: /Toploader/i })).not.toBeInTheDocument()
   })
 })
