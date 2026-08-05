@@ -33,7 +33,8 @@ const mispricedItem = {
   cost_basis: '10.00',
   current_market_value: '30.00',
   sticker_price: '25.00',
-  tcg_url: null,
+  sticker_notes: 'verify grade before pricing',
+  tcg_url: 'https://www.tcgplayer.com/product/12345',
   delta_pct: '200',
 }
 
@@ -122,5 +123,14 @@ describe('AdminShowPrepPage inline sticker editing', () => {
     expect(await screen.findByText('boom')).toBeInTheDocument()
     // Editor stays open on failure rather than silently reverting.
     expect(screen.getByPlaceholderText('0.00')).toBeInTheDocument()
+  })
+
+  it('renders the stored tcg_url in the TCG Price column instead of the generated search fallback', async () => {
+    render(<AdminShowPrepPage />)
+    await act(async () => {
+      await Promise.resolve()
+    })
+    const link = await screen.findByTitle('https://www.tcgplayer.com/product/12345')
+    expect(link).toHaveAttribute('href', 'https://www.tcgplayer.com/product/12345')
   })
 })

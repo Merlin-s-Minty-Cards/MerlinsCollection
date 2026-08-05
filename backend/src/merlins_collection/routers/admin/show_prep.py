@@ -72,6 +72,8 @@ def get_mispriced_cards(
                     "cost_basis": str(cost),
                     "current_market_value": str(market),
                     "sticker_price": str(item.sticker_price) if item.sticker_price is not None else None,
+                    "sticker_notes": item.sticker_notes,
+                    "tcg_url": item.tcg_url,
                     "delta_pct": str(margin_pct),
                     "delta_dollar": str(dollar_delta),
                 })
@@ -85,6 +87,8 @@ def get_mispriced_cards(
                     "cost_basis": str(cost),
                     "current_market_value": str(market),
                     "sticker_price": str(item.sticker_price) if item.sticker_price is not None else None,
+                    "sticker_notes": item.sticker_notes,
+                    "tcg_url": item.tcg_url,
                     "delta_pct": str(margin_pct),
                     "delta_dollar": str(dollar_delta),
                 })

@@ -15,13 +15,14 @@ from merlins_collection.models.inventory import (
 
 def _raw(item_id="item-1", *, card_id="sv1-1", location="glass",
          cost_basis="20.00", current_market_value="50.00",
-         status=ItemStatus.AVAILABLE):
+         status=ItemStatus.AVAILABLE, **extra):
     return RawInventoryItem(
         item_id=item_id, card_id=card_id, finish="holofoil",
         condition=Condition.NM, location=location, status=status,
         cost_basis=Decimal(cost_basis),
         current_market_value=Decimal(current_market_value),
         acquired_at=date(2025, 1, 1),
+        **extra,
     )
 
 
@@ -76,6 +77,26 @@ class TestMispriced:
                           headers=_auth(token))
         assert resp.status_code == 200
         assert all(i["location"] == "glass" for i in resp.json()["items"])
+
+    def test_mispriced_includes_tcg_url_and_sticker_notes(self, admin_client):
+        """GET /show-prep/mispriced must round-trip the stored tcg_url and sticker_notes."""
+        client, repo, admin_token = admin_client
+        repo.put_inventory_item(_raw(
+            item_id="item-1", cost_basis="10.00", current_market_value="50.00",
+        ))
+        # Persist tcg_url/sticker_notes exactly the way the admin PUT endpoint would.
+        repo.put_inventory_item(_raw(
+            item_id="item-1", cost_basis="10.00", current_market_value="50.00",
+            tcg_url="https://www.tcgplayer.com/product/12345",
+            sticker_notes="verify grade before pricing",
+        ))
+
+        resp = client.get("/admin/show-prep/mispriced", headers=_auth(admin_token))
+        assert resp.status_code == 200
+        flagged = resp.json()["items"]
+        assert len(flagged) == 1
+        assert flagged[0]["tcg_url"] == "https://www.tcgplayer.com/product/12345"
+        assert flagged[0]["sticker_notes"] == "verify grade before pricing"
 
 
 class TestBulkMove:
