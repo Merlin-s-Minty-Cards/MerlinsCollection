@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import CardDetailModal from '../CardDetailModal'
 
 const getMock = vi.fn()
@@ -21,6 +21,13 @@ vi.mock('@/lib/admin-api', async () => {
     }),
   }
 })
+
+vi.mock('@/lib/use-locations', () => ({
+  useLocations: () => ({
+    options: [{ value: 'custom_shelf', label: 'Custom Shelf' }],
+    loading: false,
+  }),
+}))
 
 const item = {
   item_id: 'item-1',
@@ -63,5 +70,20 @@ describe('CardDetailModal image resolution', () => {
 
     await waitFor(() => expect(postMock).toHaveBeenCalled())
     expect(screen.getByLabelText('No image')).toBeInTheDocument()
+  })
+
+  it('renders the location edit dropdown from useLocations(), not the static LOCATION_OPTIONS list', async () => {
+    // beforeEach already sets getMock to resolve `null` for PriceChart's price-
+    // history fetch (the correct "no data yet" shape — see beforeEach comment
+    // above: resolving `[]` crashes PriceChart's useMemo on `[].points` and
+    // unmounts the tree). No need to override it here.
+    postMock.mockResolvedValueOnce({})
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+
+    const editButtons = await screen.findAllByLabelText(/Edit Location/i)
+    fireEvent.click(editButtons[0])
+
+    expect(screen.getByRole('option', { name: 'Custom Shelf' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: /Toploader/i })).not.toBeInTheDocument()
   })
 })

@@ -3,8 +3,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import { X, Pencil, Check, XCircle } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
-import { CONDITION_OPTIONS, LOCATION_OPTIONS, parseCondition, formatCondition } from '@/lib/constants'
+import { CONDITION_OPTIONS, parseCondition, formatCondition } from '@/lib/constants'
 import { useCardImages } from '@/lib/use-card-images'
+import { useLocations } from '@/lib/use-locations'
 import PriceDisplay from './PriceDisplay'
 import PriceChart from './PriceChart'
 
@@ -16,8 +17,6 @@ interface CardDetailModalProps {
   /** Called after a successful edit so the parent can refresh data */
   onUpdated?: () => void
 }
-
-/** Fixed location options for dropdown — imported from lib/constants */
 
 /** Editable fields with their display labels and value types */
 const EDITABLE_FIELDS: { key: string; label: string; type: 'text' | 'number' | 'select' }[] = [
@@ -46,6 +45,7 @@ export default function CardDetailModal({
   onUpdated,
 }: CardDetailModalProps) {
   const api = useAdminApi()
+  const { options: locationOptions } = useLocations()
   const [editingField, setEditingField] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [saving, setSaving] = useState(false)
@@ -246,7 +246,7 @@ export default function CardDetailModal({
                             autoFocus
                             disabled={saving}
                           >
-                            {LOCATION_OPTIONS.map((loc) => (
+                            {locationOptions.map((loc) => (
                               <option key={loc.value} value={loc.value}>{loc.label}</option>
                             ))}
                           </select>

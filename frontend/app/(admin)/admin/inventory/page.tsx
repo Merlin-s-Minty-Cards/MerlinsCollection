@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Plus, Trash2, Pencil, RefreshCw } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
-import { CONDITION_OPTIONS as COND_VALUES, LOCATION_OPTIONS as LOC_VALUES } from '@/lib/constants'
+import { CONDITION_OPTIONS as COND_VALUES } from '@/lib/constants'
 import { useCardImages } from '@/lib/use-card-images'
 import { useLocations } from '@/lib/use-locations'
 import DataTable, { Column } from '@/components/admin/shared/DataTable'
@@ -40,7 +40,6 @@ interface InventoryItem {
 const STATUS_OPTIONS = ['', 'available', 'sold', 'lost', 'on_hold', 'consigned']
 const CONDITION_OPTIONS = ['', ...COND_VALUES]
 const KIND_OPTIONS = ['', 'raw', 'graded', 'sealed', 'bulk']
-const LOCATION_OPTIONS = LOC_VALUES.map((o) => o.value)
 
 export default function AdminInventoryPage() {
   const api = useAdminApi()
@@ -248,8 +247,8 @@ export default function AdminInventoryPage() {
               autoFocus
             >
               <option value="">— None —</option>
-              {LOCATION_OPTIONS.map((loc) => (
-                <option key={loc} value={loc}>{loc}</option>
+              {locationOptions.map((loc) => (
+                <option key={loc.value} value={loc.value}>{loc.label}</option>
               ))}
             </select>
           )
@@ -547,6 +546,7 @@ function CreateItemModal({
   onCreated: () => void
 }) {
   const api = useAdminApi()
+  const { options: locationOptions } = useLocations()
   const [form, setForm] = useState({
     kind: 'raw',
     display_name: '',
@@ -627,7 +627,7 @@ function CreateItemModal({
           <label>
             <span className="text-[11px] text-pine-400 uppercase tracking-wider">Location</span>
             <select value={form.location} onChange={(e) => update('location', e.target.value)} className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs">
-              {LOCATION_OPTIONS.map((loc) => <option key={loc} value={loc}>{loc}</option>)}
+              {locationOptions.map((loc) => <option key={loc.value} value={loc.value}>{loc.label}</option>)}
             </select>
           </label>
           <label>
