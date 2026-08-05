@@ -49,8 +49,7 @@ interface InventoryItem {
   notes?: string
   company?: string
   grade?: string
-  cosigner_id?: string | null
-  consignment_split?: number | null
+  consignment?: { consignor_id: string; split_percent: string; minimum_price?: string | null; paid_out: boolean } | null
   tcg_url?: string | null
   [key: string]: unknown
 }
@@ -330,11 +329,14 @@ export default function AdminCardDetailPage() {
           {item.grade && (
             <DetailRow label="Grade" value={item.grade} />
           )}
-          {item.cosigner_id && (
-            <DetailRow label="Consigner" value={item.cosigner_id} mono />
+          {item.consignment && (
+            <DetailRow label="Consigner" value={item.consignment.consignor_id} mono />
           )}
-          {item.consignment_split != null && (
-            <DetailRow label="Consignment Split" value={`${item.consignment_split}%`} />
+          {item.consignment && (
+            <DetailRow
+              label="Consignment Split"
+              value={`${(parseFloat(item.consignment.split_percent) * 100).toFixed(0)}%`}
+            />
           )}
           <DetailRow label="Notes" value={item.notes} />
         </div>
