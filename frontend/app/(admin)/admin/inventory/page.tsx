@@ -246,7 +246,6 @@ export default function AdminInventoryPage() {
               className="vault-field px-1.5 py-0.5 text-xs w-28 rounded"
               autoFocus
             >
-              <option value="">— None —</option>
               {locationOptions.map((loc) => (
                 <option key={loc.value} value={loc.value}>{loc.label}</option>
               ))}

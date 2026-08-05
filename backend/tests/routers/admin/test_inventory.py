@@ -1104,6 +1104,32 @@ class TestAdminWriteCombinedCondition:
         assert resp.status_code == 422
 
 
+class TestAdminLocationRequired:
+    def test_create_rejects_missing_location(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        resp = client.post(
+            "/admin/inventory",
+            json={
+                "kind": "raw", "card_id": "sv1-1", "finish": "holofoil",
+                "condition": "NM", "cost_basis": "10.00", "acquired_at": "2025-01-01",
+            },
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 422
+
+    def test_update_rejects_blanking_location(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="item-1", location="glass"))
+        resp = client.put(
+            "/admin/inventory/item-1",
+            json={"location": None},
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 422
+        # Original location must be untouched.
+        assert repo.get_inventory_item("item-1").location == "glass"
+
+
 class TestAdminLineageProfit:
     """GET /admin/inventory/{item_id}/lineage — per-step and cumulative profit."""
 

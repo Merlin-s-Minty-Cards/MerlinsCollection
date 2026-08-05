@@ -234,8 +234,7 @@ def admin_create_item(
         raise HTTPException(status_code=422, detail=f"Invalid kind: {kind}")
 
     body = _split_combined_condition(body)
-    if "location" in body:
-        validate_location(repo, body.get("location"))
+    validate_location(repo, body.get("location"), required=True)
 
     # Assign a new item_id
     body.setdefault("item_id", new_ulid())
