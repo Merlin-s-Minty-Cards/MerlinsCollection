@@ -311,9 +311,6 @@ export default function AdminSellPage() {
                     className="w-full flex items-center justify-between px-3 py-2.5 hover:bg-pine-800/50 transition-colors text-left"
                   >
                     <div className="flex items-center gap-2 min-w-0">
-                      {showImages && (
-                        <CardImage imageUrl={getImageUrl(item.card_id)} alt={item.display_name || 'card'} size="md" />
-                      )}
                       <div className="min-w-0">
                         <div className="text-xs text-pine-100 truncate flex items-center gap-1.5">
                           {item.display_name || item.product_name}
