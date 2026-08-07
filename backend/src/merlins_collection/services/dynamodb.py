@@ -77,6 +77,18 @@ def _serialize(value):
         return value.value
     if isinstance(value, (datetime, date)):
         return value.isoformat()
+    # DynamoDB has no float type and boto3 refuses one outright. Pydantic-backed
+    # writers already hand us Decimals, but the sell/buy/trade session routers
+    # persist RAW REQUEST JSON, where a price arrives as a float -- which 500'd
+    # `POST /admin/sales/{id}/items` in production. Converting via str() is the
+    # point: Decimal(0.1) is 0.1000000000000000055511151231257827..., so the
+    # binary constructor would persist a price that no longer round-trips.
+    # `bool` subclasses int, not float, so it stays a native DynamoDB BOOL.
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            raise ValueError(f"Cannot store non-finite number {value!r}: "
+                             "DynamoDB numbers must be finite")
+        return Decimal(str(value))
     if isinstance(value, dict):
         return {k: _serialize(v) for k, v in value.items()}
     if isinstance(value, list):

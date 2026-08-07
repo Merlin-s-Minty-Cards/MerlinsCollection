@@ -878,3 +878,73 @@ def test_finalize_import_rejects_a_bad_entity_scope(dynamo_repo):
     with pytest.raises(ValueError, match="empty"):
         dynamo_repo.finalize_import("gen-x", committed=True,
                                     entity_scope=frozenset())
+
+
+# ---- float -> Decimal coercion -------------------------------------------
+# DynamoDB has no float type and boto3 refuses one outright ("Float types are
+# not supported. Use Decimal types instead."). Every value we write therefore
+# has to be a Decimal by the time it reaches `put_item`. Pydantic models give
+# us that for free, but the sell/buy/trade session routers store RAW REQUEST
+# JSON, where a price arrives as a Python float. That path 500'd in production
+# on `POST /admin/sales/{id}/items` -- these tests pin the coercion that fixes
+# it. The tests above never caught it because they all send prices as STRINGS.
+
+def test_serialize_converts_float_to_decimal():
+    from merlins_collection.services.dynamodb import _serialize
+
+    assert _serialize(45.0) == Decimal("45.0")
+    assert isinstance(_serialize(45.0), Decimal)
+
+
+def test_serialize_float_conversion_goes_through_str_not_binary():
+    # Decimal(0.1) is 0.1000000000000000055511151231257827..., which would
+    # persist a price that no longer round-trips. Decimal(str(0.1)) is "0.1".
+    from merlins_collection.services.dynamodb import _serialize
+
+    assert _serialize(0.1) == Decimal("0.1")
+    assert _serialize(45.67) == Decimal("45.67")
+
+
+def test_serialize_converts_floats_nested_in_dicts_and_lists():
+    from merlins_collection.services.dynamodb import _serialize
+
+    result = _serialize({"items": [{"agreed_price": 45.5, "discount_pct": 10.0}]})
+    price = result["items"][0]["agreed_price"]
+    assert isinstance(price, Decimal) and price == Decimal("45.5")
+    assert isinstance(result["items"][0]["discount_pct"], Decimal)
+
+
+def test_serialize_leaves_ints_and_bools_alone():
+    # bool is a subclass of int, not of float, but DynamoDB stores it as BOOL
+    # and turning it into Decimal("1") would silently change the stored type.
+    from merlins_collection.services.dynamodb import _serialize
+
+    assert _serialize(True) is True
+    assert _serialize(False) is False
+    assert _serialize(7) == 7 and isinstance(_serialize(7), int)
+
+
+def test_serialize_rejects_nan_and_infinity():
+    # Python's json module parses the bare literals NaN/Infinity, so these can
+    # reach us from a request body. DynamoDB cannot store either; failing here
+    # names the offending value instead of surfacing a boto3 error two frames on.
+    from merlins_collection.services.dynamodb import _serialize
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="finite"):
+            _serialize(bad)
+
+
+def test_put_sell_session_accepts_float_prices(dynamo_repo):
+    # The exact production payload: the Sell page sends agreed_price as a JSON
+    # number (sell/page.tsx builds it with parseFloat), so it lands as a float.
+    dynamo_repo.put_sell_session({
+        "sell_id": "sell-float-1",
+        "status": "draft",
+        "created_at": "2026-08-07T00:00:00",
+        "items": [{"item_id": "card-1", "agreed_price": 45.5,
+                   "original_price": 60.0, "discount_pct": 24.17}],
+    })
+
+    stored = dynamo_repo.get_sell_session("sell-float-1")
+    assert stored["items"][0]["agreed_price"] == Decimal("45.5")

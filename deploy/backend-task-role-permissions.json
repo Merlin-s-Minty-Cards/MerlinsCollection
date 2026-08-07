@@ -11,7 +11,9 @@
         "dynamodb:BatchWriteItem",
         "dynamodb:PutItem",
         "dynamodb:DeleteItem",
-        "dynamodb:TransactWriteItems"
+        "dynamodb:TransactWriteItems",
+        "dynamodb:Scan",
+        "dynamodb:UpdateItem"
       ],
       "Resource": [
         "arn:aws:dynamodb:us-east-1:560151615792:table/merlins-cards",

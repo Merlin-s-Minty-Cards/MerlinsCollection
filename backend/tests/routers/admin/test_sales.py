@@ -6,8 +6,6 @@ Covers full sell session lifecycle: create, add items, confirm, cancel.
 from datetime import date
 from decimal import Decimal
 
-import pytest
-from fastapi.testclient import TestClient
 
 from merlins_collection.models.inventory import (
     Condition,
@@ -35,25 +33,8 @@ def _raw(item_id="item-1", *, card_id="sv1-1", status=ItemStatus.AVAILABLE, cost
 
 # ---- fixtures ----
 
-@pytest.fixture
-def admin_client(cognito_config, jwks, dynamo_repo, mint_token):
-    from merlins_collection.dependencies import get_repo, get_verifier
-    from merlins_collection.main import app
-    from merlins_collection.services.cognito import CognitoJwtVerifier
-
-    verifier = CognitoJwtVerifier(
-        region=cognito_config["region"],
-        user_pool_id=cognito_config["user_pool_id"],
-        client_id=cognito_config["client_id"],
-        jwks=jwks,
-    )
-    app.dependency_overrides[get_verifier] = lambda: verifier
-    app.dependency_overrides[get_repo] = lambda: dynamo_repo
-
-    admin_token = mint_token(claims={"cognito:groups": ["admin"]})
-    client = TestClient(app)
-    yield client, dynamo_repo, admin_token
-    app.dependency_overrides.clear()
+# ``admin_client`` now comes from ``conftest.py`` in this package; the identical
+# copy that used to sit here was one of sixteen.
 
 
 def _auth(token: str) -> dict:
@@ -103,6 +84,27 @@ class TestSellSessionItems:
         resp = client.post(f"/admin/sales/{sell_id}/items", json={
             "item_id": "card-1",
             "agreed_price": "45.00",
+        }, headers=_auth(token))
+        assert resp.status_code == 200
+        assert len(resp.json()["items"]) == 1
+
+    def test_add_item_with_numeric_prices(self, admin_client):
+        # What the Sell page ACTUALLY sends. `addItem` in sell/page.tsx builds
+        # agreed_price with parseFloat, so the body carries JSON numbers, not
+        # the strings every other test in this class uses. Those numbers reach
+        # the repo as Python floats, which boto3 refuses -- this 500'd on the
+        # live site ("TypeError: Float types are not supported").
+        client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="card-1"))
+
+        create = client.post("/admin/sales", json={}, headers=_auth(token))
+        sell_id = create.json()["sell_id"]
+
+        resp = client.post(f"/admin/sales/{sell_id}/items", json={
+            "item_id": "card-1",
+            "agreed_price": 45.5,
+            "original_price": 60.0,
+            "discount_pct": 24.17,
         }, headers=_auth(token))
         assert resp.status_code == 200
         assert len(resp.json()["items"]) == 1
