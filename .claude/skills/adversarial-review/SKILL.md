@@ -1,6 +1,6 @@
 ---
 name: adversarial-review
-description: Critique a plan or diff from four adversarial angles in one inline pass — broken logic, security exposure, resilience under abuse, and structural bloat. Use when another skill's step calls for a fresh adversarial look before or after implementing, or when asked to red-team a draft.
+description: Critique a plan or diff across four lenses in one inline pass — logic, security, chaos, bloat. Use when another skill's step calls for an adversarial pass, or when asked to break a draft.
 ---
 
 # Adversarial Review

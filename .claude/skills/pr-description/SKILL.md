@@ -9,11 +9,11 @@ Turn a finished branch into a Pull Request description that matches the local re
 
 ## Constraints
 
-- **Read-only.** Never modify code, commit, push, or open the PR itself unless explicitly asked. The deliverable is text.
-- The output must **mirror the repository's template exactly** — same headings, wording, order, checkboxes, and nothing more. Don't add, rename, merge, split, or reorder sections, and don't invent headings the template doesn't contain. The set of `##` headings in the output must match the template's set exactly. Information with no natural home goes in the closest existing section.
+- **Read-only.** The deliverable is text; code, commits, pushes, and the PR itself stay untouched unless explicitly asked.
+- The output **mirrors the repository's template exactly** — same headings, wording, order, and checkboxes. The set of `##` headings in the output matches the template's set one for one, and information with no natural home goes in the closest existing section.
 - Fill every section the template defines; if one genuinely doesn't apply, write `N/A` with a one-line reason.
-- Every claim must be grounded in the actual diff — never describe intentions or code that isn't in the changeset.
-- Check a checkbox only when it's verifiably true (e.g. tick "tests pass" only with evidence the suite ran green).
+- Every claim is grounded in the actual diff.
+- Check a checkbox only when it's verifiably true — tick "tests pass" only against an observed green run (the `testing` skill covers what makes one trustworthy).
 - Wrap the final body in a single fenced codeblock. Since the body itself contains markdown (and possibly triple-backtick fences), use a **quadruple-backtick** fence.
 
 ## Step-by-Step Execution

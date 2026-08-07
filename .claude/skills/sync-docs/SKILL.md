@@ -9,11 +9,11 @@ After source files change, scan the modifications and update every corresponding
 
 ## Constraints
 
-- **Never change behavior.** Edit documentation, docstrings, and comments only — never executable logic, signatures, or configuration values. If the code itself looks wrong rather than the docs, report it instead of "fixing" it here.
-- Documentation must be **derived from the code as it is now**, not from commit messages or intentions. Read the actual implementation before describing it.
-- Match each document's existing voice, structure, and formatting. Don't restructure a README to your taste while updating one section.
-- Comment only what the code cannot say itself — constraints, invariants, non-obvious "why". Never narrate what the next line does, and never leave a stale comment behind after an edit.
-- Never document secret or credential **values** — names and purposes only.
+- **Prose only.** Edit documentation, docstrings, and comments; leave executable logic, signatures, and configuration values exactly as found. If the code itself looks wrong rather than the docs, report it rather than fixing it here.
+- Documentation is **derived from the code as it is now**, so read the actual implementation before describing it — commit messages and intentions record what someone meant, not what shipped.
+- Match each document's existing voice, structure, and formatting, and confine edits to the sections the code change touches.
+- Comment what the code cannot say itself — constraints, invariants, non-obvious "why". Rewrite or drop any comment an edit made stale.
+- Document secret and credential **names and purposes** only; values stay out.
 
 ## Step-by-Step Execution
 

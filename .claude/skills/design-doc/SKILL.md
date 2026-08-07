@@ -9,7 +9,7 @@ Compile a feature's technical constraints, data schemas, API contracts, and serv
 
 ## Constraints
 
-- **Produce exactly one artifact:** the RFC file. Never write application code, tests, or configuration here.
+- **Produce exactly one artifact:** the RFC file. Application code, tests and configuration come later, from the implementation work this RFC is built for.
 - Ground the design in the real project. Read the existing architecture (Next.js 14 `frontend/`, FastAPI `backend/`, MCP `mcp-server/`, Sanity CMS, the AWS services in CLAUDE.md) before proposing structures — an RFC that contradicts the existing stack is wrong by default.
 - Be concrete: schemas get real field names and types, endpoints get real routes/methods/example payloads, components get real file paths. "TBD" belongs only in Open Questions.
 - Design to the requirement, not beyond it. Flag any genuinely necessary new service, layer, or dependency prominently rather than adding it quietly.
