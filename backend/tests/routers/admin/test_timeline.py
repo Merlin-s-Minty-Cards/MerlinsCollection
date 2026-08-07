@@ -7,10 +7,7 @@ GET /admin/inventory/{item_id}/lineage — full trade chain
 from datetime import date
 from decimal import Decimal
 
-import pytest
-from fastapi.testclient import TestClient
 
-from merlins_collection.models.business import ItemCategory, Transaction, TransactionType
 from merlins_collection.models.inventory import (
     Condition,
     ItemStatus,
@@ -39,25 +36,8 @@ def _raw(item_id="item-1", *, card_id="sv1-1", status=ItemStatus.AVAILABLE,
 
 # ---- fixtures ----
 
-@pytest.fixture
-def admin_client(cognito_config, jwks, dynamo_repo, mint_token):
-    from merlins_collection.dependencies import get_repo, get_verifier
-    from merlins_collection.main import app
-    from merlins_collection.services.cognito import CognitoJwtVerifier
-
-    verifier = CognitoJwtVerifier(
-        region=cognito_config["region"],
-        user_pool_id=cognito_config["user_pool_id"],
-        client_id=cognito_config["client_id"],
-        jwks=jwks,
-    )
-    app.dependency_overrides[get_verifier] = lambda: verifier
-    app.dependency_overrides[get_repo] = lambda: dynamo_repo
-
-    admin_token = mint_token(claims={"cognito:groups": ["admin"]})
-    client = TestClient(app)
-    yield client, dynamo_repo, admin_token
-    app.dependency_overrides.clear()
+# ``admin_client`` now comes from ``conftest.py`` in this package; the identical
+# copy that used to sit here was one of sixteen.
 
 
 def _auth(token: str) -> dict:
@@ -137,6 +117,39 @@ class TestItemLineage:
         assert data["lineage_id"] == "item-1"
         assert len(data["chain"]) == 1
         assert data["chain"][0]["item_id"] == "item-1"
+
+    def test_lineage_node_carries_card_id_for_art(self, admin_client):
+        """Each node names its catalog card so the UI can show the art.
+
+        The History page draws the trade chain as a row of nodes; without a
+        `card_id` per node it has nothing to resolve an image from, and the
+        chain reads as a list of ULIDs. `item_id` cannot stand in — card art
+        is keyed by the CATALOG card, and several links in a chain can share
+        one.
+        """
+        client, repo, token = admin_client
+        repo.put_inventory_item(
+            _raw(item_id="item-1", card_id="en:sv1-25", lineage_id="item-1")
+        )
+
+        resp = client.get("/admin/inventory/item-1/lineage", headers=_auth(token))
+        assert resp.status_code == 200
+        assert resp.json()["chain"][0]["card_id"] == "en:sv1-25"
+
+    def test_lineage_node_card_id_is_null_for_an_unlinked_item(self, admin_client):
+        """A sealed/bulk item has no catalog card; the key still exists.
+
+        Omitting the key on some nodes would make the frontend distinguish
+        "absent" from "null" for no reason -- both mean "no art".
+        """
+        client, repo, token = admin_client
+        repo.put_inventory_item(
+            _raw(item_id="item-1", card_id=None, lineage_id="item-1")
+        )
+
+        resp = client.get("/admin/inventory/item-1/lineage", headers=_auth(token))
+        assert resp.status_code == 200
+        assert resp.json()["chain"][0]["card_id"] is None
 
     def test_lineage_trade_chain(self, admin_client):
         """Items linked by predecessor_item_id form a chain."""

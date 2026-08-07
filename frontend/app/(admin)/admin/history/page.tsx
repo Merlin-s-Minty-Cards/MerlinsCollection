@@ -16,6 +16,8 @@ import {
   Pencil,
 } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
+import { useCardImages } from '@/lib/use-card-images'
+import CardImage, { TABLE_THUMB_SIZE } from '@/components/admin/shared/CardImage'
 import SearchInput from '@/components/admin/shared/SearchInput'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import StatusBadge from '@/components/admin/shared/StatusBadge'
@@ -39,6 +41,8 @@ interface TimelineEvent {
 
 interface LineageNode {
   item_id: string
+  /** The CATALOG card, for art. Null on sealed/bulk links, which have none. */
+  card_id?: string | null
   name: string
   acquired_cost: string
   status: string
@@ -89,6 +93,14 @@ export default function AdminHistoryPage() {
 
   // Active tab
   const [activeTab, setActiveTab] = useState<'timeline' | 'lineage'>('timeline')
+
+  // Art for every card on screen — the search hits, the chain, and the
+  // selected item's header — resolved in one batch by the shared hook.
+  const { getImageUrl } = useCardImages([
+    ...searchResults.map((i) => i.card_id),
+    ...lineage.map((n) => n.card_id),
+    selectedItem?.card_id,
+  ])
 
   // ---------------------------------------------------------------------------
   // Search
@@ -325,17 +337,27 @@ export default function AdminHistoryPage() {
                 key={item.item_id}
                 type="button"
                 onClick={() => selectItem(item)}
-                className="w-full text-left px-4 py-2.5 hover:bg-pine-800/50 transition-colors flex items-center justify-between border-b border-pine-700/20 last:border-0"
+                className="w-full text-left px-4 py-2.5 hover:bg-pine-800/50 transition-colors flex items-center gap-3 border-b border-pine-700/20 last:border-0"
               >
-                <div>
-                  <span className="text-sm text-pine-100 font-medium">
+                {/* Art leads the row: a name search routinely returns the same
+                    card in several conditions and sets, and the art is the
+                    fastest way to confirm the right one before committing to
+                    a lookup. Set name moves under the title so the row stays
+                    two tidy lines instead of one overflowing one. */}
+                <CardImage
+                  imageUrl={getImageUrl(item.card_id)}
+                  alt={adminItemName(item)}
+                  size={TABLE_THUMB_SIZE}
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm text-pine-100 font-medium truncate">
                     {adminItemName(item)}
-                  </span>
+                  </div>
                   {item.set_name && (
-                    <span className="text-[10px] text-pine-400 ml-2">{item.set_name}</span>
+                    <div className="text-[10px] text-pine-400 truncate">{item.set_name}</div>
                   )}
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-shrink-0">
                   {item.status && <StatusBadge status={item.status} />}
                   {item.cost_basis && (
                     <PriceDisplay value={item.cost_basis} className="text-xs" />
@@ -357,16 +379,24 @@ export default function AdminHistoryPage() {
       {selectedItem && (
         <div className="space-y-6">
           {/* Item header */}
-          <div className="vault-panel rounded-xl p-4 flex items-center justify-between">
-            <div>
-              <h2 className="text-sm font-semibold text-pine-100">
+          <div className="vault-panel rounded-xl p-4 flex items-center gap-3">
+            {/* The subject of everything below it — worth showing once, here,
+                rather than repeating on each timeline event (they are all the
+                same card, so per-event art would be pure noise). */}
+            <CardImage
+              imageUrl={getImageUrl(selectedItem.card_id)}
+              alt={adminItemName(selectedItem, 'card')}
+              size={TABLE_THUMB_SIZE}
+            />
+            <div className="min-w-0 flex-1">
+              <h2 className="text-sm font-semibold text-pine-100 truncate">
                 {adminItemName(selectedItem, selectedItem.item_id)}
               </h2>
               <div className="flex items-center gap-3 mt-1">
                 {selectedItem.set_name && (
                   <span className="text-[10px] text-pine-400">{selectedItem.set_name}</span>
                 )}
-                <span className="text-[10px] text-pine-500 font-mono">
+                <span className="text-[10px] text-pine-500 font-mono truncate">
                   {selectedItem.item_id}
                 </span>
               </div>
@@ -518,7 +548,7 @@ export default function AdminHistoryPage() {
                       <div key={node.item_id} className="flex items-center">
                         {/* Node */}
                         <div
-                          className={`vault-panel rounded-xl min-w-[180px] relative ${
+                          className={`vault-panel rounded-xl min-w-[248px] relative ${
                             isSelected ? 'border-mint/50 bg-mint/5' : ''
                           }`}
                         >
@@ -543,45 +573,53 @@ export default function AdminHistoryPage() {
                                 name: node.name,
                               })
                             }
-                            className="w-full text-left px-4 py-3 hover:bg-pine-800/30 transition-colors rounded-xl"
+                            className="w-full text-left px-4 py-3 hover:bg-pine-800/30 transition-colors rounded-xl flex gap-3"
                             aria-label={`View history for ${node.name || 'unnamed card'}`}
                           >
-                            <div className="text-xs font-medium text-pine-100 mb-1 truncate pr-5">
-                              {node.name || '(unnamed)'}
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <PriceDisplay
-                                value={node.acquired_cost}
-                                className="text-[11px]"
-                              />
-                              <StatusBadge status={node.status} />
-                            </div>
-                            {/* Disposal info + step profit */}
-                            {node.disposed_via && (
-                              <div className="flex items-center gap-2 mt-1.5 text-[10px]">
-                                <span className="text-pine-400">
-                                  {getDisposedLabel(node.disposed_via)}
-                                </span>
-                                {node.disposed_value && (
-                                  <span className="text-pine-300">
-                                    ${parseFloat(node.disposed_value).toFixed(2)}
+                            {/* The art turns the chain from a row of ULIDs
+                                into a row of recognisable cards — the whole
+                                point of a lineage view is seeing WHAT was
+                                traded for what. */}
+                            <CardImage
+                              imageUrl={getImageUrl(node.card_id)}
+                              alt={node.name || 'card'}
+                              size={TABLE_THUMB_SIZE}
+                            />
+                            <div className="min-w-0 flex-1">
+                              <div className="text-xs font-medium text-pine-100 mb-1 truncate pr-5">
+                                {node.name || '(unnamed)'}
+                              </div>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <PriceDisplay
+                                  value={node.acquired_cost}
+                                  className="text-[11px]"
+                                />
+                                <StatusBadge status={node.status} />
+                              </div>
+                              {/* Disposal info + step profit */}
+                              {node.disposed_via && (
+                                <div className="flex items-center gap-2 mt-1.5 text-[10px]">
+                                  <span className="text-pine-400">
+                                    {getDisposedLabel(node.disposed_via)}
                                   </span>
-                                )}
-                              </div>
-                            )}
-                            {node.step_profit != null && (
-                              <div className="mt-1 text-[11px]">
-                                {renderStepProfit(node)}
-                              </div>
-                            )}
-                            <div className="text-[9px] font-mono text-pine-600 mt-1">
-                              {node.item_id.slice(0, 12)}…
+                                  {node.disposed_value && (
+                                    <span className="text-pine-300">
+                                      ${parseFloat(node.disposed_value).toFixed(2)}
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+                              {node.step_profit != null && (
+                                <div className="mt-1 text-[11px]">
+                                  {renderStepProfit(node)}
+                                </div>
+                              )}
+                              {isSelected && (
+                                <div className="text-[9px] text-mint font-medium mt-1">
+                                  Current Item
+                                </div>
+                              )}
                             </div>
-                            {isSelected && (
-                              <div className="text-[9px] text-mint font-medium mt-1">
-                                Current Item
-                              </div>
-                            )}
                           </button>
                         </div>
 

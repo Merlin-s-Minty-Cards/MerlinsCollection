@@ -7,7 +7,7 @@ import { useCardImages } from '@/lib/use-card-images'
 import { useLocations } from '@/lib/use-locations'
 import DataTable, { Column } from '@/components/admin/shared/DataTable'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
-import CardImage from '@/components/admin/shared/CardImage'
+import CardImage, { TABLE_THUMB_SIZE, TABLE_THUMB_COLUMN } from '@/components/admin/shared/CardImage'
 import ImageToggle from '@/components/admin/shared/ImageToggle'
 import InlineEditCell from '@/components/admin/shared/InlineEditCell'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
@@ -228,12 +228,12 @@ export default function AdminPrepQueuePage() {
           {
             key: '_image',
             label: '',
-            className: 'w-24',
+            className: TABLE_THUMB_COLUMN,
             render: (item: PrepQueueItem) => (
               <CardImage
                 imageUrl={getImageUrl(item.card_id)}
                 alt={getItemName(item)}
-                size="lg"
+                size={TABLE_THUMB_SIZE}
                 loading="eager"
               />
             ),

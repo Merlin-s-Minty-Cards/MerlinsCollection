@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import { AlertTriangle, Link2, Languages, Check } from 'lucide-react'
 import { useAdminApi } from '@/lib/admin-api'
+import { useCardImages } from '@/lib/use-card-images'
+import CardImage, { TABLE_THUMB_SIZE } from '@/components/admin/shared/CardImage'
 import DataTable, { type Column } from '@/components/admin/shared/DataTable'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
 import {
@@ -48,6 +50,11 @@ export default function AdminTriagePage() {
   const [openTool, setOpenTool] = useState<OpenTool>(null)
   const [detailItem, setDetailItem] = useState<TriageItem | null>(null)
   const [error, setError] = useState<string | null>(null)
+
+  // Art is always on here, unlike the toggle the big inventory tables carry:
+  // this queue is short by construction, and recognising the card IS the task
+  // on a row whose name cannot be read.
+  const { getImageUrl } = useCardImages(items.map((i) => i.card_id))
 
   const fetchItems = useCallback(async () => {
     if (!api.isAuthenticated) return
@@ -103,15 +110,26 @@ export default function AdminTriagePage() {
       key: 'name',
       label: 'Card',
       render: (item) => (
-        <div className="min-w-0">
-          {/* The EFFECTIVE name — what the customer sees, resolved through
-              T10's precedence. Showing the raw stored name here would have the
-              admin editing blind against the field that outranks theirs. */}
-          <div className="text-[13px] text-pine-100 truncate">{effectiveName(item)}</div>
-          {/* The catalog id, or an em-dash — the reason chip already says
-              "No catalog link", and repeating the phrase here would be noise. */}
-          <div className="text-[10px] text-pine-500 font-mono truncate">
-            {item.card_id ?? '—'}
+        // Art and name are ONE identity unit, so they share a cell instead of
+        // sitting in two columns. On a `missing_english_name` row the name is
+        // precisely what the admin cannot read — the art is what tells them
+        // which card they are looking at, so it leads.
+        <div className="flex items-center gap-2.5 min-w-0">
+          <CardImage
+            imageUrl={getImageUrl(item.card_id)}
+            alt={effectiveName(item)}
+            size={TABLE_THUMB_SIZE}
+          />
+          <div className="min-w-0">
+            {/* The EFFECTIVE name — what the customer sees, resolved through
+                T10's precedence. Showing the raw stored name here would have the
+                admin editing blind against the field that outranks theirs. */}
+            <div className="text-[13px] text-pine-100 truncate">{effectiveName(item)}</div>
+            {/* The catalog id, or an em-dash — the reason chip already says
+                "No catalog link", and repeating the phrase here would be noise. */}
+            <div className="text-[10px] text-pine-500 font-mono truncate">
+              {item.card_id ?? '—'}
+            </div>
           </div>
         </div>
       ),

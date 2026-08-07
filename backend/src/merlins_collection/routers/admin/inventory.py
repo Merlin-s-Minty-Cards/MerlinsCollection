@@ -538,6 +538,9 @@ def admin_item_lineage(
 
         chain.append({
             "item_id": node.item_id,
+            # The CATALOG card, so the History page can show each link's art.
+            # `None` for sealed/bulk links, which have no catalog row at all.
+            "card_id": getattr(node, "card_id", None),
             "name": _node_name(node),
             "acquired_cost": str(node.cost_basis),
             "status": node.status.value,

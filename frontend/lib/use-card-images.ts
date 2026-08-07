@@ -12,6 +12,18 @@ export function useCardImages(cardIds: (string | null | undefined)[]) {
   const [imageMap, setImageMap] = useState<Record<string, string | null>>({})
   const resolvedRef = useRef<Set<string>>(new Set())
   const pendingRef = useRef<Set<string>>(new Set())
+  /**
+   * Ids whose lookup already failed once.
+   *
+   * Callers pass a freshly-mapped array (`items.map(i => i.card_id)`), so this
+   * hook's `resolve` is a new identity on every render and its effect re-runs
+   * every render. Putting failed ids straight back in the queue therefore
+   * means one POST per render — and on a page that re-renders per keystroke
+   * (Trade's search boxes) that is a request storm aimed at an endpoint that
+   * is already broken. Card art is decoration: one attempt per id, then the
+   * placeholder. Remounting the page clears this and tries again.
+   */
+  const failedRef = useRef<Set<string>>(new Set())
 
   const resolve = useCallback(async () => {
     if (!api.isAuthenticated) return
@@ -22,7 +34,8 @@ export function useCardImages(cardIds: (string | null | undefined)[]) {
         typeof id === 'string' &&
         id.length > 0 &&
         !resolvedRef.current.has(id) &&
-        !pendingRef.current.has(id)
+        !pendingRef.current.has(id) &&
+        !failedRef.current.has(id)
     )
 
     if (toResolve.length === 0) return
@@ -42,8 +55,13 @@ export function useCardImages(cardIds: (string | null | undefined)[]) {
       })
       setImageMap((prev) => ({ ...prev, ...result }))
     } catch {
-      // On failure, remove from pending so retry is possible
-      toResolve.forEach((id) => pendingRef.current.delete(id))
+      // Clear pending and mark failed, so these ids are not re-queued on the
+      // next render. `getImageUrl` returns null for them and the caller shows
+      // its placeholder — the same thing it shows for a card with no art.
+      toResolve.forEach((id) => {
+        pendingRef.current.delete(id)
+        failedRef.current.add(id)
+      })
     }
   }, [api, cardIds])
 

@@ -5,17 +5,34 @@ import { useState } from 'react'
 interface CardImageProps {
   imageUrl?: string | null
   alt: string
-  size?: 'sm' | 'md' | 'lg' | 'xl'
+  size?: 'xs' | 'sm' | 'md' | 'lg' | 'xl'
   className?: string
   loading?: 'lazy' | 'eager'
 }
 
 const SIZE_CLASSES = {
+  // 56x78 — a real card's 63x88mm proportions. This is the row thumbnail: big
+  // enough to recognise the art, small enough that the image is not what sets
+  // the row height.
+  xs: 'w-14 h-[4.875rem]',
   sm: 'w-24 h-[8.5rem]',
   md: 'w-40 h-56',
   lg: 'w-56 h-80',
   xl: 'w-72 h-[25.75rem]',
 }
+
+/**
+ * The size every admin LIST/TABLE row uses for its card thumbnail, and the
+ * width of the column holding it.
+ *
+ * These are exported constants rather than a per-page choice because the
+ * per-page choice is exactly what went wrong: Inventory, Vault and Show Prep
+ * each hard-coded `md` while Prep Queue hard-coded `lg`, and their columns
+ * disagreed too (`w-16` vs `w-24`), so a 160-224px image sat in a 64-96px
+ * cell on every one of those pages. Import these; do not re-pick a size.
+ */
+export const TABLE_THUMB_SIZE = 'xs' as const
+export const TABLE_THUMB_COLUMN = 'w-16'
 
 /**
  * Lazy-loaded card image with fallback placeholder.

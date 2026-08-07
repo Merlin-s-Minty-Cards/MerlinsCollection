@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { TrendingUp, Trash2, Star, RefreshCw, PackagePlus } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
+import { describeApiError, type ApiErrorDescription } from '@/lib/admin-error'
 import { getCoverageBannerState, type MarketCoverage } from '@/lib/market-coverage'
 import SearchInput from '@/components/admin/shared/SearchInput'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
@@ -133,7 +134,8 @@ export default function AdminMarketPage() {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<CatalogCard[]>([])
   const [searching, setSearching] = useState(false)
-  const [searchError, setSearchError] = useState(false)
+  // Described, not a bare boolean — see the note in lib/admin-error.ts.
+  const [searchError, setSearchError] = useState<ApiErrorDescription | null>(null)
   // Which search is current — see the Buy page for why: a slow catalog search
   // means several are in flight and they do not resolve in order.
   const searchSeqRef = useRef(0)
@@ -259,18 +261,18 @@ export default function AdminMarketPage() {
   }
 
   const searchCatalog = useCallback(async (q: string) => {
-    if (!q.trim() || !api.isAuthenticated) { setResults([]); setSearchError(false); return }
+    if (!q.trim() || !api.isAuthenticated) { setResults([]); setSearchError(null); return }
     const seq = ++searchSeqRef.current
     setSearching(true)
-    setSearchError(false)
+    setSearchError(null)
     try {
       const res = await api.get<{ items: CatalogCard[]; total: number }>('/market/search', { name: q })
       if (seq !== searchSeqRef.current) return
       setResults(res.items.slice(0, 20))
-    } catch {
+    } catch (err) {
       if (seq !== searchSeqRef.current) return
       setResults([])
-      setSearchError(true)
+      setSearchError(describeApiError(err))
     } finally {
       if (seq === searchSeqRef.current) setSearching(false)
     }
@@ -449,17 +451,17 @@ export default function AdminMarketPage() {
                    dressed up as an empty catalog is what made this bug
                    undiagnosable from the UI. */
                 <div className="p-4 space-y-2">
-                  <p className="text-xs text-red-400">
-                    Catalog search failed — a connection problem, not an empty catalog.
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => searchCatalog(query)}
-                    className="flex items-center gap-1.5 text-[11px] text-pine-300 hover:text-mint transition-colors"
-                  >
-                    <RefreshCw size={12} />
-                    Retry
-                  </button>
+                  <p className="text-xs text-red-400">{searchError.message}</p>
+                  {searchError.retryable && (
+                    <button
+                      type="button"
+                      onClick={() => searchCatalog(query)}
+                      className="flex items-center gap-1.5 text-[11px] text-pine-300 hover:text-mint transition-colors"
+                    >
+                      <RefreshCw size={12} />
+                      Retry
+                    </button>
+                  )}
                 </div>
               ) : results.length === 0 && query ? (
                 <div className="p-4 text-xs text-pine-500">No cards found in catalog</div>

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
 import AdminMarketPage from '../page'
+import { AdminApiError } from '@/lib/admin-api'
 import { getCoverageBannerState, type MarketCoverage } from '@/lib/market-coverage'
 
 const getMock = vi.fn()
@@ -255,7 +256,9 @@ describe('AdminMarketPage catalog search failure states', () => {
   it('shows an error state — not "no cards found" — when the search rejects', async () => {
     getMock.mockImplementation((path: string) => {
       if (path === '/market/coverage') return Promise.resolve(coverage)
-      if (path === '/market/search') return Promise.reject(new Error('gateway timeout'))
+      if (path === '/market/search') {
+        return Promise.reject(new AdminApiError(500, 'Internal Server Error'))
+      }
       return Promise.resolve({})
     })
 
@@ -266,7 +269,10 @@ describe('AdminMarketPage catalog search failure states', () => {
       expect(getMock).toHaveBeenCalledWith('/market/search', { name: 'Pikachu' }),
     )
 
-    expect(await screen.findByText(/catalog search failed/i)).toBeInTheDocument()
+    // Names the server error rather than asserting "a connection problem" —
+    // the live failure was a 500 from a missing dynamodb:Scan grant, and the
+    // old hard-coded copy actively misdirected the diagnosis.
+    expect(await screen.findByText(/server hit an error \(500\)/i)).toBeInTheDocument()
     expect(screen.queryByText(/no cards found in catalog/i)).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
   })

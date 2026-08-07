@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
 import AdminTradePage from '../page'
+import { AdminApiError } from '@/lib/admin-api'
 
 const getMock = vi.fn()
 const postMock = vi.fn()
@@ -39,8 +40,15 @@ describe('AdminTradePage incoming-leg catalog search failure states', () => {
   })
 
   it('shows an error state — not "no catalog match" — when the search rejects', async () => {
+    // A 500 is what the live site actually returned (the ECS task role was
+    // missing dynamodb:Scan), so that is what this reproduces. The banner must
+    // name the server error and must NOT blame the connection: the old copy
+    // hard-coded "a connection problem", which pointed the investigation at
+    // the network while the real fault was an IAM policy.
     getMock.mockImplementation((path: string) => {
-      if (path === '/market/search') return Promise.reject(new Error('gateway timeout'))
+      if (path === '/market/search') {
+        return Promise.reject(new AdminApiError(500, 'Internal Server Error'))
+      }
       return Promise.resolve({})
     })
 
@@ -51,9 +59,25 @@ describe('AdminTradePage incoming-leg catalog search failure states', () => {
       expect(getMock).toHaveBeenCalledWith('/market/search', { name: 'Pikachu' }),
     )
 
-    expect(await screen.findByText(/catalog search failed/i)).toBeInTheDocument()
+    expect(await screen.findByText(/server hit an error \(500\)/i)).toBeInTheDocument()
+    expect(screen.queryByText(/connection/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/no catalog match/i)).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
+  })
+
+  it('calls an unreachable server a connection problem — and only then', async () => {
+    // The counterpart: a rejected fetch really is a network fault, and this is
+    // the one case where saying so is accurate.
+    getMock.mockImplementation((path: string) => {
+      if (path === '/market/search') return Promise.reject(new TypeError('Failed to fetch'))
+      return Promise.resolve({})
+    })
+
+    const input = await renderTradePage()
+    fireEvent.change(input, { target: { value: 'Pikachu' } })
+
+    expect(await screen.findByText(/could not be reached/i)).toBeInTheDocument()
+    expect(screen.queryByText(/no catalog match/i)).not.toBeInTheDocument()
   })
 
   it('retries the search when the error state\'s retry button is pressed', async () => {
@@ -165,5 +189,92 @@ describe('AdminTradePage vendor mode removal (RFC 0008 §F3)', () => {
     expect(screen.getByRole('button', { name: 'Transfer' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Split' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Manual' })).toBeInTheDocument()
+  })
+})
+
+// ===========================================================================
+// Card art on the staged trade legs
+// ===========================================================================
+
+describe('AdminTradePage staged leg card art', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    postMock.mockImplementation((path: string) => {
+      if (path === '/trades') return Promise.resolve({ trade_id: 'trade-1' })
+      if (path === '/inventory/card-images') {
+        return Promise.resolve({
+          'en:sv1-25': 'https://img.example/pika.png',
+          'en:base1-4': 'https://img.example/zard.png',
+        })
+      }
+      return Promise.resolve({})
+    })
+    getMock.mockImplementation(() => Promise.resolve({}))
+  })
+
+  it('shows art on a card staged to go out', async () => {
+    // Going Out is the leg where the business gives up stock. Confirming the
+    // right physical card left the case is exactly what the art is for.
+    getMock.mockImplementation((path: string) => {
+      if (path === '/inventory/search') {
+        return Promise.resolve({
+          items: [{
+            item_id: 'item-1', display_name: 'Pikachu #25',
+            card_id: 'en:sv1-25', current_market_value: '20.00',
+          }],
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    render(<AdminTradePage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.change(screen.getByPlaceholderText(/search our inventory/i), {
+      target: { value: 'Pikachu' },
+    })
+    const hit = await screen.findByText('Pikachu #25')
+    await act(async () => { fireEvent.click(hit) })
+
+    await waitFor(() => {
+      const srcs = screen.getAllByRole('img').map((i) => i.getAttribute('src'))
+      expect(srcs).toContain('https://img.example/pika.png')
+    })
+  })
+
+  it('carries the chosen catalog card art onto a staged incoming leg', async () => {
+    // Picking a catalog match already proves which card it is; the staged row
+    // has to keep showing that, or the confirmation step goes back to text.
+    getMock.mockImplementation((path: string) => {
+      if (path === '/market/search') {
+        return Promise.resolve({
+          items: [{
+            card_id: 'en:base1-4', name: 'Charizard', set_id: 'en:base1',
+            set_name: 'Base Set', number: '004',
+          }],
+          total: 1,
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    render(<AdminTradePage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.change(screen.getByPlaceholderText('Name'), { target: { value: 'Charizard' } })
+    const suggestion = await screen.findByText('Charizard')
+    await act(async () => { fireEvent.click(suggestion) })
+
+    // Value is required before the leg can be staged.
+    fireEvent.change(screen.getByLabelText(/trade-in value/i), { target: { value: '100' } })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /add incoming card/i }))
+    })
+
+    await waitFor(() => {
+      const srcs = screen.getAllByRole('img').map((i) => i.getAttribute('src'))
+      expect(srcs).toContain('https://img.example/zard.png')
+    })
   })
 })

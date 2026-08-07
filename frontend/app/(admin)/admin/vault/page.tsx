@@ -9,7 +9,7 @@ import { sortVaultItems } from '@/lib/vault-sort'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import SearchInput from '@/components/admin/shared/SearchInput'
 import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
-import CardImage from '@/components/admin/shared/CardImage'
+import CardImage, { TABLE_THUMB_SIZE, TABLE_THUMB_COLUMN } from '@/components/admin/shared/CardImage'
 import ImageToggle from '@/components/admin/shared/ImageToggle'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
 import OwnershipBadge from '@/components/admin/shared/OwnershipBadge'
@@ -121,9 +121,13 @@ export default function AdminVaultPage() {
           {
             key: '_image',
             label: '',
-            className: 'w-16',
+            className: TABLE_THUMB_COLUMN,
             render: (item: VaultItem) => (
-              <CardImage imageUrl={getImageUrl(item.card_id)} alt={item.name || 'card'} size="md" />
+              <CardImage
+                imageUrl={getImageUrl(item.card_id)}
+                alt={item.name || 'card'}
+                size={TABLE_THUMB_SIZE}
+              />
             ),
           },
         ]

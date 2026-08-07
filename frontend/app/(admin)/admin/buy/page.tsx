@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ShoppingBag, Plus, X, Check, Banknote, CreditCard, Smartphone, DollarSign, Calendar, Search, AlertTriangle, ArrowLeft, PenLine, RefreshCw } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
+import { describeApiError, type ApiErrorDescription } from '@/lib/admin-error'
 import { CONDITION_OPTIONS, parseCondition } from '@/lib/constants'
 import { useLocations } from '@/lib/use-locations'
 import { buyFormMode, buildBuyItemBody } from '@/lib/buy-form'
@@ -54,7 +55,8 @@ export default function AdminBuyPage() {
   const [searchingCatalog, setSearchingCatalog] = useState(false)
   const [selectedCard, setSelectedCard] = useState<CatalogCard | null>(null)
   const [catalogSearchDone, setCatalogSearchDone] = useState(false)
-  const [catalogError, setCatalogError] = useState(false)
+  // Described, not a bare boolean — see the note in lib/admin-error.ts.
+  const [catalogError, setCatalogError] = useState<ApiErrorDescription | null>(null)
   // Which search is current. A catalog search can take seconds, so several are
   // in flight at once while the owner types and they do NOT come back in the
   // order they were sent — without this, the response for "Pik" can land last
@@ -85,25 +87,25 @@ export default function AdminBuyPage() {
     if (!q.trim() || !api.isAuthenticated) {
       setCatalogResults([])
       setCatalogSearchDone(false)
-      setCatalogError(false)
+      setCatalogError(null)
       return
     }
     const seq = ++searchSeqRef.current
     setSearchingCatalog(true)
-    setCatalogError(false)
+    setCatalogError(null)
     try {
       const res = await api.get<{ items: CatalogCard[]; total: number }>('/market/search', { name: q })
       if (seq !== searchSeqRef.current) return
       setCatalogResults(res.items.slice(0, 12))
       setCatalogSearchDone(true)
-    } catch {
+    } catch (err) {
       if (seq !== searchSeqRef.current) return
       // `catalogSearchDone` stays false so the "unknown card" notice cannot
       // fire: a request that threw is not evidence the catalog lacks the card,
       // and showing it as one is what made this impossible to diagnose.
       setCatalogResults([])
       setCatalogSearchDone(false)
-      setCatalogError(true)
+      setCatalogError(describeApiError(err))
     } finally {
       if (seq === searchSeqRef.current) setSearchingCatalog(false)
     }
@@ -112,7 +114,7 @@ export default function AdminBuyPage() {
   useEffect(() => {
     if (!nameSearch.trim()) {
       setCatalogResults([])
-      setCatalogError(false)
+      setCatalogError(null)
       return
     }
     const timeout = setTimeout(() => searchCatalog(nameSearch), 300)
@@ -444,20 +446,22 @@ export default function AdminBuyPage() {
                 {/* Search failed — deliberately distinct from "no matches" */}
                 {mode === 'search' && catalogError && !searchingCatalog && (
                   <div className="mt-1.5 space-y-2">
-                    <div className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg bg-red-500/10 border border-red-500/20">
-                      <AlertTriangle size={12} className="text-red-400 flex-shrink-0" />
+                    <div className="flex items-start gap-1.5 px-2 py-1.5 rounded-lg bg-red-500/10 border border-red-500/20">
+                      <AlertTriangle size={12} className="text-red-400 flex-shrink-0 mt-px" />
                       <span className="text-[10px] text-red-400">
-                        Catalog search failed &mdash; a connection problem, not an empty catalog.
+                        {catalogError.message}
                       </span>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => searchCatalog(nameSearch || form.name)}
-                      className="flex items-center gap-1.5 text-[11px] text-pine-300 hover:text-spriggatito-400 transition-colors"
-                    >
-                      <RefreshCw size={12} />
-                      Retry
-                    </button>
+                    {catalogError.retryable && (
+                      <button
+                        type="button"
+                        onClick={() => searchCatalog(nameSearch || form.name)}
+                        className="flex items-center gap-1.5 text-[11px] text-pine-300 hover:text-spriggatito-400 transition-colors"
+                      >
+                        <RefreshCw size={12} />
+                        Retry
+                      </button>
+                    )}
                   </div>
                 )}
 

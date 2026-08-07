@@ -407,3 +407,60 @@ describe('Triage — a fixed item leaves the list', () => {
     )
   })
 })
+
+// ===========================================================================
+// Card art in the queue
+// ===========================================================================
+
+describe('AdminTriagePage card art', () => {
+  // Triage is where an admin decides what a card actually IS, and for the
+  // `missing_english_name` case the name on the row is the one thing they
+  // cannot read. The art is the identifying detail, so it belongs in the
+  // identity cell next to the name rather than in a column of its own.
+  it('shows the card art beside the name once images resolve', async () => {
+    mockList([jpItem])
+    postMock.mockImplementation((path: string) => {
+      if (path === '/inventory/card-images') {
+        return Promise.resolve({ 'ja:M4-084': 'https://img.example/harimaron.png' })
+      }
+      return Promise.resolve({})
+    })
+
+    render(<AdminTriagePage />)
+
+    const img = await screen.findByRole('img')
+    expect(img).toHaveAttribute('src', 'https://img.example/harimaron.png')
+    // Same identity cell as the name, not a detached column.
+    expect(within(await findRow(/ハリマロン/)).getByRole('img')).toBe(img)
+  })
+
+  it('requests art only for items that have a catalog link', async () => {
+    // `missing_card_id` items have nothing to look up. Asking for them anyway
+    // would put null keys in the batch and make the placeholder look like a
+    // failed fetch rather than the expected state for an unlinked item.
+    mockList([jpItem, unlinkedItem])
+    postMock.mockImplementation((path: string) => {
+      if (path === '/inventory/card-images') return Promise.resolve({})
+      return Promise.resolve({})
+    })
+
+    render(<AdminTriagePage />)
+    await screen.findByText(/Charizard/)
+
+    await waitFor(() => {
+      const call = postMock.mock.calls.find(([p]) => p === '/inventory/card-images')
+      expect(call).toBeDefined()
+      expect(call![1].card_ids).toEqual(['ja:M4-084'])
+    })
+  })
+
+  it('holds the row height with a placeholder when a card has no art', async () => {
+    // An unlinked item still needs the same-size box, or the rows jog sideways
+    // as the reader scans down the queue.
+    mockList([unlinkedItem])
+    render(<AdminTriagePage />)
+
+    const row = await findRow(/Charizard/)
+    expect(within(row).getByLabelText(/no image/i)).toBeInTheDocument()
+  })
+})

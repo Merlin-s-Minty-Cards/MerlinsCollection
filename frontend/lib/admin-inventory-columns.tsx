@@ -25,7 +25,7 @@
 import type { ReactNode } from 'react'
 import { Pencil, Trash2 } from 'lucide-react'
 import type { Column } from '@/components/admin/shared/DataTable'
-import CardImage from '@/components/admin/shared/CardImage'
+import CardImage, { TABLE_THUMB_SIZE, TABLE_THUMB_COLUMN } from '@/components/admin/shared/CardImage'
 import StatusBadge from '@/components/admin/shared/StatusBadge'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import OwnershipBadge from '@/components/admin/shared/OwnershipBadge'
@@ -132,12 +132,12 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
     key: '_image',
     label: 'Image',
     defaultVisible: false,
-    className: 'w-24',
+    className: TABLE_THUMB_COLUMN,
     render: (item, ctx) => (
       <CardImage
         imageUrl={ctx.getImageUrl(item.card_id)}
         alt={adminItemName(item, 'card')}
-        size="md"
+        size={TABLE_THUMB_SIZE}
       />
     ),
   },

@@ -52,7 +52,7 @@ order (`frontend/components/admin/AdminShell.tsx`):
 
 | Route                  | Label          | Purpose                              |
 |------------------------|----------------|---------------------------------------|
-| `/admin`               | Dashboard      | Landing overview                      |
+| `/admin`               | Dashboard      | Quick actions, needs-attention queues, position, today, coverage |
 | `/admin/inventory`     | Inventory      | Inventory CRUD, granular filters, ownership column |
 | `/admin/sell`          | Sell           | Sale flow, large image preview        |
 | `/admin/buy`           | Buy            | Purchase flow, catalog-linked autocomplete, manual-entry mode |
@@ -173,6 +173,23 @@ implementations, kept deliberately in sync — `itemTitle`
 helper. `CardDetailModal` shows **both** name fields, since editing
 `display_name` on a catalog-matched item is a silent no-op.
 
+**Card art: import the size, never re-pick it.** `TABLE_THUMB_SIZE` (`xs`,
+56×78 — real card proportions) and `TABLE_THUMB_COLUMN` (`w-16`) are exported
+from `components/admin/shared/CardImage.tsx`. Every admin list row uses them.
+Hand-picking a size per page is what went wrong before: Inventory, Vault and
+Show Prep each chose `md` (160×224) while Prep Queue chose `lg` (224×320), and
+their columns disagreed too, so every one of them rendered an image several
+times wider than its own cell.
+
+Art now appears on Inventory, Vault, Show Prep, Prep Queue (behind each page's
+`ImageToggle`) and — always on, no toggle, because the list is short and
+identifying the card *is* the task — Triage, History (search hits, the item
+header, and every trade-lineage node) and Trade (both staged legs). All of them
+resolve through `useCardImages`, which batches the lookup and, since
+2026-08-07, **attempts each id once**: callers pass a freshly-mapped array so
+the hook's effect re-runs every render, and re-queueing failed ids meant one
+POST per keystroke on Trade. A failed or card-less id renders the placeholder.
+
 **Model fields added by RFC 0008.** On `InventoryItem`:
 `display_name_override` (admin-typed English name; **customer-facing**, bounded
 200 chars, outranks the catalog name — nothing in sync/import ever writes it),
@@ -219,6 +236,28 @@ sequential 1 MB pages, **11.2 seconds per request**, on a 300ms debounce. RFC
 (`services/catalog_cache.py`); read that module's docstring before touching it,
 especially the ~93 MB resident sizing note. Do not go looking for missing data
 here — this dead end has already cost one investigation.
+
+**The ECS task role must grant `dynamodb:Scan` and `dynamodb:UpdateItem`.**
+Diagnosed 2026-08-07 from CloudWatch: catalog search was returning **HTTP 500**
+on the live site, not failing to connect. `merlins-backend-task-role` had
+neither action on `table/merlins-cards`, so everything routed through
+`_scan_catalog` died — `GET /admin/market/search`, `GET /admin/market/coverage`,
+and (via `upsert_catalog_card_preserving_prices`) the price sync. The catalog
+cache T9 added is what introduced the Scan dependency; the policy was never
+updated to match. `deploy/backend-task-role-permissions.json` is the source of
+truth — apply it with `aws iam put-role-policy` (no ECS redeploy needed, task
+roles are read per request). **A blank catalog dropdown is far more likely to be
+this than missing data.**
+
+**Never write a bare `float` to DynamoDB.** boto3 rejects it outright
+("Float types are not supported"), and `_serialize`
+(`services/dynamodb.py`) is the one place that coerces `float` → `Decimal`,
+via `str()` so a price still round-trips. This matters because the sell/buy/
+trade session routers persist **raw request JSON**, where a price arrives as a
+float — `POST /admin/sales/{id}/items` 500'd in production for exactly this
+reason. Tests missed it for months because they all send prices as **strings**;
+when testing a money path, send a JSON **number**, which is what the frontend
+actually sends.
 
 **Catalog seed + sync (one-time owner action, not scheduled).** Needed only for
 a fresh/empty table, which the live one is not. With AWS creds, from `backend/`:
@@ -309,9 +348,31 @@ Then use `get_process_output` (with `terminalId`) to poll for results.
 Wait 30s+ for backend, 15s+ for frontend/mcp before first poll.
 
 ### Approximate Runtimes
-- Backend: ~10 minutes (1050+ tests)
-- Frontend: ~25 seconds (41 test files)
-- MCP Server: ~60 seconds
+Measured 2026-08-07, after the fixture rework below:
+- Backend: **~2 minutes** (1369 tests, 52 files) — was ~10 minutes
+- Frontend: **~31 seconds** (545 tests, 73 files)
+- MCP Server: **~1 second** (98 tests, 7 files)
+
+**Do not reintroduce a per-test `mock_aws()`.** The backend suite spent **93% of
+its wall time in fixture setup** until 2026-08-07. Entering a fresh `mock_aws()`
+invalidates botocore's service-model caches, so the next
+`boto3.resource("dynamodb")` pays a full model reload — measured **507ms** per
+test to build the repo + table that way versus **15ms** inside a long-lived
+mock. `tests/conftest.py` now starts **one** `mock_aws()` for the session and an
+autouse `_clean_aws` fixture resets the moto DynamoDB backend between tests,
+which wipes every table exactly as leaving the old context did. Isolation is
+verified: a probe that wrote rows in one test and asserted an empty table in the
+next goes red if the reset is removed. The RSA signing key is session-scoped for
+the same reason (2048-bit keygen is ~53ms, and ~700 tests take a token).
+
+Anything creating a table must depend on `_clean_aws` **explicitly**, not rely
+on autouse ordering — nothing else drops a table now that the mock outlives the
+test, so a second `create_table` with the same name raises `ResourceInUseException`.
+
+Frontend: the ~20 pure-logic test files carry `// @vitest-environment node`,
+since constructing a jsdom per file was the suite's largest single cost.
+`vitest.setup.ts` guards its DOM work behind `HAS_DOM` and imports
+testing-library dynamically — keep both if you add a setup step.
 
 ### Quick commands that DO work with execute_pwsh
 - `ruff check backend/src` (lint, ~3s)

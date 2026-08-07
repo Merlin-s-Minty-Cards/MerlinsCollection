@@ -7,7 +7,7 @@ import { useCardImages } from '@/lib/use-card-images'
 import { useLocations } from '@/lib/use-locations'
 import DataTable, { Column } from '@/components/admin/shared/DataTable'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
-import CardImage from '@/components/admin/shared/CardImage'
+import CardImage, { TABLE_THUMB_SIZE, TABLE_THUMB_COLUMN } from '@/components/admin/shared/CardImage'
 import ImageToggle from '@/components/admin/shared/ImageToggle'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
 import InlineEditCell from '@/components/admin/shared/InlineEditCell'
@@ -233,12 +233,12 @@ export default function AdminShowPrepPage() {
           {
             key: '_image',
             label: '',
-            className: 'w-24',
+            className: TABLE_THUMB_COLUMN,
             render: (item: MispricedItem) => (
               <CardImage
                 imageUrl={getImageUrl(item.card_id)}
                 alt={item.name || 'card'}
-                size="md"
+                size={TABLE_THUMB_SIZE}
               />
             ),
           },

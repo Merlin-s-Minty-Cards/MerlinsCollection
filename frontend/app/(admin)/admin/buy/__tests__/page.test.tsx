@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
 import AdminBuyPage from '../page'
+import { AdminApiError } from '@/lib/admin-api'
 
 const getMock = vi.fn()
 const postMock = vi.fn()
@@ -44,8 +45,12 @@ describe('AdminBuyPage catalog search failure states', () => {
   })
 
   it('shows an error state — not "no matches" — when the catalog search rejects', async () => {
+    // Reproduces the live failure: HTTP 500 from the missing dynamodb:Scan
+    // grant, not the network fault the old copy asserted.
     getMock.mockImplementation((path: string) => {
-      if (path === '/market/search') return Promise.reject(new Error('gateway timeout'))
+      if (path === '/market/search') {
+        return Promise.reject(new AdminApiError(500, 'Internal Server Error'))
+      }
       if (path === '/locations') return Promise.resolve([])
       return Promise.resolve({})
     })
@@ -57,7 +62,7 @@ describe('AdminBuyPage catalog search failure states', () => {
       expect(getMock).toHaveBeenCalledWith('/market/search', { name: 'Pikachu' }),
     )
 
-    expect(await screen.findByText(/catalog search failed/i)).toBeInTheDocument()
+    expect(await screen.findByText(/server hit an error \(500\)/i)).toBeInTheDocument()
     // The whole point: a thrown request must never be dressed up as a
     // genuine zero-match, which is what made this undiagnosable from the UI.
     expect(screen.queryByText(/not found in catalog/i)).not.toBeInTheDocument()

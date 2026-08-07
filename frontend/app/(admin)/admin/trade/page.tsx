@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Plus, X, Check, Eye, EyeOff, DollarSign, Calendar, Banknote, CreditCard, Smartphone, Search, AlertTriangle, RefreshCw } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
-import CardImage from '@/components/admin/shared/CardImage'
+import { describeApiError, type ApiErrorDescription } from '@/lib/admin-error'
+import CardImage, { TABLE_THUMB_SIZE } from '@/components/admin/shared/CardImage'
+import { useCardImages } from '@/lib/use-card-images'
 import SearchInput from '@/components/admin/shared/SearchInput'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
@@ -13,6 +15,12 @@ import { adminItemName } from '@/lib/admin-item-name'
 
 interface TradeLeg {
   item_id?: string
+  /**
+   * The CATALOG card, for art on the staged row. Absent on a manually-typed
+   * incoming leg (no catalog match) and on sealed/bulk stock — both render the
+   * placeholder, which is the honest answer.
+   */
+  card_id?: string | null
   name: string
   card_number?: string
   set_name?: string
@@ -108,12 +116,24 @@ export default function AdminTradePage() {
   const [incomingCatalogResults, setIncomingCatalogResults] = useState<IncomingCatalogCard[]>([])
   const [searchingIncomingCatalog, setSearchingIncomingCatalog] = useState(false)
   const [selectedIncomingCard, setSelectedIncomingCard] = useState<IncomingCatalogCard | null>(null)
-  const [incomingCatalogError, setIncomingCatalogError] = useState(false)
+  // The described failure, not a bare boolean: "it failed" cannot tell an
+  // unreachable server from a 500, and guessing at that in the copy is what
+  // sent the last investigation at the network instead of the task role.
+  const [incomingCatalogError, setIncomingCatalogError] =
+    useState<ApiErrorDescription | null>(null)
   // Bumping this re-runs the search effect for the name already typed.
   const [incomingRetryNonce, setIncomingRetryNonce] = useState(0)
   // Which search is current — see the Buy page for why: a slow catalog search
   // means several are in flight and they do not resolve in order.
   const incomingSearchSeqRef = useRef(0)
+
+  // Art for both staged legs, batched in one request. Always on: a trade is
+  // the one flow where cards move in BOTH directions at once, and the staged
+  // lists are the last look before the swap is committed.
+  const { getImageUrl } = useCardImages([
+    ...incoming.map((i) => i.card_id),
+    ...outgoing.map((o) => o.card_id),
+  ])
 
   // Confirm
   const [showConfirm, setShowConfirm] = useState(false)
@@ -147,21 +167,21 @@ export default function AdminTradePage() {
   useEffect(() => {
     if (!inForm.name.trim() || !api.isAuthenticated || selectedIncomingCard) {
       setIncomingCatalogResults([])
-      setIncomingCatalogError(false)
+      setIncomingCatalogError(null)
       return
     }
     const timeout = setTimeout(async () => {
       const seq = ++incomingSearchSeqRef.current
       setSearchingIncomingCatalog(true)
-      setIncomingCatalogError(false)
+      setIncomingCatalogError(null)
       try {
         const res = await api.get<{ items: IncomingCatalogCard[] }>('/market/search', { name: inForm.name })
         if (seq !== incomingSearchSeqRef.current) return
         setIncomingCatalogResults(res.items.slice(0, 8))
-      } catch {
+      } catch (err) {
         if (seq !== incomingSearchSeqRef.current) return
         setIncomingCatalogResults([])
-        setIncomingCatalogError(true)
+        setIncomingCatalogError(describeApiError(err))
       } finally {
         if (seq === incomingSearchSeqRef.current) setSearchingIncomingCatalog(false)
       }
@@ -190,7 +210,12 @@ export default function AdminTradePage() {
         name: adminItemName(item, ''),
         agreed_value: parseFloat(value),
       })
-      setOutgoing((prev) => [...prev, { item_id: item.item_id, name: adminItemName(item, ''), value }])
+      setOutgoing((prev) => [...prev, {
+        item_id: item.item_id,
+        card_id: typeof item.card_id === 'string' ? item.card_id : null,
+        name: adminItemName(item, ''),
+        value,
+      }])
       setOutSearch('')
       setOutResults([])
     } catch (err) {
@@ -270,6 +295,9 @@ export default function AdminTradePage() {
       await api.post(`/trades/${tradeId}/incoming`, body)
       setIncoming((prev) => [...prev, {
         name: inForm.name.trim(),
+        // Only set when the admin picked a catalog match — a hand-typed leg
+        // has no card behind it and must not borrow one.
+        card_id: selectedIncomingCard?.card_id ?? null,
         card_number: inForm.card_number.trim(),
         set_name: inForm.set_name.trim(),
         market_value: inForm.market_value,
@@ -536,18 +564,20 @@ export default function AdminTradePage() {
                 {/* Search failed — deliberately distinct from "no match" */}
                 {!selectedIncomingCard && incomingCatalogError && !searchingIncomingCatalog && (
                   <div className="mt-1 space-y-1">
-                    <div className="flex items-center gap-1.5 text-[10px] text-red-400">
-                      <AlertTriangle size={11} className="flex-shrink-0" />
-                      Catalog search failed — a connection problem, not an empty catalog.
+                    <div className="flex items-start gap-1.5 text-[10px] text-red-400">
+                      <AlertTriangle size={11} className="flex-shrink-0 mt-px" />
+                      <span>{incomingCatalogError.message}</span>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => setIncomingRetryNonce((n) => n + 1)}
-                      className="flex items-center gap-1 text-[10px] text-pine-300 hover:text-mint transition-colors"
-                    >
-                      <RefreshCw size={10} />
-                      Retry
-                    </button>
+                    {incomingCatalogError.retryable && (
+                      <button
+                        type="button"
+                        onClick={() => setIncomingRetryNonce((n) => n + 1)}
+                        className="flex items-center gap-1 text-[10px] text-pine-300 hover:text-mint transition-colors"
+                      >
+                        <RefreshCw size={10} />
+                        Retry
+                      </button>
+                    )}
                   </div>
                 )}
                 {!selectedIncomingCard && !incomingCatalogError && !searchingIncomingCatalog && incomingCatalogResults.length === 0 && inForm.name.trim().length >= 3 && (
@@ -595,6 +625,9 @@ export default function AdminTradePage() {
                     value={inForm.value}
                     onChange={(e) => handleIncomingValueChange(e.target.value)}
                     placeholder="$"
+                    // Three inputs on this row share the "$" placeholder, so
+                    // the visible label has to be carried to the a11y tree too.
+                    aria-label="Trade-in value"
                     className="vault-field w-full px-2 py-1.5 rounded-lg text-xs"
                   />
                 </div>
@@ -616,6 +649,8 @@ export default function AdminTradePage() {
                 type="button"
                 onClick={addIncoming}
                 disabled={!inForm.name.trim() || !inForm.value}
+                // Icon-only control: without a name it reads as just "button".
+                aria-label="Add incoming card"
                 className="p-1.5 rounded-lg bg-mint/15 text-mint border border-mint/30 disabled:opacity-40 hover:bg-mint/25 transition-colors"
               >
                 <Plus size={14} />
@@ -630,7 +665,12 @@ export default function AdminTradePage() {
             ) : (
               <div className="divide-y divide-pine-700/25">
                 {incoming.map((item, idx) => (
-                  <div key={idx} className="flex items-center justify-between px-3 py-2">
+                  <div key={idx} className="flex items-center gap-2.5 px-3 py-2">
+                    <CardImage
+                      imageUrl={getImageUrl(item.card_id)}
+                      alt={item.name}
+                      size={TABLE_THUMB_SIZE}
+                    />
                     <div className="min-w-0 flex-1">
                       <span className="text-xs text-pine-200 truncate block">
                         {item.name}
@@ -640,7 +680,7 @@ export default function AdminTradePage() {
                         <span className="text-[10px] text-pine-500 truncate block">{item.set_name}</span>
                       )}
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-shrink-0">
                       <PriceDisplay value={item.value} className="text-xs text-mint" />
                       <button type="button" onClick={() => removeIncoming(idx)} className="p-1 text-pine-500 hover:text-red-400"><X size={12} /></button>
                     </div>
@@ -674,9 +714,14 @@ export default function AdminTradePage() {
             ) : (
               <div className="divide-y divide-pine-700/25">
                 {outgoing.map((item, idx) => (
-                  <div key={idx} className="flex items-center justify-between px-3 py-2">
-                    <span className="text-xs text-pine-200 truncate flex-1">{item.name}</span>
-                    <div className="flex items-center gap-2">
+                  <div key={idx} className="flex items-center gap-2.5 px-3 py-2">
+                    <CardImage
+                      imageUrl={getImageUrl(item.card_id)}
+                      alt={item.name}
+                      size={TABLE_THUMB_SIZE}
+                    />
+                    <span className="text-xs text-pine-200 truncate flex-1 min-w-0">{item.name}</span>
+                    <div className="flex items-center gap-2 flex-shrink-0">
                       <span className="text-[10px] text-pine-500">$</span>
                       <input
                         type="number"
