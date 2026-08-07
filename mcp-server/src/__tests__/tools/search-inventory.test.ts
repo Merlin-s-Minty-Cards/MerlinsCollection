@@ -65,6 +65,23 @@ describe("searchInventory", () => {
     expect(ids(result)).toEqual(["x"]);
   });
 
+  // RFC 0008 §D (T3): a card with no resolvable price carries a null value, and
+  // a null cannot be compared against a bound. Left to JS coercion the two bounds
+  // would disagree — `null < min` is true (excluded) but `null > max` is false
+  // (kept, and returned with currentValue: null). A priced bound excludes it,
+  // mirroring the backend's hidden_no_price behaviour on /inventory/search.
+  it("excludes a card with no resolvable price from either value bound", async () => {
+    const repo = new InMemoryInventoryRepository([
+      card({ id: "priced", value: 150, marketPrice: 150 }),
+      card({ id: "unpriced", value: null, marketPrice: null }),
+    ]);
+
+    expect(ids(await searchInventory(repo, { maxValue: 400 }))).toEqual(["priced"]);
+    expect(ids(await searchInventory(repo, { minValue: 100 }))).toEqual(["priced"]);
+    // With no bound at all it is still inventory and must still be listed.
+    expect(ids(await searchInventory(repo, {}))).toEqual(["priced", "unpriced"]);
+  });
+
   it("returns empty when the value range is inverted (min greater than max)", async () => {
     const result = await searchInventory(seed(), { minValue: 400, maxValue: 100 });
 

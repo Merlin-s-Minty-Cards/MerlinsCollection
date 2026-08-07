@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, act, waitFor, within } from '@testing-library/react'
 import AdminPrepQueuePage from '../page'
 
 const getMock = vi.fn()
@@ -103,5 +103,59 @@ describe('AdminPrepQueuePage inline location edit no-op guard', () => {
 
     await act(async () => { await Promise.resolve() })
     expect(putMock).not.toHaveBeenCalled()
+  })
+})
+
+// ===========================================================================
+// T11 — "Send to Triage" reaches this page too
+// ===========================================================================
+//
+// The second half of the shared-modal pin (see the twin in
+// app/(admin)/admin/inventory/__tests__/page.test.tsx). Asserting the button
+// from ONE page proves only that CardDetailModal renders it; asserting it from
+// two proves the modal is genuinely the shared insertion point T11 is betting
+// on. The Prep Queue is the sharper of the two cases — its route is still
+// /admin/outgoing and it is easy to forget it mounts this modal at all.
+describe('AdminPrepQueuePage — Send to Triage (RFC 0008 T11)', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    putMock.mockReset()
+    putMock.mockResolvedValue({})
+    getMock.mockImplementation((path: string) => {
+      if (path === '/inventory/search') {
+        return Promise.resolve({
+          items: [{
+            item_id: 'item-1', kind: 'raw', display_name: 'Pikachu',
+            status: 'available', location: 'binder', needs_review: false,
+          }],
+        })
+      }
+      if (path === '/locations') return Promise.resolve([{ value: 'binder', label: 'Binder' }])
+      // `null`, not `{}` — this block opens CardDetailModal, whose PriceChart
+      // reads `chartData.points` and crashes the tree on an object with no
+      // `points` key. `null` is its real "no data yet" shape.
+      return Promise.resolve(null)
+    })
+  })
+
+  it('reaches the shared detail modal opened from the Prep Queue', async () => {
+    render(<AdminPrepQueuePage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.click(screen.getByText('Pikachu'))
+
+    const modal = await screen.findByRole('dialog', { name: /details for/i })
+    expect(within(modal).getByRole('button', { name: /send to triage/i })).toBeInTheDocument()
+  })
+
+  it('flags a row straight from the queue table', async () => {
+    render(<AdminPrepQueuePage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.click(await screen.findByRole('button', { name: /send pikachu to triage/i }))
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith('/inventory/item-1', { needs_review: true }),
+    )
   })
 })

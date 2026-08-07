@@ -25,6 +25,23 @@ def _reset_rate_limiter():
     get_rate_limiter.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _reset_catalog_cache():
+    """Drop the process-local catalog cache between tests.
+
+    Autouse and global, not scoped to the market tests: the cache is
+    module-level state that outlives a test, while each test's moto table does
+    not. Without this, one test's cards answer the next test's catalog search
+    against a table that never held them -- order-dependent failures of exactly
+    the kind ``_reset_sync_status_dicts`` exists to prevent.
+    """
+    from merlins_collection.services import catalog_cache
+
+    catalog_cache.invalidate()
+    yield
+    catalog_cache.invalidate()
+
+
 @pytest.fixture
 def client():
     from merlins_collection.main import app

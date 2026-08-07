@@ -4,13 +4,13 @@ import { useEffect, useRef, useState } from 'react'
 import { useSession } from 'next-auth/react'
 import { Search } from 'lucide-react'
 import CardGrid from './CardGrid'
+import SetCombobox from '@/components/shared/SetCombobox'
 import {
   searchInventory,
   getInventoryFacets,
   type InventorySearchResult,
   type InventoryFilters,
   type InventoryFacets,
-  type FacetSet,
 } from '@/lib/inventory'
 
 type Status = 'idle' | 'loading' | 'success' | 'error'
@@ -109,6 +109,8 @@ export default function FilterPanel() {
               sets={facets?.sets ?? []}
               value={filters.set_id ?? ''}
               onChange={(id) => update('set_id', id)}
+              inputId="flt-set"
+              className={fieldClass}
             />
           </div>
 
@@ -233,107 +235,6 @@ export default function FilterPanel() {
       <div aria-live="polite">
         <Results status={status} result={result} />
       </div>
-    </div>
-  )
-}
-
-// ---- Set Combobox (type-to-narrow) ----
-
-function SetCombobox({
-  sets,
-  value,
-  onChange,
-}: {
-  sets: FacetSet[]
-  value: string
-  onChange: (id: string) => void
-}) {
-  const [query, setQuery] = useState('')
-  const [open, setOpen] = useState(false)
-  const wrapperRef = useRef<HTMLDivElement>(null)
-
-  // Resolve the current value to a display name.
-  const selected = sets.find((s) => s.id === value)
-
-  const filtered = query
-    ? sets.filter((s) => s.name.toLowerCase().includes(query.toLowerCase()))
-    : sets
-
-  // Close on outside click.
-  useEffect(() => {
-    function handleClick(e: MouseEvent) {
-      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
-        setOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClick)
-    return () => document.removeEventListener('mousedown', handleClick)
-  }, [])
-
-  return (
-    <div ref={wrapperRef} className="relative">
-      <input
-        id="flt-set"
-        type="text"
-        role="combobox"
-        aria-expanded={open}
-        aria-autocomplete="list"
-        aria-controls="set-listbox"
-        value={open ? query : selected?.name ?? ''}
-        placeholder="Any set"
-        className={fieldClass}
-        onFocus={() => {
-          setOpen(true)
-          setQuery('')
-        }}
-        onChange={(e) => {
-          setQuery(e.target.value)
-          setOpen(true)
-          if (e.target.value === '') {
-            onChange('')
-          }
-        }}
-        onKeyDown={(e) => {
-          if (e.key === 'Escape') {
-            setOpen(false)
-          }
-        }}
-      />
-      {open && filtered.length > 0 && (
-        <ul
-          id="set-listbox"
-          role="listbox"
-          className="absolute z-50 mt-1 max-h-60 w-full overflow-auto rounded-lg vault-panel border border-pine-700 py-1"
-        >
-          <li
-            role="option"
-            aria-selected={value === ''}
-            className="cursor-pointer px-3 py-2 text-sm hover:bg-pine-700/40"
-            onMouseDown={(e) => {
-              e.preventDefault()
-              onChange('')
-              setOpen(false)
-            }}
-          >
-            Any set
-          </li>
-          {filtered.map((s) => (
-            <li
-              key={s.id}
-              role="option"
-              aria-selected={value === s.id}
-              className="cursor-pointer px-3 py-2 text-sm hover:bg-pine-700/40"
-              onMouseDown={(e) => {
-                e.preventDefault()
-                onChange(s.id)
-                setOpen(false)
-              }}
-            >
-              {s.name}
-            </li>
-          ))}
-        </ul>
-      )}
     </div>
   )
 }

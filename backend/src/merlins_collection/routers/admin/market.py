@@ -7,7 +7,9 @@ wants to track for buying opportunities.
 
 from __future__ import annotations
 
+import logging
 import statistics
+import time
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -17,6 +19,8 @@ from pydantic import BaseModel
 
 from merlins_collection.dependencies import get_repo
 from merlins_collection.models.inventory import new_ulid
+from merlins_collection.services import catalog_cache
+from merlins_collection.services.card_text import admin_item_name
 from merlins_collection.services.catalog_sync import (
     refresh_held_prices,
     refresh_inventory_market_values,
@@ -24,6 +28,8 @@ from merlins_collection.services.catalog_sync import (
 )
 from merlins_collection.services.dynamodb import InventoryRepository
 from merlins_collection.services.tcgdex import TcgdexClient
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/market", tags=["admin-market"])
 
@@ -80,11 +86,17 @@ def market_search(
     not the live TCGdex API. For the admin to see a card here, the catalog
     sync must have already pulled it.
     """
+    started = time.perf_counter()
+
     if set_id is not None:
         # Use the set GSI for efficient lookup
         cards = repo.list_cards_by_set(set_id)
     else:
-        # Full catalog scan — filtered by name
+        # Full catalog read — cached, then filtered by name in Python. The
+        # `set_id` branch above deliberately does NOT go through the cache:
+        # it returns one set's cards, and seeding the full-catalog cache from
+        # that partial result would make every later name search miss
+        # everything outside that set.
         cards = _scan_catalog(repo)
 
     # Apply name filter
@@ -101,6 +113,15 @@ def market_search(
     # this endpoint is unindexed by name/number, so `total` still reflects the
     # full match count even once `items` is capped.
     serialized = [c.model_dump(mode="json") for c in cards[:50]]
+
+    # Timed and logged so the next "search looks broken" report can be read off
+    # the API logs instead of costing another workstation investigation (RFC
+    # 0008 T9 -- the original diagnosis needed one). `%r` on the operator-typed
+    # values: a newline in a query must not be able to forge a second log line.
+    logger.info(
+        "market search name=%r set_id=%r number=%r -> %d matches in %.0f ms",
+        name, set_id, number, total, (time.perf_counter() - started) * 1000,
+    )
 
     return MarketSearchResult(items=serialized, total=total)
 
@@ -389,9 +410,7 @@ def market_coverage(repo: InventoryRepository = Depends(get_repo)) -> dict[str, 
     unmatched_sample = [
         {
             "item_id": i.item_id,
-            "name": getattr(i, "display_name", None)
-            or getattr(i, "product_name", None)
-            or "?",
+            "name": admin_item_name(i, "?"),
         }
         for i in items
         if i.current_market_value is None
@@ -469,9 +488,13 @@ def delete_watchlist_entry(
 # ---------------------------------------------------------------------------
 
 def _scan_catalog(repo: InventoryRepository):
-    """Scan all catalog cards. Uses the list_all_catalog_cards method if available,
-    otherwise falls back to listing known sets."""
-    return repo.list_all_catalog_cards()
+    """Every catalog card, served from the process cache when it is warm.
+
+    The underlying scan reads the whole table (~11s against the live one), so
+    it must not run per request. See ``services/catalog_cache`` for what keeps
+    the cached copy honest.
+    """
+    return catalog_cache.get_catalog_cards(repo.list_all_catalog_cards)
 
 
 def _pct_str(value: float) -> str:

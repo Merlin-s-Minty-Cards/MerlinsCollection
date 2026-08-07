@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, act } from '@testing-library/react'
+import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
 import AdminMarketPage from '../page'
 import { getCoverageBannerState, type MarketCoverage } from '@/lib/market-coverage'
 
@@ -221,5 +221,82 @@ describe('AdminMarketPage sync poll lifecycle', () => {
 
     const callsAfterUnmount = getMock.mock.calls.filter((c) => c[0] === '/market/sync/status').length
     expect(callsAfterUnmount).toBe(callsAtUnmount)
+  })
+})
+
+describe('AdminMarketPage catalog search failure states', () => {
+  const coverage = {
+    total_items: 10,
+    items_with_market_value: 8,
+    catalog_cards: 5,
+    catalog_cards_with_prices: 5,
+    unmatched_sample: [],
+  }
+
+  function catalogCard(card_id: string, name: string) {
+    return { card_id, name, set_id: 'en:sv1', set_name: 'Scarlet & Violet', number: '001' }
+  }
+
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    getMock.mockImplementation((path: string) => {
+      if (path === '/market/coverage') return Promise.resolve(coverage)
+      return Promise.resolve({})
+    })
+  })
+
+  async function renderMarketPage() {
+    render(<AdminMarketPage />)
+    await act(async () => { await Promise.resolve() })
+    return screen.getByPlaceholderText(/search catalog by name/i)
+  }
+
+  it('shows an error state — not "no cards found" — when the search rejects', async () => {
+    getMock.mockImplementation((path: string) => {
+      if (path === '/market/coverage') return Promise.resolve(coverage)
+      if (path === '/market/search') return Promise.reject(new Error('gateway timeout'))
+      return Promise.resolve({})
+    })
+
+    const input = await renderMarketPage()
+    fireEvent.change(input, { target: { value: 'Pikachu' } })
+
+    await waitFor(() =>
+      expect(getMock).toHaveBeenCalledWith('/market/search', { name: 'Pikachu' }),
+    )
+
+    expect(await screen.findByText(/catalog search failed/i)).toBeInTheDocument()
+    expect(screen.queryByText(/no cards found in catalog/i)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
+  })
+
+  it('ignores a stale response that resolves after a newer query', async () => {
+    const resolvers: Record<string, (value: unknown) => void> = {}
+    getMock.mockImplementation((path: string, params?: { name: string }) => {
+      if (path === '/market/coverage') return Promise.resolve(coverage)
+      if (path === '/market/search') {
+        return new Promise((resolve) => { resolvers[params!.name] = resolve })
+      }
+      return Promise.resolve({})
+    })
+
+    const input = await renderMarketPage()
+
+    fireEvent.change(input, { target: { value: 'Pik' } })
+    await waitFor(() => expect(resolvers['Pik']).toBeDefined())
+
+    fireEvent.change(input, { target: { value: 'Pikachu' } })
+    await waitFor(() => expect(resolvers['Pikachu']).toBeDefined())
+
+    await act(async () => {
+      resolvers['Pikachu']({ items: [catalogCard('c2', 'Pikachu VMAX')], total: 1 })
+    })
+    await act(async () => {
+      resolvers['Pik']({ items: [catalogCard('c1', 'Pikipek')], total: 1 })
+    })
+
+    expect(screen.getByText('Pikachu VMAX')).toBeInTheDocument()
+    expect(screen.queryByText('Pikipek')).not.toBeInTheDocument()
   })
 })

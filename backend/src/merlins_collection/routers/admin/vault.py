@@ -17,6 +17,7 @@ from merlins_collection.models.inventory import (
     InventoryItemAdapter,
     ItemStatus,
 )
+from merlins_collection.services.card_text import admin_item_name
 from merlins_collection.services.dynamodb import InventoryRepository
 
 router = APIRouter(prefix="/vault", tags=["admin-vault"])
@@ -94,12 +95,7 @@ def get_vault(
             total_market += cost
 
         # Get name from various possible fields
-        name = (
-            getattr(item, "display_name", None)
-            or getattr(item, "product_name", None)
-            or getattr(item, "description", None)
-            or ""
-        )
+        name = admin_item_name(item)
 
         vault_items.append(
             VaultItem(

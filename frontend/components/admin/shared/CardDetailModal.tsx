@@ -1,13 +1,15 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { X, Pencil, Check, XCircle } from 'lucide-react'
+import { X, Pencil, Check, XCircle, Flag, Undo2 } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
+import { clearTriageBody, sendToTriageBody } from '@/lib/triage'
 import { CONDITION_OPTIONS, parseCondition, formatCondition } from '@/lib/constants'
 import { useCardImages } from '@/lib/use-card-images'
 import { useLocations } from '@/lib/use-locations'
 import PriceDisplay from './PriceDisplay'
 import PriceChart from './PriceChart'
+import { adminItemName } from '@/lib/admin-item-name'
 
 interface CardDetailModalProps {
   /** The item to display — null means modal is closed */
@@ -18,26 +20,104 @@ interface CardDetailModalProps {
   onUpdated?: () => void
 }
 
-/** Editable fields with their display labels and value types */
-const EDITABLE_FIELDS: { key: string; label: string; type: 'text' | 'number' | 'select' }[] = [
-  { key: 'display_name', label: 'Display Name', type: 'text' },
-  { key: 'product_name', label: 'Product Name', type: 'text' },
-  { key: 'condition', label: 'Condition', type: 'select' },
-  { key: 'location', label: 'Location', type: 'select' },
-  { key: 'cost_basis', label: 'Price Paid', type: 'number' },
-  { key: 'current_market_value', label: 'Market Value', type: 'number' },
-  { key: 'sticker_price', label: 'Sticker Price', type: 'number' },
-  { key: 'sticker_notes', label: 'Sticker Notes', type: 'text' },
-  { key: 'notes', label: 'Notes', type: 'text' },
-  { key: 'status', label: 'Status', type: 'text' },
-  { key: 'finish', label: 'Finish', type: 'text' },
-  { key: 'language', label: 'Language', type: 'text' },
-  { key: 'tcg_url', label: 'TCGplayer Link', type: 'text' },
+/** The four members of the backend's discriminated item union. */
+type ItemKind = 'raw' | 'graded' | 'sealed' | 'bulk'
+
+type FieldType =
+  | 'text'
+  | 'textarea'
+  /** A dollar amount — displayed through PriceDisplay. */
+  | 'number'
+  /** A plain number that is NOT money. A PSA 9 must not render as "$9.00". */
+  | 'decimal'
+  | 'select'
+  | 'checkbox'
+  | 'date'
+
+interface EditableField {
+  key: string
+  label: string
+  type: FieldType
+  /** Heading this field is grouped under; see SECTION_ORDER. */
+  section: string
+  /**
+   * The item kinds this field exists on, mirroring the backend union. Absent
+   * means every kind — i.e. the field lives on `_ItemBase`. Without this a
+   * kind-specific input renders on an item that has no such field, and the
+   * save silently no-ops (pydantic drops the extra key on merge).
+   */
+  kinds?: ItemKind[]
+  /** Derived or immutable: displayed, but with no edit control. */
+  readOnly?: true
+}
+
+const SECTION_ORDER = ['Identity', 'Pricing', 'Acquisition', 'Notes', 'Flags'] as const
+
+/**
+ * Every editable/displayable field, mirroring `_ItemBase` plus the kind-specific
+ * members of `models/inventory.py`'s discriminated union.
+ *
+ * `consignment` is deliberately absent: it is a nested object, not a scalar, and
+ * is rendered read-only by its own section below.
+ */
+const EDITABLE_FIELDS: EditableField[] = [
+  // --- Identity -----------------------------------------------------------
+  { key: 'item_id', label: 'Item ID', type: 'text', section: 'Identity', readOnly: true },
+  // BOTH name fields are shown, deliberately. `display_name` is the fallback the
+  // IMPORT materialized from the sheet's Name + Card # columns; `display_name_override`
+  // is the admin's own correction and OUTRANKS it everywhere (customer tiles,
+  // chat, and — since the T10 follow-up — every admin surface too). Editing
+  // `display_name` on a catalog-matched item is a silent no-op, so an admin who
+  // can only see that one row reasonably concludes the edit failed. Showing the
+  // pair makes it obvious which is which and lets either be corrected.
+  { key: 'display_name', label: 'Display Name (imported)', type: 'text', section: 'Identity', kinds: ['raw', 'graded'] },
+  { key: 'display_name_override', label: 'Name Override (wins everywhere)', type: 'text', section: 'Identity' },
+  { key: 'product_name', label: 'Product Name', type: 'text', section: 'Identity', kinds: ['sealed'] },
+  { key: 'description', label: 'Description', type: 'text', section: 'Identity', kinds: ['bulk'] },
+  { key: 'condition', label: 'Condition', type: 'select', section: 'Identity', kinds: ['raw'] },
+  { key: 'finish', label: 'Finish', type: 'text', section: 'Identity', kinds: ['raw'] },
+  { key: 'factory_sealed', label: 'Factory Sealed', type: 'checkbox', section: 'Identity', kinds: ['raw'] },
+  { key: 'company', label: 'Grading Company', type: 'text', section: 'Identity', kinds: ['graded'] },
+  { key: 'grade', label: 'Grade', type: 'decimal', section: 'Identity', kinds: ['graded'] },
+  { key: 'cert_number', label: 'Cert Number', type: 'text', section: 'Identity', kinds: ['graded'] },
+  { key: 'product_type', label: 'Product Type', type: 'text', section: 'Identity', kinds: ['sealed'] },
+  { key: 'language', label: 'Language', type: 'text', section: 'Identity' },
+  { key: 'status', label: 'Status', type: 'text', section: 'Identity' },
+  { key: 'location', label: 'Location', type: 'select', section: 'Identity' },
+  { key: 'tcg_url', label: 'TCGplayer Link', type: 'text', section: 'Identity' },
+  { key: 'lineage_id', label: 'Lineage ID', type: 'text', section: 'Identity', readOnly: true },
+  { key: 'predecessor_item_id', label: 'Predecessor', type: 'text', section: 'Identity', readOnly: true },
+
+  // --- Pricing ------------------------------------------------------------
+  { key: 'cost_basis', label: 'Price Paid', type: 'number', section: 'Pricing' },
+  { key: 'market_value_at_purchase', label: 'Market at Purchase', type: 'number', section: 'Pricing' },
+  { key: 'current_market_value', label: 'Market Value', type: 'number', section: 'Pricing' },
+  { key: 'listed_price', label: 'Listed Price', type: 'number', section: 'Pricing' },
+  { key: 'sticker_price', label: 'Sticker Price', type: 'number', section: 'Pricing' },
+  { key: 'sticker_notes', label: 'Sticker Notes', type: 'text', section: 'Pricing' },
+
+  // --- Acquisition --------------------------------------------------------
+  { key: 'acquired_at', label: 'Acquired', type: 'date', section: 'Acquisition' },
+  { key: 'acquired_show_id', label: 'Acquired Show', type: 'text', section: 'Acquisition' },
+
+  // --- Notes --------------------------------------------------------------
+  { key: 'notes', label: 'Notes', type: 'textarea', section: 'Notes' },
+  { key: 'value_note', label: 'Value Note', type: 'textarea', section: 'Notes' },
+
+  // --- Flags --------------------------------------------------------------
+  { key: 'needs_review', label: 'Needs Review', type: 'checkbox', section: 'Flags' },
 ]
+
+const FIELDS_BY_KEY = new Map(EDITABLE_FIELDS.map((f) => [f.key, f]))
 
 /**
  * Shared modal for viewing/editing inventory item details with price history chart.
- * Opens when clicking a card row in any admin page.
+ *
+ * Mounted by FIVE admin pages — inventory, outgoing (Prep Queue), sell,
+ * show-prep and vault — NOT by "any admin page" as this docstring used to claim.
+ * Buy, Trade, Market, History, Cosigners, Analytics and /admin/card/[id] each
+ * have their own detail surface or none at all, so anything added here does not
+ * reach them (see docs/plans/rfc-0008/follow-ups.md, T5).
  */
 export default function CardDetailModal({
   item,
@@ -50,6 +130,13 @@ export default function CardDetailModal({
   const [editValue, setEditValue] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Triage (T11). `triagePanel` is the inline note form — deliberately not a
+  // window.prompt(): the note is free text an admin is encouraged to write, and
+  // a native prompt cannot be styled, sized, or dismissed predictably.
+  const [triagePanel, setTriagePanel] = useState(false)
+  const [triageNote, setTriageNote] = useState('')
+  const [triageUndo, setTriageUndo] = useState(false)
+  const [flagged, setFlagged] = useState(false)
 
   // Resolve this card's image independently of any page-level toggle —
   // the modal is a detail view, not a lazy list row, so it always wants
@@ -63,7 +150,11 @@ export default function CardDetailModal({
     setEditingField(null)
     setEditValue('')
     setError(null)
-  }, [item?.item_id])
+    setTriagePanel(false)
+    setTriageNote('')
+    setTriageUndo(false)
+    setFlagged(Boolean(item?.needs_review))
+  }, [item?.item_id, item?.needs_review])
 
   // Close on Escape
   useEffect(() => {
@@ -93,9 +184,16 @@ export default function CardDetailModal({
     setSaving(true)
     setError(null)
     try {
-      const value = editValue.trim() === '' ? null : editValue.trim()
-      const edits: Record<string, unknown> = { [editingField]: value }
-      const payload = { ...edits }
+      // A checkbox backs a NON-optional bool on the model, and the update
+      // endpoint merges the body straight into it — so the blank-is-null path
+      // used for text would be a 422 there rather than a clear.
+      const value =
+        FIELDS_BY_KEY.get(editingField)?.type === 'checkbox'
+          ? editValue === 'true'
+          : editValue.trim() === ''
+            ? null
+            : editValue.trim()
+      const payload: Record<string, unknown> = { [editingField]: value }
       if (typeof payload.condition === 'string') {
         const { condition, condition_modifier } = parseCondition(payload.condition)
         payload.condition = condition
@@ -112,20 +210,54 @@ export default function CardDetailModal({
     }
   }, [api, editingField, editValue, item, onUpdated])
 
+  const writeTriage = useCallback(
+    async (body: Record<string, unknown>, nextFlagged: boolean, undoable: boolean) => {
+      if (!item) return
+      setSaving(true)
+      setError(null)
+      try {
+        await api.put(`/inventory/${item.item_id}`, body)
+        setFlagged(nextFlagged)
+        setTriagePanel(false)
+        setTriageNote('')
+        setTriageUndo(undoable)
+        onUpdated?.()
+      } catch (err) {
+        setError(err instanceof AdminApiError ? (err.detail ?? 'Update failed') : 'Update failed')
+      } finally {
+        setSaving(false)
+      }
+    },
+    [api, item, onUpdated],
+  )
+
   if (!item) return null
 
   const itemId = String(item.item_id ?? '')
-  const name = String(item.display_name ?? item.product_name ?? item.description ?? '(unnamed)')
+  // The override wins in the title too, so the header agrees with every list the
+  // modal was opened from. `description` stays as a bulk-only last resort.
+  const name =
+    adminItemName(item as Parameters<typeof adminItemName>[0], '') ||
+    String(item.description ?? '(unnamed)')
   const kind = String(item.kind ?? '')
 
-  // Filter to fields that exist on this item type
-  const visibleFields = EDITABLE_FIELDS.filter((f) => {
-    // Show product_name only for sealed, display_name for raw/graded
-    if (f.key === 'product_name' && kind !== 'sealed') return false
-    if (f.key === 'display_name' && kind === 'sealed') return false
-    if (f.key === 'finish' && kind !== 'raw') return false
-    return true
-  })
+  // Only the fields this kind actually has, per the backend union.
+  const visibleFields = EDITABLE_FIELDS.filter(
+    (f) => !f.kinds || f.kinds.includes(kind as ItemKind),
+  )
+  const sections = SECTION_ORDER.map((name) => ({
+    name,
+    fields: visibleFields.filter((f) => f.section === name),
+  })).filter((s) => s.fields.length > 0)
+
+  // Nested object, so it does not fit the flat field registry. Read-only for
+  // now: the update endpoint replaces the whole object on merge, so a partial
+  // edit would silently drop `paid_out` or rewrite `split_percent` — real money
+  // on someone else's item. See docs/plans/rfc-0008/follow-ups.md.
+  const consignment =
+    item.consignment && typeof item.consignment === 'object'
+      ? (item.consignment as Record<string, unknown>)
+      : null
 
   return (
     <div
@@ -145,15 +277,128 @@ export default function CardDetailModal({
             <h2 className="text-base font-semibold text-pine-100 truncate">{name}</h2>
             <p className="text-[10px] text-pine-500 font-mono">{kind} &middot; {itemId}</p>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1.5 rounded-md text-pine-400 hover:text-pine-200 hover:bg-pine-800 transition-colors"
-            aria-label="Close modal"
-          >
-            <X size={18} />
-          </button>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            {/* Send to Triage — the broadest reach available in one change:
+                this modal is mounted by inventory, outgoing (Prep Queue), sell,
+                show-prep and vault. An already-flagged item reads "In Triage"
+                and offers to clear it rather than silently re-flagging, because
+                a button that no-ops reads as a broken feature. */}
+            {flagged ? (
+              <button
+                type="button"
+                onClick={() => setTriagePanel((open) => !open)}
+                disabled={saving}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium
+                           text-amber-300 bg-amber-400/10 border border-amber-400/30
+                           hover:bg-amber-400/20 transition-colors disabled:opacity-50"
+              >
+                <Flag size={12} /> In Triage
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setTriagePanel((open) => !open)}
+                disabled={saving}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium
+                           text-pine-300 border border-pine-700/60 hover:text-amber-300
+                           hover:border-amber-400/40 transition-colors disabled:opacity-50"
+              >
+                <Flag size={12} /> Send to Triage
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 rounded-md text-pine-400 hover:text-pine-200 hover:bg-pine-800 transition-colors"
+              aria-label="Close modal"
+            >
+              <X size={18} />
+            </button>
+          </div>
         </div>
+
+        {/* Triage panel — note form when unflagged, clear action when flagged */}
+        {triagePanel && (
+          <div className="border-b border-pine-700/40 bg-pine-900/60 px-5 py-3 space-y-2">
+            {flagged ? (
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-[11px] text-pine-400">
+                  {item.review_reason
+                    ? `In Triage — ${String(item.review_reason)}`
+                    : 'In Triage.'}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => writeTriage(clearTriageBody(), false, false)}
+                  disabled={saving}
+                  className="px-2.5 py-1 rounded-md text-[11px] font-medium text-mint
+                             border border-mint/30 hover:bg-mint/10 disabled:opacity-50"
+                >
+                  Clear review
+                </button>
+              </div>
+            ) : (
+              <>
+                <label
+                  htmlFor="triage-note"
+                  className="block text-[10px] uppercase tracking-wider text-pine-500"
+                >
+                  Why does this need review? (optional)
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    id="triage-note"
+                    type="text"
+                    value={triageNote}
+                    onChange={(e) => setTriageNote(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') writeTriage(sendToTriageBody(triageNote), true, true)
+                      // Stop the document-level Escape handler from closing the
+                      // whole modal and discarding a typed note.
+                      if (e.key === 'Escape') { e.stopPropagation(); setTriagePanel(false) }
+                    }}
+                    maxLength={500}
+                    placeholder="e.g. set symbol looks wrong"
+                    className="flex-1 min-w-0 bg-pine-900 border border-mint/30 rounded px-2 py-1
+                               text-xs text-pine-100 focus:outline-none focus:border-mint/60"
+                    autoFocus
+                    disabled={saving}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => writeTriage(sendToTriageBody(triageNote), true, true)}
+                    disabled={saving}
+                    className="px-3 py-1 rounded-md text-[11px] font-medium text-mint
+                               border border-mint/30 hover:bg-mint/10 disabled:opacity-50"
+                  >
+                    Send
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* Undo — a misclick on a flag action is inevitable, and undo must clear
+            the reason too or the item comes back unflagged still carrying the
+            note that put it there. */}
+        {triageUndo && (
+          <div
+            role="status"
+            className="flex items-center justify-between gap-3 border-b border-amber-400/20
+                       bg-amber-400/10 px-5 py-2 text-[11px] text-pine-100"
+          >
+            <span>Sent to Triage.</span>
+            <button
+              type="button"
+              onClick={() => writeTriage(clearTriageBody(), false, false)}
+              disabled={saving}
+              className="flex items-center gap-1 text-mint hover:text-mint/80 disabled:opacity-50"
+            >
+              <Undo2 size={12} /> Undo
+            </button>
+          </div>
+        )}
 
         <div className="flex-1 min-h-0 p-5 flex flex-col md:flex-row gap-6">
           {/* Left: Large Card Image */}
@@ -161,7 +406,7 @@ export default function CardDetailModal({
             {imageUrl ? (
               <img
                 src={imageUrl}
-                alt={String(item?.display_name ?? item?.product_name ?? 'Card')}
+                alt={adminItemName(item as Parameters<typeof adminItemName>[0], 'Card')}
                 className="h-64 md:h-full w-auto object-contain rounded-xl shadow-lg"
               />
             ) : (
@@ -212,126 +457,225 @@ export default function CardDetailModal({
             />
           </section>
 
-          {/* Editable Fields */}
-          <section>
-            <h3 className="text-[11px] font-semibold uppercase tracking-wider text-pine-400 mb-2">
-              Item Details
-            </h3>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              {visibleFields.map((field) => {
-                const value = item[field.key]
-                const isEditing = editingField === field.key
-                const displayValue =
-                  field.key === 'condition' && item.condition != null
-                    ? formatCondition(String(item.condition), item.condition_modifier as string | null | undefined)
-                    : value != null
-                      ? String(value)
-                      : '—'
+          {/* Editable Fields, grouped — the flat list is ~30 rows long */}
+          {sections.map(({ name, fields }) => (
+            <section key={name}>
+              <h3 className="text-[11px] font-semibold uppercase tracking-wider text-pine-400 mb-2">
+                {name}
+              </h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {fields.map((field) => {
+                  const value = item[field.key]
+                  const isEditing = editingField === field.key
+                  const displayValue =
+                    field.key === 'condition' && item.condition != null
+                      ? formatCondition(String(item.condition), item.condition_modifier as string | null | undefined)
+                      : field.type === 'checkbox'
+                        ? (value ? 'Yes' : 'No')
+                        : value != null && String(value) !== ''
+                          ? String(value)
+                          : '—'
 
-                return (
+                  return (
+                    <div
+                      key={field.key}
+                      className={`flex gap-2 px-3 py-2 rounded-lg bg-pine-800/30 border border-pine-700/20 ${
+                        field.type === 'textarea'
+                          ? 'sm:col-span-2 flex-col items-stretch'
+                          : 'items-center'
+                      }`}
+                    >
+                      <span className={`text-[10px] text-pine-500 uppercase tracking-wider flex-shrink-0 ${
+                        field.type === 'textarea' ? '' : 'w-24'
+                      }`}>
+                        {field.label}
+                      </span>
+                      {isEditing ? (
+                        <div className={`flex gap-1 flex-1 min-w-0 ${
+                          field.type === 'textarea' ? 'items-start' : 'items-center'
+                        }`}>
+                          {field.type === 'select' && field.key === 'location' ? (
+                            <select
+                              value={editValue}
+                              onChange={(e) => setEditValue(e.target.value)}
+                              className="flex-1 min-w-0 bg-pine-900 border border-mint/30 rounded px-2 py-0.5 text-xs text-pine-100 focus:outline-none focus:border-mint/60"
+                              autoFocus
+                              disabled={saving}
+                            >
+                              {locationOptions.map((loc) => (
+                                <option key={loc.value} value={loc.value}>{loc.label}</option>
+                              ))}
+                            </select>
+                          ) : field.type === 'select' && field.key === 'condition' ? (
+                            <select
+                              value={editValue}
+                              onChange={(e) => setEditValue(e.target.value)}
+                              className="flex-1 min-w-0 bg-pine-900 border border-mint/30 rounded px-2 py-0.5 text-xs text-pine-100 focus:outline-none focus:border-mint/60"
+                              autoFocus
+                              disabled={saving}
+                            >
+                              {CONDITION_OPTIONS.map((c) => (
+                                <option key={c} value={c}>{c}</option>
+                              ))}
+                            </select>
+                          ) : field.type === 'textarea' ? (
+                            // Deliberately no Enter-to-save: a note is multi-line
+                            // free text, so Enter has to insert a newline. Save is
+                            // the check button (issue #13 — the "tiny box" report).
+                            <textarea
+                              rows={4}
+                              value={editValue}
+                              onChange={(e) => setEditValue(e.target.value)}
+                              // stopPropagation, or the event also reaches the
+                              // document-level Escape handler and closes the WHOLE
+                              // modal — discarding four rows of typed notes when
+                              // the admin only meant to cancel this one field.
+                              onKeyDown={(e) => {
+                                if (e.key === 'Escape') { e.stopPropagation(); cancelEdit() }
+                              }}
+                              className="flex-1 min-w-0 bg-pine-900 border border-mint/30 rounded px-2 py-1 text-xs text-pine-100 focus:outline-none focus:border-mint/60 resize-y"
+                              autoFocus
+                              disabled={saving}
+                            />
+                          ) : field.type === 'checkbox' ? (
+                            <input
+                              type="checkbox"
+                              checked={editValue === 'true'}
+                              onChange={(e) => setEditValue(String(e.target.checked))}
+                              className="h-3.5 w-3.5 accent-mint bg-pine-900 border border-mint/30 rounded"
+                              autoFocus
+                              disabled={saving}
+                            />
+                          ) : (
+                            <input
+                              type={
+                                field.type === 'number' || field.type === 'decimal'
+                                  ? 'number'
+                                  : field.type === 'date'
+                                    ? 'date'
+                                    : 'text'
+                              }
+                              // Without this the browser's default step of 1
+                              // marks every decimal (a $12.50 basis, a PSA 9.5)
+                              // as a step mismatch.
+                              step={
+                                field.type === 'number' || field.type === 'decimal'
+                                  ? 'any'
+                                  : undefined
+                              }
+                              value={editValue}
+                              onChange={(e) => setEditValue(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') saveEdit()
+                                // stopPropagation: without it the document-level
+                                // Escape handler fires too and closes the modal
+                                // as well as cancelling the field.
+                                if (e.key === 'Escape') { e.stopPropagation(); cancelEdit() }
+                              }}
+                              maxLength={field.key === 'sticker_notes' ? 200 : undefined}
+                              className="flex-1 min-w-0 bg-pine-900 border border-mint/30 rounded px-2 py-0.5 text-xs text-pine-100 focus:outline-none focus:border-mint/60"
+                              autoFocus
+                              disabled={saving}
+                            />
+                          )}
+                          <button
+                            type="button"
+                            onClick={saveEdit}
+                            disabled={saving}
+                            className="p-0.5 text-mint hover:text-mint/80"
+                            aria-label="Save"
+                          >
+                            <Check size={13} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={cancelEdit}
+                            className="p-0.5 text-pine-500 hover:text-pine-300"
+                            aria-label="Cancel"
+                          >
+                            <XCircle size={13} />
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-start gap-1 flex-1 min-w-0">
+                          <span
+                            className={`text-xs text-pine-200 flex-1 ${
+                              field.type === 'textarea' ? 'whitespace-pre-wrap break-words' : 'truncate'
+                            }`}
+                          >
+                            {field.type === 'number' && value != null ? (
+                              <PriceDisplay value={displayValue} className="text-xs text-pine-200 font-mono" />
+                            ) : (
+                              displayValue
+                            )}
+                          </span>
+                          {field.readOnly ? null : (
+                            <button
+                              type="button"
+                              onClick={() => startEdit(field.key)}
+                              className="p-0.5 text-pine-600 hover:text-pine-300 transition-opacity flex-shrink-0"
+                              aria-label={`Edit ${field.label}`}
+                            >
+                              <Pencil size={11} />
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            </section>
+          ))}
+
+          {/* Consignment — read-only, see the note on `consignment` above */}
+          {consignment && (
+            <section>
+              <h3 className="text-[11px] font-semibold uppercase tracking-wider text-pine-400 mb-2">
+                Consignment
+              </h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {[
+                  { label: 'Consignor', value: String(consignment.consignor_id ?? '—') },
+                  {
+                    label: 'Our Cut',
+                    // Stored as a 0-1 fraction ("0.05 = a 5% cut" per
+                    // ConsignmentTerms), so render it as the percent an admin reads.
+                    // `!= null` first: Number(null) is 0, which would render a
+                    // missing split as a real "0.0%" cut.
+                    value:
+                      consignment.split_percent != null &&
+                      Number.isFinite(Number(consignment.split_percent))
+                        ? `${(Number(consignment.split_percent) * 100).toFixed(1)}%`
+                        : '—',
+                  },
+                  {
+                    label: 'Minimum Price',
+                    value: consignment.minimum_price != null ? String(consignment.minimum_price) : '—',
+                  },
+                  { label: 'Paid Out', value: consignment.paid_out ? 'Yes' : 'No' },
+                ].map(({ label, value }) => (
                   <div
-                    key={field.key}
+                    key={label}
                     className="flex items-center gap-2 px-3 py-2 rounded-lg bg-pine-800/30 border border-pine-700/20"
                   >
                     <span className="text-[10px] text-pine-500 uppercase tracking-wider w-24 flex-shrink-0">
-                      {field.label}
+                      {label}
                     </span>
-                    {isEditing ? (
-                      <div className="flex items-center gap-1 flex-1 min-w-0">
-                        {field.type === 'select' && field.key === 'location' ? (
-                          <select
-                            value={editValue}
-                            onChange={(e) => setEditValue(e.target.value)}
-                            className="flex-1 min-w-0 bg-pine-900 border border-mint/30 rounded px-2 py-0.5 text-xs text-pine-100 focus:outline-none focus:border-mint/60"
-                            autoFocus
-                            disabled={saving}
-                          >
-                            {locationOptions.map((loc) => (
-                              <option key={loc.value} value={loc.value}>{loc.label}</option>
-                            ))}
-                          </select>
-                        ) : field.type === 'select' && field.key === 'condition' ? (
-                          <select
-                            value={editValue}
-                            onChange={(e) => setEditValue(e.target.value)}
-                            className="flex-1 min-w-0 bg-pine-900 border border-mint/30 rounded px-2 py-0.5 text-xs text-pine-100 focus:outline-none focus:border-mint/60"
-                            autoFocus
-                            disabled={saving}
-                          >
-                            {CONDITION_OPTIONS.map((c) => (
-                              <option key={c} value={c}>{c}</option>
-                            ))}
-                          </select>
-                        ) : (
-                          <input
-                            type={field.type === 'number' ? 'number' : 'text'}
-                            value={editValue}
-                            onChange={(e) => setEditValue(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') saveEdit()
-                              if (e.key === 'Escape') cancelEdit()
-                            }}
-                            maxLength={field.key === 'sticker_notes' ? 200 : undefined}
-                            className="flex-1 min-w-0 bg-pine-900 border border-mint/30 rounded px-2 py-0.5 text-xs text-pine-100 focus:outline-none focus:border-mint/60"
-                            autoFocus
-                            disabled={saving}
-                          />
-                        )}
-                        <button
-                          type="button"
-                          onClick={saveEdit}
-                          disabled={saving}
-                          className="p-0.5 text-mint hover:text-mint/80"
-                          aria-label="Save"
-                        >
-                          <Check size={13} />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={cancelEdit}
-                          className="p-0.5 text-pine-500 hover:text-pine-300"
-                          aria-label="Cancel"
-                        >
-                          <XCircle size={13} />
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-1 flex-1 min-w-0">
-                        <span className="text-xs text-pine-200 truncate flex-1">
-                          {field.type === 'number' && value != null ? (
-                            <PriceDisplay value={displayValue} className="text-xs text-pine-200 font-mono" />
-                          ) : (
-                            displayValue
-                          )}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => startEdit(field.key)}
-                          className="p-0.5 text-pine-600 hover:text-pine-300 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
-                          style={{ opacity: 1 }}
-                          aria-label={`Edit ${field.label}`}
-                        >
-                          <Pencil size={11} />
-                        </button>
-                      </div>
-                    )}
+                    <span className="text-xs text-pine-200 truncate flex-1">{value}</span>
                   </div>
-                )
-              })}
-            </div>
-          </section>
+                ))}
+              </div>
+            </section>
+          )}
 
           {/* Quick Info */}
           <section className="flex flex-wrap gap-3 text-[10px] text-pine-500 border-t border-pine-700/30 pt-3">
             {item.card_id ? (
               <span>Card: <span className="text-pine-300 font-mono">{String(item.card_id)}</span></span>
             ) : null}
-            {item.acquired_at ? (
-              <span>Acquired: <span className="text-pine-300">{String(item.acquired_at)}</span></span>
-            ) : null}
-            {item.company ? (
-              <span>Grade: <span className="text-pine-300">{String(item.company)} {String(item.grade ?? '')}</span></span>
-            ) : null}
+            {/* `acquired_at` and the grading trio used to be repeated here; they
+                now have real, editable rows in the sections above. */}
             <a
               href={
                 item.tcg_url

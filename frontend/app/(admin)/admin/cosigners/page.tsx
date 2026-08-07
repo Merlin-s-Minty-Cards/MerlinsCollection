@@ -18,6 +18,7 @@ import DataTable, { Column } from '@/components/admin/shared/DataTable'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
 import StatusBadge from '@/components/admin/shared/StatusBadge'
+import { adminItemName } from '@/lib/admin-item-name'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -355,7 +356,7 @@ export default function AdminCosignersPage() {
       label: 'Card',
       render: (item) => (
         <span className="text-pine-100 text-xs font-medium">
-          {item.display_name || item.product_name || item.name || '(unnamed)'}
+          {adminItemName(item)}
         </span>
       ),
     },
@@ -386,7 +387,7 @@ export default function AdminCosignersPage() {
           type="button"
           onClick={(e) => { e.stopPropagation(); setUnlinkTarget(item) }}
           className="p-1 rounded text-pine-400 hover:text-red-400 transition-colors"
-          aria-label={`Unlink ${item.display_name || item.product_name || item.name || item.item_id}`}
+          aria-label={`Unlink ${adminItemName(item, item.item_id)}`}
         >
           <X size={13} />
         </button>
@@ -734,7 +735,7 @@ export default function AdminCosignersPage() {
       <ConfirmDialog
         open={!!unlinkTarget}
         title="Unlink Item"
-        description={`Remove "${unlinkTarget?.display_name || unlinkTarget?.product_name || unlinkTarget?.name || 'this item'}" from ${selectedCosigner?.name}'s consigned assets?`}
+        description={`Remove "${adminItemName(unlinkTarget, 'this item')}" from ${selectedCosigner?.name}'s consigned assets?`}
         confirmLabel="Unlink"
         variant="danger"
         loading={unlinking}

@@ -1,45 +1,36 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { Plus, Trash2, Pencil, RefreshCw } from 'lucide-react'
+import { Plus, RefreshCw, Columns3, EyeOff } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { CONDITION_OPTIONS as COND_VALUES } from '@/lib/constants'
 import { useCardImages } from '@/lib/use-card-images'
 import { useLocations } from '@/lib/use-locations'
-import DataTable, { Column } from '@/components/admin/shared/DataTable'
+import { useCatalogSets, toComboboxSets } from '@/lib/use-catalog-sets'
+import SetCombobox from '@/components/shared/SetCombobox'
+import DataTable from '@/components/admin/shared/DataTable'
 import SearchInput from '@/components/admin/shared/SearchInput'
-import StatusBadge from '@/components/admin/shared/StatusBadge'
-import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
-import CardImage from '@/components/admin/shared/CardImage'
 import ImageToggle from '@/components/admin/shared/ImageToggle'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
-import OwnershipBadge from '@/components/admin/shared/OwnershipBadge'
-
-interface InventoryItem {
-  item_id: string
-  kind: string
-  status: string
-  card_id?: string
-  display_name?: string
-  product_name?: string
-  condition?: string
-  location?: string
-  cost_basis?: string
-  current_market_value?: string
-  sticker_price?: string
-  sticker_notes?: string
-  finish?: string
-  language?: string
-  notes?: string
-  acquired_at?: string
-  consignment?: Record<string, unknown> | null
-  [key: string]: unknown
-}
+import { adminItemName } from '@/lib/admin-item-name'
+import {
+  INVENTORY_FILTERS,
+  TOGGLEABLE_COLUMNS,
+  DEFAULT_VISIBLE_COLUMN_KEYS,
+  isFilterVisible,
+  loadVisibleColumnKeys,
+  saveVisibleColumnKeys,
+  toDataTableColumns,
+  type InventoryItem,
+} from '@/lib/admin-inventory-columns'
 
 const STATUS_OPTIONS = ['', 'available', 'sold', 'lost', 'on_hold', 'consigned']
 const CONDITION_OPTIONS = ['', ...COND_VALUES]
 const KIND_OPTIONS = ['', 'raw', 'graded', 'sealed', 'bulk']
+
+/** The image column is a registry entry now, not a second competing toggle. */
+const IMAGE_COLUMN_KEY = '_image'
 
 export default function AdminInventoryPage() {
   const api = useAdminApi()
@@ -51,7 +42,7 @@ export default function AdminInventoryPage() {
   const [conditionFilter, setConditionFilter] = useState('')
   const [kindFilter, setKindFilter] = useState('')
   const [locationFilter, setLocationFilter] = useState('')
-  const [setNameFilter, setSetNameFilter] = useState('')
+  const [setIdFilter, setSetIdFilter] = useState('')
   const [cardNumberFilter, setCardNumberFilter] = useState('')
   const [artistFilter, setArtistFilter] = useState('')
   const [minPriceFilter, setMinPriceFilter] = useState('')
@@ -74,8 +65,16 @@ export default function AdminInventoryPage() {
   // Create form
   const [showCreate, setShowCreate] = useState(false)
 
-  // Image toggle
-  const [showImages, setShowImages] = useState(false)
+  // Column visibility (T6). Starts at the defaults and is replaced from
+  // localStorage in an effect — reading storage during render would both throw
+  // on the server and give React a different tree to hydrate than it rendered.
+  const [visibleColumns, setVisibleColumns] = useState<string[]>(DEFAULT_VISIBLE_COLUMN_KEYS)
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [showAllFilters, setShowAllFilters] = useState(false)
+
+  useEffect(() => {
+    setVisibleColumns(loadVisibleColumnKeys())
+  }, [])
 
   // Detail modal
   const [detailItem, setDetailItem] = useState<InventoryItem | null>(null)
@@ -87,9 +86,43 @@ export default function AdminInventoryPage() {
   // Dynamic locations dropdown
   const { options: locationOptions } = useLocations()
 
+  // Every set in the CATALOG, fetched once and narrowed in the browser — so a
+  // set we own nothing from is still pickable. That is the whole point of the
+  // control (RFC 0008 Q8); inventory-derived options could never show one.
+  const { sets: catalogSets } = useCatalogSets()
+
+  const visible = new Set(visibleColumns)
+  const showImages = visible.has(IMAGE_COLUMN_KEY)
+
   // Resolve card images
   const cardIds = items.map((i) => i.card_id as string | undefined)
   const { getImageUrl } = useCardImages(showImages ? cardIds : [])
+
+  /**
+   * Persist on the toggle rather than in an effect. An effect keyed on
+   * `visibleColumns` would fire once on mount with the still-default state and
+   * overwrite the saved list before the load effect's value had landed.
+   */
+  const toggleColumn = (key: string) => {
+    // Functional updater, so two toggles batched into one render cannot lose
+    // the first. The write inside it is idempotent, which is what makes it safe
+    // under StrictMode's double-invoked updaters.
+    setVisibleColumns((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      // Never leave a table with no columns at all. The picker also disables
+      // the last checkbox, so this is the belt to that's braces.
+      if (next.size === 0) return prev
+      const ordered = TOGGLEABLE_COLUMNS.filter((c) => next.has(c.key)).map((c) => c.key)
+      saveVisibleColumnKeys(ordered)
+      return ordered
+    })
+  }
+
+  const showColumn = (key: string) => {
+    if (!visible.has(key)) toggleColumn(key)
+  }
 
   const fetchItems = useCallback(async () => {
     if (!api.isAuthenticated) return
@@ -101,9 +134,9 @@ export default function AdminInventoryPage() {
       if (conditionFilter) params.condition = conditionFilter
       if (kindFilter) params.kind = kindFilter
       if (locationFilter) params.location = locationFilter
-      // Note: set_name, card_number, and artist filters only match catalog-linked
+      // Note: set_id, card_number, and artist filters only match catalog-linked
       // items (backend drops card_id=None rows for those filters — known behavior).
-      if (setNameFilter) params.set_name = setNameFilter
+      if (setIdFilter) params.set_id = setIdFilter
       if (cardNumberFilter) params.card_number = cardNumberFilter
       if (artistFilter) params.artist = artistFilter
       if (minPriceFilter) params.min_price = minPriceFilter
@@ -120,7 +153,7 @@ export default function AdminInventoryPage() {
     } finally {
       setLoading(false)
     }
-  }, [api, search, statusFilter, conditionFilter, kindFilter, locationFilter, setNameFilter, cardNumberFilter, artistFilter, minPriceFilter, maxPriceFilter, ownershipFilter, needsReviewFilter, sortKey, sortDir])
+  }, [api, search, statusFilter, conditionFilter, kindFilter, locationFilter, setIdFilter, cardNumberFilter, artistFilter, minPriceFilter, maxPriceFilter, ownershipFilter, needsReviewFilter, sortKey, sortDir])
 
   useEffect(() => {
     fetchItems()
@@ -141,6 +174,11 @@ export default function AdminInventoryPage() {
     const value = String((item as Record<string, unknown>)[field] ?? '')
     setEditValue(value)
     setEditOriginalValue(value)
+  }
+
+  const cancelEdit = () => {
+    setEditingId(null)
+    setEditField(null)
   }
 
   const saveEdit = async () => {
@@ -198,165 +236,135 @@ export default function AdminInventoryPage() {
     }
   }
 
-  const columns: Column<InventoryItem>[] = [
-    // Image column (conditionally shown)
-    ...(showImages
-      ? [
-          {
-            key: '_image',
-            label: '',
-            className: 'w-24',
-            render: (item: InventoryItem) => (
-              <CardImage
-                imageUrl={getImageUrl(item.card_id)}
-                alt={item.display_name || item.product_name || 'card'}
-                size="md"
-              />
-            ),
-          },
-        ]
-      : []),
-    {
-      key: 'display_name',
-      label: 'Name',
-      sortable: true,
-      className: 'min-w-[180px]',
-      render: (item) => (
-        <span className="text-pine-100 font-medium truncate block max-w-[260px]">
-          {item.display_name || item.product_name || '(unnamed)'}
-        </span>
+  const columns = toDataTableColumns(visible, {
+    editingId, editField, editValue, setEditValue,
+    startEdit, saveEdit, cancelEdit,
+    locationOptions, getImageUrl,
+    onRefresh: fetchItems,
+    onDelete: setDeleteTarget,
+  })
+
+  // --- Filters ------------------------------------------------------------
+  // The panel is driven by INVENTORY_FILTERS so that "which filters are shown"
+  // and "which columns are visible" cannot drift apart. Value, clear and
+  // control live in ONE record keyed by filter id rather than three parallel
+  // ones: an id present in two of three maps is a silent half-broken filter,
+  // and `filters-cover-every-id` in the page tests pins that none is missing.
+  const filters: Record<string, { value: string; clear: () => void; control: React.ReactNode }> = {
+    search: {
+      value: search,
+      clear: () => setSearch(''),
+      control: <SearchInput ariaLabel="Name" value={search} onChange={setSearch} placeholder="Search by name…" />,
+    },
+    status: {
+      value: statusFilter,
+      clear: () => setStatusFilter(''),
+      control: <FilterSelect label="Status" value={statusFilter} onChange={setStatusFilter} options={STATUS_OPTIONS} />,
+    },
+    condition: {
+      value: conditionFilter,
+      clear: () => setConditionFilter(''),
+      control: <FilterSelect label="Condition" value={conditionFilter} onChange={setConditionFilter} options={CONDITION_OPTIONS} />,
+    },
+    kind: {
+      value: kindFilter,
+      clear: () => setKindFilter(''),
+      control: <FilterSelect label="Kind" value={kindFilter} onChange={setKindFilter} options={KIND_OPTIONS} />,
+    },
+    location: {
+      value: locationFilter,
+      clear: () => setLocationFilter(''),
+      control: (
+        <select
+          aria-label="Location"
+          value={locationFilter}
+          onChange={(e) => setLocationFilter(e.target.value)}
+          className="vault-field px-2.5 py-1.5 rounded-lg text-xs appearance-none cursor-pointer w-full"
+        >
+          <option value="">All locations</option>
+          {locationOptions.map((loc) => (
+            <option key={loc.value} value={loc.value}>{loc.label}</option>
+          ))}
+        </select>
       ),
     },
-    {
-      key: 'status',
-      label: 'Status',
-      sortable: true,
-      render: (item) => <StatusBadge status={item.status} />,
+    minPrice: {
+      value: minPriceFilter,
+      clear: () => setMinPriceFilter(''),
+      control: <FilterText label="Min $" value={minPriceFilter} onChange={setMinPriceFilter} numeric />,
     },
-    {
-      key: 'kind',
-      label: 'Kind',
-      render: (item) => (
-        <span className="text-xs capitalize text-pine-300">{item.kind}</span>
+    maxPrice: {
+      value: maxPriceFilter,
+      clear: () => setMaxPriceFilter(''),
+      control: <FilterText label="Max $" value={maxPriceFilter} onChange={setMaxPriceFilter} numeric />,
+    },
+    ownership: {
+      value: ownershipFilter,
+      clear: () => setOwnershipFilter(''),
+      control: (
+        <select
+          aria-label="Ownership"
+          value={ownershipFilter}
+          onChange={(e) => setOwnershipFilter(e.target.value)}
+          className="vault-field px-2.5 py-1.5 rounded-lg text-xs appearance-none cursor-pointer w-full"
+        >
+          <option value="">Ownership</option>
+          <option value="owned">Owned</option>
+          <option value="consigned">Cosigned</option>
+        </select>
       ),
     },
-    {
-      key: 'condition',
-      label: 'Cond',
-      render: (item) => (
-        <span className="text-xs font-mono text-pine-300">{item.condition ?? '—'}</span>
+    needsReview: {
+      value: needsReviewFilter,
+      clear: () => setNeedsReviewFilter(''),
+      control: (
+        <select
+          aria-label="Needs Review"
+          value={needsReviewFilter}
+          onChange={(e) => setNeedsReviewFilter(e.target.value)}
+          className="vault-field px-2.5 py-1.5 rounded-lg text-xs appearance-none cursor-pointer w-full"
+        >
+          <option value="">Needs Review</option>
+          <option value="true">Flagged</option>
+          <option value="false">Clear</option>
+        </select>
       ),
     },
-    {
-      key: 'location',
-      label: 'Location',
-      sortable: true,
-      render: (item) => {
-        if (editingId === item.item_id && editField === 'location') {
-          return (
-            <select
-              aria-label={`Edit location for ${item.display_name || item.product_name || item.item_id}`}
-              value={editValue}
-              onChange={(e) => { setEditValue(e.target.value); }}
-              onBlur={saveEdit}
-              className="vault-field px-1.5 py-0.5 text-xs w-28 rounded"
-              autoFocus
-            >
-              {locationOptions.map((loc) => (
-                <option key={loc.value} value={loc.value}>{loc.label}</option>
-              ))}
-            </select>
-          )
-        }
-        return (
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); startEdit(item, 'location') }}
-            className="text-xs text-pine-300 hover:text-mint cursor-pointer flex items-center gap-1 group"
-            title="Click to edit"
-          >
-            <span className="capitalize">{item.location ?? '—'}</span>
-            <Pencil size={10} className="opacity-0 group-hover:opacity-100" />
-          </button>
-        )
-      },
-    },
-    {
-      key: 'cost_basis',
-      label: 'Price Paid',
-      sortable: true,
-      className: 'text-right',
-      render: (item) => (
-        <PriceDisplay value={item.cost_basis} className="text-xs text-pine-300" />
+    setId: {
+      value: setIdFilter,
+      clear: () => setSetIdFilter(''),
+      control: (
+        <SetCombobox
+          sets={toComboboxSets(catalogSets)}
+          value={setIdFilter}
+          onChange={setSetIdFilter}
+          inputId="admin-inv-set"
+          ariaLabel="Set"
+          placeholder="All sets"
+          emptyLabel="All sets"
+          className="vault-field px-2.5 py-1.5 rounded-lg text-xs w-full"
+        />
       ),
     },
-    {
-      key: 'current_market_value',
-      label: 'Market',
-      sortable: true,
-      className: 'text-right',
-      render: (item) => (
-        <PriceDisplay value={item.current_market_value} className="text-xs text-mint" />
-      ),
+    cardNumber: {
+      value: cardNumberFilter,
+      clear: () => setCardNumberFilter(''),
+      control: <FilterText label="Card #" value={cardNumberFilter} onChange={setCardNumberFilter} />,
     },
-    {
-      key: 'sticker_price',
-      label: 'Sticker',
-      className: 'text-right',
-      render: (item) => {
-        const sticker = item.sticker_price as string | undefined
-        const stickerNotes = item.sticker_notes as string | undefined
-        if (editingId === item.item_id && editField === 'sticker_price') {
-          return (
-            <input
-              type="number"
-              step="0.01"
-              value={editValue}
-              onChange={(e) => setEditValue(e.target.value)}
-              onBlur={saveEdit}
-              onKeyDown={(e) => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') { setEditingId(null); setEditField(null); } }}
-              className="vault-field px-1.5 py-0.5 text-xs w-20 rounded text-right"
-              autoFocus
-            />
-          )
-        }
-        return (
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); startEdit(item, 'sticker_price') }}
-            className="text-xs text-amber-400/80 hover:text-amber-300 cursor-pointer flex items-center gap-1 group justify-end w-full"
-            title={stickerNotes ? `Note: ${stickerNotes}` : 'Click to edit sticker price'}
-          >
-            <span className="font-mono">{sticker ? `$${parseFloat(sticker).toFixed(2)}` : '—'}</span>
-            {stickerNotes && <span className="text-[8px] text-pine-500">*</span>}
-            <Pencil size={10} className="opacity-0 group-hover:opacity-100" />
-          </button>
-        )
-      },
+    artist: {
+      value: artistFilter,
+      clear: () => setArtistFilter(''),
+      control: <FilterText label="Artist" value={artistFilter} onChange={setArtistFilter} />,
     },
-    {
-      key: 'consignment',
-      label: 'Ownership',
-      render: (item) => <OwnershipBadge consigned={item.consignment != null} />,
-    },
-    {
-      key: '_actions',
-      label: '',
-      className: 'w-20',
-      render: (item) => (
-        <div className="flex items-center gap-1 justify-end">
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); setDeleteTarget(item) }}
-            className="p-1.5 rounded text-pine-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
-            title="Delete"
-          >
-            <Trash2 size={14} />
-          </button>
-        </div>
-      ),
-    },
-  ]
+  }
+
+  const shownFilters = INVENTORY_FILTERS.filter((f) => isFilterVisible(f, visible, showAllFilters))
+  // An active filter whose column is not on screen changes the result set for a
+  // reason the admin cannot see. That is the failure mode this whole feature
+  // has to avoid, so it is named explicitly rather than left to be discovered.
+  const hiddenActiveFilters = INVENTORY_FILTERS.filter(
+    (f) => (filters[f.id]?.value ?? '') !== '' && (f.columnKey === null || !visible.has(f.columnKey)),
+  )
 
   return (
     <div className="p-6 lg:p-8 max-w-7xl">
@@ -392,86 +400,111 @@ export default function AdminInventoryPage() {
         </div>
       </header>
 
-      {/* Filters */}
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2 mb-4">
-        <SearchInput
-          value={search}
-          onChange={setSearch}
-          placeholder="Search by name…"
-        />
-        <FilterSelect value={statusFilter} onChange={setStatusFilter} options={STATUS_OPTIONS} placeholder="Status" />
-        <FilterSelect value={conditionFilter} onChange={setConditionFilter} options={CONDITION_OPTIONS} placeholder="Condition" />
-        <FilterSelect value={kindFilter} onChange={setKindFilter} options={KIND_OPTIONS} placeholder="Kind" />
-        <select
-          value={locationFilter}
-          onChange={(e) => setLocationFilter(e.target.value)}
-          className="vault-field px-2.5 py-1.5 rounded-lg text-xs appearance-none cursor-pointer"
+      {/* Toolbar: what is on screen, and how much of the filter panel to show */}
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <button
+          type="button"
+          onClick={() => setPickerOpen((open) => !open)}
+          aria-expanded={pickerOpen}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-pine-300 border border-pine-700/40 hover:border-pine-600 hover:text-pine-100 transition-colors"
         >
-          <option value="">All locations</option>
-          {locationOptions.map((loc) => (
-            <option key={loc.value} value={loc.value}>{loc.label}</option>
-          ))}
-        </select>
-        <input
-          type="text"
-          value={setNameFilter}
-          onChange={(e) => setSetNameFilter(e.target.value)}
-          placeholder="Set"
-          className="vault-field px-2.5 py-1.5 rounded-lg text-xs"
-        />
-        <input
-          type="text"
-          value={cardNumberFilter}
-          onChange={(e) => setCardNumberFilter(e.target.value)}
-          placeholder="Card #"
-          className="vault-field px-2.5 py-1.5 rounded-lg text-xs"
-        />
-        <input
-          type="text"
-          value={artistFilter}
-          onChange={(e) => setArtistFilter(e.target.value)}
-          placeholder="Artist"
-          className="vault-field px-2.5 py-1.5 rounded-lg text-xs"
-        />
-        <input
-          type="number"
-          step="0.01"
-          value={minPriceFilter}
-          onChange={(e) => setMinPriceFilter(e.target.value)}
-          placeholder="Min $"
-          className="vault-field px-2.5 py-1.5 rounded-lg text-xs"
-        />
-        <input
-          type="number"
-          step="0.01"
-          value={maxPriceFilter}
-          onChange={(e) => setMaxPriceFilter(e.target.value)}
-          placeholder="Max $"
-          className="vault-field px-2.5 py-1.5 rounded-lg text-xs"
-        />
-        <select
-          value={ownershipFilter}
-          onChange={(e) => setOwnershipFilter(e.target.value)}
-          className="vault-field px-2.5 py-1.5 rounded-lg text-xs appearance-none cursor-pointer"
+          <Columns3 size={14} />
+          Columns
+          {/* Decorative: the picker's own checkboxes carry this state, and
+              folding the count into the button's accessible name would make it
+              read as "Columns (9)". */}
+          <span aria-hidden="true" className="text-pine-500">({visibleColumns.length})</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setShowAllFilters((all) => !all)}
+          aria-pressed={showAllFilters}
+          className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
+            showAllFilters
+              ? 'border-mint/40 text-mint bg-mint/10 hover:bg-mint/15'
+              : 'border-pine-700/40 text-pine-400 hover:text-pine-200 hover:border-pine-600'
+          }`}
         >
-          <option value="">Ownership</option>
-          <option value="owned">Owned</option>
-          <option value="consigned">Cosigned</option>
-        </select>
-        <select
-          aria-label="Needs Review"
-          value={needsReviewFilter}
-          onChange={(e) => setNeedsReviewFilter(e.target.value)}
-          className="vault-field px-2.5 py-1.5 rounded-lg text-xs appearance-none cursor-pointer"
-        >
-          <option value="">Needs Review</option>
-          <option value="true">Flagged</option>
-          <option value="false">Clear</option>
-        </select>
-        <div className="flex items-center">
-          <ImageToggle showImages={showImages} onToggle={() => setShowImages(!showImages)} label="Images" />
-        </div>
+          Show all filters
+        </button>
+        <ImageToggle
+          showImages={showImages}
+          onToggle={() => toggleColumn(IMAGE_COLUMN_KEY)}
+          label="Images"
+        />
       </div>
+
+      {/* Column picker */}
+      {pickerOpen && (
+        <div
+          role="group"
+          aria-label="Column visibility"
+          className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-x-4 gap-y-1.5 mb-4 p-3 rounded-xl border border-pine-700/40 bg-pine-800/20"
+        >
+          {TOGGLEABLE_COLUMNS.map((col) => (
+            <label key={col.key} className="flex items-center gap-2 text-xs text-pine-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={visible.has(col.key)}
+                onChange={() => toggleColumn(col.key)}
+                // A silently unresponsive checkbox reads as broken. Disabling
+                // the last one says "not allowed" instead of doing nothing.
+                disabled={visible.has(col.key) && visibleColumns.length === 1}
+                className="rounded border-pine-600 bg-pine-800 text-mint focus:ring-mint/30 disabled:opacity-40"
+              />
+              {col.label}
+            </label>
+          ))}
+        </div>
+      )}
+
+      {/* Filters — only the ones whose column is on screen, unless overridden */}
+      <div
+        role="group"
+        aria-label="Filters"
+        className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2 mb-4"
+      >
+        {shownFilters.map((f) => (
+          <div key={f.id} className="contents">{filters[f.id]?.control}</div>
+        ))}
+      </div>
+
+      {/* Filtering on something the table is not showing */}
+      {hiddenActiveFilters.length > 0 && (
+        <div
+          role="region"
+          aria-label="Filters on a hidden column"
+          className="flex flex-wrap items-center gap-2 text-xs text-amber-300 bg-amber-400/5 border border-amber-400/20 rounded-lg px-3 py-2 mb-4"
+        >
+          <EyeOff size={14} className="flex-shrink-0" />
+          <span className="text-pine-300">Filtering on a hidden column:</span>
+          {hiddenActiveFilters.map((f) => (
+            <span
+              key={f.id}
+              className="inline-flex items-center gap-1.5 rounded-md border border-amber-400/30 bg-amber-400/10 px-2 py-0.5"
+            >
+              <span>{f.label}: {filters[f.id]?.value}</span>
+              {f.columnKey && (
+                <button
+                  type="button"
+                  onClick={() => showColumn(f.columnKey as string)}
+                  className="text-mint hover:text-mint/80 underline underline-offset-2"
+                >
+                  Show column
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={filters[f.id]?.clear}
+                aria-label={`Clear ${f.label} filter`}
+                className="text-pine-400 hover:text-pine-200"
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
 
       {/* Refresh result toast */}
       {refreshResult && (
@@ -508,8 +541,8 @@ export default function AdminInventoryPage() {
         title={deleteTarget?.status === 'lost' ? 'Permanently Delete' : 'Delete Item'}
         description={
           deleteTarget?.status === 'lost'
-            ? `This will permanently delete "${deleteTarget?.display_name || deleteTarget?.product_name || 'this item'}". This cannot be undone.`
-            : `Are you sure you want to delete "${deleteTarget?.display_name || deleteTarget?.product_name || 'this item'}"? This will mark it as lost.`
+            ? `This will permanently delete "${adminItemName(deleteTarget, 'this item')}". This cannot be undone.`
+            : `Are you sure you want to delete "${adminItemName(deleteTarget, 'this item')}"? This will mark it as lost.`
         }
         confirmLabel={deleteTarget?.status === 'lost' ? 'Permanently Delete' : 'Delete'}
         variant="danger"
@@ -536,30 +569,58 @@ export default function AdminInventoryPage() {
   )
 }
 
+// `label` doubles as the control's accessible name and as the placeholder
+// option, so the hidden-filter notice and the panel always call a filter the
+// same thing.
 function FilterSelect({
+  label,
   value,
   onChange,
   options,
-  placeholder,
 }: {
+  label: string
   value: string
   onChange: (v: string) => void
   options: string[]
-  placeholder: string
 }) {
   return (
     <select
+      aria-label={label}
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className="vault-field px-2.5 py-1.5 rounded-lg text-xs appearance-none cursor-pointer"
+      className="vault-field px-2.5 py-1.5 rounded-lg text-xs appearance-none cursor-pointer w-full"
     >
-      <option value="">{placeholder}</option>
+      <option value="">{label}</option>
       {options.filter(Boolean).map((opt) => (
         <option key={opt} value={opt}>
           {opt.replace(/_/g, ' ')}
         </option>
       ))}
     </select>
+  )
+}
+
+function FilterText({
+  label,
+  value,
+  onChange,
+  numeric,
+}: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  numeric?: boolean
+}) {
+  return (
+    <input
+      type={numeric ? 'number' : 'text'}
+      step={numeric ? '0.01' : undefined}
+      aria-label={label}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={label}
+      className="vault-field px-2.5 py-1.5 rounded-lg text-xs w-full"
+    />
   )
 }
 

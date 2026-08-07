@@ -11,6 +11,7 @@ import CardImage from '@/components/admin/shared/CardImage'
 import ImageToggle from '@/components/admin/shared/ImageToggle'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
 import OwnershipBadge from '@/components/admin/shared/OwnershipBadge'
+import { adminItemName } from '@/lib/admin-item-name'
 
 interface SellItem {
   item_id: string
@@ -147,13 +148,13 @@ export default function AdminSellPage() {
     try {
       await api.post(`/sales/${sellId}/items`, {
         item_id: inv.item_id,
-        name: inv.display_name || inv.product_name || '',
+        name: adminItemName(inv, ''),
         agreed_price: price,
         original_price: market || null,
       })
       const newItem: SellItem = {
         item_id: inv.item_id,
-        name: inv.display_name || inv.product_name || '',
+        name: adminItemName(inv, ''),
         card_id: inv.card_id,
         agreed_price: String(price),
         original_price: inv.current_market_value,
@@ -307,13 +308,13 @@ export default function AdminSellPage() {
                     key={item.item_id}
                     type="button"
                     onClick={() => addItem(item)}
-                    onMouseEnter={() => setPreviewItem({ name: item.display_name || item.product_name || '', card_id: item.card_id })}
+                    onMouseEnter={() => setPreviewItem({ name: adminItemName(item, ''), card_id: item.card_id })}
                     className="w-full flex items-center justify-between px-3 py-2.5 hover:bg-pine-800/50 transition-colors text-left"
                   >
                     <div className="flex items-center gap-2 min-w-0">
                       <div className="min-w-0">
                         <div className="text-xs text-pine-100 truncate flex items-center gap-1.5">
-                          {item.display_name || item.product_name}
+                          {adminItemName(item)}
                           <OwnershipBadge consigned={item.consignment != null} />
                         </div>
                         <div className="text-[10px] text-pine-400 flex items-center gap-2">

@@ -1083,13 +1083,37 @@ class InventoryRepository:
 
     # ---- shows ----
     def put_show(self, show: Show):
-        """Insert one show/event day (generation-scoped during an import)."""
+        """Upsert one show/event day (generation-scoped during an import).
+
+        The SK embeds the show DATE and, during an import, the generation — so a
+        plain ``put_item`` only replaces the prior copy when neither has moved.
+        Both move underneath an ordinary admin edit: rescheduling a show changes
+        the date, and every show the spreadsheet import wrote keeps its
+        ``#<gen>`` suffix after ``finalize_import`` commits, while an admin edit
+        runs with no generation set. Without the sweep below either edit forks
+        the show into two rows, so the list shows it twice and archiving flips
+        only one of them.
+
+        Ordering matters: write FIRST, then delete the superseded rows. A crash
+        in between leaves a visible duplicate that the next write cleans up,
+        rather than deleting the only copy of the show.
+
+        The sweep is skipped mid-import. There, coexisting generations are the
+        point — ``finalize_import``'s load-then-swap needs the prior generation's
+        copy to survive until commit/rollback is decided (see ``_gen_sk``).
+        """
+        sk = self._gen_sk(f"SHOW#{show.date.isoformat()}#{show.show_id}")
         body = _serialize(show.model_dump(mode="python"))
         self._table.put_item(Item={
             "PK": "SHOWLIST",
-            "SK": self._gen_sk(f"SHOW#{show.date.isoformat()}#{show.show_id}"),
+            "SK": sk,
             "entity": "show", **self._gen(), **body,
         })
+        if self._import_gen:
+            return
+        for row in self._query_all(KeyConditionExpression=Key("PK").eq("SHOWLIST")):
+            if row.get("show_id") == show.show_id and row["SK"] != sk:
+                self._table.delete_item(Key={"PK": "SHOWLIST", "SK": row["SK"]})
 
     def list_shows(self):
         """Return every show, oldest first (SK embeds the date)."""
@@ -1105,7 +1129,6 @@ class InventoryRepository:
 
     def put_show_analytics(self, snapshot):
         """Store a show analytics snapshot at PK=SHOW#{show_id}, SK=ANALYTICS."""
-        from merlins_collection.models.business import ShowAnalyticsSnapshot
         body = _serialize(snapshot.model_dump(mode="python"))
         self._table.put_item(Item={
             "PK": f"SHOW#{snapshot.show_id}",
@@ -1373,6 +1396,55 @@ class InventoryRepository:
     def list_all_catalog_cards(self):
         """Return all catalog cards via filtered scan. Expensive — admin-only."""
         return list(self.iter_catalog_cards())
+
+    # ---- catalog set registry (RFC 0008 T8) ----
+    # There is no set ENTITY in the catalog: sets exist only as denormalized
+    # `set_id`/`set_name` fields on ~31,600 card rows, plus the GSI1 `SET#`
+    # partition — which answers "cards IN this set" and cannot answer "what sets
+    # exist". Without a registry, listing every set means a full-table scan, i.e.
+    # the 11.2-second read T9 diagnosed as the cause of the dead catalog search.
+    #
+    # So: one small row per set (~400 total: 218 EN + 177 JA), all in ONE
+    # partition, listed by a single query. The shape mirrors `list_inventory`'s
+    # `INV#{bucket}` partitions rather than the watchlist's GSI1 fan-in, because
+    # GSI1 is already carrying `SET#{set_id}` for card rows and adding a second
+    # meaning to that partition would make `list_cards_by_set` depend on its
+    # `begins_with("CARD#")` filter for correctness rather than for narrowing.
+    _CATALOG_SETS_PK = "CATALOGSETS"
+
+    def put_catalog_sets(self, sets: list[dict]) -> int:
+        """Upsert registry rows (one per set); returns how many were written.
+
+        **Upsert only — this never deletes.** The writer is the catalog sync,
+        which degrades a failed ``list_sets`` to "no sets for this language"; a
+        rebuild-by-replace would turn one language's upstream 503 into "every JA
+        set vanished from the admin's dropdown".
+
+        Each row needs ``set_id``; ``set_name``, ``language``, ``card_count`` and
+        ``updated_at`` ride along as written.
+        """
+        written = 0
+        with self._table.batch_writer(overwrite_by_pkeys=["PK", "SK"]) as batch:
+            for row in sets:
+                batch.put_item(Item={
+                    "PK": self._CATALOG_SETS_PK,
+                    "SK": f"SET#{row['set_id']}",
+                    "entity": "catalog_set",
+                    **_serialize(row),
+                })
+                written += 1
+        return written
+
+    def list_catalog_sets(self) -> list[dict]:
+        """Every set in the catalog, as one query over a single partition.
+
+        Deliberately NOT derived from the card rows. See the comment above the
+        partition key: that derivation is a full-table scan.
+        """
+        return self._query_all(
+            KeyConditionExpression=Key("PK").eq(self._CATALOG_SETS_PK)
+            & Key("SK").begins_with("SET#"),
+        )
 
     # ---- watchlist (admin feature) ----
     def put_watchlist_entry(self, entry: dict):

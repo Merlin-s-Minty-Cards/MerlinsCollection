@@ -10,21 +10,43 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from merlins_collection.dependencies import get_repo
 from merlins_collection.models.business import ItemCategory, Transaction, TransactionType
 from merlins_collection.models.inventory import (
-    Condition,
     InventoryItemAdapter,
-    Language,
     new_ulid,
 )
 from merlins_collection.services.dynamodb import InventoryRepository
 from merlins_collection.services.locations import validate_location
 
 router = APIRouter(prefix="/purchases", tags=["admin-purchases"])
+
+
+def _review_reason_for_buy(buy_item: dict[str, Any]) -> str | None:
+    """Why a bought item is going to Triage, or ``None`` if it is not.
+
+    The Buy flow used to set the bare ``needs_review`` boolean, so these landed
+    in Triage with no chip explaining what to fix — a queue with no stated
+    problem, which the task doc rightly calls "not a worklist"
+    (follow-ups.md, T11 row 8).
+
+    Returns a value from ``MACHINE_REVIEW_REASONS`` only. That membership is
+    load-bearing: the re-flag guard in ``admin_update_item`` uses it to tell
+    automation from a human, and a reason outside the set would be mistaken for
+    an admin's own note.
+
+    An item can qualify both ways. ``manual_entry`` wins because it is the more
+    actionable statement — it says a human typed this row rather than that a
+    matcher came up empty.
+    """
+    if buy_item.get("manual_entry"):
+        return "manual_entry"
+    if buy_item.get("card_id") is None:
+        return "no_catalog_link"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +256,7 @@ def confirm_buy_session(
             "acquired_show_id": show_id,
             "display_name": buy_item.get("name"),
             "needs_review": bool(buy_item.get("manual_entry")) or buy_item.get("card_id") is None,
+            "review_reason": _review_reason_for_buy(buy_item),
         }
 
         inv_item = InventoryItemAdapter.validate_python(item_data)

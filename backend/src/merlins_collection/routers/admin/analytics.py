@@ -1,8 +1,11 @@
 """``/admin/shows``, ``/admin/analytics/`` and ``/admin/transactions`` (A4, spec §8/§9).
 
-Pre-computed analytics snapshots for completed shows plus the per-date
-dashboard feeds: the show list, the list of dates that actually have activity,
-one day's metrics, and the raw transaction archive.
+Show CRUD (RFC 0008 T7) plus pre-computed analytics snapshots for completed
+shows and the per-date dashboard feeds: the list of dates that actually have
+activity, one day's metrics, and the raw transaction archive.
+
+Shows are archived, never deleted — see ``Show.archived`` and the CRUD section
+below.
 
 Every route lives in this module (rather than a new router) so
 ``routers/admin/__init__.py`` stays untouched; the analytics router is included
@@ -17,9 +20,11 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import ValidationError
 
 from merlins_collection.dependencies import get_repo
 from merlins_collection.models.business import (
+    Show,
     ShowAnalyticsSnapshot,
     Transaction,
     TransactionType,
@@ -147,16 +152,98 @@ def _default_range(start: date | None, end: date | None) -> tuple[date, date]:
 
 
 # ---------------------------------------------------------------------------
-# Show list (consumed by the analytics page; previously 404'd)
+# Show CRUD (T7). "Delete" is an archive flag — see ``Show.archived``.
+#
+# Only THIS listing hides archived shows. ``repo.list_shows`` and
+# ``repo.get_show`` stay archive-agnostic on purpose: an archived show is
+# hidden, not gone, so its stored analytics snapshot must still resolve and
+# ``/shows/{id}/analytics`` must not start 404ing the moment it is archived.
 # ---------------------------------------------------------------------------
 
 @router.get("/shows")
 def list_shows(
+    include_archived: bool = Query(False),
     repo: InventoryRepository = Depends(get_repo),
 ) -> list[dict[str, Any]]:
-    """Every show, most recent first."""
-    shows = sorted(repo.list_shows(), key=lambda s: s.date, reverse=True)
+    """Every show, most recent first. Archived shows are excluded by default."""
+    shows = repo.list_shows()
+    if not include_archived:
+        shows = [s for s in shows if not s.archived]
+    shows.sort(key=lambda s: s.date, reverse=True)
     return [s.model_dump(mode="json") for s in shows]
+
+
+@router.post("/shows", status_code=201)
+def create_show(
+    body: dict[str, Any],
+    repo: InventoryRepository = Depends(get_repo),
+) -> dict[str, Any]:
+    """Create a show. The id is the server's to mint, never the client's."""
+    body = {k: v for k, v in body.items() if k != "show_id"}
+    try:
+        show = Show.model_validate(body)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    repo.put_show(show)
+    return show.model_dump(mode="json")
+
+
+def _save_show(
+    repo: InventoryRepository, existing: Show, changes: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge ``changes`` onto ``existing``, re-validate, store, and serialize.
+
+    Shared by the update and the two archive transitions so all three go through
+    one validation path and one write.
+    """
+    merged = existing.model_dump(mode="python")
+    merged.update(changes)
+    merged["show_id"] = existing.show_id  # never reassignable
+    try:
+        updated = Show.model_validate(merged)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    repo.put_show(updated)
+    return updated.model_dump(mode="json")
+
+
+def _require_show(repo: InventoryRepository, show_id: str) -> Show:
+    show = repo.get_show(show_id)
+    if show is None:
+        raise HTTPException(status_code=404, detail="Show not found")
+    return show
+
+
+@router.put("/shows/{show_id}")
+def update_show(
+    show_id: str,
+    body: dict[str, Any],
+    repo: InventoryRepository = Depends(get_repo),
+) -> dict[str, Any]:
+    """Partial update — only the fields present in the body change."""
+    return _save_show(repo, _require_show(repo, show_id), body)
+
+
+@router.post("/shows/{show_id}/archive")
+def archive_show(
+    show_id: str,
+    repo: InventoryRepository = Depends(get_repo),
+) -> dict[str, Any]:
+    """Hide a show from the default listing. Idempotent, and non-destructive:
+    there is deliberately no in-use guard, because nothing is being destroyed."""
+    return _save_show(repo, _require_show(repo, show_id), {"archived": True})
+
+
+@router.post("/shows/{show_id}/unarchive")
+def unarchive_show(
+    show_id: str,
+    repo: InventoryRepository = Depends(get_repo),
+) -> dict[str, Any]:
+    """Restore an archived show. Archiving that cannot be undone is just a
+    slower delete, which is the thing this feature exists to avoid."""
+    return _save_show(repo, _require_show(repo, show_id), {"archived": False})
 
 
 # ---------------------------------------------------------------------------

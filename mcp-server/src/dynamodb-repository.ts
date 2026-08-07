@@ -18,6 +18,7 @@
  * card_id or item_id itself.
  */
 import { BatchGetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { applyConditionAdjustment } from "./condition-pricing.js";
 import type { Card, InventoryRepository, PricePoint } from "./repository.js";
 
 /** The subset of DynamoDBDocumentClient the repository needs (send-able). */
@@ -71,6 +72,23 @@ function gradeKey(grade: unknown): string {
 function asNumber(value: unknown): number {
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * A catalog finish band's market figure, or `null` if it carries none.
+ *
+ * A band whose `market` is present but not a finite number is treated as absent
+ * so the walk keeps going. On the Python side pydantic parses these into
+ * `Decimal | None` at load, so garbage never reaches `_market_price`; MCP reads
+ * the raw DynamoDB map with no such gate. That only became load-bearing when the
+ * catalog lookup moved to the FRONT of the chain — a band of `"N/A"` would
+ * otherwise coerce to $0 and outrank a perfectly good current_market_value.
+ * A genuine 0 is a real price and is kept.
+ */
+function bandMarket(band: { market?: unknown } | undefined): number | null {
+  if (band?.market == null) return null;
+  const n = Number(band.market);
+  return Number.isFinite(n) ? n : null;
 }
 
 /** Print language off a row; only the JP items store it, everything else is EN. */
@@ -177,9 +195,18 @@ export class DynamoDbInventoryRepository implements InventoryRepository {
     // then the ULID, remains the last resort when the row stored no display_name.
     const nameFallback =
       (typeof row.display_name === "string" && row.display_name) || fallback;
+    // An admin's `display_name_override` OUTRANKS the catalog name — the same
+    // precedence `itemTitle` (customer tiles) and `adminItemName` (admin lists)
+    // apply. Without it, filter mode rendered "Chespin" and chat answered
+    // "ハリマロン" for the same card. Trimmed, not `??`: a whitespace-only
+    // override would otherwise name the card after nothing at all.
+    const override =
+      typeof row.display_name_override === "string"
+        ? row.display_name_override.trim()
+        : "";
     return {
       id: fallback,
-      name: meta ? String(meta.name) : nameFallback,
+      name: override || (meta ? String(meta.name) : nameFallback),
       set: meta ? String(meta.set_id) : cardId ? cardId.split("-")[0]! : "Unknown",
       condition:
         row.kind === "raw"
@@ -192,26 +219,80 @@ export class DynamoDbInventoryRepository implements InventoryRepository {
     };
   }
 
+  /**
+   * A card's price, resolved in the SAME order as the dashboard's
+   * `/inventory/summary` (backend `routers/inventory.py:383-391`): the LIVE
+   * finish-aware catalog figure first, then the denormalized
+   * `current_market_value`, then `listed_price`. `null` when no source has one.
+   *
+   * The order is the whole point (RFC 0008 §D). This used to read the stored
+   * value first, so whenever the nightly denormalizer lagged the catalog, the
+   * chat tools summed stale figures while the dashboard summed live ones and the
+   * two disagreed on a number customers see. Do not "optimize" the stored value
+   * back to the front.
+   */
   private marketPrice(
     row: Row,
     meta: Row | undefined,
     gradedPrices: Map<string, Row>,
-  ): number {
-    // Phase 12/19: current_market_value is the denormalized, condition-adjusted
-    // market figure (baked in by refresh_inventory_market_values). It is the
-    // single source of truth for price on every surface — website and MCP alike.
+  ): number | null {
+    const live = this.catalogMarketPrice(row, meta);
+    if (live != null) {
+      // The catalog figure is a NM price. The backend scales it by condition on
+      // both customer paths, so chat must too — otherwise filter mode shows a
+      // DMG card at 0.15x and chat quotes the full NM figure for the same card.
+      // Raw singles only: a slab carries a grade, not a tier, and never reaches
+      // this branch anyway (catalogMarketPrice refuses to price one).
+      return row.kind === "raw"
+        ? applyConditionAdjustment(
+            live,
+            row.condition as string | null,
+            row.condition_modifier as string | null,
+          )
+        : live;
+    }
+
+    // Phase 12/19: the denormalized, condition-adjusted figure baked in by
+    // refresh_inventory_market_values. Now the FALLBACK, used when the catalog
+    // has nothing — including for every graded slab, which by design gets no
+    // catalog price and must keep its own manually-maintained value.
     if (row.current_market_value != null) return asNumber(row.current_market_value);
+
+    // Slabs additionally fall back to the manually entered GRADEDPRICE row; the
+    // backend reaches the same figure via get_graded_market_value at sync time.
     if (row.kind === "graded") {
       const key = `${row.card_id}#${row.company}#${gradeKey(row.grade)}`;
-      return asNumber(gradedPrices.get(key)?.market_value ?? 0);
+      const gradedValue = gradedPrices.get(key)?.market_value;
+      if (gradedValue != null) return asNumber(gradedValue);
     }
-    // Finish-aware fallback for items whose denormalized value hasn't been
-    // written yet (e.g. just imported, before the daily sync runs). Mirrors
-    // models/inventory.py _MARKET_FINISH_FALLBACK exactly — see the CONCURRENCY
-    // warning in claude-progress.txt.
+
+    if (row.listed_price != null) return asNumber(row.listed_price);
+    return null;
+  }
+
+  /**
+   * The catalog's market figure for a row's own finish, falling back through
+   * `_MARKET_FINISH_FALLBACK` then any priced finish.
+   *
+   * *** This mirrors `_market_price` in
+   * backend/src/merlins_collection/models/inventory.py (~line 296) — read that
+   * docstring before touching either. It is the ONE shared finish-aware lookup,
+   * and its fallback tuple is declared canonical "for the whole product, in
+   * every language it is implemented in". If the two walks disagree, the website
+   * and the Bedrock chat quote different prices for the same card. ***
+   *
+   * `null` for a graded slab and for any row with no finish, exactly as the
+   * Python does: catalog figures are UNGRADED prices, so pricing a slab from
+   * them would drop the grade premium, and guessing a band for a finish-less row
+   * would silently misprice it.
+   */
+  private catalogMarketPrice(row: Row, meta: Row | undefined): number | null {
+    if (row.kind === "graded") return null;
+    const finish = row.finish == null ? "" : String(row.finish);
+    if (!finish) return null;
     const prices = meta?.prices as Record<string, { market?: unknown }> | undefined;
-    if (!prices) return 0;
-    const finish = String(row.finish ?? "normal");
+    if (!prices) return null;
+
     const fallbackOrder = [
       finish,
       "normal", "holofoil", "reverseHolofoil",
@@ -222,14 +303,15 @@ export class DynamoDbInventoryRepository implements InventoryRepository {
     for (const key of fallbackOrder) {
       if (tried.has(key)) continue;
       tried.add(key);
-      const band = prices[key];
-      if (band?.market != null) return asNumber(band.market);
+      const band = bandMarket(prices[key]);
+      if (band != null) return band;
     }
     // Last resort: any finish that carries a market figure.
-    for (const band of Object.values(prices)) {
-      if (band?.market != null) return asNumber(band.market);
+    for (const value of Object.values(prices)) {
+      const band = bandMarket(value);
+      if (band != null) return band;
     }
-    return 0;
+    return null;
   }
 
   private async queryAll(params: {

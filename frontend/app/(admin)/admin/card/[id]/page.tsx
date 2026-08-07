@@ -21,6 +21,7 @@ import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import PriceChart from '@/components/admin/shared/PriceChart'
 import StatusBadge from '@/components/admin/shared/StatusBadge'
 import CardImage from '@/components/admin/shared/CardImage'
+import { adminItemName } from '@/lib/admin-item-name'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -153,7 +154,7 @@ export default function AdminCardDetailPage() {
   // Derived
   // ---------------------------------------------------------------------------
 
-  const cardName = item?.display_name || item?.product_name || item?.name || '(unnamed)'
+  const cardName = adminItemName(item)
   const conditionDisplay = item?.condition
     ? formatCondition(item.condition, item.condition_modifier)
     : null

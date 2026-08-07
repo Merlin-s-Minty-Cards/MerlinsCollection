@@ -133,6 +133,10 @@ export default function AdminMarketPage() {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<CatalogCard[]>([])
   const [searching, setSearching] = useState(false)
+  const [searchError, setSearchError] = useState(false)
+  // Which search is current — see the Buy page for why: a slow catalog search
+  // means several are in flight and they do not resolve in order.
+  const searchSeqRef = useRef(0)
 
   // Detail
   const [selectedCard, setSelectedCard] = useState<CatalogCard | null>(null)
@@ -255,13 +259,21 @@ export default function AdminMarketPage() {
   }
 
   const searchCatalog = useCallback(async (q: string) => {
-    if (!q.trim() || !api.isAuthenticated) { setResults([]); return }
+    if (!q.trim() || !api.isAuthenticated) { setResults([]); setSearchError(false); return }
+    const seq = ++searchSeqRef.current
     setSearching(true)
+    setSearchError(false)
     try {
       const res = await api.get<{ items: CatalogCard[]; total: number }>('/market/search', { name: q })
+      if (seq !== searchSeqRef.current) return
       setResults(res.items.slice(0, 20))
-    } catch { setResults([]) }
-    finally { setSearching(false) }
+    } catch {
+      if (seq !== searchSeqRef.current) return
+      setResults([])
+      setSearchError(true)
+    } finally {
+      if (seq === searchSeqRef.current) setSearching(false)
+    }
   }, [api])
 
   useEffect(() => {
@@ -432,6 +444,23 @@ export default function AdminMarketPage() {
             <div className="vault-panel rounded-xl overflow-hidden max-h-[500px] overflow-y-auto vault-scroll">
               {searching ? (
                 <div className="p-4 text-xs text-pine-400">Searching…</div>
+              ) : searchError ? (
+                /* Deliberately distinct from "no cards found": a failed request
+                   dressed up as an empty catalog is what made this bug
+                   undiagnosable from the UI. */
+                <div className="p-4 space-y-2">
+                  <p className="text-xs text-red-400">
+                    Catalog search failed — a connection problem, not an empty catalog.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => searchCatalog(query)}
+                    className="flex items-center gap-1.5 text-[11px] text-pine-300 hover:text-mint transition-colors"
+                  >
+                    <RefreshCw size={12} />
+                    Retry
+                  </button>
+                </div>
               ) : results.length === 0 && query ? (
                 <div className="p-4 text-xs text-pine-500">No cards found in catalog</div>
               ) : (

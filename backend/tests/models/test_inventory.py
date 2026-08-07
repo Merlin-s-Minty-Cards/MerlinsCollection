@@ -236,3 +236,61 @@ def test_normalize_condition_rejects_garbage(bad):
 
     with pytest.raises(ValueError):
         normalize_condition(bad)
+
+
+# --- T10: display_name_override (admin-authored customer-facing name) ---------
+# docs/plans/rfc-0008/t10-jp-english-names.md. An admin-typed name that outranks
+# the catalog name at render time, so a Japanese card whose catalog row is in
+# Japanese script can be shown to customers in English. Distinct from
+# ``display_name`` (materialized at import, never edited) — nothing in the sync
+# or import path writes the override, so no sync can clobber a typed name.
+
+def test_display_name_override_defaults_to_none_when_absent_from_stored_row():
+    """Migration safety: every row written before this field existed lacks the
+    key entirely. Reading one back must yield None, not blow up."""
+    stored = {
+        "kind": "raw",
+        "item_id": "01JLEGACYROWNOOVERRIDE00001",
+        "card_id": "ja:M4-084",
+        "cost_basis": "10.00",
+        "acquired_at": "2026-01-05",
+        "finish": "holofoil",
+        "condition": "NM",
+    }
+    assert "display_name_override" not in stored
+    item = InventoryItemAdapter.validate_python(stored)
+    assert item.display_name_override is None
+
+
+def test_display_name_override_round_trips_on_every_kind():
+    """It lives on _ItemBase, so a sealed/bulk item can carry one too — an
+    admin correcting a product name is the same action as correcting a card."""
+    raw = RawInventoryItem(**_base(finish="holofoil", condition="NM",
+                                   display_name_override="Chespin"))
+    sealed = SealedInventoryItem(**_base(product_name="日本語の箱",
+                                         product_type=SealedProductType.ETB,
+                                         display_name_override="Japanese ETB"))
+    assert raw.display_name_override == "Chespin"
+    assert sealed.display_name_override == "Japanese ETB"
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_display_name_override_blank_is_stored_as_none(blank):
+    """Clearing the box in the admin UI sends "" — that must CLEAR the override,
+    not store an empty string that renders as a nameless tile."""
+    item = RawInventoryItem(**_base(finish="holofoil", condition="NM",
+                                    display_name_override=blank))
+    assert item.display_name_override is None
+
+
+def test_display_name_override_is_trimmed():
+    item = RawInventoryItem(**_base(finish="holofoil", condition="NM",
+                                    display_name_override="  Chespin  "))
+    assert item.display_name_override == "Chespin"
+
+
+def test_display_name_override_rejects_over_length_input():
+    """It reaches customers, so it is bounded like the search name parameter."""
+    with pytest.raises(ValidationError):
+        RawInventoryItem(**_base(finish="holofoil", condition="NM",
+                                 display_name_override="x" * 201))

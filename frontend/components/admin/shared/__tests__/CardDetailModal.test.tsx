@@ -116,3 +116,300 @@ describe('CardDetailModal TCGplayer link', () => {
     )
   })
 })
+
+// ---------------------------------------------------------------------------
+// RFC 0008 §F6 — full field coverage + a real notes box
+// ---------------------------------------------------------------------------
+
+describe('CardDetailModal field coverage (RFC 0008 §F6)', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    putMock.mockReset()
+    getMock.mockResolvedValue(null)
+    postMock.mockResolvedValue({})
+  })
+
+  async function openEditor(item: Record<string, unknown>, label: string) {
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+    const edit = await screen.findByLabelText(`Edit ${label}`)
+    fireEvent.click(edit)
+  }
+
+  it('edits notes in a textarea, not a single-line text input', async () => {
+    await openEditor({ ...item, notes: 'a long note about this card' }, 'Notes')
+
+    const box = screen.getByDisplayValue('a long note about this card')
+    expect(box.tagName).toBe('TEXTAREA')
+  })
+
+  it('sizes the notes textarea to show more than one line', async () => {
+    await openEditor({ ...item, notes: 'a long note about this card' }, 'Notes')
+
+    const box = screen.getByDisplayValue('a long note about this card')
+    expect(Number(box.getAttribute('rows'))).toBeGreaterThanOrEqual(3)
+  })
+
+  it('edits value_note in a textarea too', async () => {
+    await openEditor({ ...item, value_note: 'priced off a recent comp' }, 'Value Note')
+
+    expect(screen.getByDisplayValue('priced off a recent comp').tagName).toBe('TEXTAREA')
+  })
+
+  it('shows the graded-only fields on a graded item', async () => {
+    render(
+      <CardDetailModal
+        item={{ ...item, kind: 'graded', company: 'PSA', grade: '9', cert_number: '12345678' }}
+        onClose={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByText('Grading Company')).toBeInTheDocument()
+    expect(screen.getByText('Grade')).toBeInTheDocument()
+    expect(screen.getByText('Cert Number')).toBeInTheDocument()
+  })
+
+  it('hides the graded-only fields on a raw item', async () => {
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+
+    await screen.findByText('Condition')
+    expect(screen.queryByText('Grade')).not.toBeInTheDocument()
+    expect(screen.queryByText('Cert Number')).not.toBeInTheDocument()
+    expect(screen.queryByText('Grading Company')).not.toBeInTheDocument()
+  })
+
+  it('shows the sealed-only product type on a sealed item, not on a raw one', async () => {
+    const { unmount } = render(
+      <CardDetailModal
+        item={{ item_id: 'item-2', kind: 'sealed', product_name: 'SV1 ETB', product_type: 'etb' }}
+        onClose={vi.fn()}
+      />,
+    )
+    expect(await screen.findByText('Product Type')).toBeInTheDocument()
+    unmount()
+
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+    await screen.findByText('Condition')
+    expect(screen.queryByText('Product Type')).not.toBeInTheDocument()
+  })
+
+  it('edits factory_sealed as a checkbox on a raw item', async () => {
+    await openEditor({ ...item, factory_sealed: false }, 'Factory Sealed')
+
+    expect(screen.getByRole('checkbox')).toBeInTheDocument()
+  })
+
+  it('edits needs_review as a checkbox', async () => {
+    await openEditor({ ...item, needs_review: false }, 'Needs Review')
+
+    expect(screen.getByRole('checkbox')).toBeInTheDocument()
+  })
+
+  it('edits acquired_at with a date input', async () => {
+    await openEditor({ ...item, acquired_at: '2026-01-15' }, 'Acquired')
+
+    const input = screen.getByDisplayValue('2026-01-15')
+    expect(input).toHaveAttribute('type', 'date')
+  })
+
+  it('displays the derived identity fields but offers no edit control for them', async () => {
+    render(
+      <CardDetailModal
+        item={{ ...item, lineage_id: 'lin-9', predecessor_item_id: 'item-0' }}
+        onClose={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByText('Item ID')).toBeInTheDocument()
+    expect(screen.getByText('Lineage ID')).toBeInTheDocument()
+    expect(screen.getByText('lin-9')).toBeInTheDocument()
+
+    expect(screen.queryByLabelText('Edit Item ID')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Edit Lineage ID')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Edit Predecessor')).not.toBeInTheDocument()
+  })
+
+  it('shows the remaining _ItemBase pricing and acquisition fields', async () => {
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+
+    expect(await screen.findByText('Market at Purchase')).toBeInTheDocument()
+    expect(screen.getByText('Listed Price')).toBeInTheDocument()
+    expect(screen.getByText('Acquired Show')).toBeInTheDocument()
+  })
+
+  it('shows consignment terms for a consigned item', async () => {
+    render(
+      <CardDetailModal
+        item={{
+          ...item,
+          consignment: {
+            consignor_id: 'cosigner-7',
+            split_percent: '0.2',
+            minimum_price: '50.00',
+            paid_out: false,
+          },
+        }}
+        onClose={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByText('Consignment')).toBeInTheDocument()
+    expect(screen.getByText('cosigner-7')).toBeInTheDocument()
+  })
+
+  it('omits the consignment section entirely for an owned item', async () => {
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+
+    await screen.findByText('Condition')
+    expect(screen.queryByText('Consignment')).not.toBeInTheDocument()
+  })
+
+  // The Round 1 bug: a combined "LP+" sent as a `condition` enum value fails
+  // backend validation. This is the single most important regression guard in
+  // this task — it passes today and must keep passing.
+  it('splits a combined condition into condition + condition_modifier on save', async () => {
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+
+    fireEvent.click(await screen.findByLabelText('Edit Condition'))
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'LP+' } })
+    fireEvent.click(screen.getByLabelText('Save'))
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith('/inventory/item-1', {
+        condition: 'LP',
+        condition_modifier: '+',
+      }),
+    )
+  })
+
+  it('sends a real boolean for a checkbox field, never a null or a string', async () => {
+    // `admin_update_item` merges the body into the validated model, and
+    // `needs_review` is a non-optional bool — a null (what the generic
+    // blank-is-null path would send) is a 422, and "true" is not a bool.
+    await openEditor({ ...item, needs_review: false }, 'Needs Review')
+
+    fireEvent.click(screen.getByRole('checkbox'))
+    fireEvent.click(screen.getByLabelText('Save'))
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith('/inventory/item-1', { needs_review: true }),
+    )
+  })
+})
+
+// ===========================================================================
+// T11 — Send to Triage (docs/plans/rfc-0008/t11-triage-tab.md)
+// ===========================================================================
+//
+// The owner's requirement is that any card, on any tab, can be sent to Triage.
+// This modal is the cheapest broad insertion point — but NOT a universal one:
+// T5 established it is mounted by five pages (inventory, outgoing, sell,
+// show-prep, vault), not "any admin page". The cross-page half of that
+// assumption is pinned from the pages themselves, in
+// app/(admin)/admin/{inventory,outgoing}/__tests__/page.test.tsx.
+//
+// The button opens an INLINE note form rather than calling window.prompt():
+// the note is optional-but-encouraged free text, and a native prompt cannot be
+// styled, cannot be dismissed with Escape predictably, and blocks the render
+// thread. The row-level quick action on list pages is the no-note path.
+describe('CardDetailModal — Send to Triage', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    putMock.mockReset()
+    getMock.mockResolvedValue(null)
+    postMock.mockResolvedValue({})
+    putMock.mockResolvedValue({})
+  })
+
+  it('offers a Send to Triage action for an item that is not already flagged', async () => {
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+
+    expect(await screen.findByRole('button', { name: /send to triage/i })).toBeInTheDocument()
+  })
+
+  it('flags the item with the typed note', async () => {
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /send to triage/i }))
+    fireEvent.change(screen.getByLabelText(/why does this need review/i), {
+      target: { value: 'set symbol looks wrong' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^send$/i }))
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith('/inventory/item-1', {
+        needs_review: true,
+        review_reason: 'set symbol looks wrong',
+      }),
+    )
+  })
+
+  it('sends with no note when the admin leaves the box empty', async () => {
+    // "Optional but encouraged" — an empty note must not block the send, and
+    // must not post an empty string that would render as a blank reason chip.
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /send to triage/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^send$/i }))
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith('/inventory/item-1', {
+        needs_review: true,
+        review_reason: null,
+      }),
+    )
+  })
+
+  it('reads "In Triage" for an already-flagged item and never silently re-flags it', async () => {
+    // A button that no-ops is worse than no button: the admin clicks, nothing
+    // visible happens, and they conclude the feature is broken.
+    render(
+      <CardDetailModal
+        item={{ ...item, needs_review: true, review_reason: 'manual_entry' }}
+        onClose={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByRole('button', { name: /in triage/i })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /send to triage/i })).not.toBeInTheDocument()
+  })
+
+  it('lets an already-flagged item be cleared from the modal', async () => {
+    render(
+      <CardDetailModal
+        item={{ ...item, needs_review: true, review_reason: 'manual_entry' }}
+        onClose={vi.fn()}
+      />,
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: /in triage/i }))
+    fireEvent.click(screen.getByRole('button', { name: /clear review/i }))
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith('/inventory/item-1', {
+        needs_review: false,
+        review_reason: null,
+      }),
+    )
+  })
+
+  it('offers an Undo that reverts the send, reason included', async () => {
+    // Misclicks on this are inevitable. Undo must also clear `review_reason`,
+    // or the item comes back unflagged while still carrying the note that put
+    // it there — which then shows up as a stale reason on the next flag.
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /send to triage/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^send$/i }))
+
+    fireEvent.click(await screen.findByRole('button', { name: /undo/i }))
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenLastCalledWith('/inventory/item-1', {
+        needs_review: false,
+        review_reason: null,
+      }),
+    )
+  })
+})

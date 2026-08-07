@@ -7,7 +7,7 @@ item's status is flipped to SOLD and a SALE transaction is recorded atomically.
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from merlins_collection.dependencies import get_repo
 from merlins_collection.models.business import ItemCategory, Transaction, TransactionType
 from merlins_collection.models.inventory import ItemStatus, new_ulid
+from merlins_collection.services.card_text import admin_item_name
 from merlins_collection.services.dynamodb import InventoryRepository, ItemAlreadySoldError
 
 router = APIRouter(prefix="/sales", tags=["admin-sales"])
@@ -190,7 +191,10 @@ def add_sell_item(
     if item is None:
         raise HTTPException(status_code=404, detail=f"Item {item_id} not found")
     if item.status != ItemStatus.AVAILABLE:
-        raise HTTPException(status_code=409, detail=f"Item {item_id} is not available (status: {item.status})")
+        raise HTTPException(
+            status_code=409,
+            detail=f"Item {item_id} is not available (status: {item.status})",
+        )
 
     # Check not already in session
     existing_ids = {i["item_id"] for i in session.get("items", [])}
@@ -199,7 +203,7 @@ def add_sell_item(
 
     sell_item = {
         "item_id": item_id,
-        "name": body.get("name", getattr(item, "display_name", None) or ""),
+        "name": body.get("name", admin_item_name(item)),
         "agreed_price": body.get("agreed_price"),
         "original_price": body.get("original_price"),
         "discount_pct": body.get("discount_pct"),

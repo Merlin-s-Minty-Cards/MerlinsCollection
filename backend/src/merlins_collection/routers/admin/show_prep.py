@@ -10,11 +10,11 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
 
 from merlins_collection.dependencies import get_repo
 from merlins_collection.models.inventory import InventoryItemAdapter, ItemStatus
 from merlins_collection.services import locations as locations_service
+from merlins_collection.services.card_text import admin_item_name
 from merlins_collection.services.dynamodb import InventoryRepository
 
 router = APIRouter(prefix="/show-prep", tags=["admin-show-prep"])
@@ -67,11 +67,13 @@ def get_mispriced_cards(
                 flagged.append({
                     "item_id": item.item_id,
                     "card_id": getattr(item, "card_id", None),
-                    "name": getattr(item, "display_name", None) or getattr(item, "product_name", None) or "",
+                    "name": admin_item_name(item),
                     "location": getattr(item, "location", None),
                     "cost_basis": str(cost),
                     "current_market_value": str(market),
-                    "sticker_price": str(item.sticker_price) if item.sticker_price is not None else None,
+                    "sticker_price": (
+                        str(item.sticker_price) if item.sticker_price is not None else None
+                    ),
                     "sticker_notes": item.sticker_notes,
                     "tcg_url": item.tcg_url,
                     "delta_pct": str(margin_pct),
@@ -82,11 +84,13 @@ def get_mispriced_cards(
                 flagged.append({
                     "item_id": item.item_id,
                     "card_id": getattr(item, "card_id", None),
-                    "name": getattr(item, "display_name", None) or getattr(item, "product_name", None) or "",
+                    "name": admin_item_name(item),
                     "location": getattr(item, "location", None),
                     "cost_basis": str(cost),
                     "current_market_value": str(market),
-                    "sticker_price": str(item.sticker_price) if item.sticker_price is not None else None,
+                    "sticker_price": (
+                        str(item.sticker_price) if item.sticker_price is not None else None
+                    ),
                     "sticker_notes": item.sticker_notes,
                     "tcg_url": item.tcg_url,
                     "delta_pct": str(margin_pct),

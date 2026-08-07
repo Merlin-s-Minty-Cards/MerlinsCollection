@@ -393,6 +393,42 @@ def _record_sheet_sale(ctx, item, *, sold, date_sold, venmo, venmo_fees, categor
     ctx.repo.record_sale(txn)
 
 
+def _review_reason_for_row(
+    *, card_id: str | None, confidence: str | None, blank_condition: bool,
+) -> str | None:
+    """Why an imported row is going to Triage, or ``None`` if it is not.
+
+    The importer used to collapse "no catalog link", "the matcher was unsure"
+    and "the sheet had no condition" into one boolean, so every imported item in
+    Triage showed the same unexplained "flagged" chip and an admin could not tell
+    which of the three to fix (follow-ups.md, T11 row 8).
+
+    Returns a value from ``MACHINE_REVIEW_REASONS`` only — the re-flag guard
+    distinguishes automation from a human by that membership.
+
+    Ordered most- to least-specific, because the column holds one string and a
+    row routinely qualifies under several: an unlinked row is the one an admin
+    can actually act on, a low-confidence match is the next most useful thing to
+    know, and a blank condition is a detail by comparison.
+
+    Rows written BEFORE this field existed cannot be backfilled — the stored data
+    no longer distinguishes the cases — so those keep the bare chip.
+
+    ``confidence=None`` means the legacy import path, which matches live and
+    reports no confidence score at all — there is nothing to be unsure about, so
+    that rung is skipped rather than treated as low. On the enriched path an
+    EMPTY score does count as low: the caller flags those, and a reason of
+    ``None`` there would leave the chip unexplained all over again.
+    """
+    if card_id is None:
+        return "no_catalog_link"
+    if confidence is not None and confidence != "high":
+        return "low_match_confidence"
+    if blank_condition:
+        return "blank_condition"
+    return None
+
+
 def import_singles(rows: list[dict], ctx: ImportContext) -> dict:
     summary = {"imported": 0, "sales": 0, "skipped": 0, "needs_review": 0}
     _LANG_MAP = {"EN": Language.EN, "JP": Language.JP}
@@ -442,6 +478,10 @@ def import_singles(rows: list[dict], ctx: ImportContext) -> dict:
                 else:
                     # medium, low, empty, or card_id is None
                     needs_review = True
+                review_reason = _review_reason_for_row(
+                    card_id=card_id, confidence=confidence,
+                    blank_condition=blank_condition,
+                )
 
                 tcg_url = None
                 listed_price = None
@@ -456,6 +496,10 @@ def import_singles(rows: list[dict], ctx: ImportContext) -> dict:
                     set_text=set_hint_from_url(tcg_url),
                 )
                 needs_review = card_id is None or blank_condition
+                # No confidence score on this path — it matches live.
+                review_reason = _review_reason_for_row(
+                    card_id=card_id, confidence=None, blank_condition=blank_condition,
+                )
                 listed_price = parse_money(_find(row, "Sticker"))
 
             notes = " — ".join(x for x in (
@@ -484,6 +528,7 @@ def import_singles(rows: list[dict], ctx: ImportContext) -> dict:
                 notes=notes or None,
                 tcg_url=tcg_url,
                 needs_review=needs_review,
+                review_reason=review_reason,
             )
             ctx.repo.put_inventory_item(item)
             summary["imported"] += 1

@@ -11,6 +11,9 @@ import CardImage from '@/components/admin/shared/CardImage'
 import ImageToggle from '@/components/admin/shared/ImageToggle'
 import InlineEditCell from '@/components/admin/shared/InlineEditCell'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
+import TriageRowAction from '@/components/admin/shared/TriageRowAction'
+import type { TriageItem } from '@/lib/triage'
+import { adminItemName } from '@/lib/admin-item-name'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -212,7 +215,7 @@ export default function AdminPrepQueuePage() {
   // ---------------------------------------------------------------------------
 
   const getItemName = (item: PrepQueueItem): string => {
-    return item.display_name || item.product_name || item.name || '(unnamed)'
+    return adminItemName(item)
   }
 
   // ---------------------------------------------------------------------------
@@ -353,6 +356,16 @@ export default function AdminPrepQueuePage() {
       label: 'Market',
       className: 'text-right w-20',
       render: (item) => <PriceDisplay value={item.current_market_value} className="text-xs text-pine-400" />,
+    },
+    {
+      key: '_triage',
+      label: '',
+      className: 'w-10',
+      // Same one-click flag as the Inventory table: this queue is exactly where
+      // an unpriced card turns out to be the wrong card.
+      render: (item) => (
+        <TriageRowAction item={item as TriageItem} onChanged={fetchItems} />
+      ),
     },
   ]
 

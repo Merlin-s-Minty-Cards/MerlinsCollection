@@ -9,6 +9,11 @@ interface SearchInputProps {
   placeholder?: string
   debounceMs?: number
   className?: string
+  /**
+   * Accessible name for the input. Without one the field's only name is its
+   * placeholder, which disappears the moment anything is typed.
+   */
+  ariaLabel?: string
 }
 
 /**
@@ -20,6 +25,7 @@ export default function SearchInput({
   placeholder = 'Search…',
   debounceMs = 300,
   className = '',
+  ariaLabel,
 }: SearchInputProps) {
   const [local, setLocal] = useState(value)
   const timerRef = useRef<ReturnType<typeof setTimeout>>()
@@ -47,6 +53,7 @@ export default function SearchInput({
       />
       <input
         type="text"
+        aria-label={ariaLabel}
         value={local}
         onChange={(e) => handleChange(e.target.value)}
         placeholder={placeholder}

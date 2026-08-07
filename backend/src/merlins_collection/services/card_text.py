@@ -507,3 +507,32 @@ def format_display_name(name, number) -> str | None:
     else:
         composed = clean_name
     return composed[:_DISPLAY_NAME_MAX].strip()
+
+
+def admin_item_name(item, fallback: str = "") -> str:
+    """The name an admin should see for an item — the ONE server-side authority.
+
+    Mirrors the frontend's ``lib/admin-item-name.ts`` and the customer path's
+    ``_enrich``/``itemTitle``: an admin's ``display_name_override`` OUTRANKS
+    everything, then the import-materialized ``display_name``, then a sealed
+    product's name, then a bulk description.
+
+    Every admin response that carries a name used to inline
+    ``display_name or product_name``, so none of them knew about the override —
+    an admin could assign an English name to a Japanese card and still see the
+    Japanese one in Show Prep, the Market watchlist and the Vault, which reads
+    exactly like an edit that did not save (RFC 0008 follow-up, T10 row 2; owner
+    decision 2026-08-06).
+
+    Trimmed, not ``or`` on the raw value: a whitespace-only override would
+    otherwise render a blank, nameless row.
+    """
+    override = getattr(item, "display_name_override", None)
+    if override and override.strip():
+        return override.strip()
+    return (
+        getattr(item, "display_name", None)
+        or getattr(item, "product_name", None)
+        or getattr(item, "description", None)
+        or fallback
+    )

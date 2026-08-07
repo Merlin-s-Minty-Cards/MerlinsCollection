@@ -9,7 +9,7 @@ Unlike the customer ``/inventory/search``, this surface:
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from merlins_collection.dependencies import get_repo
 from merlins_collection.models.inventory import (
+    MACHINE_REVIEW_REASONS,
     Condition,
     ConditionModifier,
     InventoryItem,
@@ -27,9 +28,15 @@ from merlins_collection.models.inventory import (
     new_ulid,
     normalize_condition,
 )
+from merlins_collection.services.card_text import admin_item_name
 from merlins_collection.services.condition_pricing import apply_condition_adjustment
 from merlins_collection.services.dynamodb import InventoryRepository
 from merlins_collection.services.locations import validate_location
+from merlins_collection.services.triage import (
+    is_missing_card_id,
+    is_missing_english_name,
+    needs_triage,
+)
 
 router = APIRouter(prefix="/inventory", tags=["admin-inventory"])
 
@@ -88,10 +95,16 @@ def admin_search_inventory(
     kind: str | None = Query(None),
     card_number: str | None = Query(None, max_length=20),
     artist: str | None = Query(None, max_length=200),
+    set_id: str | None = Query(None, max_length=100),
     set_name: str | None = Query(None, max_length=200),
     ownership: str | None = Query(None),
     needs_review: bool | None = Query(None),
     missing_sticker: bool = Query(False),
+    # Triage (T11). `triage` is the one OR on this endpoint — the union of every
+    # reason — while the two below narrow WITHIN it like every other filter here.
+    triage: bool = Query(False),
+    missing_card_id: bool = Query(False),
+    missing_english_name: bool = Query(False),
     min_price: Decimal | None = Query(None, ge=0),
     max_price: Decimal | None = Query(None, ge=0),
     min_profit: Decimal | None = Query(None),
@@ -157,6 +170,17 @@ def admin_search_inventory(
     if missing_sticker:
         items = [i for i in items if i.sticker_price is None]
 
+    # Triage. The predicates live in services.triage so the list and the sidebar
+    # badge (`GET /admin/triage/counts`) can never disagree about what counts.
+    if triage:
+        items = [i for i in items if needs_triage(i)]
+
+    if missing_card_id:
+        items = [i for i in items if is_missing_card_id(i)]
+
+    if missing_english_name:
+        items = [i for i in items if is_missing_english_name(i)]
+
     # Price range filters compare against what the item is worth NOW, falling
     # back to what it cost only when no market figure is known. Filtering on
     # cost alone made "show me my $100+ cards" answer a different question.
@@ -198,6 +222,18 @@ def admin_search_inventory(
             and (max_profit is None or profit <= max_profit)
         ]
 
+    # T8: exact set membership, resolved through the GSI1 `SET#` partition —
+    # one query, not the catalog walk `set_name` below does. This is what the
+    # set combobox sends, and why it sends an id: set NAMES are not unique
+    # across languages ("Base Set" is both `en:base1` and `ja:base1`) and a
+    # substring like "Sun & Moon" spans a dozen sets, so picking one entry from
+    # a dropdown and getting several sets back would defeat the control. An
+    # item with no catalog link belongs to no set and is excluded — including
+    # sealed and bulk items, which have no `card_id` field at all.
+    if set_id is not None:
+        set_card_ids = {c.card_id for c in repo.list_cards_by_set(set_id)}
+        items = [i for i in items if getattr(i, "card_id", None) in set_card_ids]
+
     # A5: Catalog-based filters (card_number, artist, set_name) — joins the catalog
     if card_number is not None or artist is not None or set_name is not None:
         items = _filter_by_catalog(
@@ -209,6 +245,15 @@ def admin_search_inventory(
 
     # Serialize with full fields
     serialized = [_serialize_item(i) for i in items]
+
+    # Triage rows carry their catalog card so the page can render the EFFECTIVE
+    # name — `display_name_override -> card.name -> display_name` (T10). Without
+    # the join the page can only ever show the fallback, and an admin fixing a
+    # name would be working blind against the one field that outranks theirs.
+    # Scoped to `triage` so the ordinary admin search keeps its payload and its
+    # cost; the triage cohort is tens of rows, not the whole table.
+    if triage:
+        _attach_catalog_cards(serialized, repo)
 
     return AdminInventorySearchResult(items=serialized, total=len(serialized))
 
@@ -278,6 +323,27 @@ def admin_update_item(
     body = _split_combined_condition(body)
     if "location" in body:
         validate_location(repo, body.get("location"), required=True)
+    # Re-pointing a card is a first-class Triage action, so the id it lands on
+    # has to exist. The importer already validates the composite against the
+    # catalog index before storing it (services/spreadsheet_import.py); this
+    # endpoint did not, so a stale or hand-typed id silently linked an item to a
+    # phantom card that resolves no price, no image and no set — and then
+    # reappears in Triage looking unlinked while actually carrying a bad id.
+    #
+    # Only what the request CHANGES is checked. Validating the whole row would
+    # make a single bad legacy card_id uneditable, including from the very tool
+    # meant to repair it. ``None`` stays allowed: unlinking is a real repair for
+    # a match that was simply wrong.
+    if "card_id" in body and body["card_id"] is not None:
+        if repo.get_catalog_card(str(body["card_id"])) is None:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"card_id {body['card_id']!r} is not in the catalog. "
+                    "Pick a card from search, or clear the link instead."
+                ),
+            )
+    body = _apply_review_transition(existing, body)
 
     # Merge: dump existing to dict, overlay with update body, re-validate
     current_data = existing.model_dump(mode="python")
@@ -695,11 +761,7 @@ def admin_resolve_card_images(
 
 def _node_name(item: InventoryItem) -> str:
     """Best human label for an item, whatever kind it is."""
-    return (
-        getattr(item, "display_name", None)
-        or getattr(item, "product_name", None)
-        or ""
-    )
+    return admin_item_name(item)
 
 
 _DISPOSAL_TYPES = ("sale", "trade_out")
@@ -1012,6 +1074,72 @@ def _sort_admin_results(
             return ""
 
     return sorted(items, key=_get_sort_value, reverse=reverse)
+
+
+def _attach_catalog_cards(
+    rows: list[dict[str, Any]], repo: InventoryRepository,
+) -> None:
+    """Set ``row["card"]`` on each serialized row, in place.
+
+    Always sets the key — ``None`` for an unlinked item or a dangling
+    ``card_id`` — so the frontend can distinguish "no catalog row" from "this
+    response shape does not carry one" without guessing.
+    """
+    cache: dict[str, dict[str, Any] | None] = {}
+    for row in rows:
+        card_id = row.get("card_id")
+        if not card_id:
+            row["card"] = None
+            continue
+        if card_id not in cache:
+            card = repo.get_catalog_card(card_id)
+            cache[card_id] = card.model_dump(mode="json") if card is not None else None
+        row["card"] = cache[card_id]
+
+
+def _apply_review_transition(
+    existing: InventoryItem, body: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve a ``needs_review`` change into the fields actually written.
+
+    Three rules, all of them about keeping the Triage queue drainable:
+
+    1. **Clearing stamps ``reviewed_at``** (server clock — a client's own clock
+       is not evidence that a human looked at the item).
+    2. **Automation must not re-flag a reviewed item.** A write carrying a
+       reason from ``MACHINE_REVIEW_REASONS`` is automation; if an admin has
+       already inspected and passed this item, the flag is dropped. Without
+       this the queue refills with cards nobody needs to look at, which is the
+       standard failure mode for review queues.
+    3. **A human always may re-flag**, and doing so clears the stale stamp —
+       otherwise the row says "reviewed and passed" about an item that is back
+       in the queue, and would suppress the next automated flag.
+
+    NOTE: rule 2 is currently a guard against a FUTURE in-place re-matcher and
+    against UI mistakes. No automated path writes ``needs_review`` onto an
+    existing row today; the live re-import creates new rows and destroys
+    ``reviewed_at`` outright. See docs/plans/rfc-0008/follow-ups.md (T11).
+    """
+    if "needs_review" not in body:
+        return body
+
+    body = dict(body)
+    reason = body.get("review_reason")
+    is_machine = isinstance(reason, str) and reason in MACHINE_REVIEW_REASONS
+
+    if body["needs_review"]:
+        if is_machine and existing.reviewed_at is not None:
+            # Rule 2 — leave the item exactly as the admin left it. Popping
+            # both keys (rather than forcing False) keeps the merge a no-op, so
+            # this write records no spurious `edit` timeline event either.
+            body.pop("needs_review")
+            body.pop("review_reason", None)
+        else:
+            body["reviewed_at"] = None  # rule 3
+    else:
+        body["reviewed_at"] = datetime.now(tz=timezone.utc)  # rule 1
+
+    return body
 
 
 def _serialize_item(item: InventoryItem) -> dict[str, Any]:

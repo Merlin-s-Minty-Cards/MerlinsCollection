@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { usePathname } from 'next/navigation'
 import Link from 'next/link'
 import {
@@ -12,7 +12,9 @@ import {
   TrendingUp,
   MapPin,
   MapPinned,
+  CalendarDays,
   Lock,
+  Stethoscope,
   Tags,
   BarChart3,
   History,
@@ -22,6 +24,7 @@ import {
   LogOut,
 } from 'lucide-react'
 import { signOut } from 'next-auth/react'
+import { useAdminApi } from '@/lib/admin-api'
 
 const navItems = [
   { href: '/admin', label: 'Dashboard', icon: LayoutDashboard },
@@ -32,7 +35,9 @@ const navItems = [
   { href: '/admin/vault', label: 'Vault', icon: Lock },
   { href: '/admin/market', label: 'Market', icon: TrendingUp },
   { href: '/admin/show-prep', label: 'Show Prep', icon: MapPin },
+  { href: '/admin/shows', label: 'Shows', icon: CalendarDays },
   { href: '/admin/outgoing', label: 'Prep Queue', icon: Tags },
+  { href: '/admin/triage', label: 'Triage', icon: Stethoscope, badge: true },
   { href: '/admin/analytics', label: 'Show Analytics', icon: BarChart3 },
   { href: '/admin/history', label: 'History', icon: History },
   { href: '/admin/cosigners', label: 'Cosigners', icon: Users },
@@ -41,7 +46,24 @@ const navItems = [
 
 export default function AdminShell({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsed] = useState(false)
+  const [triageCount, setTriageCount] = useState(0)
   const pathname = usePathname()
+  const api = useAdminApi()
+
+  // The count is what makes the Triage tab get used instead of forgotten — a
+  // queue with no visible number is a page nobody opens twice. Fetched per
+  // navigation rather than cached: a stale badge that still counts a card the
+  // admin just fixed is the exact failure this feature exists to avoid.
+  // A failure is swallowed to zero on purpose; a chrome element must never be
+  // able to break the page it frames.
+  useEffect(() => {
+    let cancelled = false
+    api
+      .get<{ total: number }>('/triage/counts')
+      .then((data) => { if (!cancelled) setTriageCount(data?.total ?? 0) })
+      .catch(() => { if (!cancelled) setTriageCount(0) })
+    return () => { cancelled = true }
+  }, [api, pathname])
 
   const isActive = (href: string) => {
     if (href === '/admin') return pathname === '/admin'
@@ -49,7 +71,13 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
   }
 
   return (
-    <div className="vault-scope min-h-screen font-sans text-pine-100 flex">
+    // h-screen, not min-h-screen: `overflow-y-auto` on <main> only bounds
+    // scrolling when its flex parent's height is CAPPED. A minimum lets both
+    // <aside> and <main> stretch to content height, so the document scrolls and
+    // the sidebar rides away with it (RFC 0008 §F2). Capping here activates
+    // <main>'s existing overflow and leaves <aside> viewport-bounded, which in
+    // turn lets the nav's own overflow-y-auto engage when the tab list is long.
+    <div className="vault-scope h-screen overflow-hidden font-sans text-pine-100 flex">
       {/* Sidebar */}
       <aside
         className={`
@@ -77,8 +105,11 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
 
         {/* Navigation */}
         <nav className="flex-1 py-2 space-y-0.5 px-2 overflow-y-auto vault-scroll">
-          {navItems.map(({ href, label, icon: Icon }) => {
+          {navItems.map(({ href, label, icon: Icon, badge }) => {
             const active = isActive(href)
+            // Rendered only when there is outstanding work: a permanent "0"
+            // chip is visual debt that trains the eye to ignore the badge.
+            const showBadge = badge && triageCount > 0
             return (
               <Link
                 key={href}
@@ -96,6 +127,15 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
               >
                 <Icon size={18} className={active ? 'text-mint' : 'text-pine-400'} />
                 {!collapsed && <span className="truncate">{label}</span>}
+                {showBadge && (
+                  <span
+                    className={`ml-auto rounded-full bg-amber-400/20 text-amber-300 text-[10px]
+                                font-semibold px-1.5 py-0.5 leading-none
+                                ${collapsed ? 'ml-0 absolute translate-x-3 -translate-y-2' : ''}`}
+                  >
+                    {triageCount}
+                  </span>
+                )}
               </Link>
             )
           })}

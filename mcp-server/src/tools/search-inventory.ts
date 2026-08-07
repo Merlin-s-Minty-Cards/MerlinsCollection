@@ -26,10 +26,10 @@ export type CardResult = {
   set: string;
   condition: string;
   quantity: number;
-  /** Per-unit market value (condition-adjusted, from current_market_value). */
-  currentValue: number;
+  /** Per-unit market value; `null` when no price could be resolved for the card. */
+  currentValue: number | null;
   /** Per-unit market price (same as currentValue — kept for backward compat). */
-  marketPrice: number;
+  marketPrice: number | null;
   /** Print language (EN/JP) — lets the model distinguish a JP print from its EN twin. */
   language: "EN" | "JP";
 };
@@ -84,11 +84,15 @@ export async function searchInventory(
     if (filters.condition !== undefined && !conditionMatches(card.condition, filters.condition)) {
       return false;
     }
-    if (filters.minValue !== undefined && card.marketPrice < filters.minValue) {
-      return false;
-    }
-    if (filters.maxValue !== undefined && card.marketPrice > filters.maxValue) {
-      return false;
+    // A card with no resolvable price cannot satisfy a bound, so any bound at
+    // all excludes it. This must be explicit: left to JS coercion the two bounds
+    // would disagree — `null < min` is true (excluded) but `null > max` is false
+    // (kept, and returned with a null currentValue). Mirrors the backend's
+    // hidden_no_price behaviour on /inventory/search.
+    if (filters.minValue !== undefined || filters.maxValue !== undefined) {
+      if (card.marketPrice == null) return false;
+      if (filters.minValue !== undefined && card.marketPrice < filters.minValue) return false;
+      if (filters.maxValue !== undefined && card.marketPrice > filters.maxValue) return false;
     }
     if (
       filters.language !== undefined &&

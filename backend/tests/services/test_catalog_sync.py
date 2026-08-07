@@ -1168,6 +1168,95 @@ def test_sync_new_sets_dry_run_writes_nothing(dynamo_repo):
     assert dynamo_repo.get_catalog_card("en:swsh2-1") is None
 
 
+# ---------------------------------------------------------------------------
+# T8 — the catalog_set registry
+#
+# "List every set in the catalog" has no index: sets exist only as denormalized
+# `set_id`/`set_name` fields on card rows, so answering it today means a full
+# catalog scan -- the 11.2-second read T9 diagnosed as the cause of the dead
+# catalog search. The registry is one small row per set (~400 total), written
+# from the set-list response this sync ALREADY fetches, so it costs no extra
+# upstream request.
+# ---------------------------------------------------------------------------
+
+
+def test_sync_new_sets_registers_every_set_not_just_the_new_ones(dynamo_repo):
+    """The registry describes the whole catalog, so it must cover sets the sync
+    skipped as already-populated.
+
+    This is the easy thing to get wrong: the writer sits after ``sync_new_sets``'
+    ``if not missing_set_ids: continue``, so a run where nothing is new
+    registers nothing -- and the steady state of this job IS "nothing is new".
+    """
+    dynamo_repo.batch_upsert_catalog_cards([
+        to_catalog_card_brief_for_test("swsh1", "1", "Celebi V"),
+    ])
+    client = FakeSetsClient(
+        sets_by_language={Language.EN: [SWSH1_SET, SWSH2_SET]},
+        cards_by_language={Language.EN: [SWSH1_CARD_ROW, *SWSH2_CARD_ROWS]},
+    )
+
+    summary = sync_new_sets(dynamo_repo, client)
+
+    # Reported, not just written: `scripts/scheduled_sync.py` prints this
+    # summary as the monthly job's JSON output, and "how many sets got
+    # registered" is the first thing to look at when the admin's set dropdown
+    # comes back empty.
+    assert summary["sets_registered"] == 2
+
+    registry = {s["set_id"]: s for s in dynamo_repo.list_catalog_sets()}
+    assert set(registry) == {"en:swsh1", "en:swsh2"}
+    assert registry["en:swsh1"]["set_name"] == "Sword & Shield"
+    assert registry["en:swsh1"]["language"] == "EN"
+    # `card_count` is the rows WE hold for the set, in both writers -- not the
+    # total TCGdex advertises. Half of TCGdex's Japanese sets advertise a card
+    # count while carrying zero card rows, so the advertised figure would report
+    # a set as covered when the catalog has nothing in it.
+    assert registry["en:swsh1"]["card_count"] == 1
+    assert registry["en:swsh2"]["card_count"] == 2  # counted AFTER its cards land
+
+
+def test_sync_new_sets_dry_run_writes_no_registry_rows(dynamo_repo):
+    """A dry run predicts; it does not mutate. The registry is no exception."""
+    client = FakeSetsClient(
+        sets_by_language={Language.EN: [SWSH2_SET]},
+        cards_by_language={Language.EN: SWSH2_CARD_ROWS},
+    )
+
+    sync_new_sets(dynamo_repo, client, dry_run=True)
+
+    assert dynamo_repo.list_catalog_sets() == []
+
+
+def test_sync_new_sets_keeps_registry_rows_when_a_set_list_call_fails(dynamo_repo):
+    """One language's outage must not erase that language's registry.
+
+    ``_sync_new_sets`` already degrades a failed ``list_sets`` to "no new sets
+    for this language". If the registry were rebuilt by replacing the whole
+    list, the same outage would silently delete every JA set from the dropdown.
+    """
+    dynamo_repo.put_catalog_sets([{
+        "set_id": "ja:sv1", "set_name": "スカーレット", "language": "JP",
+        "card_count": 78, "updated_at": "2026-01-01T00:00:00+00:00",
+    }])
+
+    class FlakyClient(FakeSetsClient):
+        def list_sets(self, language):
+            if language is Language.JP:
+                raise RuntimeError("upstream 503")
+            return super().list_sets(language)
+
+    client = FlakyClient(
+        sets_by_language={Language.EN: [SWSH1_SET]},
+        cards_by_language={Language.EN: [SWSH1_CARD_ROW]},
+    )
+
+    sync_new_sets(dynamo_repo, client)
+
+    registry = {s["set_id"] for s in dynamo_repo.list_catalog_sets()}
+    assert registry == {"ja:sv1", "en:swsh1"}
+
+
 def to_catalog_card_brief_for_test(raw_set_id, local_id, name):
     """Builds a stored-shape brief `CatalogCard` for `en:{raw_set_id}-{local_id}`
     without going through the client, for pre-seeding the repo in a test."""

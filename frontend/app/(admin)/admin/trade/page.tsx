@@ -1,7 +1,7 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
-import { Plus, X, Check, Eye, EyeOff, DollarSign, Calendar, Banknote, CreditCard, Smartphone, ArrowLeftRight, Search, AlertTriangle } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Plus, X, Check, Eye, EyeOff, DollarSign, Calendar, Banknote, CreditCard, Smartphone, Search, AlertTriangle, RefreshCw } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import CardImage from '@/components/admin/shared/CardImage'
 import SearchInput from '@/components/admin/shared/SearchInput'
@@ -9,6 +9,7 @@ import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
 import { availableModes, canConfirmBasis, type BasisMode } from '@/lib/trade-basis'
 import { buildIncomingLegBody } from '@/lib/trade-incoming-form'
+import { adminItemName } from '@/lib/admin-item-name'
 
 interface TradeLeg {
   item_id?: string
@@ -84,7 +85,6 @@ export default function AdminTradePage() {
   const [tradeDate, setTradeDate] = useState(todayISO())
 
   // Vendor mode toggle
-  const [vendorMode, setVendorMode] = useState(false)
 
   // Basis mode
   const [basisMode, setBasisMode] = useState<BasisMode>('transfer')
@@ -108,6 +108,12 @@ export default function AdminTradePage() {
   const [incomingCatalogResults, setIncomingCatalogResults] = useState<IncomingCatalogCard[]>([])
   const [searchingIncomingCatalog, setSearchingIncomingCatalog] = useState(false)
   const [selectedIncomingCard, setSelectedIncomingCard] = useState<IncomingCatalogCard | null>(null)
+  const [incomingCatalogError, setIncomingCatalogError] = useState(false)
+  // Bumping this re-runs the search effect for the name already typed.
+  const [incomingRetryNonce, setIncomingRetryNonce] = useState(0)
+  // Which search is current — see the Buy page for why: a slow catalog search
+  // means several are in flight and they do not resolve in order.
+  const incomingSearchSeqRef = useRef(0)
 
   // Confirm
   const [showConfirm, setShowConfirm] = useState(false)
@@ -141,21 +147,27 @@ export default function AdminTradePage() {
   useEffect(() => {
     if (!inForm.name.trim() || !api.isAuthenticated || selectedIncomingCard) {
       setIncomingCatalogResults([])
+      setIncomingCatalogError(false)
       return
     }
     const timeout = setTimeout(async () => {
+      const seq = ++incomingSearchSeqRef.current
       setSearchingIncomingCatalog(true)
+      setIncomingCatalogError(false)
       try {
         const res = await api.get<{ items: IncomingCatalogCard[] }>('/market/search', { name: inForm.name })
+        if (seq !== incomingSearchSeqRef.current) return
         setIncomingCatalogResults(res.items.slice(0, 8))
       } catch {
+        if (seq !== incomingSearchSeqRef.current) return
         setIncomingCatalogResults([])
+        setIncomingCatalogError(true)
       } finally {
-        setSearchingIncomingCatalog(false)
+        if (seq === incomingSearchSeqRef.current) setSearchingIncomingCatalog(false)
       }
     }, 300)
     return () => clearTimeout(timeout)
-  }, [inForm.name, selectedIncomingCard, api.isAuthenticated]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [inForm.name, selectedIncomingCard, api.isAuthenticated, incomingRetryNonce]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch balance
   const fetchBalance = useCallback(async () => {
@@ -175,10 +187,10 @@ export default function AdminTradePage() {
     try {
       await api.post(`/trades/${tradeId}/outgoing`, {
         item_id: item.item_id,
-        name: item.display_name || item.product_name || '',
+        name: adminItemName(item, ''),
         agreed_value: parseFloat(value),
       })
-      setOutgoing((prev) => [...prev, { item_id: item.item_id, name: item.display_name || item.product_name || '', value }])
+      setOutgoing((prev) => [...prev, { item_id: item.item_id, name: adminItemName(item, ''), value }])
       setOutSearch('')
       setOutResults([])
     } catch (err) {
@@ -364,7 +376,6 @@ export default function AdminTradePage() {
     setCounterparty('')
     setConfirmed(false)
     setTradeDate(todayISO())
-    setVendorMode(false)
     setBasisMode('transfer')
     setManualBasis('')
     setSelectedIncomingCard(null)
@@ -403,15 +414,6 @@ export default function AdminTradePage() {
           <h1 className="text-xl font-semibold text-pine-100">Trade Calculator</h1>
         </div>
         <div className="flex items-center gap-2">
-          {/* Vendor mode toggle */}
-          <button
-            type="button"
-            onClick={() => setVendorMode((v) => !v)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${vendorMode ? 'bg-purple-500/15 text-purple-400 border-purple-500/30' : 'text-pine-400 border-pine-700/40 hover:border-pine-600'}`}
-          >
-            <ArrowLeftRight size={13} />
-            {vendorMode ? 'Vendor Mode' : 'Customer Mode'}
-          </button>
           <button
             type="button"
             onClick={() => setCustomerView((v) => !v)}
@@ -423,7 +425,8 @@ export default function AdminTradePage() {
         </div>
       </header>
 
-      {/* Basis mode selector — rendered unconditionally (not gated behind vendorMode) */}
+      {/* Basis mode selector — the live cost-basis control, rendered
+          unconditionally by design (Round 3 OWNER RULING 2026-08-04). */}
       <div className="mb-4 vault-panel rounded-xl p-3">
         <div className="flex items-center gap-4 flex-wrap">
           <span className="text-[11px] text-pine-400 uppercase tracking-wider font-medium">Cost Basis Mode</span>
@@ -530,7 +533,24 @@ export default function AdminTradePage() {
                     )}
                   </div>
                 )}
-                {!selectedIncomingCard && !searchingIncomingCatalog && incomingCatalogResults.length === 0 && inForm.name.trim().length >= 3 && (
+                {/* Search failed — deliberately distinct from "no match" */}
+                {!selectedIncomingCard && incomingCatalogError && !searchingIncomingCatalog && (
+                  <div className="mt-1 space-y-1">
+                    <div className="flex items-center gap-1.5 text-[10px] text-red-400">
+                      <AlertTriangle size={11} className="flex-shrink-0" />
+                      Catalog search failed — a connection problem, not an empty catalog.
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setIncomingRetryNonce((n) => n + 1)}
+                      className="flex items-center gap-1 text-[10px] text-pine-300 hover:text-mint transition-colors"
+                    >
+                      <RefreshCw size={10} />
+                      Retry
+                    </button>
+                  </div>
+                )}
+                {!selectedIncomingCard && !incomingCatalogError && !searchingIncomingCatalog && incomingCatalogResults.length === 0 && inForm.name.trim().length >= 3 && (
                   <div className="mt-1 flex items-center gap-1.5 text-[10px] text-amber-400">
                     <AlertTriangle size={11} className="flex-shrink-0" />
                     No catalog match — fields below can still be filled in manually.
@@ -642,7 +662,7 @@ export default function AdminTradePage() {
             <div className="vault-panel rounded-lg divide-y divide-pine-700/30 max-h-40 overflow-y-auto vault-scroll">
               {outResults.map((item) => (
                 <button key={item.item_id} type="button" onClick={() => addOutgoing(item)} className="w-full flex items-center justify-between px-3 py-2 hover:bg-pine-800/50 text-left text-xs">
-                  <span className="text-pine-100 truncate">{item.display_name || item.product_name}</span>
+                  <span className="text-pine-100 truncate">{adminItemName(item)}</span>
                   <span className="text-pine-400 ml-2"><PriceDisplay value={item.current_market_value} className="text-[10px] inline" /></span>
                 </button>
               ))}
@@ -825,7 +845,7 @@ export default function AdminTradePage() {
       <ConfirmDialog
         open={showConfirm}
         title="Confirm Trade"
-        description={`Execute trade: ${outgoing.length} card${outgoing.length !== 1 ? 's' : ''} out, ${incoming.length} card${incoming.length !== 1 ? 's' : ''} in${cashComponents.length > 0 ? ` + ${cashComponents.length} cash component${cashComponents.length !== 1 ? 's' : ''}` : ''}${vendorMode ? ' (vendor mode)' : ''}?`}
+        description={`Execute trade: ${outgoing.length} card${outgoing.length !== 1 ? 's' : ''} out, ${incoming.length} card${incoming.length !== 1 ? 's' : ''} in${cashComponents.length > 0 ? ` + ${cashComponents.length} cash component${cashComponents.length !== 1 ? 's' : ''}` : ''}?`}
         confirmLabel="Execute Trade"
         loading={confirming}
         onConfirm={handleConfirm}

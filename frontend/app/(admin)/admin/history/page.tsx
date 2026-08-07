@@ -19,6 +19,7 @@ import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import SearchInput from '@/components/admin/shared/SearchInput'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import StatusBadge from '@/components/admin/shared/StatusBadge'
+import { adminItemName } from '@/lib/admin-item-name'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -328,7 +329,7 @@ export default function AdminHistoryPage() {
               >
                 <div>
                   <span className="text-sm text-pine-100 font-medium">
-                    {item.display_name || item.product_name || item.name || '(unnamed)'}
+                    {adminItemName(item)}
                   </span>
                   {item.set_name && (
                     <span className="text-[10px] text-pine-400 ml-2">{item.set_name}</span>
@@ -359,10 +360,7 @@ export default function AdminHistoryPage() {
           <div className="vault-panel rounded-xl p-4 flex items-center justify-between">
             <div>
               <h2 className="text-sm font-semibold text-pine-100">
-                {selectedItem.display_name ||
-                  selectedItem.product_name ||
-                  selectedItem.name ||
-                  selectedItem.item_id}
+                {adminItemName(selectedItem, selectedItem.item_id)}
               </h2>
               <div className="flex items-center gap-3 mt-1">
                 {selectedItem.set_name && (

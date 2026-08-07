@@ -56,6 +56,14 @@ interface ItemBase {
    * {@link itemTitle}.
    */
   display_name?: string | null
+  /**
+   * An admin-typed name that OUTRANKS the catalog name — the only thing that
+   * does. Set on a Japanese card whose catalog row is in Japanese script so a
+   * customer sees a name they can read; absent (the normal case) means the
+   * catalog name renders unchanged. Editing it never touches `card_id`, so it
+   * cannot break the item's catalog link. Read it via {@link itemTitle}.
+   */
+  display_name_override?: string | null
 }
 
 export interface RawInventoryItem extends ItemBase {
@@ -231,11 +239,19 @@ const PRODUCT_TYPE_LABELS: Record<SealedProductType, string> = {
 }
 
 /**
- * Display name for a tile: a sealed product's own name, else the catalog name,
- * then the backend's sanitized notes-derived name, then the card id, and only
- * the item id ULID as a last resort when nothing else is present.
+ * Display name for a tile: an admin's `display_name_override` beats everything
+ * — including a sealed product's own name — since correcting what the customer
+ * reads is the whole point of it. With no override (the normal case): a sealed
+ * product's own name, else the catalog name, then the backend's sanitized
+ * name+number fallback, then the card id, and only the item id ULID as a last
+ * resort when nothing else is present.
+ *
+ * The override is checked with a trim rather than `??` because `??` passes an
+ * empty string straight through, which would render a NAMELESS tile.
  */
 export function itemTitle(item: InventoryItem): string {
+  const override = item.display_name_override?.trim()
+  if (override) return override
   if (item.kind === 'sealed') return item.product_name
   return item.card?.name ?? item.display_name ?? item.card_id ?? item.item_id
 }

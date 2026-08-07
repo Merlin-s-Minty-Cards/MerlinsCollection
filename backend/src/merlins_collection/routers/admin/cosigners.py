@@ -10,7 +10,6 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
 
 from merlins_collection.dependencies import get_repo
 from merlins_collection.models.business import Consignor

@@ -288,6 +288,81 @@ describe('itemTitle', () => {
       itemTitle(makeRawItem({ display_name: 'Stale #99' })),
     ).toBe('Charizard')
   })
+
+  // ---- T10: admin-authored display_name_override (RED) ----
+  // docs/plans/rfc-0008/t10-jp-english-names.md. Precedence becomes
+  // display_name_override ?? card?.name ?? display_name ?? card_id ?? item_id.
+  // The override is the ONLY thing that outranks the catalog name — it exists
+  // because a JP card's catalog row is in Japanese script and the customer
+  // cannot read it. Everything below the override is unchanged.
+
+  it('prefers an admin display_name_override over the catalog name', () => {
+    expect(
+      itemTitle(
+        makeRawItem({
+          language: 'JP',
+          display_name_override: 'Chespin',
+          card: { ...(makeRawItem().card!), name: 'ハルクジラ' },
+        }),
+      ),
+    ).toBe('Chespin')
+  })
+
+  it('renders the native catalog name for a JP item with no override', () => {
+    // Unchanged fallback: without an admin correction the catalog name stands,
+    // even in Japanese script. No override is invented for us.
+    expect(
+      itemTitle(
+        makeRawItem({
+          language: 'JP',
+          card: { ...(makeRawItem().card!), name: 'ハルクジラ' },
+        }),
+      ),
+    ).toBe('ハルクジラ')
+  })
+
+  it('keeps using the catalog name for an EN item with no override', () => {
+    // The regression guard for the ~249 English items: promoting the messy
+    // sheet-derived display_name ahead of the catalog name would downgrade
+    // every one of them ("Magnezone first #68" instead of "Magnezone").
+    expect(
+      itemTitle(makeRawItem({ display_name: 'Charizard first #4' })),
+    ).toBe('Charizard')
+  })
+
+  it('falls back to display_name for an unmatched item with no override', () => {
+    expect(
+      itemTitle(
+        makeRawItem({
+          card: null,
+          card_id: null,
+          display_name: 'Dragonair #181',
+          display_name_override: null,
+        }),
+      ),
+    ).toBe('Dragonair #181')
+  })
+
+  it('prefers an override over a sealed product_name', () => {
+    // The sealed short-circuit must not swallow the override — correcting a
+    // mis-typed product name is the same admin action as correcting a card.
+    expect(
+      itemTitle(makeSealedItem({ display_name_override: 'Japanese ETB' })),
+    ).toBe('Japanese ETB')
+  })
+
+  it('ignores a blank or whitespace-only override rather than rendering nothing', () => {
+    // `??` only guards null/undefined. An empty string reaching the tile — from
+    // an un-normalized row or an in-flight edit — would render a NAMELESS card.
+    expect(itemTitle(makeRawItem({ display_name_override: '' }))).toBe('Charizard')
+    expect(itemTitle(makeRawItem({ display_name_override: '   ' }))).toBe('Charizard')
+  })
+
+  it('trims a padded override before displaying it', () => {
+    expect(
+      itemTitle(makeRawItem({ display_name_override: '  Chespin  ' })),
+    ).toBe('Chespin')
+  })
 })
 
 describe('conditionLabel', () => {

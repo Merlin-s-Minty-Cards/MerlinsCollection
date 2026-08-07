@@ -11,12 +11,12 @@ DynamoDB) into the union.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter, field_validator
 from ulid import ULID
 
 
@@ -158,6 +158,22 @@ class SealedProductType(StrEnum):
     OTHER = "other"
 
 
+# The reasons an AUTOMATED path flags an item for review. A human "Send to
+# Triage" types free text instead, and that difference is what the re-flag guard
+# in ``admin_update_item`` keys off: automation must not re-flag an item an admin
+# has already inspected and passed, but a human always may.
+#
+# Kept as one column shared with human free text rather than a second
+# ``review_source`` field — see docs/plans/rfc-0008/follow-ups.md (T11) for the
+# seam that creates and why it was accepted.
+MACHINE_REVIEW_REASONS = frozenset({
+    "low_match_confidence",
+    "manual_entry",
+    "no_catalog_link",
+    "blank_condition",
+})
+
+
 class ConsignmentTerms(BaseModel):
     """Terms for an item we sell on someone else's behalf (we don't own it)."""
 
@@ -196,9 +212,53 @@ class _ItemBase(BaseModel):
     notes: str | None = None
     tcg_url: str | None = None
     needs_review: bool = False
+    # Why this item is in Triage. ``needs_review`` alone is a bare boolean, so
+    # low match confidence, a manual buy entry and a human's "back looks
+    # trimmed" were indistinguishable — a queue of cards with no stated problem
+    # is not a worklist. Machine reasons come from MACHINE_REVIEW_REASONS above;
+    # anything else is an admin's own note.
+    #
+    # INTERNAL. Deliberately kept OUT of ``_CUSTOMER_ITEM_FIELDS`` — unlike
+    # ``value_note``, which is customer-visible by design (Phase 19). Bounded
+    # because it is free text riding into a DynamoDB item with a 400 KB ceiling,
+    # and blank normalizes to None so clearing the box means "no reason" rather
+    # than an empty chip.
+    review_reason: str | None = Field(default=None, max_length=500)
+    # Stamped by the SERVER when an admin clears the flag; the client never
+    # sends it. This is what stops the queue rotting: without it a later
+    # automated write re-flags an item a human already inspected and passed,
+    # the tab fills with cards nobody needs to look at, and it stops being used.
+    # See docs/plans/rfc-0008/t11-triage-tab.md.
+    reviewed_at: datetime | None = None
     value_note: str | None = None
     lineage_id: str | None = None
     predecessor_item_id: str | None = None
+    # An admin-typed name that OUTRANKS the catalog name on customer surfaces —
+    # the fix for a Japanese card whose catalog row is in Japanese script that a
+    # customer cannot read. It is an override, not a materialized name: leaving
+    # it None means the catalog name renders, so the ~249 English items need no
+    # data change at all. Nothing in the sync or import path writes this field,
+    # which is what makes it safe from being silently clobbered later — and it
+    # is separate from ``card_id``, so renaming an item can never break its
+    # catalog link. Bounded because it reaches customers.
+    # See docs/plans/rfc-0008/t10-jp-english-names.md.
+    display_name_override: str | None = Field(default=None, max_length=200)
+
+    @field_validator("display_name_override", "review_reason", mode="before")
+    @classmethod
+    def _blank_admin_text_is_none(cls, value: object) -> object:
+        """Trim, and treat a blank string as "not set".
+
+        Clearing the box in the admin UI submits ``""``. For
+        ``display_name_override`` that would out-rank the catalog name and
+        render a NAMELESS tile; for ``review_reason`` it would render an empty
+        chip on the Triage row. Both have to mean "remove it" instead. Runs
+        before the length bound, so a padded-but-legal value is trimmed rather
+        than rejected.
+        """
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
 
 
 # A sanitized, customer-safe fallback name (e.g. "Dragonair #181") materialized at

@@ -90,6 +90,11 @@ class Show(BaseModel):
     cash_at_start: Decimal | None = None
     inventory_value_at_start: Decimal | None = None
     notes: str | None = None
+    # "Deleted" in the admin UI. Nothing is ever destroyed: a mistakenly
+    # archived show with real transaction history stays recoverable and the
+    # analytics snapshots that reference it never dangle. Rows stored before
+    # this field existed carry no ``archived`` attribute and default to False.
+    archived: bool = False
 
 
 class ShowAnalyticsSnapshot(BaseModel):

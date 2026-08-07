@@ -34,6 +34,7 @@ from datetime import date, datetime, timezone
 from merlins_collection.config import settings
 from merlins_collection.models.catalog import PricePoint
 from merlins_collection.models.inventory import ItemStatus, Language, _market_price, new_ulid
+from merlins_collection.services import catalog_cache
 from merlins_collection.services.condition_pricing import apply_condition_adjustment
 from merlins_collection.services.dynamodb import CatalogReseedInProgressError
 from merlins_collection.services.tcgdex import (
@@ -276,10 +277,14 @@ def refresh_held_prices(repo, client, today: date, *,
         return _refresh_held_prices(repo, client, today, request_delay_seconds,
                                     max_consecutive_failures)
     finally:
-        # Both in a `finally`: an unexpected raise must not leave the lock held
-        # for its full hour-long TTL, blocking tomorrow's run and any reseed.
+        # All three in a `finally`: an unexpected raise must not leave the lock
+        # held for its full hour-long TTL, blocking tomorrow's run and any
+        # reseed -- nor leave the API serving the prices this pass replaced.
+        # A run that dies partway has still written the cards it got through,
+        # and the Buy page reads `prices` straight off a search result.
         repo.set_catalog_generation(None)
         repo.release_catalog_lock(lock_gen)
+        catalog_cache.invalidate()
 
 
 def _refresh_held_prices(repo, client, today, request_delay_seconds,
@@ -364,6 +369,21 @@ def run_daily_sync(repo, client, today: date) -> dict:
 
 
 def sync_new_sets(repo, client, *, dry_run: bool = False) -> dict:
+    """Incremental catalog sync, dropping the API's catalog cache when it ends.
+
+    Same wrapper shape as ``refresh_held_prices``: the run proper is
+    ``_sync_new_sets`` below, which carries the contract. The invalidation is in
+    a ``finally`` because a run that raises partway has still written the cards
+    it got through, and a cache that survived that would hide them until its
+    TTL expired.
+    """
+    try:
+        return _sync_new_sets(repo, client, dry_run=dry_run)
+    finally:
+        catalog_cache.invalidate()
+
+
+def _sync_new_sets(repo, client, *, dry_run: bool = False) -> dict:
     """Incremental catalog sync: seed identity rows for any set we hold none of.
 
     The "check for new sets" button/schedule (Round 3 Tasks 3.8/3.9). Distinct
@@ -400,10 +420,30 @@ def sync_new_sets(repo, client, *, dry_run: bool = False) -> dict:
     Only ``list_sets`` for one language failing degrades that language to zero
     new sets found (logged, not raised) -- one struggling upstream endpoint
     must not abort the whole run when the other language is healthy.
+
+    It also maintains the ``catalog_set`` REGISTRY (T8) -- one row per set, so
+    ``GET /admin/catalog/sets`` can list every set in the catalog with a single
+    query instead of the full-table scan that "read the set off 31,600 card
+    rows" would require. This job is the natural writer because it already
+    fetches the set list for both languages, so the registry costs no extra
+    upstream request. Two properties of that write are load-bearing and both
+    have tests:
+
+    * **every set is registered, not just the new ones.** The registry describes
+      the whole catalog, and this job's steady state is "nothing is new" -- a
+      writer sitting after the ``missing_set_ids`` early-out would register
+      nothing on almost every run.
+    * ``card_count`` is **the rows WE hold**, never TCGdex's advertised
+      ``cardCount.total``. 108 of TCGdex's 177 Japanese sets advertise a card
+      count while carrying zero card rows (see ``scripts/seed_catalog.py``'s
+      ``MIN_EXPECTED_RATIO_BY_LANGUAGE``), so the advertised figure would report
+      a set as covered when our catalog has nothing in it at all -- the exact
+      question the admin opens this dropdown to answer.
     """
     sets_checked = 0
     new_sets: list[str] = []
     cards_added = 0
+    sets_registered = 0
     synced_at = datetime.now(timezone.utc)
 
     for language in Language:
@@ -416,43 +456,67 @@ def sync_new_sets(repo, client, *, dry_run: bool = False) -> dict:
         sets_checked += len(sets)
 
         missing_set_ids: set[str] = set()
+        # Registry material, gathered from the membership check this loop was
+        # already paying for: `list_cards_by_set` returns the set's rows, so the
+        # count is a `len()` on a query we ran anyway.
+        held_counts: dict[str, int] = {}
+        names_by_composite: dict[str, str] = {}
         for raw_set in sets:
             raw_set_id = raw_set.get("id")
             if not raw_set_id:
                 continue
             composite_set_id = build_card_id(language, raw_set_id)
-            if not repo.list_cards_by_set(composite_set_id):
+            held = len(repo.list_cards_by_set(composite_set_id))
+            held_counts[composite_set_id] = held
+            names_by_composite[composite_set_id] = raw_set.get("name") or ""
+            if not held:
                 missing_set_ids.add(composite_set_id)
 
-        if not missing_set_ids:
-            continue
-        new_sets.extend(sorted(missing_set_ids))
+        added_by_set: dict[str, int] = {}
+        if missing_set_ids:
+            new_sets.extend(sorted(missing_set_ids))
 
-        set_names = {s["id"]: s.get("name", "") for s in sets}
-        buffer: list = []
+            set_names = {s["id"]: s.get("name", "") for s in sets}
+            buffer: list = []
 
-        def flush():
-            nonlocal buffer, cards_added
-            if not buffer:
-                return
-            cards_added += len(buffer)
-            if not dry_run:
-                repo.batch_upsert_catalog_cards(buffer, preserve_priced=True)
-            buffer = []
+            def flush():
+                nonlocal buffer, cards_added
+                if not buffer:
+                    return
+                cards_added += len(buffer)
+                if not dry_run:
+                    repo.batch_upsert_catalog_cards(buffer, preserve_priced=True)
+                buffer = []
 
-        for raw in client.iter_brief_cards(language):
-            try:
-                card = to_catalog_card_brief(raw, language, set_names=set_names,
-                                             synced_at=synced_at)
-            except Exception as exc:  # noqa: BLE001 - one bad row must not abort the run
-                logger.warning("catalog sync: skipped %r (%s: %s)",
-                               raw.get("id"), type(exc).__name__, exc)
-                continue
-            if card.set_id not in missing_set_ids:
-                continue
-            buffer.append(card)
-            if len(buffer) >= _NEW_SETS_BATCH_SIZE:
-                flush()
-        flush()
+            for raw in client.iter_brief_cards(language):
+                try:
+                    card = to_catalog_card_brief(raw, language, set_names=set_names,
+                                                 synced_at=synced_at)
+                except Exception as exc:  # noqa: BLE001 - one bad row must not abort the run
+                    logger.warning("catalog sync: skipped %r (%s: %s)",
+                                   raw.get("id"), type(exc).__name__, exc)
+                    continue
+                if card.set_id not in missing_set_ids:
+                    continue
+                added_by_set[card.set_id] = added_by_set.get(card.set_id, 0) + 1
+                buffer.append(card)
+                if len(buffer) >= _NEW_SETS_BATCH_SIZE:
+                    flush()
+            flush()
 
-    return {"sets_checked": sets_checked, "new_sets": new_sets, "cards_added": cards_added}
+        if not dry_run and held_counts:
+            # Counted AFTER the walk, so a set seeded by this very run records
+            # the cards it just gained rather than the zero it started at.
+            sets_registered += repo.put_catalog_sets([
+                {
+                    "set_id": set_id,
+                    "set_name": names_by_composite[set_id],
+                    "language": language.value,
+                    "card_count": held + added_by_set.get(set_id, 0),
+                    "updated_at": synced_at.isoformat(),
+                }
+                for set_id, held in held_counts.items()
+            ])
+
+    return {"sets_checked": sets_checked, "new_sets": new_sets,
+            "cards_added": cards_added, "sets_registered": sets_registered}

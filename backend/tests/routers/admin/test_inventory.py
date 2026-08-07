@@ -66,6 +66,25 @@ def _graded(card_id="sv1-2", *, item_id=None, status=ItemStatus.AVAILABLE,
     return GradedInventoryItem(**kw)
 
 
+def _sealed(*, item_id=None, location="glass", status=ItemStatus.AVAILABLE):
+    """A kind with NO ``card_id`` attribute at all — not a null one.
+
+    Any filter that reaches for ``item.card_id`` directly raises
+    ``AttributeError`` on the first sealed box and 500s the whole search.
+    """
+    kw = dict(
+        product_name="Obsidian Flames ETB",
+        product_type=SealedProductType.ETB,
+        location=location,
+        status=status,
+        cost_basis=Decimal("40.00"),
+        acquired_at=date(2025, 1, 1),
+    )
+    if item_id:
+        kw["item_id"] = item_id
+    return SealedInventoryItem(**kw)
+
+
 def _catalog(card_id="sv1-1", name="Pikachu", **extra):
     defaults = dict(
         card_id=card_id,
@@ -608,6 +627,65 @@ class TestAdminUpdateItem:
         assert changed["location"] == {"old": "toploader", "new": "glass"}
         assert changed["cost_basis"] == {"old": "10.00", "new": "15.00"}
 
+    # ---- T10: display_name_override, admin-authored customer-facing name ----
+    # docs/plans/rfc-0008/t10-jp-english-names.md. The update handler merges the
+    # whole body into the validated model (no per-field allowlist), so these
+    # pin the field's WRITABILITY as an endpoint contract rather than a model
+    # detail — a future allowlist there would break the admin UI silently.
+
+    def test_update_sets_display_name_override(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(card_id="ja:M4-084", item_id="item-jp"))
+
+        resp = client.put(
+            "/admin/inventory/item-jp",
+            json={"display_name_override": "Chespin"},
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["display_name_override"] == "Chespin"
+        assert repo.get_inventory_item("item-jp").display_name_override == "Chespin"
+
+    def test_update_does_not_touch_card_id_when_setting_the_override(self, admin_client):
+        """Owner requirement: editing the displayed name must never be able to
+        break the item's link to its catalog card."""
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(card_id="ja:M4-084", item_id="item-jp"))
+
+        client.put(
+            "/admin/inventory/item-jp",
+            json={"display_name_override": "Chespin"},
+            headers=_auth_header(admin_token),
+        )
+        assert repo.get_inventory_item("item-jp").card_id == "ja:M4-084"
+
+    def test_update_with_empty_override_clears_it(self, admin_client):
+        """Clearing the input box sends "" and must remove the override, letting
+        the catalog name take over again — not store a blank name."""
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(
+            _raw(item_id="item-jp", display_name_override="Chespin"))
+
+        resp = client.put(
+            "/admin/inventory/item-jp",
+            json={"display_name_override": "   "},
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        assert repo.get_inventory_item("item-jp").display_name_override is None
+
+    def test_update_rejects_over_length_display_name_override(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="item-jp"))
+
+        resp = client.put(
+            "/admin/inventory/item-jp",
+            json={"display_name_override": "x" * 201},
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 422
+        assert repo.get_inventory_item("item-jp").display_name_override is None
+
     def test_update_with_no_actual_change_writes_no_edit_event(self, admin_client):
         """Re-submitting the same value must not spam the audit trail."""
         client, repo, admin_token, _ = admin_client
@@ -1007,6 +1085,49 @@ class TestAdminInventorySearch23:
         data = resp.json()
         assert data["total"] == 1
         assert data["items"][0]["item_id"] == "umb-1"
+
+    def test_search_by_set_id(self, admin_client):
+        """T8: the combobox selects a SET, not a name substring.
+
+        ``set_name`` cannot express the selection the combobox makes. Names are
+        not unique across languages (``en:base1`` and ``ja:base1`` are both
+        "Base Set") and a substring like "Sun & Moon" catches a dozen sets, so
+        picking one entry from a list and getting several sets back is the exact
+        failure the dropdown exists to remove. Resolved through the GSI1 ``SET#``
+        partition, which is a query — not the catalog walk ``set_name`` does.
+        """
+        client, repo, admin_token, _ = admin_client
+        repo.batch_upsert_catalog_cards([
+            _catalog(card_id="sv1-25", name="Pikachu", number="025",
+                     set_id="sv1", set_name="Scarlet & Violet"),
+            _catalog(card_id="swsh7-1", name="Umbreon", number="001",
+                     set_id="swsh7", set_name="Evolving Skies"),
+        ])
+        repo.put_inventory_item(_raw(item_id="pika-1", card_id="sv1-25"))
+        repo.put_inventory_item(_raw(item_id="umb-1", card_id="swsh7-1"))
+
+        resp = client.get("/admin/inventory/search?set_id=swsh7",
+                          headers=_auth_header(admin_token))
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["items"][0]["item_id"] == "umb-1"
+
+    def test_search_by_set_id_excludes_unlinked_items(self, admin_client):
+        """An item with no catalog link belongs to no set, including sealed
+        products, which have no ``card_id`` field at all rather than a null one."""
+        client, repo, admin_token, _ = admin_client
+        repo.batch_upsert_catalog_cards([
+            _catalog(card_id="sv1-25", name="Pikachu", number="025",
+                     set_id="sv1", set_name="Scarlet & Violet"),
+        ])
+        repo.put_inventory_item(_raw(item_id="pika-1", card_id="sv1-25"))
+        repo.put_inventory_item(_sealed(item_id="etb-1"))
+
+        resp = client.get("/admin/inventory/search?set_id=sv1",
+                          headers=_auth_header(admin_token))
+        assert resp.status_code == 200
+        assert [i["item_id"] for i in resp.json()["items"]] == ["pika-1"]
 
     def test_search_ownership_filter(self, admin_client):
         from merlins_collection.models.inventory import ConsignmentTerms

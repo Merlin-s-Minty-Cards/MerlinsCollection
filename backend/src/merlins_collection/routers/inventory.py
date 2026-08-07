@@ -4,10 +4,15 @@ Loads the full inventory and applies the requested filters in-process (the
 collection is small enough that this is simpler than per-filter queries).
 Filters are applied cheapest-first — in-item fields (language, condition) before
 filters that require a catalog lookup (set, name, rarity) — with ONE deliberate
-exception: the price bound runs LAST. It is the only filter that reports what it
-excluded (``hidden_no_price``), and that count is only honest when it is taken
-against the cohort every other filter has already agreed on (Phase 12, owner
-decision 2).
+exception: the price bound runs LAST, after catalog enrichment. Two reasons:
+
+- It is the only filter that reports what it excluded (``hidden_no_price``), and
+  that count is only honest when it is taken against the cohort every other
+  filter has already agreed on (Phase 12, owner decision 2).
+- It compares against ``_display_price`` — the price the customer actually sees
+  on the tile — which is only resolvable once ``_enrich`` has attached the live
+  catalog row. Filtering before enrichment would leave every ``item.card`` unset
+  (RFC 0008 §A; see ``_display_price``).
 """
 
 from decimal import Decimal
@@ -21,6 +26,7 @@ from merlins_collection.models.catalog import CatalogCard
 from merlins_collection.models.inventory import (
     CardSummary,
     Condition,
+    ConditionModifier,
     EnrichedBulkInventoryItem,
     EnrichedGradedInventoryItem,
     EnrichedInventoryItem,
@@ -31,8 +37,10 @@ from merlins_collection.models.inventory import (
     ItemStatus,
     Language,
     _market_price,
+    normalize_condition,
 )
 from merlins_collection.rate_limit import rate_limit_search
+from merlins_collection.services.condition_pricing import apply_condition_adjustment
 from merlins_collection.services.dynamodb import InventoryRepository
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
@@ -76,43 +84,54 @@ def customer_visible_items(repo: InventoryRepository) -> list[InventoryItem]:
     ]
 
 
-def _price(item) -> Decimal | None:
-    """The price a price-range filter compares an item against, or ``None`` when
-    the item has no known price at all.
+def _display_price(item: EnrichedInventoryItem) -> Decimal | None:
+    """THE price of an item, and the only one any customer-facing code may use.
 
-    This is ``current_market_value`` outright — the denormalized projection of
-    the ONE shared finish-aware helper (``models.inventory._market_price``),
-    rewritten nightly by ``services.catalog_sync.refresh_inventory_market_values``.
-    It used to prefer ``listed_price``, which is null on EVERY item by owner
-    decision (Section 1/D3 — the sheet has no sticker prices and never will), so
-    the preference was pure dead weight in front of the only field that carries a
-    figure (claude-progress.txt Phase 12, Problem 2).
+    This is the single authority for the price **filter**, the price **sort**,
+    and the price the **tile renders**. Those three used to read three different
+    figures and only two of them agreed: the bound read ``current_market_value``
+    (denormalized nightly by ``catalog_sync.refresh_inventory_market_values``,
+    therefore stale between runs) while the sort and the tile both read the live
+    ``card.market_price``. The owner reported the consequence — a Rayquaza
+    displaying $517 that still passed ``max_price=500``, because its stale value
+    had been ≤ 500 at the last sync (RFC 0008 §A). **They must never diverge
+    again**: change this function, not a caller.
+
+    Mirrors ``frontend/components/inventory/CardTile.tsx``: for raw cards the
+    live catalog ``card.market_price`` (computed per-finish by
+    ``CardSummary.from_catalog``); for graded slabs the catalog price is skipped
+    deliberately — it is an UNGRADED figure and inapplicable to a slab carrying a
+    grade premium. Either way it falls back to ``listed_price``.
+
+    Requires an ENRICHED item: ``item.card`` is populated by ``_enrich`` and is
+    unset on a bare ``InventoryItem``, so every caller must run after enrichment.
 
     ``None`` is NOT treated as zero and never matches a bound: a card whose price
     nobody knows cannot honestly be claimed to be under $500. The search counts
     those exclusions instead and reports them as ``hidden_no_price`` so they are
     surfaced rather than dropped invisibly (Phase 12, owner decision 2).
     """
-    return item.current_market_value
+    market = item.card.market_price if item.kind == "raw" and item.card else None
+    return market if market is not None else item.listed_price
 
 
 def _apply_price_bounds(
-    items: list[InventoryItem],
+    items: list[EnrichedInventoryItem],
     min_price: Decimal | None,
     max_price: Decimal | None,
-) -> tuple[list[InventoryItem], int]:
-    """Filter ``items`` to those priced within the bounds; also return how many
-    were dropped purely for having no resolvable price.
+) -> tuple[list[EnrichedInventoryItem], int]:
+    """Filter ENRICHED ``items`` to those priced within the bounds; also return
+    how many were dropped purely for having no resolvable price.
 
     With no bound set nothing is excluded and the count is 0 — a priceless item
     is perfectly displayable, it just cannot answer a question about its price.
     """
     if min_price is None and max_price is None:
         return items, 0
-    kept: list[InventoryItem] = []
+    kept: list[EnrichedInventoryItem] = []
     hidden_no_price = 0
     for item in items:
-        price = _price(item)
+        price = _display_price(item)
         if price is None:
             hidden_no_price += 1
             continue
@@ -122,6 +141,46 @@ def _apply_price_bounds(
             continue
         kept.append(item)
     return kept, hidden_no_price
+
+
+# Condition display vocabulary, best-to-worst. Mirrors the frontend's
+# ``CONDITION_OPTIONS`` (``frontend/lib/constants.ts``) — the order a collector
+# expects in a dropdown, which alphabetical sorting mangles into LP, LP+, LP-.
+_CONDITION_ORDER = ("NM", "LP+", "LP", "LP-", "MP", "HP", "DMG")
+_CONDITION_RANK = {value: rank for rank, value in enumerate(_CONDITION_ORDER)}
+
+
+def _condition_display(item: InventoryItem) -> str:
+    """Combine an item's two stored condition fields into the one string every
+    human-facing surface speaks (``LP`` + ``+`` -> ``LP+``).
+
+    The inverse of ``models.inventory.normalize_condition``, and the server-side
+    mirror of the frontend's ``formatCondition``. Storage stays two fields —
+    there is deliberately no combined ``"LP+"`` member on the ``Condition`` enum
+    (that was the Round 1 bug; see CLAUDE.md).
+    """
+    modifier = getattr(item, "condition_modifier", None)
+    return f"{item.condition.value}{modifier.value if modifier else ''}"
+
+
+def _parse_condition_query(value: str) -> tuple[Condition, ConditionModifier | None]:
+    """Parse a ``condition`` query value, 422-ing instead of 500-ing on garbage.
+
+    The param used to be typed ``Condition``, which made ``LP+``/``LP-`` — the
+    very values ``/inventory/facets`` now offers in its dropdown — a validation
+    error the customer could not recover from (RFC 0008 §B).
+
+    Deliberately delegates to the same ``normalize_condition`` as the admin
+    router's identically-named helper, so the two surfaces can never drift into
+    accepting different dialects.
+    """
+    try:
+        return normalize_condition(value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid condition '{value}'. Expected one of {', '.join(_CONDITION_ORDER)}.",
+        ) from exc
 
 
 # Allowlist of the ONLY fields a customer may see on a search result (mirrors the
@@ -144,6 +203,16 @@ _CUSTOMER_ITEM_FIELDS = {
     # row, and read verbatim here — never re-parsed from the free-text notes — so
     # it carries only name+number and no cost/location/free-text (see _enrich).
     "display_name",
+    # display_name_override is the ONE customer-facing name field that is FREE
+    # TEXT typed by an admin — the "never derived from notes" guarantee above
+    # covers display_name and does NOT extend to this. It exists so a Japanese
+    # card whose catalog row is in Japanese script can be shown under a name the
+    # customer can read, which means a human decides its contents and a human is
+    # therefore responsible for not typing a consignor name or a cost into it.
+    # Bounded at the model (200 chars) because it reaches customers, and blank
+    # is normalized to None so an empty edit falls back to the catalog name.
+    # See docs/plans/rfc-0008/t10-jp-english-names.md.
+    "display_name_override",
     # value_note carries condition-adjustment and FX-conversion explanations
     # visible to the customer (Phase 19 visibility requirement).
     "value_note",
@@ -163,7 +232,10 @@ def search_inventory(
     name: str | None = Query(None, max_length=200),
     set_id: str | None = Query(None),
     rarity: str | None = Query(None),
-    condition: Condition | None = Query(None),
+    # Typed ``str``, not ``Condition``: the accepted vocabulary is the COMBINED
+    # display form (``NM``/``LP+``/``LP``/…), which the bare-tier enum rejects.
+    # Length-capped because the value is echoed back in the 422 detail.
+    condition: str | None = Query(None, max_length=8),
     min_price: Decimal | None = Query(None),
     max_price: Decimal | None = Query(None),
     language: Language | None = Query(None),
@@ -174,8 +246,11 @@ def search_inventory(
     """Return inventory matching the given filters (all optional, AND-combined).
 
     ``condition`` selects raw cards only (graded items are excluded when it's
-    set). An inverted price range (``min_price > max_price``) is rejected with
-    422. ``cost_basis`` (and every other internal field) is stripped from the
+    set) and takes the combined display form: a bare tier (``LP``) means the
+    WHOLE tier including ``LP+``/``LP-``, while naming a modifier (``LP+``)
+    narrows to exactly that grade. Anything else is a 422 rather than a silent
+    empty result. An inverted price range (``min_price > max_price``) is rejected
+    with 422. ``cost_basis`` (and every other internal field) is stripped from the
     response by the ``_CUSTOMER_ITEM_FIELDS`` allowlist via ``response_model_include``.
 
     A price bound excludes items with no known price and reports how many under
@@ -201,9 +276,16 @@ def search_inventory(
         items = [i for i in items if i.language == language]
 
     # condition: raw items only; graded items are excluded when this filter is set.
-    # The tier alone is compared, so LP matches LP+ / LP / LP-.
     if condition is not None:
-        items = [i for i in items if i.kind == "raw" and i.condition == condition]
+        tier, modifier = _parse_condition_query(condition)
+        items = [
+            i for i in items
+            if i.kind == "raw"
+            and i.condition == tier
+            # A bare tier ("LP") is the whole tier including LP+/LP-; a query
+            # that names a modifier ("LP+") narrows to exactly that grade.
+            and (modifier is None or i.condition_modifier == modifier)
+        ]
 
     # set_id: use the catalog GSI to get valid card_ids for the set
     if set_id is not None:
@@ -230,16 +312,19 @@ def search_inventory(
                 and catalog[i.card_id].rarity == rarity
             ]
 
-    # Price LAST, so `hidden_no_price` counts only what the bound itself hid —
-    # not items some other filter had already ruled out (see the module docstring).
-    items, hidden_no_price = _apply_price_bounds(items, min_price, max_price)
-
-    # Enrich the surviving items with the catalog summary the UI renders.
+    # Enrich with the catalog summary the UI renders. This runs BEFORE the price
+    # bound, not after: the bound compares against `_display_price`, which reads
+    # the live `item.card.market_price` that only `_enrich` attaches. Filter the
+    # unenriched list and every card falls back to the permanently-null
+    # `listed_price`, silently burying the whole vault in `hidden_no_price`.
     _load_catalog(repo, items, catalog)
-
     enriched = [
         _enrich(item, catalog.get(getattr(item, "card_id", None))) for item in items
     ]
+
+    # Price LAST, so `hidden_no_price` counts only what the bound itself hid —
+    # not items some other filter had already ruled out (see the module docstring).
+    enriched, hidden_no_price = _apply_price_bounds(enriched, min_price, max_price)
 
     # Sort (Phase 14). Priceless items always sort last regardless of direction.
     enriched = _sort_results(enriched, sort)
@@ -300,6 +385,15 @@ def inventory_summary(
     for i in items:
         card = catalog.get(getattr(i, "card_id", None))
         value = _market_price(card, getattr(i, "finish", None)) if card is not None else None
+        # Same multiplier the tiles apply (see ``_condition_adjust``), or the
+        # header would total a DMG card at its NM figure while the card beneath
+        # it renders 0.15x. Only the LIVE branch is adjusted: the stored fallback
+        # below already has the multiplier baked in by the nightly denormalizer,
+        # and adjusting that would apply it twice.
+        if value is not None and i.kind == "raw" and getattr(i, "condition", None):
+            value, _ = apply_condition_adjustment(
+                value, i.condition, getattr(i, "condition_modifier", None),
+            )
         if value is None:
             value = (i.current_market_value if i.current_market_value is not None
                      else i.listed_price)
@@ -354,7 +448,11 @@ def inventory_facets(
     card_ids: set[str] = set()
     for item in items:
         if hasattr(item, "condition"):
-            conditions.add(item.condition.value)
+            # The COMBINED grade (`LP+`), not the bare tier: LP+, LP and LP- are
+            # three different grades at three different prices, and emitting only
+            # the tier made the dropdown structurally incapable of offering the
+            # other two no matter what was in stock (RFC 0008 §B).
+            conditions.add(_condition_display(item))
         languages.add(item.language.value)
         cid = getattr(item, "card_id", None)
         if cid is not None:
@@ -378,7 +476,13 @@ def inventory_facets(
     return InventoryFacets(
         sets=sorted_sets,
         rarities=sorted(rarities),
-        conditions=sorted(conditions),
+        # Best-to-worst, NOT alphabetical — `sorted()` yields LP, LP+, LP-, which
+        # is nonsense to a collector. An unranked value (shouldn't happen) sorts
+        # last rather than crashing the dropdown.
+        conditions=sorted(
+            conditions,
+            key=lambda c: (_CONDITION_RANK.get(c, len(_CONDITION_ORDER)), c),
+        ),
         languages=sorted(languages),
     )
 
@@ -391,22 +495,6 @@ _ALLOWED_SORTS = frozenset({
 })
 
 _PRICE_SENTINEL_HIGH = Decimal("999999999")  # priceless items sort LAST in both directions
-
-
-def _display_price(item) -> Decimal | None:
-    """The price the customer actually sees on the tile.
-
-    Mirrors the frontend ``CardTile`` logic: for raw cards, use the live catalog
-    ``card.market_price`` (computed fresh via ``CardSummary.from_catalog``); for
-    graded slabs, skip the catalog price (it's ungraded and inapplicable). Falls
-    back to ``listed_price`` when no market price is available.
-
-    This MUST stay in sync with the frontend derivation
-    (``frontend/components/inventory/CardTile.tsx``) so that the sort order
-    matches what the user sees rendered on screen.
-    """
-    market = item.card.market_price if item.kind == "raw" and item.card else None
-    return market if market is not None else item.listed_price
 
 
 def _sort_results(items: list, sort: str | None) -> list:
@@ -478,12 +566,61 @@ _ENRICHED = {
 }
 
 
+def _condition_adjust(
+    summary: CardSummary | None, item: InventoryItem,
+) -> tuple[CardSummary | None, str | None]:
+    """Scale a raw card's catalog price by its condition multiplier.
+
+    The catalog relays ONE market figure per finish and that figure is a Near
+    Mint price. Applying the multiplier here — at enrichment, on the summary the
+    customer receives — is what makes the tile, the sort and the price bound all
+    show a DMG card at 0.15x instead of the NM figure. Before this, a DMG card
+    was displayed to a buyer at ~6.7x what the business itself valued it at, and
+    the error ran in the business's favour (RFC 0008 follow-up, T1 row 1; owner
+    decision 2026-08-06).
+
+    **Applied in exactly one place, deliberately.** T1's whole point was that the
+    filter, the sort and the tile must resolve the SAME number; adjusting in
+    ``_display_price`` alone would have left the frontend rendering the raw
+    figure and reintroduced that divergence. Because the adjustment lands on
+    ``summary.market_price``, every downstream reader inherits it for free.
+
+    Only RAW cards qualify. A graded slab carries a grade, not a condition tier,
+    and its catalog price is an ungraded figure ``_display_price`` already skips
+    — adjusting one would be a category error. Sealed and bulk have no condition.
+
+    Returns the (possibly rebuilt) summary and a customer-visible ``value_note``
+    explaining the adjustment, or ``None`` when nothing was adjusted. The note is
+    computed live rather than read off the row so it can never disagree with the
+    price shown beside it.
+    """
+    if summary is None or summary.market_price is None or item.kind != "raw":
+        return summary, None
+    condition = getattr(item, "condition", None)
+    if condition is None:
+        return summary, None
+
+    adjusted, note = apply_condition_adjustment(
+        summary.market_price, condition, getattr(item, "condition_modifier", None),
+    )
+    if note is None:  # NM anchor — 1.00x, nothing changed.
+        return summary, None
+    return summary.model_copy(update={"market_price": adjusted}), note
+
+
 def _enrich(item: InventoryItem, card: CatalogCard | None) -> EnrichedInventoryItem:
     summary = (
         CardSummary.from_catalog(card, finish=getattr(item, "finish", None))
         if card is not None else None
     )
+    summary, condition_note = _condition_adjust(summary, item)
     data = item.model_dump()
+    # A live note beats the one the nightly denormalizer stored: it is derived
+    # from the same figure being rendered, so the two cannot drift apart between
+    # syncs. Only overwritten when an adjustment actually happened, so an FX or
+    # sync-authored note on an unadjusted item survives.
+    if condition_note is not None:
+        data["value_note"] = condition_note
     # The catalog name is authoritative when the item is matched; otherwise expose
     # the sanitized display_name that was materialized on the row at import time
     # (services.card_text.format_display_name). Reading the stored field rather than

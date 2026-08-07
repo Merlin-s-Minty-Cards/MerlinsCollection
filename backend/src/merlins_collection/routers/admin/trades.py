@@ -10,10 +10,9 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
 
 from merlins_collection.dependencies import get_repo
 from merlins_collection.models.business import ItemCategory, Transaction, TransactionType
@@ -22,6 +21,7 @@ from merlins_collection.models.inventory import (
     ItemStatus,
     new_ulid,
 )
+from merlins_collection.services.card_text import admin_item_name
 from merlins_collection.services.dynamodb import InventoryRepository, ItemAlreadySoldError
 from merlins_collection.services.locations import validate_location
 
@@ -223,11 +223,17 @@ def get_trade_customer_view(
             "image_url": leg.get("image_url"),
         }
 
-    outgoing = [_sanitize_leg(l) for l in session.get("outgoing_legs", [])]
-    incoming = [_sanitize_leg(l) for l in session.get("incoming_legs", [])]
+    outgoing = [_sanitize_leg(leg) for leg in session.get("outgoing_legs", [])]
+    incoming = [_sanitize_leg(leg) for leg in session.get("incoming_legs", [])]
 
-    total_out = sum(Decimal(str(l.get("agreed_value") or 0)) for l in session.get("outgoing_legs", []))
-    total_in = sum(Decimal(str(l.get("agreed_value") or 0)) for l in session.get("incoming_legs", []))
+    total_out = sum(
+        Decimal(str(leg.get("agreed_value") or 0))
+        for leg in session.get("outgoing_legs", [])
+    )
+    total_in = sum(
+        Decimal(str(leg.get("agreed_value") or 0))
+        for leg in session.get("incoming_legs", [])
+    )
     cash = session.get("cash")
 
     # Compute balance description
@@ -306,14 +312,14 @@ def add_outgoing_leg(
         raise HTTPException(status_code=409, detail=f"Item {item_id} not available")
 
     # Check not already in session
-    existing_ids = {l.get("item_id") for l in session.get("outgoing_legs", [])}
+    existing_ids = {leg.get("item_id") for leg in session.get("outgoing_legs", [])}
     if item_id in existing_ids:
         raise HTTPException(status_code=409, detail=f"Item {item_id} already in trade")
 
     leg = {
         "item_id": item_id,
         "card_id": getattr(item, "card_id", None),
-        "name": body.get("name", getattr(item, "display_name", None) or ""),
+        "name": body.get("name", admin_item_name(item)),
         "set_name": body.get("set_name"),
         "condition": body.get("condition", getattr(item, "condition", None)),
         "finish": body.get("finish", getattr(item, "finish", None)),
@@ -374,7 +380,7 @@ def remove_outgoing_leg(
         raise HTTPException(status_code=409, detail="Can only modify draft sessions")
 
     legs = session.get("outgoing_legs", [])
-    session["outgoing_legs"] = [l for l in legs if l.get("item_id") != item_id]
+    session["outgoing_legs"] = [leg for leg in legs if leg.get("item_id") != item_id]
     if len(session["outgoing_legs"]) == len(legs):
         raise HTTPException(status_code=404, detail=f"Item {item_id} not in outgoing legs")
 
@@ -539,16 +545,16 @@ def get_trade_balance(
         raise HTTPException(status_code=404, detail="Trade session not found")
 
     total_out = sum(
-        Decimal(str(l.get("agreed_value") or 0))
-        for l in session.get("outgoing_legs", [])
+        Decimal(str(leg.get("agreed_value") or 0))
+        for leg in session.get("outgoing_legs", [])
     )
     total_in = sum(
-        Decimal(str(l.get("agreed_value") or 0))
-        for l in session.get("incoming_legs", [])
+        Decimal(str(leg.get("agreed_value") or 0))
+        for leg in session.get("incoming_legs", [])
     )
     total_cost_out = sum(
-        Decimal(str(l.get("our_cost_basis") or 0))
-        for l in session.get("outgoing_legs", [])
+        Decimal(str(leg.get("our_cost_basis") or 0))
+        for leg in session.get("outgoing_legs", [])
     )
 
     # Compute cash delta from cash_components (preferred) or legacy cash key
@@ -850,7 +856,10 @@ def confirm_trade_session(
                 payment_method=comp.get("payment_method", "cash"),
                 show_id=show_id,
                 trade_id=trade_id,
-                notes=f"Cash component: {comp.get('direction')} via {comp.get('payment_method', 'cash')}",
+                notes=(
+                    f"Cash component: {comp.get('direction')} "
+                    f"via {comp.get('payment_method', 'cash')}"
+                ),
             )
             repo.put_transaction(cash_txn)
             txns_created += 1
@@ -879,8 +888,8 @@ def confirm_trade_session(
             txns_created += 1
 
     # Compute final totals
-    total_out = sum(Decimal(str(l.get("agreed_value") or 0)) for l in outgoing)
-    total_in = sum(Decimal(str(l.get("agreed_value") or 0)) for l in incoming)
+    total_out = sum(Decimal(str(leg.get("agreed_value") or 0)) for leg in outgoing)
+    total_in = sum(Decimal(str(leg.get("agreed_value") or 0)) for leg in incoming)
 
     # Update session
     session["status"] = "confirmed"
