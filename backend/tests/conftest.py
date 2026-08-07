@@ -94,15 +94,23 @@ def _generate_signing_key(kid: str = "test-key-1") -> SigningKey:
 
 @pytest.fixture
 def make_signing_key():
+    """Factory for tests that need a SECOND, different key (see test_cognito)."""
     return _generate_signing_key
 
 
-@pytest.fixture
+# Session-scoped: RSA-2048 keygen costs ~53ms and roughly 700 tests take a token,
+# so regenerating per test spent ~37s of the suite producing identical material.
+# Safe to share only because nothing writes to either value -- verified across
+# the suite: no test mutates ``jwks`` or ``signing_key.jwk``
+# (``test_cognito.py`` builds a *new* dict from ``signing_key.jwk``), and
+# ``CognitoJwtVerifier`` rebinds ``self._cached_jwks`` rather than mutating the
+# dict it was handed. Keep it that way, or these go back to function scope.
+@pytest.fixture(scope="session")
 def signing_key() -> SigningKey:
     return _generate_signing_key("test-key-1")
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def jwks(signing_key) -> dict:
     return {"keys": [signing_key.jwk]}
 
@@ -166,16 +174,70 @@ def make_verifier(cognito_config, jwks):
     return _make
 
 
-@pytest.fixture
-def dynamo_repo():
+# --- moto / DynamoDB ------------------------------------------------------
+#
+# ONE ``mock_aws()`` for the whole session, reset between tests -- do not go back
+# to entering a fresh one per test.
+#
+# Entering ``mock_aws()`` invalidates botocore's service-model caches, so the
+# very next ``boto3.resource("dynamodb")`` pays a full model reload. Measured on
+# this machine 2026-08-07: building the repo + table cost **507ms** per test
+# behind a fresh ``mock_aws()`` versus **15ms** inside a long-lived one (the
+# resource call alone is 371ms vs 3.5ms). Roughly 850 of the suite's tests take
+# ``dynamo_repo`` directly or transitively, which is why ``--durations`` used to
+# be almost entirely ``setup`` rows at ~0.65s and the backend suite took 9m50s.
+#
+# Isolation is unchanged: resetting the moto dynamodb backend drops every table
+# and all stored state, which is exactly what leaving the old per-test
+# ``mock_aws()`` did.
+
+
+@pytest.fixture(scope="session")
+def _moto_aws():
+    """Start a single moto mock for the whole session.
+
+    Credentials are set before the mock starts so no test can reach real AWS.
+    """
     from moto import mock_aws
 
-    with mock_aws():
-        os.environ["AWS_ACCESS_KEY_ID"] = "testing"
-        os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
-        os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
-        from merlins_collection.services.dynamodb import InventoryRepository
+    os.environ["AWS_ACCESS_KEY_ID"] = "testing"
+    os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
+    os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
+    mock = mock_aws()
+    mock.start()
+    yield mock
+    mock.stop()
 
-        repo = InventoryRepository("merlins-cards-test", region_name="us-east-1")
-        repo.create_table()
-        yield repo
+
+@pytest.fixture(autouse=True)
+def _clean_aws(_moto_aws):
+    """Give every test an empty DynamoDB, standing in for a fresh ``mock_aws()``.
+
+    Autouse **and** an explicit dependency of every fixture that builds a table
+    (``dynamo_repo`` here, ``chat_client`` in ``routers/test_chat.py``). The
+    autouse alone would work today only by relying on pytest instantiating
+    autouse fixtures ahead of requested ones at the same scope; naming it as a
+    dependency makes the ordering a fact rather than an inference. Without it a
+    second test creating the same table name gets ``ResourceInUseException``,
+    since nothing else clears tables now that the mock outlives the test.
+
+    DynamoDB is the only AWS service these tests mock -- every repository here
+    (``InventoryRepository``, ``DynamoRateLimiter``) is DynamoDB-backed.
+    """
+    import moto.backends
+
+    for backend in moto.backends.get_backend("dynamodb").values():
+        backend.reset()
+    yield
+
+
+@pytest.fixture
+def dynamo_repo(_clean_aws):
+    from merlins_collection.services.dynamodb import InventoryRepository
+
+    # The name is load-bearing: script tests pass it as a ``--confirm-table``
+    # CLI argument and assert on it (test_apply_review_decisions,
+    # test_wipe_catalog, test_backfill_language, test_build_review).
+    repo = InventoryRepository("merlins-cards-test", region_name="us-east-1")
+    repo.create_table()
+    yield repo

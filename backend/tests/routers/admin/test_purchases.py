@@ -4,35 +4,15 @@ Covers full buy session lifecycle: create, add items, confirm, cancel.
 """
 
 from datetime import date
-from decimal import Decimal
 
-import pytest
-from fastapi.testclient import TestClient
 
 from merlins_collection.models.inventory import ItemStatus
 
 
 # ---- fixtures ----
 
-@pytest.fixture
-def admin_client(cognito_config, jwks, dynamo_repo, mint_token):
-    from merlins_collection.dependencies import get_repo, get_verifier
-    from merlins_collection.main import app
-    from merlins_collection.services.cognito import CognitoJwtVerifier
-
-    verifier = CognitoJwtVerifier(
-        region=cognito_config["region"],
-        user_pool_id=cognito_config["user_pool_id"],
-        client_id=cognito_config["client_id"],
-        jwks=jwks,
-    )
-    app.dependency_overrides[get_verifier] = lambda: verifier
-    app.dependency_overrides[get_repo] = lambda: dynamo_repo
-
-    admin_token = mint_token(claims={"cognito:groups": ["admin"]})
-    client = TestClient(app)
-    yield client, dynamo_repo, admin_token
-    app.dependency_overrides.clear()
+# ``admin_client`` now comes from ``conftest.py`` in this package; the identical
+# copy that used to sit here was one of sixteen.
 
 
 def _auth(token: str) -> dict:

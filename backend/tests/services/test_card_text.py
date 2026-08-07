@@ -106,9 +106,30 @@ def test_letter_glued_markers_are_still_refused():
     ("JP exxeggutor Promo", "exxeggutor Promo"),
     ("Wooper (Delta Species) Jp 1st Edition", "Wooper (Delta Species) 1st Edition"),
     ("Venusaur (jp) 1st holo", "Venusaur 1st holo"),
+    # Spellings absorbed from the importer's own duplicate copy of this table
+    # (test_spreadsheet_import.py) when the three parallel parse_language test
+    # sets were consolidated here, into the module the function lives in.
+    ("Milotic (JP)", "Milotic"),
+    ("Reshiram Ex (japanese)", "Reshiram Ex"),
+    ("COLRESS'S EXPERIMENT - FULL ART (Japanese)", "COLRESS'S EXPERIMENT - FULL ART"),
+    ("Espathra (JP)", "Espathra"),
+    ("Slakoth JP", "Slakoth"),
+    ("Dragonite JP ANA airlines", "Dragonite ANA airlines"),
 ])
 def test_every_r7_marker_spelling_still_parses(text, cleaned):
     assert parse_language(text) == (Language.JP, cleaned)
+
+
+def test_a_name_that_is_nothing_but_a_marker_keeps_its_text():
+    """Stripping would leave the row with no identity at all, so the original
+    text is kept — it still reports JP, it just refuses to destroy the only
+    name it has."""
+    assert parse_language("(jp)") == (Language.JP, "(jp)")
+
+
+def test_parse_language_handles_none_and_empty_without_raising():
+    assert parse_language(None) == (Language.EN, "")
+    assert parse_language("") == (Language.EN, "")
 
 
 def test_one_pattern_not_a_per_language_dict_decides(monkeypatch):
@@ -184,6 +205,14 @@ def test_item_language_defaults_to_english():
     assert item_language({"kind": "raw", "notes": "Charizard #4.0"}) is Language.EN
     assert item_language({"kind": "sealed", "product_name": "Booster Box"}) is Language.EN
     assert item_language({}) is Language.EN
+
+
+def test_item_language_falls_back_to_english_on_an_unrecognized_stored_value():
+    """Rather than raising. Junk in one row's ``language`` field must not 500 the
+    review page for every other row it is listed beside."""
+    assert item_language(
+        {"kind": "raw", "language": "KLINGON", "notes": "Pikachu"},
+    ) is Language.EN
 
 
 def test_item_language_accepts_a_model_instance_not_only_a_dict():
@@ -310,11 +339,13 @@ def test_language_from_url_still_reads_the_slug_when_the_query_param_is_ambiguou
 
 # ---- SET-based JP fallback (no marker anywhere; two real Slabs rows) ------
 
-def test_language_from_set_recognizes_a_known_japanese_only_set_code():
+@pytest.mark.parametrize("set_text", ["SV11B", "sv11b"])
+def test_language_from_set_recognizes_a_known_japanese_only_set_code(set_text):
     """Real Slabs.csv row 18: Name "Seismitoad", Set "SV11B" — no marker in
-    either column."""
+    either column. The sheet is hand-typed, so the code is matched
+    case-insensitively."""
     from merlins_collection.services.card_text import language_from_set
-    assert language_from_set("SV11B") is Language.JP
+    assert language_from_set(set_text) is Language.JP
 
 
 def test_language_from_set_recognizes_a_known_japanese_only_set_name():

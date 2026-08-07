@@ -159,7 +159,7 @@ The owner triaged this ledger in one pass after T-FINAL's verification run.
 |---|---|
 | ECS memory vs the 93 MB cache (T9 r1) | **Not a risk.** Task is 2048 MB; the cache is ~4.5% of it |
 | The catalog search fix, against live data (T9) | **Confirmed.** 11.2s -> **~20ms warm** (~500x). Substring matching intact: "surfing pikachu" -> 5 results |
-| The 7 skipped backend tests | **Benign but genuinely dead.** All in `tests/scripts/test_language_recall.py`, self-skipping because the production snapshot now holds 266 records rather than the 1266 their assertions were written against, and because `tcg_url` has been None by design since Phase 3.1. They hide no failure. Rewriting them is Phase 6/7 work; deleting them is also defensible |
+| The 7 skipped backend tests | **Resolved 2026-08-07 — file deleted.** They were in `tests/scripts/test_language_recall.py`, dead because the production snapshot now holds 266 records rather than the 1266 their assertions were written against, and because `tcg_url` has been None by design since Phase 3.1. A later rewrite made them hermetic but left them a near-verbatim duplicate of `tests/services/test_card_text.py` (identical false-positive parametrize list). The four cases that were genuinely unique — `parse_language("(jp)")`, `parse_language(None)`/`("")`, an unrecognized stored `language`, and the lowercase `sv11b` set code — moved into `test_card_text.py`, which tests those functions from the module they live in |
 | Triage badge vs list agreement (T11) | **Confirmed live.** Both report 28. Reason counts (21/13/17) exceed the total by design — items qualify severally |
 
 ### Still open, and still worth a decision

@@ -721,32 +721,12 @@ def test_price_filter_matches_on_the_live_catalog_price(inv_client, mint_token):
     assert body["items"][0]["card_id"] == "sv1-2"
 
 
-def test_response_strips_internal_fields(inv_client, mint_token):
-    client, repo = inv_client
-    terms = ConsignmentTerms(consignor_id="c-1", split_percent=Decimal("20"))
-    repo.put_inventory_item(_raw("sv1-1", consignment=terms, needs_review=True))
-
-    item = client.get(
-        "/inventory/search",
-        headers={"Authorization": f"Bearer {mint_token()}"},
-    ).json()["items"][0]
-    assert "cost_basis" not in item
-    assert "consignment" not in item
-    assert "needs_review" not in item
-
-
-def test_search_response_does_not_expose_cost_basis(inv_client, mint_token):
-    """cost_basis (purchase price) is internal data and must not appear in search results."""
-    client, repo = inv_client
-    repo.put_inventory_item(_raw("sv1-1"))
-
-    resp = client.get(
-        "/inventory/search",
-        headers={"Authorization": f"Bearer {mint_token()}"},
-    )
-    body = resp.json()
-    assert body["total"] == 1
-    assert "cost_basis" not in body["items"][0]
+# Two narrower projection tests used to sit here — ``test_response_strips_
+# internal_fields`` (3 keys) and ``test_search_response_does_not_expose_cost_
+# basis`` (1 key). Both are subsumed by ``test_B9_search_response_omits_internal_
+# fields`` below, which asserts an 8-key allowlist is disjoint from the response.
+# B9 now seeds ``consignment``/``needs_review``/``tcg_url`` explicitly, which is
+# the one thing it was missing when those two were folded into it.
 
 
 # ---- language (EN/JP) support ----
@@ -847,12 +827,24 @@ def test_search_rejects_invalid_language(inv_client, mint_token):
 
 
 def test_B9_search_response_omits_internal_fields(inv_client, mint_token):
-    """The search projection is an allowlist: no internal per-item field ships."""
+    """The search projection is an allowlist: no internal per-item field ships.
+
+    Every field in ``internal`` below is POPULATED on the seeded item on purpose.
+    A field left at its default would make the disjointness assertion pass
+    vacuously — it proves nothing about a field the projection would only leak
+    once something put a value in it. ``consignment`` and ``needs_review``
+    specifically are here because they used to be probed by a separate, weaker
+    test that asserted three absent keys and nothing else.
+    """
     client, repo = inv_client
     repo.put_inventory_item(_raw(
         "sv1-secret", location="glass",
         market_value_at_purchase=Decimal("40.00"),
         acquired_show_id="show-1", notes="bought cheap from Dave",
+        consignment=ConsignmentTerms(
+            consignor_id="c-1", split_percent=Decimal("20")),
+        needs_review=True,
+        tcg_url="https://www.tcgplayer.com/product/1/pokemon-sv-pikachu",
     ))
     resp = client.get(
         "/inventory/search",

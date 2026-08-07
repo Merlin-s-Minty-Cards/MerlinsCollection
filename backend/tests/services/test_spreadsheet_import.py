@@ -24,7 +24,6 @@ from merlins_collection.services.spreadsheet_import import (
     parse_bool,
     parse_condition,
     parse_date,
-    parse_language,
     parse_money,
     run_import,
     run_singles_only_import,
@@ -1149,52 +1148,19 @@ def test_R5_nonzero_row_edit_still_commits_as_normal_replace(tmp_path, dynamo_re
 
 
 # ---- print language (a JP card is a DIFFERENT card, not an English one) ----
-
-@pytest.mark.parametrize("text,cleaned", [
-    # every marker spelling/casing seen in the real workbook
-    ("Team Rocket's Mewtwo (jp)", "Team Rocket's Mewtwo"),
-    ("Articuno (Jp)", "Articuno"),
-    ("Milotic (JP)", "Milotic"),
-    ("Reshiram Ex (japanese)", "Reshiram Ex"),
-    ("Espeon V (Japanese)", "Espeon V"),
-    ("COLRESS'S EXPERIMENT - FULL ART (Japanese)", "COLRESS'S EXPERIMENT - FULL ART"),
-    ("Espathra (JP)", "Espathra"),
-    # bare, whitespace-delimited markers — also real rows in the sheet
-    ("Lugia jp", "Lugia"),
-    ("Slakoth JP", "Slakoth"),
-    ("JP exxeggutor Promo", "exxeggutor Promo"),
-    ("Dragonite JP ANA airlines", "Dragonite ANA airlines"),
-    # a marker sitting alongside other parenthesised text must take only its own
-    ("Wooper (Delta Species) Jp 1st Edition", "Wooper (Delta Species) 1st Edition"),
-])
-def test_parse_language_reads_every_marker_spelling(text, cleaned):
-    assert parse_language(text) == (Language.JP, cleaned)
-
-
-def test_parse_language_defaults_to_english_and_leaves_the_text_untouched():
-    for text in ("Charizard", "Mr. Mime", "Team Rocket's Mewtwo", ""):
-        assert parse_language(text) == (Language.EN, text)
-
-
-def test_parse_language_ignores_a_marker_buried_in_an_ordinary_word():
-    """Conservative by construction: only a WHOLE, delimited word counts. A bare
-    ``jp`` substring inside a longer word is never a language marker."""
-    for text in ("Charizard jpeg scan", "Mewtwo Jpop Promo", "Japanophile Deck",
-                 "Snorlax 1stjp", "jpn2 lot"):
-        assert parse_language(text) == (Language.EN, text)
-
-
-def test_parse_language_keeps_the_text_when_stripping_would_empty_it():
-    """A name that is nothing but a marker still yields JP, but we refuse to
-    destroy the only text the row has."""
-    assert parse_language("(jp)") == (Language.JP, "(jp)")
-
-
-def test_parse_language_survives_combined_qualifiers():
-    assert parse_language("Venusaur (jp) 1st holo") == (Language.JP, "Venusaur 1st holo")
-    assert parse_language("Eevee (jp) 1st Ed") == (Language.JP, "Eevee 1st Ed")
-    assert parse_language("Magnezone (jp) first") == (Language.JP, "Magnezone first")
-
+#
+# ``parse_language`` itself is NOT unit-tested here any more. It lives in
+# ``services/card_text.py`` and is tested in ``tests/services/test_card_text.py``;
+# this file had grown a third parallel copy of the same marker/false-positive
+# tables (the other being the since-deleted ``scripts/test_language_recall.py``),
+# so a rule change meant editing three places and the suite paid for the same
+# assertions three times. Every marker spelling that was only listed here —
+# "Milotic (JP)", "Reshiram Ex (japanese)", "COLRESS'S EXPERIMENT - FULL ART
+# (Japanese)", "Espathra (JP)", "Slakoth JP", "Dragonite JP ANA airlines" —
+# moved into that file's parametrize list, so no real workbook spelling was lost.
+#
+# What stays below is the part that is genuinely about the IMPORTER: that a
+# Japanese row never gets linked to an English catalog card.
 
 # The English catalog, containing exactly the card a JP row would collide with.
 # Built through the PRODUCTION index builder (RFC F.1) so no test carries an
@@ -1582,18 +1548,19 @@ def test_import_consignments_materializes_display_name(dynamo_repo):
 # hit matching); everything below is new coverage for the Phase 3 rewrite.
 # =============================================================================
 
-import csv as _csv
-from pathlib import Path as _Path
-
-_REAL_CSV_DIR = _Path(__file__).resolve().parents[3] / "data" / "spreadsheet" / "csv"
-
-
-def _real_rows(tab: str) -> list[dict]:
-    path = _REAL_CSV_DIR / f"{tab}.csv"
-    if not path.exists():
-        pytest.skip(f"real workbook export not present (gitignored): {path}")
-    with path.open(newline="", encoding="utf-8-sig") as f:
-        return list(_csv.DictReader(f))
+# Three tests here used to read the owner's real workbook export from the
+# gitignored ``data/spreadsheet/csv/`` and assert hardcoded populations against
+# it (``sales == 44`` out of 137 Bulk rows, and so on). They were removed
+# 2026-08-07 for the same reason the old ``test_language_recall.py`` snapshot
+# tests were: the export is regenerated whenever the owner re-saves the
+# workbook, so those counts describe rows that may no longer be in the file —
+# and because the directory is absent in CI, they self-skipped there, which
+# reads as "unverified", not "passing". The bug they were built around (the
+# sheet writes dates as ``YYYY-MM-DD HH:MM:SS``, which ``parse_date`` used to
+# drop, silently misclassifying every sold row) is pinned hermetically instead
+# by ``test_parse_date_reads_the_real_sheets_datetime_with_time_suffix`` and
+# ``test_import_bulk_sold_row_using_the_real_datetime_format_is_recognized_as_sold``
+# below, neither of which needs a file that is not in the repository.
 
 
 # ---- D3: store EVERY row, sold or not, with its full money/date fields -------
@@ -1622,37 +1589,6 @@ def test_import_bulk_sold_row_using_the_real_datetime_format_is_recognized_as_so
     assert summary["sales"] == 1
     [item] = dynamo_repo.list_inventory()
     assert item.status.value == "sold"
-
-
-def test_real_bulk_csv_recognizes_every_row_carrying_both_sold_and_date_sold(
-        dynamo_repo):
-    """Regression pin against the SAME datetime-format bug, run against the
-    actual 2026-07-25 workbook export: 44 of the 137 Bulk rows carry a Sold
-    amount AND a Date Sold (measured directly off the CSV this session) and each
-    must produce a sale transaction — not the 0 today's ``parse_date`` manages."""
-    rows = _real_rows("Bulk")
-    ctx = ImportContext(repo=dynamo_repo)
-    summary = import_bulk(rows, ctx)
-    assert summary["imported"] == len(rows)
-    assert summary["sales"] == 44
-    assert len(dynamo_repo.list_transactions(date(2026, 1, 1), date(2026, 12, 31))) == 44
-
-
-def test_real_singles_csv_stores_every_row_and_shows_only_the_unsold(dynamo_repo):
-    """Section 2's measurement this session: the owner pruned every sold Singles
-    row before saving the 7-25 workbook, so 0 of its rows carry both a Sold
-    amount and a Date Sold. D3 requires every row to be STORED regardless — and,
-    since none of them are sold, every stored row's status must be something
-    other than 'sold' (available/on_hold/lost/out_for_grading are all fine)."""
-    rows = _real_rows("Singles")
-    ctx = ImportContext(repo=dynamo_repo)
-    summary = import_singles(rows, ctx)
-    assert summary["imported"] + summary["skipped"] == len(rows)
-    items = dynamo_repo.list_inventory()
-    assert len(items) == summary["imported"]
-    assert summary["sales"] == 0
-    assert all(i.status.value != "sold" for i in items)
-    assert all(i.cost_basis is not None for i in items)  # nothing dropped in translation
 
 
 def test_import_singles_sold_row_stores_the_full_d3_field_set(dynamo_repo):
@@ -1829,6 +1765,8 @@ def test_an_unmatched_singles_row_surfaces_in_build_review_and_is_relinked(
         spec.loader.exec_module(module)
         return module
 
+    from pathlib import Path as _Path
+
     scripts_dir = _Path(__file__).resolve().parents[2] / "scripts"
     br = _load("br_roundtrip_phase3", scripts_dir / "build_review.py")
     ard = _load("ard_roundtrip_phase3", scripts_dir / "apply_review_decisions.py")
@@ -1866,9 +1804,6 @@ def test_an_unmatched_singles_row_surfaces_in_build_review_and_is_relinked(
 # deterministically. Language + card_id come from the enriched file, not from
 # URL-param parsing or live _match_card. Confidence tiers drive needs_review.
 # =============================================================================
-
-_ENRICHED_CSV = "Singles_enriched_v3"
-
 
 def _enriched_singles_row(**over):
     """A row shaped like Singles_enriched_v3.csv (Stage B input)."""
@@ -2079,25 +2014,13 @@ def test_enriched_row_blank_condition_still_defaults_nm_needs_review(dynamo_repo
     assert item.needs_review is True
 
 
-def test_real_enriched_csv_stores_every_row(dynamo_repo):
-    """Read the actual Singles_enriched_v3.csv and confirm every row is
-    accounted for. None are silently dropped. listed_price and tcg_url
-    are never set."""
-    rows = _real_rows(_ENRICHED_CSV)
-    ctx = ImportContext(repo=dynamo_repo)
-    summary = import_singles(rows, ctx)
-    # All 266 rows accounted for (imported + skipped = total):
-    assert summary["imported"] + summary["skipped"] == 266
-    # At minimum 19 need review (13 low + 6 medium):
-    assert summary["needs_review"] >= 19
-    # Every stored item: no listed_price, no tcg_url
-    items = dynamo_repo.list_inventory()
-    assert len(items) == summary["imported"]
-    for item in items:
-        assert item.listed_price is None, (
-            f"listed_price must be None, got {item.listed_price} on {item.item_id}")
-        assert item.tcg_url is None, (
-            f"tcg_url must be None, got {item.tcg_url} on {item.item_id}")
+# ``test_real_enriched_csv_stores_every_row`` sat here and read the gitignored
+# ``Singles_enriched_v3.csv``, asserting ``imported + skipped == 266``. Removed
+# 2026-08-07 with the other real-export tests: the count tracks one particular
+# regeneration of that file, and the properties it checked beyond the count —
+# no ``listed_price``, no ``tcg_url`` on an enriched row — are already pinned
+# hermetically by ``test_enriched_row_does_not_populate_listed_price`` and
+# ``test_enriched_row_does_not_store_tcg_url`` above.
 
 
 # =============================================================================

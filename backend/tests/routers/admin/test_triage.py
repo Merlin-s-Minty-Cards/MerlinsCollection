@@ -39,7 +39,6 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
-from fastapi.testclient import TestClient
 
 from merlins_collection.models.catalog import CardImages, CatalogCard
 from merlins_collection.models.inventory import (
@@ -138,28 +137,21 @@ def _auth(token: str) -> dict:
 
 @pytest.fixture
 def admin_client(cognito_config, jwks, dynamo_repo, mint_token):
-    """TestClient + repo + admin/non-admin token pair."""
-    from merlins_collection.dependencies import get_repo, get_verifier
-    from merlins_collection.main import app
-    from merlins_collection.services.cognito import CognitoJwtVerifier
+    """Overrides the package fixture to add a NON-admin token as a 4th element.
 
-    verifier = CognitoJwtVerifier(
-        region=cognito_config["region"],
-        user_pool_id=cognito_config["user_pool_id"],
-        client_id=cognito_config["client_id"],
-        jwks=jwks,
-    )
-    app.dependency_overrides[get_verifier] = lambda: verifier
-    app.dependency_overrides[get_repo] = lambda: dynamo_repo
+    ``TestAuthGate`` needs both sides of the gate. The wiring comes from
+    ``conftest.build_admin_client``; only the token shape differs.
+    """
+    from .conftest import build_admin_client, clear_overrides
 
-    client = TestClient(app)
+    client = build_admin_client(cognito_config, jwks, dynamo_repo)
     yield (
         client,
         dynamo_repo,
         mint_token(claims={"cognito:groups": ["admin"]}),
         mint_token(claims={"cognito:groups": []}),
     )
-    app.dependency_overrides.clear()
+    clear_overrides()
 
 
 # ===========================================================================

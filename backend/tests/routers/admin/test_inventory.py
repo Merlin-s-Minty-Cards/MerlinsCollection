@@ -8,7 +8,6 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
-from fastapi.testclient import TestClient
 
 from merlins_collection.models.business import Transaction, TransactionType, ItemCategory
 from merlins_collection.models.catalog import CardImages, CatalogCard, FinishPrice
@@ -18,7 +17,6 @@ from merlins_collection.models.inventory import (
     GradedInventoryItem,
     GradingCompany,
     ItemStatus,
-    Language,
     RawInventoryItem,
     SealedInventoryItem,
     SealedProductType,
@@ -108,28 +106,19 @@ def _catalog(card_id="sv1-1", name="Pikachu", **extra):
 
 @pytest.fixture
 def admin_client(cognito_config, jwks, dynamo_repo, mint_token):
-    """TestClient + repo + admin token factory for admin endpoint tests."""
-    from merlins_collection.dependencies import get_repo, get_verifier
-    from merlins_collection.main import app
-    from merlins_collection.services.cognito import CognitoJwtVerifier
+    """Overrides the package fixture to add a NON-admin token as a 4th element.
 
-    verifier = CognitoJwtVerifier(
-        region=cognito_config["region"],
-        user_pool_id=cognito_config["user_pool_id"],
-        client_id=cognito_config["client_id"],
-        jwks=jwks,
-    )
-    app.dependency_overrides[get_verifier] = lambda: verifier
-    app.dependency_overrides[get_repo] = lambda: dynamo_repo
+    ``TestAdminAuthGate`` needs both sides of the gate — a token in the admin
+    group and one without it — so this yields the pair. The wiring itself comes
+    from ``conftest.build_admin_client``; only the token shape differs.
+    """
+    from .conftest import build_admin_client, clear_overrides
 
-    # Admin token: include cognito:groups with admin group
+    client = build_admin_client(cognito_config, jwks, dynamo_repo)
     admin_token = mint_token(claims={"cognito:groups": ["admin"]})
-    # Non-admin token: no admin group
     user_token = mint_token(claims={"cognito:groups": []})
-
-    client = TestClient(app)
     yield client, dynamo_repo, admin_token, user_token
-    app.dependency_overrides.clear()
+    clear_overrides()
 
 
 def _auth_header(token: str) -> dict:

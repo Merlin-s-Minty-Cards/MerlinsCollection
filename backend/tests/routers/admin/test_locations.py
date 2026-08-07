@@ -8,7 +8,6 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
-from fastapi.testclient import TestClient
 
 from merlins_collection.models.inventory import Condition, ItemStatus, RawInventoryItem
 
@@ -24,25 +23,8 @@ def _raw(item_id="item-1", *, card_id="sv1-1", location="glass",
     )
 
 
-@pytest.fixture
-def admin_client(cognito_config, jwks, dynamo_repo, mint_token):
-    from merlins_collection.dependencies import get_repo, get_verifier
-    from merlins_collection.main import app
-    from merlins_collection.services.cognito import CognitoJwtVerifier
-
-    verifier = CognitoJwtVerifier(
-        region=cognito_config["region"],
-        user_pool_id=cognito_config["user_pool_id"],
-        client_id=cognito_config["client_id"],
-        jwks=jwks,
-    )
-    app.dependency_overrides[get_verifier] = lambda: verifier
-    app.dependency_overrides[get_repo] = lambda: dynamo_repo
-
-    admin_token = mint_token(claims={"cognito:groups": ["admin"]})
-    client = TestClient(app)
-    yield client, admin_token
-    app.dependency_overrides.clear()
+# ``admin_client`` now comes from ``conftest.py`` in this package; the identical
+# copy that used to sit here was one of sixteen.
 
 
 def _auth(token: str) -> dict:
@@ -52,7 +34,7 @@ def _auth(token: str) -> dict:
 class TestListLocations:
     def test_returns_location_list(self, admin_client):
         """GET /admin/locations returns the full location choice list."""
-        client, token = admin_client
+        client, _repo, token = admin_client
         resp = client.get("/admin/locations", headers=_auth(token))
         assert resp.status_code == 200
         data = resp.json()
@@ -75,7 +57,7 @@ class TestListLocations:
 
     def test_requires_admin_auth(self, admin_client):
         """Endpoint is admin-only."""
-        client, _ = admin_client
+        client, _repo, _ = admin_client
         resp = client.get("/admin/locations")
         assert resp.status_code in (401, 403)
 
@@ -84,7 +66,7 @@ class TestLocationsAdminManaged:
     """DB-backed, admin-managed locations: seeding, add, delete, validation."""
 
     def test_get_seeds_from_enum_and_inventory(self, admin_client, dynamo_repo):
-        client, token = admin_client
+        client, _repo, token = admin_client
         dynamo_repo.put_inventory_item(_raw(item_id="seed-1", location="card_show_bin"))
 
         resp = client.get("/admin/locations", headers=_auth(token))
@@ -98,7 +80,7 @@ class TestLocationsAdminManaged:
         assert second.json() == resp.json()
 
     def test_post_adds_location(self, admin_client):
-        client, token = admin_client
+        client, _repo, token = admin_client
         r = client.post(
             "/admin/locations",
             json={"value": "show_box_c", "label": "Show Box C"},
@@ -109,7 +91,7 @@ class TestLocationsAdminManaged:
         assert {"value": "show_box_c", "label": "Show Box C"} in listing
 
     def test_post_duplicate_409(self, admin_client):
-        client, token = admin_client
+        client, _repo, token = admin_client
         client.post(
             "/admin/locations",
             json={"value": "show_box_d", "label": "Show Box D"},
@@ -123,7 +105,7 @@ class TestLocationsAdminManaged:
         assert r.status_code == 409
 
     def test_post_bad_slug_422(self, admin_client):
-        client, token = admin_client
+        client, _repo, token = admin_client
         r = client.post(
             "/admin/locations",
             json={"value": "Show Box!", "label": "Bad"},
@@ -132,13 +114,13 @@ class TestLocationsAdminManaged:
         assert r.status_code == 422
 
     def test_delete_in_use_409(self, admin_client, dynamo_repo):
-        client, token = admin_client
+        client, _repo, token = admin_client
         dynamo_repo.put_inventory_item(_raw(item_id="in-use", location="glass"))
         r = client.delete("/admin/locations/glass", headers=_auth(token))
         assert r.status_code == 409
 
     def test_delete_unused_204(self, admin_client):
-        client, token = admin_client
+        client, _repo, token = admin_client
         client.post(
             "/admin/locations",
             json={"value": "temp_box", "label": "Temp Box"},
@@ -150,12 +132,12 @@ class TestLocationsAdminManaged:
         assert "temp_box" not in [o["value"] for o in listing]
 
     def test_delete_unknown_404(self, admin_client):
-        client, token = admin_client
+        client, _repo, token = admin_client
         r = client.delete("/admin/locations/nonexistent_value", headers=_auth(token))
         assert r.status_code == 404
 
     def test_bulk_move_unknown_location_422(self, admin_client, dynamo_repo):
-        client, token = admin_client
+        client, _repo, token = admin_client
         dynamo_repo.put_inventory_item(_raw(item_id="mv-1", location="glass"))
         r = client.post(
             "/admin/show-prep/bulk-move",
@@ -165,7 +147,7 @@ class TestLocationsAdminManaged:
         assert r.status_code == 422
 
     def test_post_label_too_long_422(self, admin_client):
-        client, token = admin_client
+        client, _repo, token = admin_client
         r = client.post(
             "/admin/locations",
             json={"value": "show_box_f", "label": "x" * 61},
@@ -209,7 +191,7 @@ class TestLocationConfigConcurrency:
         not a silently-dropped write and a fake 201."""
         from botocore.exceptions import ClientError
 
-        client, token = admin_client
+        client, _repo, token = admin_client
 
         # Seed the config row first (via a normal GET) so the router's
         # subsequent read-then-write in create_location reaches the mutating

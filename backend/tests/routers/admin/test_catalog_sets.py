@@ -29,8 +29,6 @@ What these tests pin:
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-import pytest
-from fastapi.testclient import TestClient
 
 from merlins_collection.models.catalog import CatalogCard
 from merlins_collection.models.inventory import (
@@ -105,25 +103,8 @@ def _set_row(set_id, set_name, language, card_count):
     }
 
 
-@pytest.fixture
-def admin_client(cognito_config, jwks, dynamo_repo, mint_token):
-    from merlins_collection.dependencies import get_repo, get_verifier
-    from merlins_collection.main import app
-    from merlins_collection.services.cognito import CognitoJwtVerifier
-
-    verifier = CognitoJwtVerifier(
-        region=cognito_config["region"],
-        user_pool_id=cognito_config["user_pool_id"],
-        client_id=cognito_config["client_id"],
-        jwks=jwks,
-    )
-    app.dependency_overrides[get_verifier] = lambda: verifier
-    app.dependency_overrides[get_repo] = lambda: dynamo_repo
-
-    admin_token = mint_token(claims={"cognito:groups": ["admin"]})
-    client = TestClient(app)
-    yield client, admin_token
-    app.dependency_overrides.clear()
+# ``admin_client`` now comes from ``conftest.py`` in this package; the identical
+# copy that used to sit here was one of sixteen.
 
 
 def _auth(token: str) -> dict:
@@ -137,7 +118,7 @@ class TestListCatalogSets:
         Two sets in the registry, stock in only one of them. The empty one is the
         whole reason this endpoint is not built on ``/inventory/facets``.
         """
-        client, token = admin_client
+        client, _repo, token = admin_client
         _register(
             dynamo_repo,
             _set_row("en:base1", "Base Set", "EN", 102),
@@ -160,7 +141,7 @@ class TestListCatalogSets:
         assert by_id["en:sv1"]["card_count"] == 258
 
     def test_sorted_alphabetically_by_name(self, admin_client, dynamo_repo):
-        client, token = admin_client
+        client, _repo, token = admin_client
         _register(
             dynamo_repo,
             _set_row("en:sv1", "Scarlet & Violet", "EN", 258),
@@ -182,7 +163,7 @@ class TestListCatalogSets:
         scan — the same 11.2-second read that killed catalog search. Any scan on
         this request path raises here.
         """
-        client, token = admin_client
+        client, _repo, token = admin_client
         _register(dynamo_repo, _set_row("en:base1", "Base Set", "EN", 102))
         dynamo_repo.put_inventory_item(_raw("item-1", "en:base1-4"))
 
@@ -206,7 +187,7 @@ class TestListCatalogSets:
     ):
         """Names are not unique across languages; ``set_id`` is. Both are listed,
         each carrying its own ``language`` so the admin can tell them apart."""
-        client, token = admin_client
+        client, _repo, token = admin_client
         _register(
             dynamo_repo,
             _set_row("en:base1", "Base Set", "EN", 102),
@@ -231,7 +212,7 @@ class TestListCatalogSets:
 
     def test_sealed_items_do_not_break_the_owned_count(self, admin_client, dynamo_repo):
         """Sealed and bulk items have no ``card_id`` FIELD, not a null one."""
-        client, token = admin_client
+        client, _repo, token = admin_client
         _register(dynamo_repo, _set_row("en:base1", "Base Set", "EN", 102))
         dynamo_repo.put_inventory_item(_sealed("item-sealed"))
 
@@ -242,11 +223,11 @@ class TestListCatalogSets:
 
     def test_empty_registry_returns_an_empty_list(self, admin_client):
         """A table whose sync has never run answers honestly, not with a 500."""
-        client, token = admin_client
+        client, _repo, token = admin_client
         assert client.get("/admin/catalog/sets", headers=_auth(token)).json() == []
 
     def test_rejects_a_non_admin_caller(self, admin_client, mint_token):
-        client, _ = admin_client
+        client, _repo, _ = admin_client
         member_token = mint_token(claims={"cognito:groups": ["members"]})
 
         resp = client.get("/admin/catalog/sets", headers=_auth(member_token))

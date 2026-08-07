@@ -354,7 +354,9 @@ single-flight lock + load-then-swap generation replace in `services/dynamodb.py`
    and any manual fixes would be at risk. Option C touches one attribute per item.
 2. **Purpose-built.** The review/apply/backfill toolchain and its tests
    (`backend/tests/scripts/test_build_review.py`, `test_apply_review_decisions.py`,
-   `test_backfill_language.py`, `test_language_recall.py`) exist precisely for this.
+   `test_backfill_language.py`) exist precisely for this. The language-detection
+   half of that safety net now lives in `backend/tests/services/test_card_text.py`
+   — `test_language_recall.py` was deleted on 2026-08-07 as a duplicate of it.
 3. **Already has the good matcher.** Relinking benefits from `predict_card`'s fuzzy +
    set inference and a human confirm — safer than the importer's conservative
    auto-linker for the genuinely ambiguous rows.

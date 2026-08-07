@@ -1,3 +1,12 @@
+/**
+ * Pure logic — no DOM. Runs in `node` rather than the default jsdom:
+ * constructing a jsdom per file was the single largest cost in this
+ * suite (215s cumulative `environment` time against 55s of actual tests).
+ * If this file ever renders a component or touches window/document,
+ * delete this docblock rather than stubbing the DOM by hand.
+ *
+ * @vitest-environment node
+ */
 import { describe, it, expect } from 'vitest'
 import { adminItemName } from '../admin-item-name'
 
