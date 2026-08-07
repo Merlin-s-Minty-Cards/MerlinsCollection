@@ -8,8 +8,16 @@ card rows written before the registry existed, which no sync will revisit
 because ``sync_new_sets`` deliberately never walks a set that has cards.
 
     cd backend
-    python scripts/backfill_catalog_sets.py                  # DRY RUN (default)
-    python scripts/backfill_catalog_sets.py --execute
+    ../.venv/Scripts/python.exe scripts/backfill_catalog_sets.py            # DRY RUN
+    ../.venv/Scripts/python.exe scripts/backfill_catalog_sets.py --execute
+
+Call the venv interpreter explicitly. A bare ``python`` on this machine resolves
+to an unrelated environment that cannot import ``merlins_collection``, and the
+file has no shebang, so invoking it as ``scripts/backfill_catalog_sets.py``
+hands it to the shell, which reads this docstring as commands.
+
+**ALREADY RUN against ``merlins-cards`` on 2026-08-06** — 284 sets registered
+from 31,603 card rows. Re-running is a harmless upsert that refreshes the counts.
 
 **A DRY RUN IS THE DEFAULT.** Nothing is written without ``--execute``; the dry
 run prints every set it would register.
@@ -32,6 +40,7 @@ inventory, price or transaction row is read for mutation or written.
 from __future__ import annotations
 
 import argparse
+import sys
 from datetime import datetime, timezone
 
 from merlins_collection.config import settings
@@ -94,8 +103,30 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _make_stdout_printable() -> None:
+    """Let this script's own output survive a console that is not UTF-8.
+
+    Windows consoles default to cp1252, which cannot encode the Japanese set
+    names this catalog is full of. The listing below is printed BEFORE the write,
+    so on a default Windows shell the first Japanese set raised
+    ``UnicodeEncodeError`` and killed the run having written nothing — with the
+    English sets already scrolled past, it looked like the backfill had worked.
+
+    ``errors="replace"`` keeps it merely lossy on an old console instead of
+    fatal, and a modern terminal renders the names properly. This touches
+    display only: the rows written to DynamoDB carry the real names either way.
+    """
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        # A stream that cannot be reconfigured (a pipe someone wrapped, a test
+        # double) still prints; it just keeps whatever encoding it arrived with.
+        pass
+
+
 def main(argv=None) -> dict:
     args = _parser().parse_args(argv)
+    _make_stdout_printable()
     repo = InventoryRepository(args.table, region_name=args.region)
 
     mode = "EXECUTE" if args.execute else "DRY RUN — nothing will be written"

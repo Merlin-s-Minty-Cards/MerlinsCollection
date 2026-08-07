@@ -224,14 +224,20 @@ here — this dead end has already cost one investigation.
 a fresh/empty table, which the live one is not. With AWS creds, from `backend/`:
 
 ```bash
-python scripts/seed_catalog.py --help    # read the rails; it is dry-run by default
-python scripts/seed_catalog.py --execute --confirm-table merlins-cards
+cd backend
+../.venv/Scripts/python.exe scripts/seed_catalog.py --help    # dry-run by default
+../.venv/Scripts/python.exe scripts/seed_catalog.py --execute --confirm-table merlins-cards
 ```
 
-then press **Sync Prices** on `/admin/market`, or run `python scripts/
-daily_sync.py`. This is not part of the scheduled daily sync — the daily sync
+then press **Sync Prices** on `/admin/market`, or run `scripts/daily_sync.py`
+the same way. This is not part of the scheduled daily sync — the daily sync
 refreshes prices for cards already in the catalog, it does not seed the
 catalog itself.
+
+**Every script here needs the venv interpreter spelled out.** A bare `python`
+resolves to an unrelated environment that cannot import `merlins_collection`,
+and these files have no shebang — so `scripts/foo.py` hands the file to the
+shell, which tries to run its docstring as commands.
 
 **Catalog set registry backfill (one-time owner action).** The admin
 inventory page's Set filter lists every set in the catalog — including ones we
@@ -239,12 +245,16 @@ own nothing from, which is the whole point of it — from a `catalog_set`
 registry rather than from a full catalog scan. `sync_new_sets` (the **check
 for new sets** button on `/admin/market`) maintains that registry going
 forward, but it deliberately never walks a set that already has cards, so it
-will not backfill a catalog seeded before the registry existed. Run once, from
-`backend/`:
+will not backfill a catalog seeded before the registry existed.
+
+**DONE — run against `merlins-cards` on 2026-08-06**, registering **284 sets**
+from 31,603 card rows; `GET /admin/catalog/sets` now returns all 284, of which
+94 have owned cards. Re-running is a harmless upsert that refreshes the counts:
 
 ```bash
-python scripts/backfill_catalog_sets.py             # DRY RUN (default)
-python scripts/backfill_catalog_sets.py --execute
+cd backend
+../.venv/Scripts/python.exe scripts/backfill_catalog_sets.py            # DRY RUN
+../.venv/Scripts/python.exe scripts/backfill_catalog_sets.py --execute
 ```
 
 Until it has run, `GET /admin/catalog/sets` honestly returns `[]` and the Set

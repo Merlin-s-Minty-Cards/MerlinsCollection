@@ -10,12 +10,14 @@ The aggregation is what is pinned here. ``main`` itself is argument parsing plus
 printing over the same function.
 """
 
+import io
+import sys
 from datetime import datetime, timezone
 
 from merlins_collection.models.catalog import CatalogCard
 from merlins_collection.models.inventory import Language
 
-from scripts.backfill_catalog_sets import build_registry_rows
+from scripts.backfill_catalog_sets import build_registry_rows, main
 
 
 def _card(card_id, *, set_id, set_name, language=Language.EN, name="Pikachu"):
@@ -98,3 +100,39 @@ def test_rows_round_trip_through_the_registry_writer(dynamo_repo):
     assert stored[0]["set_name"] == "Base Set"
     assert stored[0]["card_count"] == 1
     assert stored[0]["language"] == "EN"
+
+
+def test_main_writes_even_when_the_console_cannot_encode_a_japanese_set_name(
+    dynamo_repo, monkeypatch,
+):
+    """The listing is printed BEFORE the write, so a console that cannot encode a
+    set name kills the run without writing anything.
+
+    Found by running the real script: a Windows console defaults to cp1252, and
+    the first Japanese set name raised ``UnicodeEncodeError`` after ~400 English
+    sets had scrolled past. The backfill runs exactly once against live data, so
+    a crash here is the difference between the Set dropdown working and shipping
+    empty.
+
+    This file's own docstring called ``main`` "argument parsing plus printing
+    over the same function" and left it untested — printing was the bug.
+    """
+    dynamo_repo.batch_upsert_catalog_cards([
+        _card("ja:sv11b-1", set_id="ja:sv11b", set_name="ブラックボルト",
+              language=Language.JP, name="リザードン"),
+    ])
+    monkeypatch.setattr(
+        "scripts.backfill_catalog_sets.InventoryRepository",
+        lambda *a, **k: dynamo_repo,
+    )
+    # A console that can encode Latin-1 and nothing else — what MINGW/cmd give
+    # you on a default Windows install.
+    monkeypatch.setattr(
+        sys, "stdout",
+        io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict"),
+    )
+
+    summary = main(["--execute"])
+
+    assert summary["sets_written"] == 1
+    assert [s["set_id"] for s in dynamo_repo.list_catalog_sets()] == ["ja:sv11b"]
