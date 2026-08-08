@@ -310,9 +310,19 @@ Two notes on the sample itself, since they bound how much the table proves:
 
 ## 6. What the owner needs to do
 
-1. **Get the PSA account approved for the public API.** This is the only blocker on
-   T2, and it is external — email `collectors-apis@collectors.com` (the address PSA's
-   own 429 body gives) or use PSA's public-API access request. The key itself is fine.
+1. **Accept the PSA public-API EULA, then re-issue the token.** This is the only
+   blocker on T2, and it is external to this codebase.
+   - Sign in to the PSA account that owns the token and accept the EULA at
+     **https://www.psacard.com/publicapi/accepteula**. The page returns 403 to an
+     anonymous request, so it requires a logged-in session — it cannot be automated
+     from here, and accepting a licence agreement is the owner's to do regardless.
+   - **Then generate a fresh token and replace `PSA_API_KEY` in `backend/.env`.**
+     Re-tested after the EULA page was identified: the existing token still 403s, so
+     acceptance does not appear to retro-enable a token issued before it. PSA's docs
+     confirm the auth model is OAuth2 password-grant against PSA login credentials,
+     and `Authorization: bearer <token>` — which matches what §1.2 measured.
+   - If it still 403s with a fresh token, `collectors-apis@collectors.com` is the
+     address PSA's own error body gives.
 2. **Decide whether T6 proceeds ahead of PSA**, on the terms in §5.
 3. **Rotate both keys** once the integration is confirmed working — both were pasted
    into a chat transcript during planning (progress.md).
