@@ -1,7 +1,26 @@
 # T4 — The Slabs tab: scan → stage → commit
 
-**RFC:** 0009 §8 · **Layer:** frontend · **Depends on:** T2, T3 ·
-**Blocks:** T5, T6
+> # ⛔ SUPERSEDED 2026-08-08 — DO NOT EXECUTE THIS DOCUMENT
+>
+> This describes a **scan → PSA-lookup → stage → commit** pipeline. **It cannot be
+> built.** PSA's cert API returns 403 at the account level, so the
+> `/admin/slabs/lookup/{cert}` endpoint every flag and badge below depends on does
+> not exist and is not being built.
+>
+> **Build this instead:**
+> [`docs/superpowers/plans/2026-08-08-slab-manual-entry.md`](../../superpowers/plans/2026-08-08-slab-manual-entry.md)
+> — Tasks 3–6. An entry form with catalog autocomplete and a free-text fallback,
+> feeding the same staging table and the same three-call commit.
+>
+> **What changed:** T4 now **depends on T3 only**, not T2. There is no `/lookup`
+> call, no `degraded_reason` badge table, and no quota polling. The commit section
+> below is still accurate and is carried forward. The manual-typing requirements
+> below are still binding — they are now the *primary* path rather than the fallback.
+>
+> Kept unedited as the record of what was originally specified.
+
+**RFC:** 0009 §8 · **Layer:** frontend · ~~**Depends on:** T2, T3~~ →
+**Depends on: T3** · **Blocks:** T6
 
 **This is the milestone.** When T4 lands, the feature is usable end to end: a stack
 of slabs becomes real, costed inventory. Everything after this adds pricing and

@@ -1,5 +1,26 @@
 # T3 — The buy session learns to create graded items
 
+> # ⚠️ SUPERSEDED 2026-08-08 — two instructions here are now WRONG
+>
+> **Build this instead:**
+> [`docs/superpowers/plans/2026-08-08-slab-manual-entry.md`](../../superpowers/plans/2026-08-08-slab-manual-entry.md)
+> — Tasks 1–2, which carry the corrected versions with full test code.
+>
+> The two errors, both of which will cost you a cycle:
+>
+> 1. **"Add a discriminator plus the slab fields to `BuySessionItem`" — that
+>    validates nothing.** `BuySessionItem` (`purchases.py:56`) is **dead code**,
+>    referenced nowhere; `add_buy_item` takes `body: dict[str, Any]` and hand-builds
+>    the item. Validation belongs in `add_buy_item`.
+> 2. **"`cert_verified_at is None` → `cert_lookup_failed`" is REVERSED.** With
+>    manual entry now the primary path, that rule would flag *every* slab and turn
+>    Triage into noise. Flag only on a missing `card_id`, which
+>    `_review_reason_for_buy` already does as `no_catalog_link`. **Do not add the
+>    rule.**
+>
+> Everything else below — the `confirm_buy_session` gap, the float landmine, the
+> raw-regression requirement — is still accurate and still binding.
+
 **RFC:** 0009 §4 · **Layer:** backend · **Depends on:** T1 · **Blocks:** T4
 
 ## The gap — the single real blocker in this RFC

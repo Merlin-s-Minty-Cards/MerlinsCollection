@@ -1,7 +1,18 @@
 # RFC 0009 — Slab intake by barcode, and free graded pricing
 
-**Status:** accepted, not started · **Date:** 2026-08-07 · **Owner decisions:** all
-locked (see §2) · **Plan:** [`docs/plans/rfc-0009/`](../plans/rfc-0009/README.md)
+**Status:** accepted; **amended 2026-08-08 to manual-first intake** · **Date:** 2026-08-07
+· **Owner decisions:** see §2 · **Plan:** [`docs/plans/rfc-0009/`](../plans/rfc-0009/README.md)
+
+> **AMENDMENT, 2026-08-08.** PSA's cert API returns `403 "Access to this API is
+> limited to approved customers"` — the account is not entitled and no code change
+> reaches it. **Intake is therefore hand-entered first**, with PSA lookup returning
+> later as a pre-fill rather than a prerequisite. §5.1's PSA flow, and the parts of
+> §7/§8 that assume a cert lookup, are **on hold**; §5.2 pricing is verified and
+> proceeding. See
+> [the design spec](../superpowers/specs/2026-08-08-slab-manual-entry-design.md) and
+> [findings](../plans/rfc-0009/spike-findings.md). Corrections to §5.1/§5.2/§9 are
+> assigned to the re-plan's Task 7 — until then, **trust the spec over this document
+> where they disagree.**
 
 ## 1. What this builds
 

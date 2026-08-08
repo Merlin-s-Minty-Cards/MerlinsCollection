@@ -1207,6 +1207,13 @@ git commit -m "feat(slabs): manual slab intake tab, scan to committed inventory"
 
 No tests — this task is prose. It is separate because a reviewer can reject the docs while accepting the code.
 
+**Already done up front, on 2026-08-08 — do not redo:** the *navigational* corrections
+that had to land before any task ran, because a fresh conversation reading them would
+otherwise have built the superseded design. `progress.md` carries a pivot banner and
+corrected T3/T4/T5 rows, `README.md`'s dependency table points here, the RFC carries an
+amendment banner, and `t3-*.md` / `t4-*.md` carry SUPERSEDED banners naming their two
+wrong instructions. **This task is the substantive rewrite**, not the redirect.
+
 - [ ] **Step 1: Correct the RFC**
 
 In §5.2, replace "1 credit per card" with the measured **2 credits per card** (`costPerCard: 2`, 1 for the card + 1 for `includeEbay`), and add that **billing is on `limit`, not on hits** — a `limit=2` search matching zero cards still cost 4 credits.

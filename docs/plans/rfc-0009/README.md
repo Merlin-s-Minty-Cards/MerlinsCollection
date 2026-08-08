@@ -20,9 +20,23 @@ Never combine phases.
 **Out-of-scope findings:** append to [`follow-ups.md`](follow-ups.md). Do not fix
 them as a side errand.
 
+## ⚠️ Re-planned 2026-08-08 — manual-first intake
+
+PSA's cert API is blocked at the account (403, no code-side fix), so T3 and T4 were
+re-planned. **Their authority is now
+[`docs/superpowers/plans/2026-08-08-slab-manual-entry.md`](../../superpowers/plans/2026-08-08-slab-manual-entry.md)**
+(7 numbered tasks, one per conversation; its checkboxes are the live record), backed by
+[the design spec](../../superpowers/specs/2026-08-08-slab-manual-entry-design.md).
+
+`t3-*.md` and `t4-*.md` are **superseded and carry banners**. T4 no longer depends
+on T2.
+
 ## How to start a task conversation
 
-Paste this, filling in the task id:
+**For T3/T4 work**, use the numbered tasks in the manual-entry plan above — each
+conversation ends by committing and emitting the prompt for the next one.
+
+**For every other task**, paste this, filling in the task id:
 
 > Read `docs/plans/rfc-0009/progress.md` and `docs/plans/rfc-0009/<task-file>.md`.
 > Execute that task only, following the RED gate. Do not start any other task.
@@ -42,10 +56,10 @@ prices are manual) or **after T7** (intake + automated pricing; only docs remain
 |---|---|---|---|---|
 | T0 | [t0-provider-spike.md](t0-provider-spike.md) | Verify both APIs against real data; record fixtures; **coverage gate** | spike | — |
 | T1 | [t1-slab-model-and-cert-index.md](t1-slab-model-and-cert-index.md) | Slab fields + `CERT#` pointer row + duplicate-check endpoint | backend | — |
-| T2 | [t2-psa-lookup-and-quota.md](t2-psa-lookup-and-quota.md) | PSA client behind a Protocol, outbound quota guard, `/lookup/{cert}` | backend | T0, T1 |
-| T3 | [t3-buy-session-graded.md](t3-buy-session-graded.md) | Buy session creates graded items — fixes the `kind: "raw"` hardcode | backend | T1 |
-| T4 | [t4-slabs-tab-scan-to-commit.md](t4-slabs-tab-scan-to-commit.md) | **The tab.** Wedge scanner **and hand-typed certs** → staging table → commit. End-to-end usable | frontend | T2, T3 |
-| T5 | [t5-camera-scan.md](t5-camera-scan.md) | Camera barcode fallback — a third input into the same pipeline | frontend | T4 |
+| T2 | [t2-psa-lookup-and-quota.md](t2-psa-lookup-and-quota.md) | **DEFERRED** — PSA is 403-blocked at the account. Not startable | backend | PSA approval |
+| T3 | ~~[t3-buy-session-graded.md](t3-buy-session-graded.md)~~ → **[manual-entry plan](../../superpowers/plans/2026-08-08-slab-manual-entry.md) Tasks 1–2** | Buy session creates graded items — fixes the `kind: "raw"` hardcode | backend | T1 |
+| T4 | ~~[t4-slabs-tab-scan-to-commit.md](t4-slabs-tab-scan-to-commit.md)~~ → **[manual-entry plan](../../superpowers/plans/2026-08-08-slab-manual-entry.md) Tasks 3–6** | **The tab.** Manual entry with catalog autocomplete → staging table → commit | frontend | **T3 only** |
+| T5 | [t5-camera-scan.md](t5-camera-scan.md) | **DEFERRED** behind T2 — a camera yields a cert number, which without PSA resolves to nothing | frontend | T2 |
 | T6 | [t6-pricing-provider-and-slab-list.md](t6-pricing-provider-and-slab-list.md) | Pricing client + `graded_price` writes + slab list with values | full-stack | T0, T4 |
 | T7 | [t7-nightly-sync-and-refresh-fix.md](t7-nightly-sync-and-refresh-fix.md) | Nightly refresh with stalest-first rotation; fixes the graded-skip bug | backend | T6 |
 | T8 | [t8-docs-and-ops.md](t8-docs-and-ops.md) | CLAUDE.md corrections, `.env.example`, ECS secrets, README | docs/ops | T7 |

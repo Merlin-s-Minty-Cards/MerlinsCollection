@@ -13,6 +13,23 @@ an account-entitlement 403. **T1 DONE** — `0b21de2`)
 **RFC:** [`docs/rfcs/0009-slab-intake-and-graded-pricing.md`](../../rfcs/0009-slab-intake-and-graded-pricing.md)
 **Task index:** [`README.md`](README.md)
 
+## ⚠️ THE PLAN CHANGED ON 2026-08-08 — READ THIS BEFORE PICKING UP A TASK
+
+PSA's cert API is **blocked at the account** (403, not fixable in code), so intake
+was re-planned as **manual-first**. The authority for T3 and T4 is now:
+
+- **Design:** [`docs/superpowers/specs/2026-08-08-slab-manual-entry-design.md`](../../superpowers/specs/2026-08-08-slab-manual-entry-design.md)
+- **Task-by-task plan:** [`docs/superpowers/plans/2026-08-08-slab-manual-entry.md`](../../superpowers/plans/2026-08-08-slab-manual-entry.md)
+  — **7 numbered tasks, executed in order, one per conversation.** Its checkboxes
+  are the live record of what is done.
+
+**`t3-buy-session-graded.md` and `t4-slabs-tab-scan-to-commit.md` are superseded**
+and carry banners saying so. Do not execute them as written: T4's doc describes a
+scan→PSA-lookup pipeline that cannot be built, and T3's doc contains a review-flagging
+rule the owner has since reversed.
+
+**T4 no longer depends on T2.** The dependency was the whole point of the re-plan.
+
 ## Status
 
 | # | Task | Status | Commit | Notes |
@@ -20,9 +37,9 @@ an account-entitlement 403. **T1 DONE** — `0b21de2`)
 | T0 | Provider spike | **DONE (split verdict)** | `cd59ebc` | **Pricing = PROCEED, PSA = STOP.** All 19 cards priced, **including 3/3 Japanese** — coverage is better than feared. But PSA returns `403 "limited to approved customers"` on every call: the key is valid, **the account is not entitled**, and no code change fixes it. **T6 unblocked; T2 still blocked, now on PSA account approval rather than on this spike.** Also: auto-pricing off a name search picks the **wrong card ~1/3 of the time** — T6 must gate attachment on a verified match. Full evidence: [`spike-findings.md`](spike-findings.md) |
 | T1 | Slab model + cert index | **DONE** | `0b21de2` | **Stale-pointer strategy: READER-SIDE verification** (`get_item_id_by_cert` re-reads the item and confirms it still claims the cert) — so T4 can trust `owned: true` **completely**; the residual risk is a rare false *negative*, first row of [`follow-ups.md`](follow-ups.md) T1. Endpoint is `GET /admin/slabs/certs/{cert}?company=PSA`, `200` either way |
 | T2 | PSA lookup + quota guard | **BLOCKED (owner action)** | — | **No longer blocked on T0 — blocked on PSA approving the account.** Every call is `403 "limited to approved customers"`; the token and `Authorization: Bearer` format are both confirmed correct. Nothing about PSA's response shape is known, so the mapper cannot be written honestly. Add a **403 case** to the failure handling — RFC §9 has none |
-| T3 | Buy session → graded | NOT STARTED | — | **unblocked — T1 is done.** Note `cert_number` is still an unbounded `str` on the model; T1 guarded only the read path, see follow-ups |
-| T4 | Slabs tab (scan → commit) | NOT STARTED | — | blocked on T2, T3. **Milestone: usable product** |
-| T5 | Camera scan fallback | NOT STARTED | — | blocked on T4. Droppable |
+| T3 | Buy session → graded | NOT STARTED | — | **Unblocked. Now Tasks 1–2 of the [manual-entry plan](../../superpowers/plans/2026-08-08-slab-manual-entry.md)** — execute that, not `t3-*.md`. Its `cert_verified_at → cert_lookup_failed` rule is **reversed** (see Decisions). Also: `BuySessionItem` is dead code, so validation goes in `add_buy_item` |
+| T4 | Slabs tab (manual entry → commit) | NOT STARTED | — | **Depends on T3 ONLY — no longer on T2.** Now Tasks 3–6 of the [manual-entry plan](../../superpowers/plans/2026-08-08-slab-manual-entry.md). A form with catalog autocomplete, not a scan→lookup pipeline. **Milestone: usable product** |
+| T5 | Camera scan fallback | **DEFERRED** | — | Behind T2, not T4: a camera yields a cert number, which without PSA resolves to nothing. Droppable |
 | T6 | Pricing provider + slab list | NOT STARTED | — | **T0 cleared it** — shape recorded as 19 fixtures, quota is self-reported, coverage proven. Still needs T4. Three binding notes: store `smartMarketPrice.price` **with its `confidence`**, pin `limit=1` (**cost is 2 x limit, billed even on zero hits**), and **auto-attach a price only on a verified `externalCatalogId` join** — a bare name search is wrong ~1/3 of the time |
 | T7 | Nightly sync + refresh fix | NOT STARTED | — | blocked on T6 |
 | T8 | Docs + ops | NOT STARTED | — | blocked on T7 |
@@ -82,6 +99,9 @@ The 19 cert numbers themselves are recorded in that doc's §4 coverage table.
 | 2026-08-08 | T0 | Drove the pricing sweep from the **owner's card names** (`--names-from`) instead of PSA identities, and recorded the query separately from the owner's label | PSA's 403 left no verified identities. The findings must not claim cert-verified coverage — a hit proves the vendor covers the CARD, not that PSA would resolve the cert to it, and the two claims are kept apart in §4 |
 | 2026-08-08 | T0 | Pinned `limit=1` on every pricing query | Billing is `2 x limit` **and is charged even when the search matches nothing** — measured: a `limit=2` search with 0 hits cost 4 credits. `limit` is the cost dial, not a free breadth knob |
 | 2026-08-08 | T0 | The one PSA fixture is named **`psa_403_not_approved.json`**, not `cert_<n>.json` | It holds an error body, not a cert response. Under the cert name, a later task would eventually write a mapper against it |
+| 2026-08-08 | re-plan | **Intake becomes MANUAL-FIRST and T4 is decoupled from T2.** Owner-approved; design + 7-task plan under `docs/superpowers/` | PSA is blocked at the account with no code-side fix. Manual entry was already required to work in every degraded state (RFC §8) and for CGC/BGS/SGC (§9), so promoting it to the primary path makes the fallback the path everyone uses — it cannot rot. Nothing is discarded: PSA returns as a pre-fill |
+| 2026-08-08 | re-plan | **T2 deferred WHOLE rather than stubbed PSA-free** | Without PSA a cert number identifies nothing, so a PSA-free `/lookup/{cert}` would return an empty shell on every call — code written only to be rewritten, and a false signal to callers that a lookup happened. The manual flow needs no new endpoint: catalog search and T1's duplicate check both already exist |
+| 2026-08-08 | re-plan | **REVERSED T3's rule that `cert_verified_at is None` flags `cert_lookup_failed`.** Flag only on a missing `card_id` | With manual entry primary, that rule would flag every slab and turn Triage into noise. `cert_lookup_failed` means *automation tried and failed*; a human typing a slab in is the opposite. `_review_reason_for_buy` already returns `no_catalog_link`, so this removes work rather than adding it. **The frontend must therefore never send `manual_entry`** |
 | 2026-08-08 | T8 (early, at the owner's request) | **`backend/.env.example` now carries blank `PSA_API_KEY=` and `POKEMONPRICETRACKER_API_KEY=`.** Deliberately **without** the `PSA_DAILY_QUOTA` / `PRICING_DAILY_QUOTA` lines T8 §2 also lists, and the comments diverge from T8's draft text on two points: a graded lookup is budgeted at **2 credits, not 1**, and PSA's "no rate-limit headers" is qualified (a 429 does carry `Retry-After`, and is also what a bad token returns) | The two quota knobs are not fields on `Settings` yet — T2 and T6 add them — and `model_config` uses `extra="ignore"`, so documenting them now would advertise settings that silently do nothing. T8 still owns the rest of §2 (CLAUDE.md, ECS secrets, README); only the two key placeholders are done |
 | 2026-08-08 | T1 | `put_inventory_item` writes the **item first, then the pointer**, and lets a pointer failure propagate rather than swallowing it | The reverse order lets an advisory index write block a real inventory write. This way a crash between them leaves a *missing* pointer (a missed warning, which the RFC already allows an admin to override) rather than a wrong one, and the retry is an idempotent upsert of both |
 
