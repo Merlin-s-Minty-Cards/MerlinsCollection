@@ -1,0 +1,9 @@
+{
+  "url": "https://www.pokemonpricetracker.com/api/v2/cards",
+  "params": {
+    "search": "Lugia ex",
+    "includeEbay": "true",
+    "language": "english",
+    "limit": "1"
+  }
+}
