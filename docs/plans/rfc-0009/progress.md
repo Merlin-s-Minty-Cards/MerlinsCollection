@@ -50,7 +50,7 @@ certs, which unblocked T0. One new blocker replaced them, and it is external.
 
 | Item | Needed from owner | Blocks |
 |---|---|---|
-| **Accept the PSA public-API EULA, then RE-ISSUE the token** | Every call returns `403 {"Message":"Access to this API is limited to approved customers."}`. The key is valid and `Authorization: Bearer` is confirmed correct — **this is an entitlement, not a bug, and no code change can work around it.** Step 1: sign in to the PSA account that owns the token and accept the EULA at **https://www.psacard.com/publicapi/accepteula** (the page 403s to anonymous fetches, so it needs a logged-in session). Step 2: **generate a fresh token afterwards and replace `PSA_API_KEY` in `backend/.env`** — the current one was issued before acceptance, and re-checked after the EULA link was supplied it still 403s, so acceptance alone does not appear to retro-enable an existing token. Fallback if it still fails: `collectors-apis@collectors.com`, the address PSA's own error body gives | **T2**, and the PSA half of T0 |
+| **Get PSA to approve this account for the public API — email them** | `403 {"Message":"Access to this API is limited to approved customers."}` on **every** call. Tried and ruled out: four auth header formats (§1.2 of spike-findings — `Authorization: Bearer` is correct), the EULA page at **https://www.psacard.com/publicapi/accepteula**, and **a key the owner updated on 2026-08-08 at 13:08**, which still 403s. It is **not endpoint-specific** — `GetByCertNumber` and `GetImagesByCertNumber` both 403 — so it is the **account**, not the call. **Stop retrying; each attempt spends quota and cannot succeed.** The remaining action is to email `collectors-apis@collectors.com` (the address PSA's own error body gives) and ask for public-API approval for the account. Key fingerprint at the last failed attempt, so a future "I updated it" is verifiable: `sha256[:12] = e4e50f8717d2` | **T2**, and the PSA half of T0 |
 | Decide whether **T6 proceeds ahead of PSA** | Pricing is verified and unblocked, but without cert-verified identities an automatic price attach is wrong ~1/3 of the time. The proposed rule — auto-attach only on a verified `externalCatalogId` join, otherwise stage or Triage — needs an owner nod | T6 |
 | *(optional)* more **Japanese** cert numbers | JP coverage measured 3/3, but on only 3 cards; T0 asked for at least 5 | confidence in T6 |
 | Rotate both keys | Both were pasted into a chat transcript on 2026-08-07. Rotate once the integration is confirmed working | T8 |
@@ -58,7 +58,7 @@ certs, which unblocked T0. One new blocker replaced them, and it is external.
 | ~~~20 real cert numbers off the shelf~~ | ~~Needed to measure coverage~~ — **19 supplied 2026-08-08** | — |
 
 **When PSA approval lands, re-run the PSA half first** — it is the whole of
-[`spike-findings.md`](spike-findings.md) §1.4 and costs 21 of the 100 daily calls:
+[`spike-findings.md`](spike-findings.md) §1.5 and costs 21 of the 100 daily calls:
 
 ```bash
 cd backend

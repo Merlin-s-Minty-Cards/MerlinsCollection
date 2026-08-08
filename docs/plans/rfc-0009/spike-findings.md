@@ -1,7 +1,7 @@
 # RFC 0009 T0 — Provider spike findings
 
 **Date:** 2026-08-08 · **Task:** [t0-provider-spike.md](t0-provider-spike.md)
-**Spend:** 5 PSA calls (all failed identically), 46 of 100 daily pricing credits.
+**Spend:** 8 PSA calls (every one a 403), 46 of 100 daily pricing credits.
 **Fixtures:** `backend/tests/fixtures/pricing/` (19 cards), `backend/tests/fixtures/psa/` (the 403).
 
 ## THE GATE — a split verdict
@@ -65,7 +65,28 @@ format** — T2 should use exactly that — and the key itself is intact. The ke
 304-character opaque token, not a JWT (checked: one segment, no decodable claims), so
 there is no client-side expiry to read.
 
-### 1.3 What this corrects in the RFC and in my own earlier note
+### 1.3 What has been ruled out
+
+Everything cheap has been tried. **Do not spend more quota re-testing these** — each
+attempt costs a call and none of them can succeed while the account is unapproved.
+
+| Tried | Result |
+|---|---|
+| Four auth header formats (§1.2) | `Authorization: Bearer` confirmed correct |
+| Accepting the EULA at `psacard.com/publicapi/accepteula` | page needs a logged-in session; no change to the 403 |
+| **A key the owner updated on 2026-08-08 13:08** | **still 403** (fingerprint `sha256[:12] = e4e50f8717d2`, length 304 — same length as the original) |
+| A **second endpoint**, `GetImagesByCertNumber` | **also 403** — so it is account-wide, not one route |
+
+The second endpoint is the decisive one: a per-endpoint entitlement would have let one
+through. **The account itself is not on PSA's approved list.** PSA's own documentation
+describes registration and a EULA but says nothing about an approval step, which is
+consistent with public API access having been narrowed to approved customers since
+those docs were written.
+
+**The only remaining action is to ask PSA directly** —
+`collectors-apis@collectors.com`, the address their own error body supplies.
+
+### 1.4 What this corrects in the RFC and in my own earlier note
 
 RFC §5.1 anticipates two failure modes, missing key and 429. **403 "not approved" is
 a third, and it is the one actually happening.** An admin looking at "cert lookup
@@ -78,7 +99,7 @@ distinguish a bad token from a spent quota. With the real key that is too pessim
 unentitled* one returns a clearly distinguishable 403. The follow-up row has been
 updated rather than left standing.
 
-### 1.4 Consequently unanswered
+### 1.5 Consequently unanswered
 
 Every PSA question in T0 remains open, and **none of it can be guessed**: the JSON
 paths to subject/year/brand/variety/number/grade/label/image, whether the body is
@@ -346,5 +367,5 @@ cd backend
 override exists because of §3.3 — the query that finds a card and the owner's name for
 it are different strings often enough that conflating them would hide the problem.
 
-**Re-run `psa` first thing once the account is approved.** It is the whole of §1.4,
+**Re-run `psa` first thing once the account is approved.** It is the whole of §1.5,
 and it costs 21 of the 100 daily calls.
