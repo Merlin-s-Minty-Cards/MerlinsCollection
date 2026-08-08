@@ -18,6 +18,7 @@ from .market import watchlist_router
 from .purchases import router as purchases_router
 from .sales import router as sales_router
 from .show_prep import router as show_prep_router
+from .slabs import router as slabs_router
 from .trades import router as trades_router
 from .triage import router as triage_router
 from .vault import router as vault_router
@@ -41,6 +42,7 @@ admin_router.include_router(vault_router)
 admin_router.include_router(cosigners_router)
 admin_router.include_router(analytics_router)
 admin_router.include_router(triage_router)
+admin_router.include_router(slabs_router)
 
 
 @admin_router.get("/health")

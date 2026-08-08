@@ -15,6 +15,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Literal, Union
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, TypeAdapter, field_validator
 from ulid import ULID
@@ -171,6 +172,9 @@ MACHINE_REVIEW_REASONS = frozenset({
     "manual_entry",
     "no_catalog_link",
     "blank_condition",
+    # A slab whose PSA cert lookup failed -- no key, provider down, or the daily
+    # quota spent -- and which was therefore entered by hand (RFC 0009 §9).
+    "cert_lookup_failed",
 })
 
 
@@ -281,7 +285,19 @@ class RawInventoryItem(_ItemBase):
 
 
 class GradedInventoryItem(_ItemBase):
-    """A slabbed card."""
+    """A slabbed card.
+
+    The four cert fields below are what PSA's cert lookup fills in (RFC 0009 §6),
+    and every one of them is OPTIONAL on purpose: each graded row already in the
+    live table predates them, so a required field would fail validation on all of
+    them the moment this deploys. ``cert_verified_at is None`` is the honest
+    reading of "no provider ever confirmed this cert" — a hand-entered slab and a
+    PSA-verified one must stay distinguishable.
+
+    There is deliberately **no population field**: PSA's public API always returns
+    ``null`` for ``TotalPopulation``/``PopulationHigher`` (RFC 0009 §5.1), so a
+    column for it could only ever hold nothing.
+    """
 
     kind: Literal["graded"] = "graded"
     card_id: str | None = None
@@ -289,6 +305,46 @@ class GradedInventoryItem(_ItemBase):
     company: GradingCompany
     grade: Decimal
     cert_number: str
+    # PSA's own wording for the grade ("GEM MT 10"), which is not derivable from
+    # the numeric ``grade`` -- the label carries qualifiers the number does not.
+    grade_label: str | None = Field(default=None, max_length=50)
+    # When a provider CONFIRMED this cert. None = never verified.
+    cert_verified_at: datetime | None = None
+    # The provider's label/card image. PROVIDER-SUPPLIED and rendered in the admin
+    # UI, so the scheme is validated below rather than trusted.
+    cert_image_url: str | None = Field(default=None, max_length=2000)
+    # The pricing provider's own product id, resolved once and reused so later
+    # refreshes skip the fuzzy name search. Named for the ROLE, not the vendor:
+    # the vendor decision is revisitable (RFC 0009 §5.2) and a column called
+    # after one of them would have to be renamed or lie.
+    price_source_id: str | None = Field(default=None, max_length=100)
+
+    @field_validator("cert_image_url", mode="before")
+    @classmethod
+    def _http_url_only(cls, value: object) -> object:
+        """Accept ``http``/``https`` only; blank means "no image".
+
+        This value comes from a third party and is rendered as a link/image in
+        the admin panel, so a ``javascript:`` URI here is stored XSS waiting for
+        an admin to click it. The codebase already carries one finding for
+        ``tcg_url`` accepting exactly that (RFC 0008 follow-ups); this is the
+        field that does not repeat it.
+
+        ``netloc`` is required too, which is what rejects the protocol-relative
+        ``//evil.example.com/x`` — its scheme is whatever the surrounding page's
+        happens to be, so a scheme check alone would wave it through.
+        """
+        if not isinstance(value, str):
+            return value
+        text = value.strip()
+        if not text:
+            return None
+        parsed = urlparse(text)
+        if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+            raise ValueError(
+                "cert_image_url must be an absolute http:// or https:// URL"
+            )
+        return text
 
 
 class SealedInventoryItem(_ItemBase):

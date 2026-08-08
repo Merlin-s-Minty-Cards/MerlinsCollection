@@ -12,6 +12,7 @@ catalog_card          ``CARD#<id>``         ``META``
 inventory_item        ``INV#<shard>``       ``ITEM#<item_id>``
 graded_price          ``CARD#<id>``         ``GRADEDPRICE#<company>#<grade>``
 price_point           ``CARD#<id>``         ``PRICE#RAW#<finish>#<date>`` / ``PRICE#GRADED#...``
+cert_pointer          ``CERT#<co>#<cert>``  ``POINTER``  (advisory — see ``get_item_id_by_cert``)
 ====================  ====================  ============================================
 
 Inventory is sharded across ``INVENTORY_SHARD_COUNT`` partitions (by a stable
@@ -62,6 +63,18 @@ _MAX_BATCH_ATTEMPTS = 8
 def _grade_key(grade) -> str:
     # Canonical string for a grade in a key: trailing zeros stripped, plain (non-exponent) notation.
     return f"{Decimal(str(grade)).normalize():f}"
+
+
+def _cert_pk(company, cert_number: str) -> str:
+    """Partition key for a slab's cert pointer row.
+
+    Normalization has to be IDENTICAL on the write and read sides or the lookup
+    silently misses: the write side is handed a ``GradingCompany`` enum, while the
+    read side is fed a query string and a hand-typed scan bar, where ``psa`` and a
+    cert with a trailing space are both ordinary.
+    """
+    name = company.value if isinstance(company, Enum) else str(company)
+    return f"CERT#{name.strip().upper()}#{cert_number.strip()}"
 
 
 def _bucket(key: str) -> int:
@@ -908,7 +921,20 @@ class InventoryRepository:
 
     # ---- inventory (keyed by item_id; card link is a sparse GSI1) ----
     def put_inventory_item(self, item):
-        """Insert or overwrite one inventory item (one physical unit)."""
+        """Insert or overwrite one inventory item (one physical unit).
+
+        A graded item with a cert also gets a **cert pointer row**, so "do I
+        already own this slab?" is an O(1) point read instead of a table scan
+        (CLAUDE.md's Ops section records what a scan on a request path cost).
+
+        Ordering matters, the opposite way round from ``put_show``: the ITEM is
+        written first and the pointer second. The pointer is an advisory index —
+        a dangling one is harmless because ``get_item_id_by_cert`` verifies it,
+        while a MISSING one is invisible and never heals. Writing the item first
+        also means a failure on the index can never cost us the real inventory
+        row; the error propagates rather than being swallowed, and the retry
+        upserts both.
+        """
         body = _serialize(item.model_dump(mode="python"))
         record = {
             "PK": f"INV#{_bucket(item.item_id)}",
@@ -922,6 +948,53 @@ class InventoryRepository:
             record["GSI1PK"] = f"CARD#{card_id}"
             record["GSI1SK"] = f"ITEM#{item.item_id}"
         self._table.put_item(Item=record)
+
+        cert_number = (getattr(item, "cert_number", "") or "").strip()
+        if getattr(item, "kind", None) == "graded" and cert_number:
+            # Deliberately NOT generation-stamped. A gen-scoped row that no sweep
+            # knows to remove would be worse than an unscoped one, and the reader
+            # already tolerates an orphan (see docs/plans/rfc-0009/follow-ups.md).
+            self._table.put_item(Item={
+                "PK": _cert_pk(item.company, cert_number),
+                "SK": "POINTER",
+                "entity": "cert_pointer",
+                "item_id": item.item_id,
+                "company": _serialize(item.company),
+                "cert_number": cert_number,
+            })
+
+    def get_item_id_by_cert(self, company, cert_number: str) -> str | None:
+        """The item currently holding this cert, or ``None``.
+
+        The pointer row is ADVISORY and is verified here rather than swept on
+        write. Two writers leave one behind: editing a slab's cert (the old
+        pointer still names the item, which no longer claims that cert) and
+        deleting the item outright (nothing to name at all). Sweeping on write
+        would need the item's OLD cert, i.e. an extra ``get_item`` on *every*
+        inventory write including the bulk import loop, and still would not cover
+        the delete — so the cost lands here, on a per-scan admin path, instead.
+
+        Rebuilding the item's own key and comparing it to the requested one
+        checks the company and the cert in a single expression, under exactly the
+        normalization the write side used.
+
+        Note this holds only the MOST RECENT item per cert; a slab sold and
+        re-bought is legitimate, and duplicate detection warns rather than blocks
+        (RFC 0009 §9).
+        """
+        cert_number = (cert_number or "").strip()
+        if not cert_number:
+            return None
+        pk = _cert_pk(company, cert_number)
+        row = self._table.get_item(Key={"PK": pk, "SK": "POINTER"}).get("Item")
+        if not row:
+            return None
+        item = self.get_inventory_item(row["item_id"])
+        if item is None or getattr(item, "kind", None) != "graded":
+            return None
+        if _cert_pk(item.company, item.cert_number) != pk:
+            return None
+        return item.item_id
 
     def get_inventory_item(self, item_id: str):
         """Fetch one item by id, or ``None`` if absent.

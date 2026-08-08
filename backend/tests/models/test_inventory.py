@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 import pytest
@@ -294,3 +294,97 @@ def test_display_name_override_rejects_over_length_input():
     with pytest.raises(ValidationError):
         RawInventoryItem(**_base(finish="holofoil", condition="NM",
                                  display_name_override="x" * 201))
+
+
+# --- RFC 0009 T1: slab cert-verification fields ---------------------------
+#
+# All four are OPTIONAL, and that is a correctness requirement rather than a
+# style choice: every graded row already in the live table predates them, and a
+# required field would fail validation on all of them at deploy.
+
+
+def _graded(**over):
+    kw = _base(company=GradingCompany.PSA, grade=Decimal("10"),
+               cert_number="12345678")
+    kw.update(over)
+    return kw
+
+
+def test_graded_item_without_cert_fields_validates_with_all_none():
+    """The live-data compatibility test: an existing slab row carries none of
+    the four new fields and must keep validating."""
+    item = InventoryItemAdapter.validate_python({
+        "kind": "graded", "company": "PSA", "grade": Decimal("10"),
+        "cert_number": "12345678", "cost_basis": Decimal("300"),
+        "acquired_at": date(2026, 1, 1),
+    })
+    assert item.grade_label is None
+    assert item.cert_verified_at is None
+    assert item.cert_image_url is None
+    assert item.price_source_id is None
+
+
+def test_graded_cert_fields_round_trip():
+    item = GradedInventoryItem(**_graded(
+        grade_label="GEM MT 10",
+        cert_verified_at=datetime(2026, 8, 7, 12, 30),
+        cert_image_url="https://images.psacard.com/x.jpg",
+        price_source_id="tcg-12345",
+    ))
+    assert item.grade_label == "GEM MT 10"
+    assert item.cert_verified_at == datetime(2026, 8, 7, 12, 30)
+    assert item.cert_image_url == "https://images.psacard.com/x.jpg"
+    assert item.price_source_id == "tcg-12345"
+
+
+@pytest.mark.parametrize("url", [
+    "javascript:alert(1)",
+    "JavaScript:alert(1)",
+    "  javascript:alert(1)",
+    "\tjava\nscript:alert(1)",
+    "data:text/html;base64,PHNjcmlwdD4=",
+    "//evil.example.com/x.jpg",     # protocol-relative: scheme is whatever the page is
+    "https:///x.jpg",               # no host
+    "vbscript:msgbox(1)",
+])
+def test_cert_image_url_rejects_non_http_schemes(url):
+    """It is PROVIDER-SUPPLIED and rendered in the admin UI. The codebase already
+    carries one finding for ``tcg_url`` accepting a ``javascript:`` URI; this is
+    the field that does not repeat it."""
+    with pytest.raises(ValidationError):
+        GradedInventoryItem(**_graded(cert_image_url=url))
+
+
+@pytest.mark.parametrize("url", [
+    "https://images.psacard.com/x.jpg",
+    "http://images.psacard.com/x.jpg",
+    "HTTPS://images.psacard.com/x.jpg",
+    "  https://images.psacard.com/x.jpg  ",
+])
+def test_cert_image_url_accepts_http_and_https(url):
+    item = GradedInventoryItem(**_graded(cert_image_url=url))
+    assert item.cert_image_url == url.strip()
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_cert_image_url_blank_is_none(blank):
+    """A provider that returns an empty string means "no image", not a URL."""
+    assert GradedInventoryItem(**_graded(cert_image_url=blank)).cert_image_url is None
+
+
+def test_grade_label_and_price_source_id_are_bounded():
+    """Both ride into a DynamoDB item with a 400 KB ceiling, and both are
+    provider-supplied rather than typed by us."""
+    with pytest.raises(ValidationError):
+        GradedInventoryItem(**_graded(grade_label="x" * 51))
+    with pytest.raises(ValidationError):
+        GradedInventoryItem(**_graded(price_source_id="x" * 101))
+
+
+def test_cert_lookup_failed_is_a_machine_review_reason():
+    """A slab that PSA could not verify goes to Triage by AUTOMATION, so its
+    reason has to be in the machine vocabulary or the re-flag guard treats it as
+    an admin's own note and stops protecting a reviewed item."""
+    from merlins_collection.models.inventory import MACHINE_REVIEW_REASONS
+
+    assert "cert_lookup_failed" in MACHINE_REVIEW_REASONS

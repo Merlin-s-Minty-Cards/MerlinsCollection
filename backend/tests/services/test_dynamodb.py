@@ -948,3 +948,110 @@ def test_put_sell_session_accepts_float_prices(dynamo_repo):
 
     stored = dynamo_repo.get_sell_session("sell-float-1")
     assert stored["items"][0]["agreed_price"] == Decimal("45.5")
+
+
+# --- RFC 0009 T1: the cert pointer row ------------------------------------
+#
+# "Do I already own this slab?" must be an O(1) point read. CLAUDE.md's Ops
+# section records what a full-table scan on a request path already cost this
+# project once.
+#
+# Staleness is handled on the READ side: the pointer is advisory, and
+# ``get_item_id_by_cert`` re-reads the item and confirms it still claims that
+# cert. The alternative -- sweeping the old pointer on update -- would put an
+# extra ``get_item`` on EVERY inventory write, including the bulk import loop,
+# and still would not cover a deleted item.
+
+
+def _graded_item(cert_number="12345678", company=GradingCompany.PSA, **over):
+    kw = dict(
+        card_id="swsh1-1", cost_basis=Decimal("300"), acquired_at=_date(2026, 1, 1),
+        company=company, grade=Decimal("10"), cert_number=cert_number,
+    )
+    kw.update(over)
+    return GradedInventoryItem(**kw)
+
+
+def test_saving_a_graded_item_writes_a_resolvable_cert_pointer(dynamo_repo):
+    item = _graded_item()
+    dynamo_repo.put_inventory_item(item)
+    assert dynamo_repo.get_item_id_by_cert("PSA", "12345678") == item.item_id
+
+
+def test_get_item_id_by_cert_returns_none_for_unknown_cert(dynamo_repo):
+    assert dynamo_repo.get_item_id_by_cert("PSA", "99999999") is None
+
+
+def _cert_pointer_rows(repo):
+    """Every cert_pointer row in the table. Asserted directly rather than through
+    the reader, because "the lookup returns None" is also what a WRONG pointer
+    looks like -- these two tests are about nothing being written at all."""
+    return [i for i in repo._table.scan().get("Items", [])
+            if i.get("entity") == "cert_pointer"]
+
+
+def test_saving_a_raw_item_writes_no_cert_pointer(dynamo_repo):
+    """A raw single has no cert. Nothing should land in the CERT# partition."""
+    dynamo_repo.put_inventory_item(_raw_item())
+    assert _cert_pointer_rows(dynamo_repo) == []
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_saving_a_graded_item_with_a_blank_cert_writes_no_pointer(dynamo_repo, blank):
+    """An unverified/manual slab may have no cert yet. Writing ``CERT#PSA#``
+    would make every such slab a duplicate of every other."""
+    dynamo_repo.put_inventory_item(_graded_item(cert_number=blank))
+    assert _cert_pointer_rows(dynamo_repo) == []
+
+
+def test_editing_a_cert_makes_the_old_pointer_stop_resolving(dynamo_repo):
+    """The stale-pointer case. Re-pointing a slab at its real cert leaves the
+    old pointer row behind; the reader must not report the item under a cert it
+    no longer claims, or the owner gets a false "duplicate" on a cert they
+    legitimately re-enter."""
+    item = _graded_item(cert_number="11111111")
+    dynamo_repo.put_inventory_item(item)
+    assert dynamo_repo.get_item_id_by_cert("PSA", "11111111") == item.item_id
+
+    corrected = item.model_copy(update={"cert_number": "22222222"})
+    dynamo_repo.put_inventory_item(corrected)
+
+    assert dynamo_repo.get_item_id_by_cert("PSA", "11111111") is None
+    assert dynamo_repo.get_item_id_by_cert("PSA", "22222222") == item.item_id
+
+
+def test_deleted_item_stops_resolving_by_cert(dynamo_repo):
+    """``delete_inventory_item`` does not know about the pointer. Reader-side
+    verification is what keeps the orphan harmless."""
+    item = _graded_item(cert_number="33333333")
+    dynamo_repo.put_inventory_item(item)
+    dynamo_repo.delete_inventory_item(item.item_id)
+    assert dynamo_repo.get_item_id_by_cert("PSA", "33333333") is None
+
+
+def test_cert_pointer_is_scoped_by_grading_company(dynamo_repo):
+    """The same cert digits can exist at two graders; they are different slabs."""
+    psa = _graded_item(cert_number="44444444", company=GradingCompany.PSA)
+    cgc = _graded_item(cert_number="44444444", company=GradingCompany.CGC)
+    dynamo_repo.put_inventory_item(psa)
+    dynamo_repo.put_inventory_item(cgc)
+    assert dynamo_repo.get_item_id_by_cert("PSA", "44444444") == psa.item_id
+    assert dynamo_repo.get_item_id_by_cert("CGC", "44444444") == cgc.item_id
+
+
+def test_cert_lookup_normalizes_company_case_and_surrounding_space(dynamo_repo):
+    """The lookup is fed by a query string and a hand-typed scan bar, so the
+    read side must normalize exactly as the write side did or it silently misses."""
+    item = _graded_item(cert_number="55555555")
+    dynamo_repo.put_inventory_item(item)
+    assert dynamo_repo.get_item_id_by_cert("psa", " 55555555 ") == item.item_id
+
+
+def test_rebuying_a_sold_slab_points_at_the_newest_item(dynamo_repo):
+    """Two items can legitimately share a cert over time -- you sell a slab and
+    buy it back. The pointer holds the MOST RECENT item id."""
+    old = _graded_item(cert_number="66666666")
+    dynamo_repo.put_inventory_item(old)
+    new = _graded_item(cert_number="66666666")
+    dynamo_repo.put_inventory_item(new)
+    assert dynamo_repo.get_item_id_by_cert("PSA", "66666666") == new.item_id
