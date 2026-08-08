@@ -97,7 +97,7 @@ flow), using the `ScanLine` lucide icon.
 
 | Field | Behaviour |
 |---|---|
-| Cert number | Scanned or typed. **Required** — `GradedInventoryItem.cert_number` is `str`, not optional (`models/inventory.py:307`), and it is the key of T1's `CERT#` pointer row, so there is nothing to store a slab under without it. Duplicate check on blur |
+| Cert number | Scanned or typed. **Required — see below.** Duplicate check on blur |
 | Card | Catalog autocomplete, 300 ms debounce. `useAdminApi` prefixes `/admin`, so the call is `api.get('/market/search', { name })` → `GET /admin/market/search`. Selecting sets `card_id` |
 | *(fallback)* Name / Set / Number | Free text, revealed by "Can't find it? Enter manually". Leaves `card_id` unset |
 | Grade | Numeric, half grades allowed (`9.5`). Required |
@@ -109,14 +109,34 @@ flow), using the `ScanLine` lucide icon.
 No condition control — conditions are meaningless for a slab, and the customer
 surface already skips the condition multiplier for graded items.
 
+#### The cert number is required, and that is a definition rather than a constraint
+
+Owner decision, 2026-08-08: **without a cert number it is not a slab, it is just a
+normal card.** The cert is what a graded item *is* — a third party's identified,
+encapsulated judgement — so an entry lacking one does not belong in this flow at all.
+
+Two mechanical facts agree with it, which is how we know the rule is sound rather
+than merely convenient: `GradedInventoryItem.cert_number` is `str`, not `str | None`
+(`models/inventory.py:307`), and the cert is the key of T1's `CERT#` pointer row, so
+there is nowhere to file a slab without one.
+
+**So the form does not offer a "no cert" escape.** The operator with an ungraded card
+in hand is in the wrong place, and the empty-cert validation message should say so —
+point them at the Buy page, which creates raw items. Silently accepting a graded item
+with a blank cert would produce a row that is neither a working slab nor a correct
+raw card.
+
+This raises the stakes on hand entry: for a slab whose label is scuffed or whose
+barcode will not read, typing the cert is the difference between entering that slab
+and not entering it at all.
+
 ### `CertInput` — one path for scanner and keyboard
 
 A wedge scanner is a keyboard that types fast and ends with Enter. **Submission is
 never gated on typing speed**; timing may only decide whether to *auto*-submit, never
 whether an entry is *allowed*. A cert typed slowly over ten seconds is exactly as
 valid as one scanned in 40 ms, and an unreadable barcode makes hand entry the only
-way in — which, since the cert is required, is the difference between entering that
-slab and not.
+way in.
 
 Trailing `\r`/`\n`/spaces are stripped — some scanners append both.
 
@@ -168,7 +188,8 @@ Frontend, `cd frontend && npx vitest run components/admin/slabs app/\(admin\)/ad
 - **SlabEntryForm** — autocomplete selection sets `card_id`; the manual fallback
   leaves it unset and still adds a row; grade accepts `9.5`; company defaults to PSA
   and can be changed to CGC; **cert, grade and cost are all required**; a duplicate
-  cert warns and still allows the add.
+  cert warns and still allows the add. **A blank cert blocks the add and the message
+  points at the Buy page** — an uncerted card is a raw card, not a slab.
 - **StagingTable** — a row missing cost blocks commit and says why; removing the row
   re-enables it; rows are editable after staging.
 - **Page** — commit posts create → items → confirm in order with `kind: "graded"`;
