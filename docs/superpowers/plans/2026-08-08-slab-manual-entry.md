@@ -1012,7 +1012,40 @@ done at the top of this plan.
 - Consumes: `StagedSlab` from Task 4.
 - Produces: `export default function StagingTable(props: { rows: StagedSlab[]; onRemove: (key: string) => void })`
 
-- [ ] **Step 1: Write the failing test**
+> **DONE 2026-08-08 — commit `cb0b59f`.** 15 passed in `components/admin/slabs`
+> (CertInput's 6 + SlabEntryForm's 5 as the regression gate, + 4 new). RED was
+> the predicted `Failed to resolve import "../StagingTable"`. Implemented
+> exactly as written below — no deviation was needed. `next lint` clean on all
+> three slab components.
+>
+> **The `/grade/i` trap class does NOT reach this test — checked before running,
+> confirmed by the green run.** `getByText` matches on `getNodeText`, which joins
+> only an element's **direct text-node children**, so the `<tr>`/`<tbody>`/
+> `<table>` wrappers return `""` and never compete with the `<td>`s. The four
+> queries were each checked for a second candidate: `'89787279'` does not collide
+> with the Remove button's `aria-label="Remove 89787279"` (an aria-label is not
+> text content); `/9\.5/` does not match `"$900.50"` (no `9` is followed by a
+> `.` in `900.50`) and cannot match `grade_label` `"MINT 9.5"` because the table
+> **never renders `grade_label`**. That last one is the fragile link — see below.
+>
+> **⚠️ Two things Task 6 needs.**
+>
+> 1. **`StagingTable` renders 5 of `StagedSlab`'s 9 fields.** `grade_label`,
+>    `location` and `key` are deliberately not displayed (`key` is the React key
+>    and the `onRemove` argument). If a later task adds a `grade_label` column,
+>    **this test's `/9\.5/` becomes ambiguous** — `"MINT 9.5"` would match it too.
+>    Anchor or scope that query at the same time, do not discover it as a mystery.
+> 2. **The spec's "commit is disabled while any row lacks a cost or a grade, and
+>    the button says which" (design doc, *Staging table and commit*) is NOT in
+>    this component**, and neither is the "per-row edit" the File Structure table
+>    above claims for it. Task 5 was built presentational-only — `rows` and
+>    `onRemove`, no state, no api, no validity gating — per the plan's own sketch
+>    and the owner's explicit constraint (2026-08-08). **That gating is now Task
+>    6's**, which is where the Commit button lives anyway. Task 6's tests as
+>    written do not cover it; adding it is a scope call for the owner, not an
+>    assumption to make silently.
+
+- [x] **Step 1: Write the failing test**
 
 ```tsx
 import { describe, it, expect, vi } from 'vitest'
@@ -1056,9 +1089,9 @@ describe('StagingTable', () => {
 })
 ```
 
-- [ ] **Step 2: Run and confirm FAIL, then STOP.** Same command as Task 4. **WAIT for owner confirmation.**
+- [x] **Step 2: Run and confirm FAIL, then STOP.** Same command as Task 4. **WAIT for owner confirmation.**
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```tsx
 'use client'
@@ -1107,16 +1140,16 @@ export default function StagingTable({ rows, onRemove }: {
 }
 ```
 
-- [ ] **Step 4: Run and confirm PASS.**
+- [x] **Step 4: Run and confirm PASS.**
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add frontend/components/admin/slabs/StagingTable.tsx frontend/components/admin/slabs/__tests__/StagingTable.test.tsx
 git commit -m "feat(slabs): staging table for a slab intake batch"
 ```
 
-- [ ] **Step 6: Tick this task's checkboxes, then hand off**
+- [x] **Step 6: Tick this task's checkboxes, then hand off**
 
 Tick every `- [ ]` in Task 5 above to `- [x]` and amend or add a commit so the
 record is durable — a fresh conversation trusts these boxes over any message.
