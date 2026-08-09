@@ -1,0 +1,39 @@
+import { describe, it, expect, vi } from 'vitest'
+import { render, screen, fireEvent } from '@testing-library/react'
+import StagingTable from '../StagingTable'
+import type { StagedSlab } from '../SlabEntryForm'
+
+function row(over: Partial<StagedSlab> = {}): StagedSlab {
+  return {
+    key: 'k1', cert_number: '89787279', card_id: 'en:swsh8-271', name: 'Gengar VMAX',
+    company: 'PSA', grade: '9.5', grade_label: 'MINT 9.5', buy_price: '900.50',
+    location: 'toploader', ...over,
+  }
+}
+
+describe('StagingTable', () => {
+  it('renders one row per staged slab with cert, card, grade and cost', () => {
+    render(<StagingTable rows={[row()]} onRemove={vi.fn()} />)
+    expect(screen.getByText('89787279')).toBeInTheDocument()
+    expect(screen.getByText('Gengar VMAX')).toBeInTheDocument()
+    expect(screen.getByText(/9\.5/)).toBeInTheDocument()
+    expect(screen.getByText(/900\.50/)).toBeInTheDocument()
+  })
+
+  it('marks a row with no catalog link so the operator knows it lands in Triage', () => {
+    render(<StagingTable rows={[row({ card_id: null })]} onRemove={vi.fn()} />)
+    expect(screen.getByText(/no catalog link/i)).toBeInTheDocument()
+  })
+
+  it('removes a row by key', () => {
+    const onRemove = vi.fn()
+    render(<StagingTable rows={[row()]} onRemove={onRemove} />)
+    fireEvent.click(screen.getByRole('button', { name: /remove/i }))
+    expect(onRemove).toHaveBeenCalledWith('k1')
+  })
+
+  it('renders nothing but an empty note when there are no rows', () => {
+    render(<StagingTable rows={[]} onRemove={vi.fn()} />)
+    expect(screen.getByText(/nothing staged/i)).toBeInTheDocument()
+  })
+})
