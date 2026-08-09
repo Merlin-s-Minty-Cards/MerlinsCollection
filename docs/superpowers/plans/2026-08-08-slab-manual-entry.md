@@ -438,7 +438,28 @@ done at the top of this plan.
 
 **Design note — Enter must not submit the form.** A wedge scanner ends its burst with Enter, which arrives before the card, grade and cost are filled. So Enter here **advances**, it does not commit the batch row. `onEnter` is how the form moves focus to the Card field.
 
-- [ ] **Step 1: Write the failing test**
+> **DONE 2026-08-08 — commit `c5b5a00`.** 6 passed in
+> `frontend/components/admin/slabs/__tests__/CertInput.test.tsx`; this task
+> creates the `slabs/` directory, so that file is the whole selection. RED was
+> the predicted `Failed to resolve import "../CertInput"`. Implemented exactly
+> as written below — no deviation was needed.
+>
+> **Checked before implementing, because the component carries both a wrapping
+> `<label><span>Cert number</span>` and `aria-label="Cert number"`:**
+> `getByLabelText` dedupes its matches (`Array.from(new Set(...))`,
+> `@testing-library/dom/dist/queries/label-text.js:89`), so the two routes
+> resolving to the same input is safe, not an ambiguous-match failure.
+> `autoFocus` has precedent in five existing components, so lint is unaffected.
+>
+> **⚠️ A trap waiting in Task 4's test, found here.** Task 4 renders inputs
+> labelled `Grade` **and** `Grade label`, and its helper calls
+> `fill(/grade/i, '9.5')`. That regex matches both, and `getByLabelText` throws
+> `Found multiple elements` on an ambiguous match — dedupe only collapses one
+> element reached twice, it does not pick between two different elements.
+> Task 4 must resolve this deliberately (an anchored `/^grade$/i`, or a label
+> that does not prefix the other) rather than discover it as a mystery failure.
+
+- [x] **Step 1: Write the failing test**
 
 `frontend/components/admin/slabs/__tests__/CertInput.test.tsx`:
 
@@ -501,7 +522,7 @@ describe('CertInput', () => {
 })
 ```
 
-- [ ] **Step 2: Run the test and confirm it FAILS, then STOP**
+- [x] **Step 2: Run the test and confirm it FAILS, then STOP**
 
 ```bash
 cd frontend && npx vitest run components/admin/slabs --reporter=verbose
@@ -510,7 +531,7 @@ Expected: `Failed to resolve import "../CertInput"`.
 
 **Show the owner this output and WAIT for confirmation before Step 3.**
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `frontend/components/admin/slabs/CertInput.tsx`:
 
@@ -567,20 +588,20 @@ export default function CertInput({ value, onChange, onEnter, onBlur, disabled }
 }
 ```
 
-- [ ] **Step 4: Run the test and confirm it PASSES**
+- [x] **Step 4: Run the test and confirm it PASSES**
 
 ```bash
 cd frontend && npx vitest run components/admin/slabs --reporter=verbose
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add frontend/components/admin/slabs/CertInput.tsx frontend/components/admin/slabs/__tests__/CertInput.test.tsx
 git commit -m "feat(slabs): cert input serving scanner and keyboard equally"
 ```
 
-- [ ] **Step 6: Tick this task's checkboxes, then hand off**
+- [x] **Step 6: Tick this task's checkboxes, then hand off**
 
 Tick every `- [ ]` in Task 3 above to `- [x]` and amend or add a commit so the
 record is durable — a fresh conversation trusts these boxes over any message.
