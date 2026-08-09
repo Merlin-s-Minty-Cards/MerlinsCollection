@@ -73,7 +73,13 @@ says.** Write it for someone with no memory of this one.
 - Consumes: nothing from earlier tasks.
 - Produces: `POST /admin/purchases/{buy_id}/items` accepts `kind: "graded"` plus `company: str`, `grade: number|str`, `cert_number: str`, and optional `grade_label`, `cert_verified_at`, `cert_image_url`, `price_source_id`. Persists them onto the session item dict under those exact keys. Task 2 reads them.
 
-- [ ] **Step 1: Write the failing tests**
+> **DONE 2026-08-08 — commit `b9a9798`.** 25 passed in
+> `backend/tests/routers/admin/test_purchases.py` (22 pre-existing + 3 new).
+> Both traps confirmed against real code before implementing: `BuySessionItem`
+> is dead, and `_serialize` recurses into lists so the JSON float `grade: 9.5`
+> becomes `Decimal("9.5")` on write — the float trap does not bite this path.
+
+- [x] **Step 1: Write the failing tests**
 
 Append to `backend/tests/routers/admin/test_purchases.py` inside `class TestBuySessionItems`:
 
@@ -129,7 +135,7 @@ Append to `backend/tests/routers/admin/test_purchases.py` inside `class TestBuyS
         assert len(session["items"]) == 1
 ```
 
-- [ ] **Step 2: Run the tests and confirm they FAIL, then STOP**
+- [x] **Step 2: Run the tests and confirm they FAIL, then STOP**
 
 Run:
 ```bash
@@ -139,7 +145,7 @@ Expected: `test_add_graded_item_persists_slab_fields` fails on `KeyError: 'kind'
 
 **Show the owner this output and WAIT for confirmation before Step 3.** (CLAUDE.md TDD gate.)
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `purchases.py`, above `class BuySessionItem`, add:
 
@@ -183,21 +189,21 @@ Then extend the `buy_item` dict (after `"manual_entry": ...`):
         "price_source_id": body.get("price_source_id"),
 ```
 
-- [ ] **Step 4: Run the tests and confirm they PASS**
+- [x] **Step 4: Run the tests and confirm they PASS**
 
 ```bash
 ./.venv/Scripts/python.exe -m pytest backend/tests/routers/admin/test_purchases.py -q --tb=short
 ```
 Expected: all pass, including the pre-existing raw tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/src/merlins_collection/routers/admin/purchases.py backend/tests/routers/admin/test_purchases.py
 git commit -m "feat(buy): stage graded items in a buy session"
 ```
 
-- [ ] **Step 6: Tick this task's checkboxes, then hand off**
+- [x] **Step 6: Tick this task's checkboxes, then hand off**
 
 Tick every `- [ ]` in Task 1 above to `- [x]` and amend or add a commit so the
 record is durable — a fresh conversation trusts these boxes over any message.
