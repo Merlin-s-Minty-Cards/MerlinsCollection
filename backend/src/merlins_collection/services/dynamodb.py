@@ -1038,32 +1038,62 @@ class InventoryRepository:
         return [InventoryItemAdapter.validate_python(i) for i in items]
 
     # ---- graded current price (separate item; catalog put never touches it) ----
-    def set_graded_market_value(self, card_id, company, grade, value: Decimal):
-        """Record the current manual market value for a graded slab.
+    def set_graded_market_value(self, card_id, company, grade, value: Decimal,
+                                *, source: str = "manual",
+                                confidence: str | None = None):
+        """Record the current market value for a graded slab.
 
         Stored under its own ``GRADEDPRICE#`` item so a catalog re-sync (which
         overwrites the ``META`` item) never clobbers a hand-entered graded price.
+
+        ``source`` says who put the number there — ``"manual"`` (an admin typed
+        it) or ``"provider"`` (RFC 0009 T6 scraped it). It defaults to
+        ``"manual"`` because that is what every caller predating T6 meant, and
+        because the honest failure of a missing default is to understate our
+        confidence rather than overstate it. ``/admin/slabs`` surfaces this, so
+        the UI can say where a figure came from instead of implying they are all
+        equally authoritative.
+
+        ``confidence`` is the pricing vendor's own word for how much it trusts
+        its figure (``high``/``medium``/``low``), stored alongside the price
+        rather than derived from it — the difference between a number built from
+        334 sales and one built from two.
         """
-        self._table.put_item(
-            Item={
-                "PK": f"CARD#{card_id}",
-                "SK": f"GRADEDPRICE#{company}#{_grade_key(grade)}",
-                "entity": "graded_price",
-                "card_id": card_id,
-                "company": _serialize(company),
-                "grade": grade,
-                "market_value": value,
-                "source": "manual",
-                "updated_at": datetime.now(tz=timezone.utc).isoformat(),
-            }
-        )
+        item = {
+            "PK": f"CARD#{card_id}",
+            "SK": f"GRADEDPRICE#{company}#{_grade_key(grade)}",
+            "entity": "graded_price",
+            "card_id": card_id,
+            "company": _serialize(company),
+            # Through `_serialize` because a provider figure arrives as a JSON
+            # NUMBER, i.e. a Python float, which boto3 refuses outright. This is
+            # the exact shape of the production 500 CLAUDE.md records.
+            "grade": _serialize(grade),
+            "market_value": _serialize(value),
+            "source": source,
+            "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+        }
+        if confidence:
+            item["confidence"] = confidence
+        self._table.put_item(Item=item)
 
     def get_graded_market_value(self, card_id, company, grade):
         """Return the stored graded market value, or ``None`` if none is set."""
-        item = self._table.get_item(
+        item = self.get_graded_price_row(card_id, company, grade)
+        return item["market_value"] if item else None
+
+    def get_graded_price_row(self, card_id, company, grade):
+        """Return the whole graded-price row, or ``None``.
+
+        Separate from ``get_graded_market_value`` because the bare figure cannot
+        answer the two questions ``/admin/slabs`` actually asks — *who* priced
+        this and *when*. "$2,479.50, scraped last night" and "$2,479.50, typed in
+        by hand in March" are different facts and the list has to be able to say
+        which it is holding.
+        """
+        return self._table.get_item(
             Key={"PK": f"CARD#{card_id}", "SK": f"GRADEDPRICE#{company}#{_grade_key(grade)}"}
         ).get("Item")
-        return item["market_value"] if item else None
 
     # ---- transaction ledger ----
     @staticmethod

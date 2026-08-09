@@ -1,9 +1,12 @@
 'use client'
 
-import { useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useAdminApi } from '@/lib/admin-api'
 import SlabEntryForm, { type StagedSlab } from '@/components/admin/slabs/SlabEntryForm'
 import StagingTable from '@/components/admin/slabs/StagingTable'
+import SlabList, { type SlabRow } from '@/components/admin/slabs/SlabList'
+
+type PricedFilter = 'all' | 'true' | 'false'
 
 export default function SlabsPage() {
   const api = useAdminApi()
@@ -11,6 +14,29 @@ export default function SlabsPage() {
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [slabs, setSlabs] = useState<SlabRow[]>([])
+  const [total, setTotal] = useState(0)
+  const [priced, setPriced] = useState<PricedFilter>('all')
+  const [listError, setListError] = useState<string | null>(null)
+
+  const loadSlabs = useCallback(async () => {
+    try {
+      const body = await api.get<{ items: SlabRow[]; total: number }>('/slabs', {
+        params: priced === 'all' ? undefined : { priced },
+      })
+      setSlabs(body?.items ?? [])
+      setTotal(body?.total ?? 0)
+      setListError(null)
+    } catch (e) {
+      // The list failing must never take the ENTRY form down with it — intake
+      // is the job this page exists for, and it does not depend on the list.
+      setListError(`Could not load the slab list: ${(e as Error).message}`)
+    }
+  }, [api, priced])
+
+  useEffect(() => {
+    loadSlabs()
+  }, [loadSlabs])
 
   const commit = async () => {
     if (rows.length === 0) return
@@ -38,9 +64,11 @@ export default function SlabsPage() {
       }
 
       await api.post(`/purchases/${buyId}/confirm`, {})
-      const total = rows.reduce((sum, r) => sum + Number(r.buy_price), 0)
-      setResult(`Committed ${rows.length} slab(s), $${total.toFixed(2)}`)
+      const spend = rows.reduce((sum, r) => sum + Number(r.buy_price), 0)
+      setResult(`Committed ${rows.length} slab(s), $${spend.toFixed(2)}`)
       setRows([])
+      // The batch is now real inventory, so the list below is stale.
+      loadSlabs()
     } catch (e) {
       // Stop where we are. An unconfirmed draft creates no inventory, so
       // "do nothing" is the safe state -- never half-commit a batch.
@@ -61,6 +89,32 @@ export default function SlabsPage() {
               className="self-start rounded bg-green-700 px-4 py-2 text-white disabled:opacity-50">
         Commit batch
       </button>
+
+      <section className="flex flex-col gap-3">
+        <div className="flex items-center gap-3">
+          <h2 className="text-lg font-semibold">Slabs on the shelf ({total})</h2>
+          <label className="text-sm">
+            Show{' '}
+            <select
+              aria-label="Filter slabs by pricing"
+              value={priced}
+              onChange={(e) => setPriced(e.target.value as PricedFilter)}
+              className="rounded border px-2 py-1"
+            >
+              <option value="all">All</option>
+              {/* The worklist. An unpriced slab is not Triage-flagged (owner's
+                  decision, 2026-08-08), so this filter is where it surfaces. */}
+              <option value="false">Not priced</option>
+              <option value="true">Priced</option>
+            </select>
+          </label>
+          <button type="button" onClick={loadSlabs} className="rounded border px-3 py-1 text-sm">
+            Refresh
+          </button>
+        </div>
+        {listError && <p role="alert" className="text-red-700">{listError}</p>}
+        <SlabList rows={slabs} />
+      </section>
     </div>
   )
 }

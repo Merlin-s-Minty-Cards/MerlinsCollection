@@ -1,17 +1,23 @@
-"""Tests for ``/admin/slabs`` — RFC 0009 T1, the duplicate-cert check.
+"""Tests for ``/admin/slabs`` — RFC 0009 T1's duplicate-cert check and T6's list.
 
-The question this endpoint answers is "do I already own this slab?", asked once
+The question T1's endpoint answers is "do I already own this slab?", asked once
 per barcode scan during intake. It is a **warning**, not a gate: two items can
 legitimately share a cert over time (you sell a slab and buy it back later), so
 "owned" never blocks — it tells the admin what they are about to re-buy.
 
 "Not owned" is the NORMAL answer and returns ``200``, not ``404``. A 404 would
 make every ordinary scan look like an error to the frontend.
+
+T6 adds ``GET /admin/slabs`` — the slab list, joined to whatever graded price
+row each slab has. An UNPRICED slab is a first-class row there, not an omission:
+after the verified-join rule, every Japanese slab is unpriced by construction
+(spike §3.2), and a list that hid them would hide most of the JP shelf.
 """
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
+from merlins_collection.models.catalog import CatalogCard
 from merlins_collection.models.inventory import (
     Condition,
     GradedInventoryItem,
@@ -141,3 +147,143 @@ class TestCertLookupIgnoresNonGradedItems:
         resp = client.get("/admin/slabs/certs/12345678", headers=_auth(token))
         assert resp.status_code == 200
         assert resp.json() == {"owned": False}
+
+
+# ---------------------------------------------------------------------------
+# T6 — GET /admin/slabs, the slab list
+# ---------------------------------------------------------------------------
+
+def _catalog(card_id="swsh1-1", name="Celebi V"):
+    return CatalogCard(
+        card_id=card_id, name=name, set_id="swsh1", set_name="S&S", number="1",
+        images={"small": "s", "large": "l"}, prices={},
+        last_synced_at=datetime(2026, 8, 8, 12, 0, 0),
+    )
+
+
+class TestSlabList:
+    def test_returns_only_graded_items(self, admin_client):
+        """RED 12. Raw singles are the overwhelming majority of the table; a
+        slab list that included them would be the inventory page again."""
+        client, repo, token = admin_client
+        slab = _graded(cert_number="10000001")
+        repo.put_inventory_item(slab)
+        repo.put_inventory_item(RawInventoryItem(
+            card_id="swsh1-1", finish="holofoil", condition=Condition.NM,
+            cost_basis=Decimal("4"), acquired_at=date(2026, 1, 1),
+        ))
+
+        body = client.get("/admin/slabs", headers=_auth(token)).json()
+        assert [i["item_id"] for i in body["items"]] == [slab.item_id]
+
+    def test_a_slab_with_no_card_id_still_appears_with_a_null_value(self, admin_client):
+        """RED 15. It is real inventory that was really paid for. After the
+        verified-join rule this is the ordinary state of a Japanese slab, so
+        dropping it would drop most of the JP shelf."""
+        client, repo, token = admin_client
+        repo.put_inventory_item(_graded(cert_number="10000002", card_id=None))
+
+        rows = client.get("/admin/slabs", headers=_auth(token)).json()["items"]
+        assert len(rows) == 1
+        assert rows[0]["market_value"] is None
+        assert rows[0]["price_source"] is None
+
+    def test_a_priced_slab_carries_its_value_source_and_age(self, admin_client):
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([_catalog()])
+        repo.put_inventory_item(_graded(cert_number="10000003"))
+        repo.set_graded_market_value("swsh1-1", GradingCompany.PSA, Decimal("10"),
+                                     Decimal("2479.5"))
+
+        row = client.get("/admin/slabs", headers=_auth(token)).json()["items"][0]
+        assert Decimal(row["market_value"]) == Decimal("2479.5")
+        assert row["price_source"] == "manual"
+        assert row["value_as_of"]
+
+    def test_priced_false_returns_only_slabs_with_no_value(self, admin_client):
+        """RED 13. This is the worklist — after the owner's 2026-08-08 decision
+        it is the ONLY worklist, since an unpriced slab is not Triage-flagged."""
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([_catalog()])
+        priced = _graded(cert_number="10000004")
+        unpriced = _graded(cert_number="10000005", card_id=None)
+        repo.put_inventory_item(priced)
+        repo.put_inventory_item(unpriced)
+        repo.set_graded_market_value("swsh1-1", GradingCompany.PSA, Decimal("10"),
+                                     Decimal("100"))
+
+        rows = client.get("/admin/slabs?priced=false", headers=_auth(token)).json()["items"]
+        assert [r["item_id"] for r in rows] == [unpriced.item_id]
+
+        rows = client.get("/admin/slabs?priced=true", headers=_auth(token)).json()["items"]
+        assert [r["item_id"] for r in rows] == [priced.item_id]
+
+    def test_company_and_grade_filter_together(self, admin_client):
+        """RED 14."""
+        client, repo, token = admin_client
+        want = _graded(cert_number="10000006", company=GradingCompany.PSA,
+                       grade=Decimal("10"))
+        wrong_grade = _graded(cert_number="10000007", company=GradingCompany.PSA,
+                              grade=Decimal("9"))
+        wrong_company = _graded(cert_number="10000008", company=GradingCompany.CGC,
+                                grade=Decimal("10"))
+        for item in (want, wrong_grade, wrong_company):
+            repo.put_inventory_item(item)
+
+        rows = client.get("/admin/slabs?company=PSA&grade=10",
+                          headers=_auth(token)).json()["items"]
+        assert [r["item_id"] for r in rows] == [want.item_id]
+
+    def test_a_half_grade_filters_exactly(self, admin_client):
+        """`9.5` and `9` are different slabs and different price rows."""
+        client, repo, token = admin_client
+        half = _graded(cert_number="10000009", grade=Decimal("9.5"))
+        whole = _graded(cert_number="10000010", grade=Decimal("9"))
+        repo.put_inventory_item(half)
+        repo.put_inventory_item(whole)
+
+        rows = client.get("/admin/slabs?grade=9.5", headers=_auth(token)).json()["items"]
+        assert [r["item_id"] for r in rows] == [half.item_id]
+
+    def test_status_narrows_the_list_and_nothing_is_hidden_by_default(self, admin_client):
+        """No default status filter. A sold slab is still a slab you owned and
+        priced, and silently omitting it would make the list disagree with the
+        vault for reasons the operator cannot see."""
+        client, repo, token = admin_client
+        available = _graded(cert_number="10000011")
+        sold = _graded(cert_number="10000012", status=ItemStatus.SOLD)
+        repo.put_inventory_item(available)
+        repo.put_inventory_item(sold)
+
+        everything = client.get("/admin/slabs", headers=_auth(token)).json()
+        assert everything["total"] == 2
+
+        rows = client.get("/admin/slabs?status=sold", headers=_auth(token)).json()["items"]
+        assert [r["item_id"] for r in rows] == [sold.item_id]
+
+    def test_limit_bounds_the_response(self, admin_client):
+        client, repo, token = admin_client
+        for n in range(5):
+            repo.put_inventory_item(_graded(cert_number=f"1100000{n}"))
+
+        body = client.get("/admin/slabs?limit=2", headers=_auth(token)).json()
+        assert len(body["items"]) == 2
+        assert body["total"] == 5, "total counts the matches, not the page"
+
+    def test_rows_carry_what_the_list_renders(self, admin_client):
+        """Card art needs `card_id`; the columns need cert, company, grade,
+        cost and a name."""
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([_catalog()])
+        repo.put_inventory_item(_graded(cert_number="10000013"))
+
+        row = client.get("/admin/slabs", headers=_auth(token)).json()["items"][0]
+        for field in ("item_id", "card_id", "name", "cert_number", "company",
+                      "grade", "cost_basis", "status", "market_value",
+                      "value_as_of", "price_source"):
+            assert field in row, f"{field} missing from a slab row"
+        assert row["name"] == "Celebi V"
+
+    def test_requires_admin_auth(self, admin_client):
+        client, _repo, _token = admin_client
+        assert client.get("/admin/slabs").status_code in (401, 403)

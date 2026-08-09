@@ -42,6 +42,19 @@ class Settings(BaseSettings):
     # NEVER set in production.
     auth_disabled: bool = False
 
+    # --- Graded-slab providers (RFC 0009) ---
+    # PokemonPriceTracker, the per-grade market-value source for slabs. The raw
+    # TCGplayer/Cardmarket feed prices ungraded singles only, so without this a
+    # PSA 10 and a PSA 4 of the same card carry the same number.
+    pokemonpricetracker_api_key: str = ""
+    # Credits per UTC day, NOT lookups per day. A graded lookup costs 2 (1 for
+    # the card + 1 for the eBay sales block), and the free tier is 100 credits —
+    # so this default is FIFTY slab lookups a day. Measured against a live
+    # response, not read off the docs; see docs/plans/rfc-0009/spike-findings.md
+    # §2.1, which also records that you are billed on `limit` even when the
+    # search matches nothing.
+    pricing_daily_quota: int = 100
+
     # --- Admin API key (Retool / external tool access) ---
     # A static bearer token that bypasses Cognito JWT validation for admin routes.
     # Set this to a long random string (e.g. `openssl rand -hex 32`) and configure
