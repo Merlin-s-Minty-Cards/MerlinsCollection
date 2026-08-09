@@ -60,6 +60,14 @@ def snapshot_graded_prices(repo, today: date) -> dict:
 
     Deduplicates by ``(card_id, company, grade)`` so multiples of the same slab
     write only one point per day.
+
+    The point carries the STORED row's ``source`` rather than a hardcoded
+    ``"manual"`` (RFC 0009 T7). Before ``refresh_graded_prices`` existed, every
+    graded value really was hand-typed and the constant was honest; now a chart
+    has to be able to tell a figure someone typed from one the provider fetched,
+    and those are different claims about how much to trust the line. A row
+    written before T6 added the field has no ``source`` at all, so it falls back
+    to ``"manual"`` — which is what it was.
     """
     seen = set()
     written = 0
@@ -70,19 +78,299 @@ def snapshot_graded_prices(repo, today: date) -> dict:
         if key in seen:
             continue
         seen.add(key)
-        value = repo.get_graded_market_value(item.card_id, item.company, item.grade)
+        row = repo.get_graded_price_row(item.card_id, item.company, item.grade)
+        value = row.get("market_value") if row else None
         if value is None:
             continue
         repo.append_price_points(
             [
                 PricePoint(
-                    card_id=item.card_id, date=today, source="manual",
+                    card_id=item.card_id, date=today,
+                    source=row.get("source") or "manual",
                     kind="graded", company=item.company, grade=item.grade, market=value,
                 )
             ]
         )
         written += 1
     return {"graded_points_written": written}
+
+
+# ---------------------------------------------------------------------------
+# Graded pricing — the nightly provider pass (RFC 0009 T7)
+# ---------------------------------------------------------------------------
+
+# Statuses that still mean "we own it". Mirrors `_held_card_ids`, and for the
+# same reason (RFC 0003 §7): a live market figure for something we no longer own
+# has no consumer. Here the reason is sharper, because producing one costs 2 of
+# a 100-credit day.
+_OWNED_STATUSES = (ItemStatus.AVAILABLE, ItemStatus.ON_HOLD)
+
+# 1 credit for the card + 1 for the eBay sales block. `costPerCard: 2`, read off
+# a live response rather than the docs (spike-findings §2.1). This is the whole
+# reason the free tier is FIFTY slabs a night and not a hundred.
+_CREDITS_PER_LOOKUP = 2
+
+# Much tighter than the depth pass's 25, because the unit of waste is different.
+# Every failed call is still BILLED — the client debits as soon as the vendor
+# answers, whatever it answered — so a vendor 500ing at everything would spend
+# the entire day's budget producing nothing. TCGdex failures cost only time.
+_MAX_CONSECUTIVE_FAILURES = 5
+
+
+def build_pricing_provider():
+    """The configured graded-pricing client, or ``None`` when there is no key.
+
+    ``None`` rather than a raise, because the two callers want opposite things
+    from the same absence. The nightly job must degrade — a missing or
+    mid-rotation key cannot be allowed to take down the depth pass and both
+    snapshots with it — while the admin button must report a failure, because a
+    human is standing there waiting for prices that are never coming.
+    """
+    from merlins_collection.services.slab.pricing import (
+        PokemonPriceTrackerClient,
+        PricingProviderError,
+    )
+
+    try:
+        return PokemonPriceTrackerClient(
+            api_key=settings.pokemonpricetracker_api_key
+        )
+    except PricingProviderError as exc:
+        # `exc` is constructed from the config's absence, never from the key.
+        logger.warning("graded pricing unavailable: %s", exc)
+        return None
+
+
+class _ProviderMemo:
+    """Answers a repeated question from within one run instead of re-buying it.
+
+    Two savings, and the second matters more than the money. One vendor response
+    carries EVERY grade — ~23 buckets spanning PSA/BGS/CGC/SGC (spike §2.2) — so
+    a card held in PSA 9 and PSA 10 is one lookup rather than two. And because
+    the memo covers ``resolve`` as well, the FUZZY search runs at most once per
+    card even when several grades of it are queued: T0 measured that search
+    returning the wrong card roughly a third of the time, so halving the number
+    of times we ask is a correctness win, not only a cost one.
+
+    Scoped to one run, deliberately. A figure from last night is exactly what
+    tonight's run exists to replace.
+
+    ``calls`` counts what actually left the process, INCLUDING a call that
+    raised — the vendor bills a 500 the same as a 200 — so it is the honest
+    measure of budget spent.
+    """
+
+    def __init__(self, provider):
+        self._provider = provider
+        self._resolved: dict = {}
+        self._priced: dict = {}
+        self.calls = 0
+
+    def resolve(self, *, name, set_name, number, language=Language.EN):
+        key = (name, set_name, number, language)
+        if key in self._resolved:
+            return self._resolved[key]
+        self.calls += 1
+        result = self._provider.resolve(name=name, set_name=set_name,
+                                        number=number, language=language)
+        self._resolved[key] = result
+        return result
+
+    def prices(self, price_source_id):
+        if price_source_id in self._priced:
+            return self._priced[price_source_id]
+        self.calls += 1
+        result = self._provider.prices(price_source_id)
+        self._priced[price_source_id] = result
+        return result
+
+
+def _graded_candidates(repo) -> list:
+    """Owned slabs, one per ``(card_id, company, grade)``.
+
+    Deduped before anything is spent: two copies of the same slab at the same
+    grade share one price row, so the second copy's lookup would buy a number we
+    already have. An UNLINKED slab is kept as its own candidate — there is no
+    key to dedupe it by, and the loop skips it for free anyway.
+    """
+    seen = set()
+    candidates = []
+    for item in repo.list_inventory():
+        if item.kind != "graded" or item.status not in _OWNED_STATUSES:
+            continue
+        if item.card_id is not None:
+            key = (item.card_id, str(item.company), str(item.grade))
+            if key in seen:
+                continue
+            seen.add(key)
+        candidates.append(item)
+    return candidates
+
+
+def _staleness_key(row, item) -> tuple:
+    """Sort key: never-priced first, then oldest first, then oldest item.
+
+    A slab with no value at all is more urgent than one priced yesterday, and
+    with the budget smaller than the shelf that ordering is the only thing
+    deciding who gets tonight's credits. The ``item_id`` tie-break is not
+    cosmetic: item ids are ULIDs so it is a stable, time-ordered fallback, and
+    without it a truncated run would abandon a *different* arbitrary subset
+    every night — the same trap `refresh_held_prices` sorts its held set to
+    avoid.
+    """
+    if row is None:
+        return (0, "", item.item_id)
+    return (1, str(row.get("updated_at") or ""), item.item_id)
+
+
+def refresh_graded_prices(repo, provider, *,
+                          max_consecutive_failures: int = _MAX_CONSECUTIVE_FAILURES
+                          ) -> dict:
+    """Fetch provider prices for owned slabs, stalest first, within today's budget.
+
+    **This job never calls PSA.** A cert's identity is immutable and population —
+    the only mutable field — is ``null`` on the public API anyway (RFC 0009
+    §5.1), so there is nothing about a slab for PSA to refresh. The only
+    collaborator is the injected pricing provider.
+
+    Everything expensive is decided before a socket opens:
+
+    - a slab with no ``card_id`` is skipped for FREE. ``attach_price`` would
+      refuse it too, but only after paying 2 credits for the answer, and being
+      unlinked is a normal state Triage already surfaces rather than an error.
+    - a PINNED price is skipped for free (owner's decision, 2026-08-09). It is
+      the one figure the operator has said not to touch.
+    - candidates are deduped, then ordered never-priced-first, then capped at
+      what the daily budget can actually pay for.
+
+    Failure posture, mirroring the depth pass because it runs just as
+    unattended: one card's failure is caught, counted and stepped over, so a
+    hiccup on slab 3 of 80 does not cost the other 77. Two things end a run
+    early instead — the budget running out (a clean stop, reported), and
+    ``max_consecutive_failures`` in a row (a dead vendor, whose every 500 is
+    still billed).
+
+    The order of the two ``except`` clauses is load-bearing:
+    ``PricingQuotaExceeded`` SUBCLASSES ``PricingProviderError``, so catching the
+    parent first would book the budget running out as a per-item failure and
+    spin through every remaining candidate collecting 429s.
+    """
+    from merlins_collection.services.slab.pricing import (
+        PricingQuotaExceeded,
+        attach_price,
+    )
+
+    candidates = _graded_candidates(repo)
+    skipped = pinned = priced = unpriced = failures = 0
+
+    plan = []
+    for item in candidates:
+        if not item.card_id:
+            skipped += 1
+            continue
+        row = repo.get_graded_price_row(item.card_id, item.company, item.grade)
+        if row is not None and row.get("pinned"):
+            pinned += 1
+            continue
+        plan.append((_staleness_key(row, item), item))
+    plan.sort(key=lambda pair: pair[0])
+
+    budget = _lookup_budget(provider)
+    memo = _ProviderMemo(provider)
+    consecutive = 0
+    aborted = quota_exhausted = False
+
+    for _key, item in plan:
+        if memo.calls >= budget:
+            # Not a failure: tonight's allowance is simply spent, and the rest of
+            # the shelf is first in line tomorrow because it is now the stalest.
+            quota_exhausted = True
+            break
+        try:
+            result = attach_price(item=item, provider=memo, repo=repo)
+        except PricingQuotaExceeded:
+            # MUST precede the parent clause below.
+            quota_exhausted = True
+            logger.info("graded pricing: daily budget spent; stopping cleanly "
+                        "after %d lookups", memo.calls)
+            break
+        except Exception as exc:  # noqa: BLE001 - one bad card must not end the run
+            failures += 1
+            consecutive += 1
+            # The message, never the request: nothing here may carry the key.
+            logger.warning("graded pricing: %s failed (%s)", item.item_id,
+                           type(exc).__name__)
+            if consecutive >= max_consecutive_failures:
+                aborted = True
+                logger.error("graded pricing aborted after %d consecutive "
+                             "failures; existing prices are untouched", consecutive)
+                break
+            continue
+        consecutive = 0
+        if result.attached:
+            priced += 1
+        else:
+            # Refused, not failed — no coverage for this grade, or the verified
+            # join said no. `result.reason` is the honest answer to "why is this
+            # slab still unpriced?", which is what /admin/slabs?priced=false asks.
+            unpriced += 1
+            logger.info("graded pricing: %s not priced (%s)", item.item_id,
+                        result.reason)
+
+    remaining = _credits_remaining(provider)
+    logger.info(
+        "graded pricing: %d candidates, %d priced, %d unpriced, %d skipped, "
+        "%d pinned, %d failures, %d lookups, %d credits remaining%s",
+        len(candidates), priced, unpriced, skipped, pinned, failures,
+        memo.calls, remaining if remaining is not None else -1,
+        " (ABORTED)" if aborted else "",
+    )
+
+    return {
+        "graded_candidates": len(candidates),
+        "graded_priced": priced,
+        "graded_unpriced": unpriced,
+        "graded_skipped": skipped,
+        "graded_pinned": pinned,
+        "graded_failures": failures,
+        "graded_lookups": memo.calls,
+        "graded_quota_exhausted": quota_exhausted,
+        "graded_aborted": aborted,
+        "graded_credits_remaining": remaining,
+    }
+
+
+def _lookup_budget(provider) -> int:
+    """How many slabs today's remaining credits can actually pay for.
+
+    Read off the provider's own counter when it has one, so a run started with a
+    partly-spent budget refreshes what is left rather than what a fresh day
+    would allow.
+    """
+    remaining = _credits_remaining(provider)
+    if remaining is None:
+        remaining = settings.pricing_daily_quota
+    return max(0, remaining // _CREDITS_PER_LOOKUP)
+
+
+def _credits_remaining(provider) -> int | None:
+    quota = getattr(provider, "quota", None)
+    return None if quota is None else quota.remaining
+
+
+def _no_pricing_provider_summary() -> dict:
+    """The graded keys, all zero, when there is no provider to ask.
+
+    Present rather than absent so a caller reading the summary sees "nothing was
+    priced" instead of a ``KeyError`` — and so the nightly job's printed report
+    has the same shape whether the key is configured or not.
+    """
+    return {
+        "graded_candidates": 0, "graded_priced": 0, "graded_unpriced": 0,
+        "graded_skipped": 0, "graded_pinned": 0, "graded_failures": 0,
+        "graded_lookups": 0, "graded_quota_exhausted": False,
+        "graded_aborted": False, "graded_credits_remaining": None,
+    }
 
 
 def refresh_inventory_market_values(repo) -> int:
@@ -352,7 +640,7 @@ def _refresh_held_prices(repo, client, today, request_delay_seconds,
             "no_usable_price": no_usable_price, "aborted": aborted}
 
 
-def run_daily_sync(repo, client, today: date) -> dict:
+def run_daily_sync(repo, client, today: date, *, pricing_provider=None) -> dict:
     """Run all sync steps in order and return their merged summary.
 
     The depth pass runs FIRST and the order is load-bearing (RFC 0003 §7):
@@ -360,8 +648,28 @@ def run_daily_sync(repo, client, today: date) -> dict:
     ``refresh_held_prices`` has just written, so the other order publishes
     yesterday's figures for a day and makes every new holding wait two runs for
     its first price.
+
+    The graded pass (RFC 0009 T7) sits between them for exactly the same reason:
+    it must land before ``snapshot_graded_prices`` reads the figures into
+    history, and before the denormalization copies them onto the items.
+
+    ``pricing_provider`` is injectable so tests never touch the network; left
+    unset it is built from config. A missing key degrades to "no slabs priced
+    tonight" and NOTHING else — the depth pass, both snapshots and the
+    denormalization all still run. That is deliberate: the graded provider is
+    the newest and least load-bearing of the four steps, and T8's checklist
+    includes rotating both keys, so "no key right now" is a state this job will
+    really meet.
     """
     summary = dict(refresh_held_prices(repo, client, today))
+
+    provider = pricing_provider if pricing_provider is not None else build_pricing_provider()
+    if provider is None:
+        logger.warning("graded pricing skipped: no pricing provider is configured")
+        summary.update(_no_pricing_provider_summary())
+    else:
+        summary.update(refresh_graded_prices(repo, provider))
+
     summary.update(snapshot_graded_prices(repo, today))
     summary.update(snapshot_sealed_prices(repo, today))
     summary["items_refreshed"] = refresh_inventory_market_values(repo)

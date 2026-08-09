@@ -287,3 +287,223 @@ class TestSlabList:
     def test_requires_admin_auth(self, admin_client):
         client, _repo, _token = admin_client
         assert client.get("/admin/slabs").status_code in (401, 403)
+
+
+# ===========================================================================
+# RFC 0009 T7 — the refresh trigger and the price pin
+# ===========================================================================
+#
+# `POST /admin/slabs/refresh-prices` mirrors `POST /admin/market/sync`: a 202,
+# a background run, and a status endpoint to poll. The shape is copied
+# deliberately rather than invented, because the Market page's polling UI is
+# the precedent the frontend will reuse.
+#
+# The pin exists because of the owner's 2026-08-09 precedence decision: a
+# hand-typed price is NOT protected from the provider unless it is explicitly
+# pinned. Without a way to pin, that decision would mean "the provider always
+# wins", which is the option the owner did not pick.
+
+import pytest
+
+from merlins_collection.config import settings
+from merlins_collection.services.slab.pricing import GradedPrices
+
+
+@pytest.fixture(autouse=True)
+def _reset_refresh_status():
+    """The refresh status is a module-level dict, exactly like the two in
+    `routers/admin/market.py`. A test that leaves it `"running"` would 409 every
+    later test that presses the button — the order-dependence `test_market.py`'s
+    own reset fixture exists to prevent."""
+    yield
+    from merlins_collection.routers.admin import slabs
+
+    slabs._REFRESH_STATUS.update({
+        "state": "idle", "started_at": None, "finished_at": None,
+        "candidates": None, "priced": None, "skipped": None, "failures": None,
+        "credits_remaining": None, "error": None,
+    })
+
+
+class _FakeProvider:
+    """Answers one vendor id; records every call. No socket, no credits."""
+
+    def __init__(self, prices=None):
+        self._prices = prices
+        self.calls: list[str] = []
+
+    def resolve(self, *, name, set_name, number, language=None):
+        return None
+
+    def prices(self, price_source_id):
+        self.calls.append(price_source_id)
+        return self._prices
+
+
+def _priced(**by_grade) -> GradedPrices:
+    return GradedPrices(
+        price_source_id="253266",
+        prices={k: Decimal(v) for k, v in by_grade.items()},
+        confidences={k: "high" for k in by_grade},
+        currency="USD", currency_assumed=True, as_of=None,
+    )
+
+
+class TestRefreshPricesTrigger:
+    def test_it_returns_immediately_and_reports_status(self, admin_client,
+                                                       monkeypatch):
+        """RED 12. Same contract as `POST /admin/market/sync`: 202 + a status
+        endpoint, because a run that walks the shelf cannot finish inside a
+        request."""
+        from merlins_collection.routers.admin import slabs
+
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([_catalog()])
+        repo.put_inventory_item(_graded(cert_number="10000101",
+                                        price_source_id="253266"))
+        provider = _FakeProvider(_priced(psa10="2479.5"))
+        monkeypatch.setattr(slabs, "build_pricing_provider", lambda: provider)
+
+        resp = client.post("/admin/slabs/refresh-prices", headers=_auth(token))
+        assert resp.status_code == 202
+        assert resp.json()["state"] == "started"
+
+        status = client.get("/admin/slabs/refresh-prices/status",
+                            headers=_auth(token)).json()
+        assert status["state"] == "completed"
+        assert status["priced"] == 1
+        assert status["error"] is None
+        assert repo.get_graded_market_value(
+            "swsh1-1", GradingCompany.PSA, Decimal("10")) == Decimal("2479.5")
+
+    def test_a_second_trigger_while_one_runs_is_a_409(self, admin_client):
+        """Each run spends real credits — 2 per slab against a 100-credit day.
+        A double-click must not buy the same prices twice."""
+        from merlins_collection.routers.admin import slabs
+
+        client, _repo, token = admin_client
+        slabs._REFRESH_STATUS["state"] = "running"
+
+        resp = client.post("/admin/slabs/refresh-prices", headers=_auth(token))
+        assert resp.status_code == 409
+
+    def test_an_unconfigured_key_reports_a_failure_not_a_silent_success(
+            self, admin_client, monkeypatch):
+        """Unlike the nightly job, which degrades quietly so the other steps
+        still run, a human pressed this button — telling them "completed" when
+        no provider exists would be a lie they cannot see through."""
+        client, _repo, token = admin_client
+        # Forced empty, not assumed: `env_file=".env"` resolves against the CWD,
+        # so a run started from `backend/` would load the REAL key and this test
+        # would spend real credits.
+        monkeypatch.setattr(settings, "pokemonpricetracker_api_key", "")
+
+        client.post("/admin/slabs/refresh-prices", headers=_auth(token))
+
+        status = client.get("/admin/slabs/refresh-prices/status",
+                            headers=_auth(token)).json()
+        assert status["state"] == "failed"
+        assert status["error"]
+
+    def test_the_status_never_leaks_the_api_key(self, admin_client, monkeypatch):
+        """Both keys have already been pasted into a chat transcript once
+        (progress.md). The status dict is served to a browser."""
+        from merlins_collection.routers.admin import slabs
+
+        client, _repo, token = admin_client
+        monkeypatch.setattr(settings, "pokemonpricetracker_api_key", "sekrit-key-xyz")
+
+        def explode():
+            raise RuntimeError("vendor said no")
+
+        monkeypatch.setattr(slabs, "build_pricing_provider", explode)
+        client.post("/admin/slabs/refresh-prices", headers=_auth(token))
+
+        body = client.get("/admin/slabs/refresh-prices/status",
+                          headers=_auth(token)).text
+        assert "sekrit-key-xyz" not in body
+
+    def test_it_requires_admin_auth(self, admin_client):
+        client, _repo, _token = admin_client
+        assert client.post("/admin/slabs/refresh-prices").status_code in (401, 403)
+
+
+class TestPricePin:
+    """The owner's 2026-08-09 decision needs a way to actually pin a price."""
+
+    def test_pinning_protects_a_price_from_the_provider(self, admin_client):
+        client, repo, token = admin_client
+        item = _graded(cert_number="10000102")
+        repo.put_inventory_item(item)
+        repo.set_graded_market_value("swsh1-1", GradingCompany.PSA, Decimal("10"),
+                                     Decimal("5000"), source="manual")
+
+        resp = client.put("/admin/slabs/%s/price/pin" % item.item_id,
+                          json={"pinned": True}, headers=_auth(token))
+
+        assert resp.status_code == 200
+        assert resp.json()["pinned"] is True
+        row = repo.get_graded_price_row("swsh1-1", GradingCompany.PSA, Decimal("10"))
+        assert row["pinned"] is True
+        assert row["market_value"] == Decimal("5000"), "pinning must not touch the figure"
+
+    def test_unpinning_releases_it_back_to_automatic(self, admin_client):
+        client, repo, token = admin_client
+        item = _graded(cert_number="10000103")
+        repo.put_inventory_item(item)
+        repo.set_graded_market_value("swsh1-1", GradingCompany.PSA, Decimal("10"),
+                                     Decimal("5000"), source="manual", pinned=True)
+
+        resp = client.put("/admin/slabs/%s/price/pin" % item.item_id,
+                          json={"pinned": False}, headers=_auth(token))
+
+        assert resp.status_code == 200
+        row = repo.get_graded_price_row("swsh1-1", GradingCompany.PSA, Decimal("10"))
+        assert row["pinned"] is False
+
+    def test_pinning_a_slab_with_no_price_row_is_a_404(self, admin_client):
+        """There is nothing to protect yet. A 200 here would report a pin that
+        the next provider write would silently ignore."""
+        client, repo, token = admin_client
+        item = _graded(cert_number="10000104")
+        repo.put_inventory_item(item)
+
+        resp = client.put("/admin/slabs/%s/price/pin" % item.item_id,
+                          json={"pinned": True}, headers=_auth(token))
+        assert resp.status_code == 404
+
+    def test_pinning_an_unknown_item_is_a_404(self, admin_client):
+        client, _repo, token = admin_client
+        resp = client.put("/admin/slabs/01JQNOTAREALITEMID/price/pin",
+                          json={"pinned": True}, headers=_auth(token))
+        assert resp.status_code == 404
+
+    def test_pinning_a_raw_item_is_refused(self, admin_client):
+        """Raw singles are priced off the catalog card, not off a
+        `GRADEDPRICE#` row — there is no pin to set."""
+        client, repo, token = admin_client
+        raw = RawInventoryItem(card_id="swsh1-1", finish="normal",
+                               condition=Condition.NM, cost_basis=Decimal("1"),
+                               acquired_at=date(2026, 1, 1))
+        repo.put_inventory_item(raw)
+
+        resp = client.put("/admin/slabs/%s/price/pin" % raw.item_id,
+                          json={"pinned": True}, headers=_auth(token))
+        assert resp.status_code in (400, 404)
+
+    def test_the_slab_list_reports_whether_a_price_is_pinned(self, admin_client):
+        """The list is where the operator decides what to protect, so it has to
+        show what is already protected."""
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([_catalog()])
+        repo.put_inventory_item(_graded(cert_number="10000105"))
+        repo.set_graded_market_value("swsh1-1", GradingCompany.PSA, Decimal("10"),
+                                     Decimal("5000"), source="manual", pinned=True)
+
+        row = client.get("/admin/slabs", headers=_auth(token)).json()["items"][0]
+        assert row["price_pinned"] is True
+
+    def test_requires_admin_auth(self, admin_client):
+        client, _repo, _token = admin_client
+        assert client.put("/admin/slabs/anything/price/pin",
+                          json={"pinned": True}).status_code in (401, 403)

@@ -1273,3 +1273,625 @@ def to_catalog_card_brief_for_test(raw_set_id, local_id, name):
         detail="brief",
         last_synced_at=datetime.now(tz=timezone.utc),
     )
+
+
+# ===========================================================================
+# RFC 0009 T7 — the nightly graded-pricing pass
+# ===========================================================================
+#
+# T6 shipped the provider, the per-grade storage and the slab list, but nothing
+# called `attach_price`. This is the job that walks the shelf.
+#
+# TWO OWNER DECISIONS (2026-08-09) drive what these tests assert, and both
+# DEVIATE from the T7 doc as written:
+#
+# 1. **The job DOES do first contact.** The doc's RED item 5 says a slab with no
+#    `price_source_id` is skipped, but that line predates T6: nothing anywhere
+#    sets that id, so a job that skipped them would price nothing, ever, and
+#    `attach_price`'s resolve branch would be dead code. The owner chose "run the
+#    first name search; T6's verified join catches the bad matches".
+# 2. **A hand-typed price is NOT protected unless it is explicitly PINNED.**
+#    The owner rejected both "manual always wins" and "provider always wins".
+#
+# The other standing correction: the budget is **50 slabs, not 100**. A lookup
+# costs 2 credits against a 100-credit free tier and is billed even on zero hits
+# (spike-findings 2.1, measured). The doc's "refresh the 100 stalest" is the
+# pre-measurement figure; follow-ups.md T0 row 1 assigns that doc fix to T8.
+
+from merlins_collection.services.slab.pricing import (  # noqa: E402
+    GradedPrices,
+    PricingProviderError,
+    PricingQuotaExceeded,
+    ResolvedCard,
+)
+from merlins_collection.services.slab.quota import DailyQuota, QuotaExceeded  # noqa: E402
+
+_CREDITS = 2  # 1 for the card + 1 for `includeEbay`; `costPerCard: 2`, measured
+
+
+def _slab(card_id=CARD_ID, *, grade="10", cert="123", price_source_id=None,
+          status=ItemStatus.AVAILABLE, company=GradingCompany.PSA, **over):
+    """A graded item with the knobs this section needs.
+
+    Deliberately not `_graded_item` above, which takes only a `card_id` — these
+    tests turn on grade, status and `price_source_id`.
+    """
+    return GradedInventoryItem(
+        card_id=card_id, listed_price=Decimal("700"), cost_basis=Decimal("300"),
+        acquired_at=date(2026, 1, 1), company=company, grade=Decimal(grade),
+        cert_number=cert, price_source_id=price_source_id, status=status, **over,
+    )
+
+
+def _prices(price_source_id="253266", **by_grade) -> GradedPrices:
+    """Per-grade figures keyed the VENDOR's way (`psa10`), as T6 stores them.
+
+    A grade absent from `by_grade` is absent from the result — never `0`.
+    Confirmed against all 19 recorded fixtures: "no coverage" is a MISSING KEY
+    (spike 2.2), and a slab silently valued at $0 drags every total while
+    looking authoritative.
+    """
+    return GradedPrices(
+        price_source_id=price_source_id,
+        prices={k: Decimal(v) for k, v in by_grade.items()},
+        confidences={k: "high" for k in by_grade},
+        currency="USD", currency_assumed=True, as_of=None,
+    )
+
+
+def _resolved(price_source_id="253266", external_catalog_id="swsh1-1",
+              **by_grade) -> ResolvedCard:
+    """What the vendor's name search returns, prices riding along.
+
+    `en:<external_catalog_id>` IS our `card_id` (spike 3.1) — that identity is
+    the whole verified-join rule, so the default here joins onto `CARD_ID`.
+    """
+    return ResolvedCard(
+        price_source_id=price_source_id, external_catalog_id=external_catalog_id,
+        name="Celebi V", set_name="S&S", number="1",
+        prices=_prices(price_source_id, **by_grade),
+    )
+
+
+class FakePricingProvider:
+    """A `GradedPricing` implementation with a call log and no socket.
+
+    It mirrors the real client's BILLING, which is the part these tests turn on:
+    every call debits 2 credits, and the budget check happens BEFORE the answer,
+    because you are billed on `limit` even when the search matches nothing
+    (spike 2.1, measured — a zero-hit `limit=2` probe still cost 4 credits). A
+    fake that answered for free would make every quota assertion vacuous.
+
+    A `fail` entry bills and THEN raises, matching the 500 case: the real client
+    debits as soon as the vendor answers, whatever it answered
+    (`pricing.py::_get_cards`). A connection error, which never reaches the
+    vendor, is the one shape that costs nothing — and is not what these test.
+    """
+
+    def __init__(self, *, by_id=None, by_name=None, quota=None, fail=()):
+        self._by_id = dict(by_id or {})
+        self._by_name = dict(by_name or {})
+        self.quota = quota or DailyQuota(limit=100, key="test:pricing")
+        self.resolve_calls: list[str] = []
+        self.price_calls: list[str] = []
+        self._fail = set(fail)
+
+    @property
+    def calls(self) -> list[str]:
+        return self.resolve_calls + self.price_calls
+
+    def _bill(self) -> None:
+        try:
+            self.quota.check(_CREDITS)
+        except QuotaExceeded as exc:
+            raise PricingQuotaExceeded(str(exc)) from exc
+        self.quota.record(_CREDITS)
+
+    def resolve(self, *, name, set_name, number, language=Language.EN):
+        self._bill()
+        self.resolve_calls.append(name)
+        if name in self._fail:
+            raise PricingProviderError("simulated vendor failure")
+        return self._by_name.get(name)
+
+    def prices(self, price_source_id):
+        self._bill()
+        self.price_calls.append(price_source_id)
+        if price_source_id in self._fail:
+            raise PricingProviderError("simulated vendor failure")
+        return self._by_id.get(price_source_id)
+
+
+def _write_priced_at(repo, card_id, when, *, grade="10", source="provider"):
+    """Force a graded-price row's `updated_at`, which the writer stamps itself."""
+    repo.set_graded_market_value(card_id, GradingCompany.PSA, Decimal(grade),
+                                 Decimal("100"), source=source)
+    row = repo.get_graded_price_row(card_id, GradingCompany.PSA, Decimal(grade))
+    row["updated_at"] = when
+    repo._table.put_item(Item=row)
+
+
+class TestRefreshGradedPrices:
+    """RED 1-11. The loop that spends real money, unattended."""
+
+    def test_a_run_prices_owned_slabs_and_writes_graded_price_rows(self, dynamo_repo):
+        """RED 1."""
+        from merlins_collection.services.catalog_sync import refresh_graded_prices
+
+        _seed_catalog(dynamo_repo)
+        dynamo_repo.put_inventory_item(_slab(price_source_id="253266"))
+        provider = FakePricingProvider(by_id={"253266": _prices(psa10="2479.5")})
+
+        summary = refresh_graded_prices(dynamo_repo, provider)
+
+        assert summary["graded_priced"] == 1
+        assert dynamo_repo.get_graded_market_value(
+            CARD_ID, GradingCompany.PSA, Decimal("10")) == Decimal("2479.5")
+
+    def test_a_slab_with_no_cached_id_is_resolved_once_and_the_id_is_kept(
+            self, dynamo_repo):
+        """The owner's first-contact decision. The fuzzy search runs ONCE; the
+        vendor id it yields is cached on the item so every later night is the
+        exact `prices(id)` call, which is both cheaper and more correct — the
+        search is where T0 measured the wrong answers coming from."""
+        from merlins_collection.services.catalog_sync import refresh_graded_prices
+
+        _seed_catalog(dynamo_repo)
+        item = _slab()
+        dynamo_repo.put_inventory_item(item)
+        provider = FakePricingProvider(by_name={"Celebi V": _resolved(psa10="2479.5")})
+
+        refresh_graded_prices(dynamo_repo, provider)
+
+        assert provider.resolve_calls == ["Celebi V"]
+        assert dynamo_repo.get_inventory_item(item.item_id).price_source_id == "253266"
+        assert dynamo_repo.get_graded_market_value(
+            CARD_ID, GradingCompany.PSA, Decimal("10")) == Decimal("2479.5")
+
+    def test_a_second_run_never_searches_again(self, dynamo_repo):
+        """The point of caching the id: `resolve()` runs at most once per card,
+        ever. A second night is an exact lookup and no fuzzy call at all."""
+        from merlins_collection.services.catalog_sync import refresh_graded_prices
+
+        _seed_catalog(dynamo_repo)
+        dynamo_repo.put_inventory_item(_slab())
+        first = FakePricingProvider(by_name={"Celebi V": _resolved(psa10="2479.5")})
+        refresh_graded_prices(dynamo_repo, first)
+
+        second = FakePricingProvider(by_id={"253266": _prices(psa10="2500")},
+                                     by_name={"Celebi V": _resolved(psa10="2479.5")})
+        refresh_graded_prices(dynamo_repo, second)
+
+        assert second.resolve_calls == []
+        assert second.price_calls == ["253266"]
+
+    def test_two_slabs_of_the_same_card_and_grade_cost_one_lookup(self, dynamo_repo):
+        """RED 3. Deduped by `(card_id, company, grade)` — and the reason is now
+        money, not tidiness."""
+        from merlins_collection.services.catalog_sync import refresh_graded_prices
+
+        _seed_catalog(dynamo_repo)
+        dynamo_repo.put_inventory_item(_slab(cert="1", price_source_id="253266"))
+        dynamo_repo.put_inventory_item(_slab(cert="2", price_source_id="253266"))
+        provider = FakePricingProvider(by_id={"253266": _prices(psa10="2479.5")})
+
+        refresh_graded_prices(dynamo_repo, provider)
+
+        assert len(provider.calls) == 1
+        assert provider.quota.spent == _CREDITS
+
+    def test_two_grades_of_the_same_card_also_cost_one_lookup(self, dynamo_repo):
+        """One response carries EVERY grade (~23 buckets, spike 2.2), so a PSA 9
+        and a PSA 10 of one card are one call, not two. Without this the fuzzy
+        search would also run twice for a single card — 4 credits, and twice the
+        exposure to the wrong-card answer the join exists to catch."""
+        from merlins_collection.services.catalog_sync import refresh_graded_prices
+
+        _seed_catalog(dynamo_repo)
+        dynamo_repo.put_inventory_item(_slab(cert="1", grade="10"))
+        dynamo_repo.put_inventory_item(_slab(cert="2", grade="9"))
+        provider = FakePricingProvider(
+            by_name={"Celebi V": _resolved(psa10="2479.5", psa9="929.67")},
+            by_id={"253266": _prices(psa10="2479.5", psa9="929.67")},
+        )
+
+        refresh_graded_prices(dynamo_repo, provider)
+
+        assert len(provider.calls) == 1, "one card is one lookup, whatever we hold of it"
+        assert dynamo_repo.get_graded_market_value(
+            CARD_ID, GradingCompany.PSA, Decimal("10")) == Decimal("2479.5")
+        assert dynamo_repo.get_graded_market_value(
+            CARD_ID, GradingCompany.PSA, Decimal("9")) == Decimal("929.67")
+
+    def test_a_slab_with_no_card_id_is_skipped_and_spends_nothing(self, dynamo_repo):
+        """RED 4. Unlinked is a NORMAL state that Triage already surfaces — not
+        an error, and never a billed call. `attach_price` would refuse it anyway,
+        but only after paying 2 credits for the answer."""
+        from merlins_collection.services.catalog_sync import refresh_graded_prices
+
+        dynamo_repo.put_inventory_item(_slab(card_id=None, display_name="Celebi V"))
+        provider = FakePricingProvider(by_name={"Celebi V": _resolved(psa10="1")})
+
+        summary = refresh_graded_prices(dynamo_repo, provider)
+
+        assert provider.calls == []
+        assert provider.quota.spent == 0
+        assert summary["graded_skipped"] == 1
+        assert summary["graded_priced"] == 0
+
+    def test_a_sold_slab_is_not_a_candidate(self, dynamo_repo):
+        """Mirrors `_held_card_ids`: a live market figure for something we no
+        longer own has no consumer (RFC 0003 section 7), and here it would cost 2
+        of the day's 50 lookups to produce one."""
+        from merlins_collection.services.catalog_sync import refresh_graded_prices
+
+        _seed_catalog(dynamo_repo)
+        dynamo_repo.put_inventory_item(
+            _slab(price_source_id="253266", status=ItemStatus.SOLD))
+        provider = FakePricingProvider(by_id={"253266": _prices(psa10="2479.5")})
+
+        summary = refresh_graded_prices(dynamo_repo, provider)
+
+        assert provider.calls == []
+        assert summary["graded_candidates"] == 0
+
+    def test_the_run_is_capped_at_fifty_lookups_on_a_hundred_credit_budget(
+            self, dynamo_repo):
+        """RED 6, with the measured budget. The doc says "150 candidates, quota
+        100 -> 100 refreshed"; that assumed 1 credit per slab. It is **2**
+        (`costPerCard: 2`, confirmed live), so a 100-credit free tier is FIFTY
+        slabs a night. Correcting the doc and the RFC is T8's job (follow-ups.md
+        T0 row 1) — the behaviour is corrected here."""
+        from merlins_collection.services.catalog_sync import refresh_graded_prices
+
+        by_id = {}
+        for n in range(150):
+            dynamo_repo.put_inventory_item(
+                _slab(card_id="en:swsh1-%d" % n, cert=str(n), price_source_id=str(n)))
+            by_id[str(n)] = _prices(str(n), psa10="100")
+        quota = DailyQuota(limit=100, key="test:pricing")
+        provider = FakePricingProvider(by_id=by_id, quota=quota)
+
+        summary = refresh_graded_prices(dynamo_repo, provider)
+
+        assert summary["graded_candidates"] == 150
+        assert len(provider.calls) == 50
+        assert summary["graded_priced"] == 50
+        assert quota.spent == 100
+
+    def test_never_priced_slabs_are_refreshed_before_stale_ones(self, dynamo_repo):
+        """RED 7. A slab with no value at all is more urgent than one priced
+        yesterday, and with the budget smaller than the shelf, "urgent" is the
+        only thing that decides who gets tonight's credits."""
+        from merlins_collection.services.catalog_sync import refresh_graded_prices
+
+        for n in (1, 2):
+            dynamo_repo.put_inventory_item(
+                _slab(card_id="en:swsh1-%d" % n, cert=str(n), price_source_id=str(n)))
+            _write_priced_at(dynamo_repo, "en:swsh1-%d" % n, "2026-08-08T00:00:00+00:00")
+        # Never priced: no graded_price row at all.
+        dynamo_repo.put_inventory_item(
+            _slab(card_id="en:swsh1-3", cert="3", price_source_id="3"))
+
+        quota = DailyQuota(limit=_CREDITS, key="test:pricing")  # exactly one lookup
+        provider = FakePricingProvider(
+            by_id={str(n): _prices(str(n), psa10="200") for n in (1, 2, 3)},
+            quota=quota,
+        )
+
+        refresh_graded_prices(dynamo_repo, provider)
+
+        assert provider.calls == ["3"], "the never-priced slab must go first"
+
+    def test_the_stalest_priced_slab_goes_before_a_fresher_one(self, dynamo_repo):
+        """The second half of RED 7: among slabs that DO have a value, oldest
+        first, so nothing can starve behind a slab priced last night."""
+        from merlins_collection.services.catalog_sync import refresh_graded_prices
+
+        for n in (1, 2):
+            dynamo_repo.put_inventory_item(
+                _slab(card_id="en:swsh1-%d" % n, cert=str(n), price_source_id=str(n)))
+        _write_priced_at(dynamo_repo, "en:swsh1-1", "2026-08-08T00:00:00+00:00")
+        _write_priced_at(dynamo_repo, "en:swsh1-2", "2026-01-01T00:00:00+00:00")
+
+        quota = DailyQuota(limit=_CREDITS, key="test:pricing")
+        provider = FakePricingProvider(
+            by_id={str(n): _prices(str(n), psa10="200") for n in (1, 2)}, quota=quota)
+
+        refresh_graded_prices(dynamo_repo, provider)
+
+        assert provider.calls == ["2"], "January is staler than August"
+
+    def test_one_provider_failure_does_not_abort_the_run(self, dynamo_repo):
+        """RED 8. A hiccup on slab 3 of 80 must not cost the other 77."""
+        from merlins_collection.services.catalog_sync import refresh_graded_prices
+
+        by_id = {}
+        for n in (1, 2, 3):
+            dynamo_repo.put_inventory_item(
+                _slab(card_id="en:swsh1-%d" % n, cert=str(n), price_source_id=str(n)))
+            by_id[str(n)] = _prices(str(n), psa10="100")
+        provider = FakePricingProvider(by_id=by_id, fail={"2"})
+
+        summary = refresh_graded_prices(dynamo_repo, provider)
+
+        assert summary["graded_failures"] == 1
+        assert summary["graded_priced"] == 2
+        assert dynamo_repo.get_graded_market_value(
+            "en:swsh1-3", GradingCompany.PSA, Decimal("10")) == Decimal("100")
+
+    def test_a_dead_vendor_stops_the_run_instead_of_burning_the_budget(
+            self, dynamo_repo):
+        """Every failed call is still BILLED — the real client debits as soon as
+        the vendor answers, whatever it answered. So a vendor returning 500 to
+        everything would spend the whole day's budget producing nothing. Mirrors
+        `refresh_held_prices`' consecutive-failure abort, with a much tighter cap
+        because here the unit of waste is money rather than a free request."""
+        from merlins_collection.services.catalog_sync import refresh_graded_prices
+
+        ids = [str(n) for n in range(20)]
+        for n in ids:
+            dynamo_repo.put_inventory_item(
+                _slab(card_id="en:swsh1-%s" % n, cert=n, price_source_id=n))
+        provider = FakePricingProvider(by_id={}, fail=set(ids))
+
+        summary = refresh_graded_prices(dynamo_repo, provider)
+
+        assert summary["graded_aborted"] is True
+        assert len(provider.calls) <= 5
+
+    def test_a_provider_error_is_never_recorded_as_no_coverage(self, dynamo_repo):
+        """The distinction T6's docstring exists to protect: `PricingProviderError`
+        means the vendor is down, `None` means there is no price. Conflating them
+        is how a nightly job overwrites good prices with silence."""
+        from merlins_collection.services.catalog_sync import refresh_graded_prices
+
+        dynamo_repo.set_graded_market_value(
+            CARD_ID, GradingCompany.PSA, Decimal("10"), Decimal("999"))
+        dynamo_repo.put_inventory_item(_slab(price_source_id="253266"))
+        provider = FakePricingProvider(fail={"253266"})
+
+        summary = refresh_graded_prices(dynamo_repo, provider)
+
+        assert summary["graded_failures"] == 1
+        assert summary["graded_unpriced"] == 0, "a failure is not 'no coverage'"
+        assert dynamo_repo.get_graded_market_value(
+            CARD_ID, GradingCompany.PSA, Decimal("10")) == Decimal("999")
+
+    def test_an_uncovered_grade_writes_no_row_and_is_counted_separately(
+            self, dynamo_repo):
+        """"No coverage" is an ABSENT KEY, never `0` — confirmed against all 19
+        recorded fixtures. T6 refuses to write a row at all in that case, and NO
+        ROW beats a row saying $0: an unpriced slab is visibly unpriced, a $0 one
+        quietly drags every total."""
+        from merlins_collection.services.catalog_sync import refresh_graded_prices
+
+        dynamo_repo.put_inventory_item(_slab(grade="3", price_source_id="253266"))
+        provider = FakePricingProvider(by_id={"253266": _prices(psa10="2479.5")})
+
+        summary = refresh_graded_prices(dynamo_repo, provider)
+
+        assert summary["graded_unpriced"] == 1
+        assert summary["graded_priced"] == 0
+        assert dynamo_repo.get_graded_price_row(
+            CARD_ID, GradingCompany.PSA, Decimal("3")) is None
+
+    def test_quota_exhausted_mid_run_stops_cleanly_and_reports_it(self, dynamo_repo):
+        """RED 10. `PricingQuotaExceeded` SUBCLASSES `PricingProviderError`, so a
+        loop that caught the parent first would book the budget running out as a
+        per-item failure and spin through every remaining candidate collecting
+        429s — the exact thing the doc says not to do."""
+        from merlins_collection.services.catalog_sync import refresh_graded_prices
+
+        by_id = {}
+        for n in range(5):
+            dynamo_repo.put_inventory_item(
+                _slab(card_id="en:swsh1-%d" % n, cert=str(n), price_source_id=str(n)))
+            by_id[str(n)] = _prices(str(n), psa10="100")
+        quota = DailyQuota(limit=100, key="test:pricing")
+        quota.record(96)  # room for exactly two more lookups
+        provider = FakePricingProvider(by_id=by_id, quota=quota)
+
+        summary = refresh_graded_prices(dynamo_repo, provider)
+
+        assert summary["graded_quota_exhausted"] is True
+        assert summary["graded_priced"] == 2
+        assert summary["graded_failures"] == 0, "running out of budget is not a failure"
+        assert len(provider.calls) == 2, "no spinning through the remainder"
+
+    def test_the_run_opens_no_socket_of_its_own(self, dynamo_repo, monkeypatch):
+        """RED 9 — **zero PSA calls**. A cert's identity is immutable and
+        population is `null` on the public API (RFC section 5.1), so there is
+        nothing about a slab to refresh from PSA.
+
+        There is no PSA client to hand a spy to (T2 is deferred whole), so the
+        assertion is the stronger available one: every outbound HTTP call is
+        blocked for the duration of the run. The injected provider is the ONLY
+        collaborator; anything constructing its own client — a PSA lookup, a
+        second pricing client, an image fetch — fails loudly here."""
+        from merlins_collection.services.catalog_sync import refresh_graded_prices
+
+        def no_network(*args, **kwargs):
+            raise AssertionError("the nightly graded pass opened its own socket")
+
+        monkeypatch.setattr("httpx.Client.send", no_network)
+        monkeypatch.setattr("httpx.Client.request", no_network)
+
+        _seed_catalog(dynamo_repo)
+        dynamo_repo.put_inventory_item(_slab(price_source_id="253266"))
+        provider = FakePricingProvider(by_id={"253266": _prices(psa10="2479.5")})
+
+        summary = refresh_graded_prices(dynamo_repo, provider)
+
+        assert summary["graded_priced"] == 1
+        assert provider.price_calls == ["253266"]
+
+    def test_the_summary_reports_what_an_unattended_run_did(self, dynamo_repo):
+        """The only visibility into a job that runs while nobody is watching."""
+        from merlins_collection.services.catalog_sync import refresh_graded_prices
+
+        dynamo_repo.put_inventory_item(_slab(price_source_id="253266"))
+        summary = refresh_graded_prices(
+            dynamo_repo, FakePricingProvider(by_id={"253266": _prices(psa10="1")}))
+
+        for key in ("graded_candidates", "graded_priced", "graded_skipped",
+                    "graded_unpriced", "graded_failures", "graded_pinned",
+                    "graded_quota_exhausted", "graded_aborted",
+                    "graded_credits_remaining"):
+            assert key in summary, "%s missing from the run summary" % key
+
+
+class TestPinnedPrices:
+    """RED 11 — the owner's precedence decision, 2026-08-09.
+
+    A hand-typed price is **not** protected by default; pinning is a separate,
+    deliberate action. The alternative ("manual always wins") was rejected: it
+    would freeze every slab the owner had ever touched out of automatic pricing
+    forever, and `/admin/slabs?priced=false` would not surface them either,
+    because they DO have a value.
+    """
+
+    def test_a_pinned_price_is_never_overwritten_and_costs_no_credit(self, dynamo_repo):
+        from merlins_collection.services.catalog_sync import refresh_graded_prices
+
+        dynamo_repo.set_graded_market_value(
+            CARD_ID, GradingCompany.PSA, Decimal("10"), Decimal("5000"),
+            source="manual", pinned=True)
+        dynamo_repo.put_inventory_item(_slab(price_source_id="253266"))
+        provider = FakePricingProvider(by_id={"253266": _prices(psa10="2479.5")})
+
+        summary = refresh_graded_prices(dynamo_repo, provider)
+
+        assert provider.calls == [], "a pinned slab must not even be looked up"
+        assert summary["graded_pinned"] == 1
+        assert dynamo_repo.get_graded_market_value(
+            CARD_ID, GradingCompany.PSA, Decimal("10")) == Decimal("5000")
+
+    def test_an_unpinned_manual_price_is_refreshed_by_the_provider(self, dynamo_repo):
+        """The other half of the decision, and the one that makes it a choice
+        rather than a default: an ordinary hand-typed value is a bootstrap, and
+        the provider's per-grade comps replace it."""
+        from merlins_collection.services.catalog_sync import refresh_graded_prices
+
+        dynamo_repo.set_graded_market_value(
+            CARD_ID, GradingCompany.PSA, Decimal("10"), Decimal("5000"),
+            source="manual")
+        dynamo_repo.put_inventory_item(_slab(price_source_id="253266"))
+        provider = FakePricingProvider(by_id={"253266": _prices(psa10="2479.5")})
+
+        refresh_graded_prices(dynamo_repo, provider)
+
+        row = dynamo_repo.get_graded_price_row(CARD_ID, GradingCompany.PSA, Decimal("10"))
+        assert row["market_value"] == Decimal("2479.5")
+        assert row["source"] == "provider"
+
+    def test_rewriting_a_price_by_hand_does_not_silently_clear_its_pin(
+            self, dynamo_repo):
+        """`set_graded_market_value` is a whole-row `put_item`, so a later write
+        that says nothing about the pin would drop it — and the owner would find
+        out only when the provider quietly replaced the figure they protected."""
+        dynamo_repo.set_graded_market_value(
+            CARD_ID, GradingCompany.PSA, Decimal("10"), Decimal("5000"),
+            source="manual", pinned=True)
+        dynamo_repo.set_graded_market_value(
+            CARD_ID, GradingCompany.PSA, Decimal("10"), Decimal("5500"),
+            source="manual")
+
+        row = dynamo_repo.get_graded_price_row(CARD_ID, GradingCompany.PSA, Decimal("10"))
+        assert row["market_value"] == Decimal("5500")
+        assert row["pinned"] is True
+
+
+class TestSnapshotSource:
+    """RED 2. A chart has to be able to tell a hand-typed point from a fetched
+    one; before T7 every graded point was stamped `source="manual"` regardless."""
+
+    def test_a_provider_sourced_point_carries_the_provider_as_its_source(
+            self, dynamo_repo):
+        dynamo_repo.set_graded_market_value(
+            CARD_ID, GradingCompany.PSA, Decimal("10"), Decimal("2479.5"),
+            source="provider", confidence="high")
+        dynamo_repo.put_inventory_item(_slab())
+
+        snapshot_graded_prices(dynamo_repo, date(2026, 6, 22))
+
+        point = dynamo_repo.get_price_history(
+            CARD_ID, company=GradingCompany.PSA, grade=Decimal("10"))[0]
+        assert point.source == "provider"
+        assert point.market == Decimal("2479.5")
+
+    def test_a_hand_typed_point_still_says_manual(self, dynamo_repo):
+        dynamo_repo.set_graded_market_value(
+            CARD_ID, GradingCompany.PSA, Decimal("10"), Decimal("500"))
+        dynamo_repo.put_inventory_item(_slab())
+
+        snapshot_graded_prices(dynamo_repo, date(2026, 6, 22))
+
+        point = dynamo_repo.get_price_history(
+            CARD_ID, company=GradingCompany.PSA, grade=Decimal("10"))[0]
+        assert point.source == "manual"
+
+    def test_still_one_point_per_card_company_grade_per_day(self, dynamo_repo):
+        """Unchanged by T7, and pinned here because the fetch step now runs
+        immediately before it."""
+        dynamo_repo.set_graded_market_value(
+            CARD_ID, GradingCompany.PSA, Decimal("10"), Decimal("500"))
+        dynamo_repo.put_inventory_item(_slab(cert="1"))
+        dynamo_repo.put_inventory_item(_slab(cert="2"))
+
+        summary = snapshot_graded_prices(dynamo_repo, date(2026, 6, 22))
+
+        assert summary == {"graded_points_written": 1}
+
+
+class TestDailySyncWiring:
+    """The nightly job as cron actually runs it."""
+
+    def test_the_daily_sync_prices_slabs_before_it_snapshots_them(self, dynamo_repo):
+        """Order is load-bearing, exactly as it is for the depth pass: fetch,
+        then snapshot, then denormalize. The other order publishes yesterday's
+        figure for a day and makes every new slab wait two runs for its first
+        price point."""
+        from merlins_collection.services.catalog_sync import run_daily_sync
+
+        _seed_catalog(dynamo_repo)
+        item = _slab(price_source_id="253266")
+        dynamo_repo.put_inventory_item(item)
+        provider = FakePricingProvider(by_id={"253266": _prices(psa10="2479.5")})
+
+        summary = run_daily_sync(dynamo_repo, FakeTcgdexClient(), date(2026, 6, 22),
+                                 pricing_provider=provider)
+
+        assert summary["graded_priced"] == 1
+        point = dynamo_repo.get_price_history(
+            CARD_ID, company=GradingCompany.PSA, grade=Decimal("10"))[0]
+        assert point.market == Decimal("2479.5")
+        assert point.source == "provider"
+        assert dynamo_repo.get_inventory_item(
+            item.item_id).current_market_value == Decimal("2479.5")
+
+    def test_the_daily_sync_survives_an_unconfigured_pricing_key(self, dynamo_repo,
+                                                                 monkeypatch):
+        """The whole nightly job must not die because one provider is not set up.
+        `PokemonPriceTrackerClient.__init__` RAISES on an empty key, and T8's
+        checklist includes rotating both keys — so "no key today" is a state this
+        job will really meet, and the depth pass, both snapshots and the
+        denormalization all have to survive it."""
+        from merlins_collection.config import settings
+        from merlins_collection.services.catalog_sync import run_daily_sync
+
+        # Forced empty rather than assumed empty. `env_file=".env"` is resolved
+        # against the CWD, so a run started from `backend/` would load the REAL
+        # key — and this test would then make a live, BILLED vendor call.
+        monkeypatch.setattr(settings, "pokemonpricetracker_api_key", "")
+
+        _seed_catalog(dynamo_repo)
+        dynamo_repo.set_graded_market_value(
+            CARD_ID, GradingCompany.PSA, Decimal("10"), Decimal("500"))
+        dynamo_repo.put_inventory_item(_slab(price_source_id="253266"))
+
+        summary = run_daily_sync(dynamo_repo, FakeTcgdexClient(), date(2026, 6, 22))
+
+        assert summary["graded_priced"] == 0
+        assert summary["graded_points_written"] == 1, "the snapshot still ran"
+        assert summary["items_refreshed"] == 1, "the denormalization still ran"

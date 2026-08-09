@@ -22,6 +22,8 @@ from merlins_collection.models.inventory import new_ulid
 from merlins_collection.services import catalog_cache
 from merlins_collection.services.card_text import admin_item_name
 from merlins_collection.services.catalog_sync import (
+    build_pricing_provider,
+    refresh_graded_prices,
     refresh_held_prices,
     refresh_inventory_market_values,
     sync_new_sets,
@@ -43,6 +45,10 @@ _SYNC_STATUS: dict[str, Any] = {
     "started_at": None,
     "finished_at": None,
     "priced_cards": None,
+    # Slabs priced by the graded provider in this run (RFC 0009 T7). Reported
+    # separately from `priced_cards` because they are different vendors on
+    # different budgets, and "0 slabs" is a fact worth being able to see.
+    "priced_slabs": None,
     "updated_items": None,
     "error": None,
 }
@@ -237,20 +243,41 @@ def market_card_confidence(
 # ---------------------------------------------------------------------------
 
 def _run_market_sync(repo: InventoryRepository) -> None:
-    """Background task body: run the depth pass then the item denormalization.
+    """Background task body: refresh raw prices, then graded, then denormalize.
 
-    Mirrors ``scripts/daily_sync.py``'s two-step order — the depth pass writes
-    the catalog prices ``refresh_inventory_market_values`` then denormalizes —
-    but only those two steps; the snapshot steps stay on the scheduled job.
+    Mirrors ``scripts/daily_sync.py``'s order — the depth pass writes the catalog
+    prices ``refresh_inventory_market_values`` then denormalizes — but only the
+    refresh steps; the two snapshot steps stay on the scheduled job.
+
+    **The graded step is RFC 0009 T7's fix to a bug open since Round 2**: this
+    button was raw-only, so pressing it left every slab exactly as unpriced as
+    before. The mismatch was narrower than the old note claimed — the
+    denormalization below always copied a slab's STORED value onto the item —
+    but until T6 there was no provider to FETCH one from, so a slab nobody had
+    hand-priced could never get a number here no matter how often this ran.
+
+    An unconfigured graded provider costs the graded step and nothing else. The
+    raw half is what this button has always been for, and taking it down over a
+    key that only slabs need would be a strictly worse trade.
     """
     try:
         with TcgdexClient() as client:
             price_summary = refresh_held_prices(repo, client, date.today())
+
+        provider = build_pricing_provider()
+        if provider is None:
+            logger.warning("market sync: graded pricing skipped, no provider "
+                           "is configured")
+            graded_summary = {}
+        else:
+            graded_summary = refresh_graded_prices(repo, provider)
+
         updated_items = refresh_inventory_market_values(repo)
         _SYNC_STATUS.update({
             "state": "completed",
             "finished_at": datetime.now(tz=timezone.utc).isoformat(),
             "priced_cards": price_summary.get("cards_updated", 0),
+            "priced_slabs": graded_summary.get("graded_priced", 0),
             "updated_items": updated_items,
             "error": None,
         })
@@ -280,6 +307,7 @@ def trigger_market_sync(
         "started_at": datetime.now(tz=timezone.utc).isoformat(),
         "finished_at": None,
         "priced_cards": None,
+        "priced_slabs": None,
         "updated_items": None,
         "error": None,
     })

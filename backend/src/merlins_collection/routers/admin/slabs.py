@@ -22,16 +22,24 @@ No auth dependency is declared here on purpose — ``admin_router`` already carr
 
 from __future__ import annotations
 
+import logging
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Path, Query
 from pydantic import BaseModel
 
 from merlins_collection.dependencies import get_repo
 from merlins_collection.models.inventory import GradingCompany, ItemStatus
 from merlins_collection.services.card_text import admin_item_name
+from merlins_collection.services.catalog_sync import (
+    build_pricing_provider,
+    refresh_graded_prices,
+)
 from merlins_collection.services.dynamodb import InventoryRepository
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/slabs", tags=["admin-slabs"])
 
@@ -209,6 +217,9 @@ def _slab_row(item, repo: InventoryRepository, price_cache: dict,
         "price_source": price_row.get("source") if price_row else None,
         "value_confidence": price_row.get("confidence") if price_row else None,
         "price_source_id": item.price_source_id,
+        # The list is where an operator decides what to protect, so it has to
+        # show what is already protected.
+        "price_pinned": bool(price_row.get("pinned")) if price_row else False,
     }
 
 
@@ -227,3 +238,166 @@ def _slab_name(item, repo: InventoryRepository, cache: dict) -> str | None:
         card = repo.get_catalog_card(item.card_id)
         cache[item.card_id] = card.name if card else None
     return cache[item.card_id]
+
+
+# ---------------------------------------------------------------------------
+# Refresh trigger (RFC 0009 T7)
+# ---------------------------------------------------------------------------
+
+# Run status, kept in a module-level dict rather than a datastore — the same
+# single-worker assumption, and the same tradeoff, as the two dicts in
+# ``routers/admin/market.py``. A SEPARATE dict from those on purpose: the raw
+# price sync and the graded pass are different jobs against different vendors
+# with different budgets, so one being in flight must not block or clobber the
+# other's report.
+_REFRESH_STATUS: dict[str, Any] = {
+    "state": "idle",
+    "started_at": None,
+    "finished_at": None,
+    "candidates": None,
+    "priced": None,
+    "skipped": None,
+    "failures": None,
+    "credits_remaining": None,
+    "error": None,
+}
+
+
+def _run_slab_price_refresh(repo: InventoryRepository) -> None:
+    """Background body: price every owned slab the day's budget reaches.
+
+    Wrapped end to end, because a crash that left ``state`` on ``"running"``
+    would 409 every future press of the button, permanently.
+
+    A missing provider FAILS here rather than degrading quietly, which is the
+    opposite of what ``run_daily_sync`` does with the same absence — and
+    deliberately so. Nobody is watching the nightly job, so it degrades; a human
+    pressed this, and telling them "completed" while nothing could possibly have
+    been fetched is a lie they cannot see through.
+    """
+    try:
+        provider = build_pricing_provider()
+        if provider is None:
+            raise RuntimeError(
+                "No pricing provider is configured (POKEMONPRICETRACKER_API_KEY "
+                "is unset), so no slab prices can be fetched."
+            )
+        summary = refresh_graded_prices(repo, provider)
+        _REFRESH_STATUS.update({
+            "state": "completed",
+            "finished_at": datetime.now(tz=timezone.utc).isoformat(),
+            "candidates": summary.get("graded_candidates", 0),
+            "priced": summary.get("graded_priced", 0),
+            "skipped": summary.get("graded_skipped", 0),
+            "failures": summary.get("graded_failures", 0),
+            "credits_remaining": summary.get("graded_credits_remaining"),
+            "error": None,
+        })
+    except Exception as exc:  # noqa: BLE001 - report the failure, don't crash the worker
+        # `str(exc)` only. Every exception this path can raise is built from our
+        # own text or a class name — the pricing client is careful never to
+        # construct one from the request — and this dict is served to a browser.
+        _REFRESH_STATUS.update({
+            "state": "failed",
+            "finished_at": datetime.now(tz=timezone.utc).isoformat(),
+            "error": str(exc),
+        })
+
+
+@router.post("/refresh-prices", status_code=202)
+def trigger_slab_price_refresh(
+    background_tasks: BackgroundTasks,
+    repo: InventoryRepository = Depends(get_repo),
+) -> dict[str, str]:
+    """Kick off a graded price refresh; poll ``/refresh-prices/status``.
+
+    Mirrors ``POST /admin/market/sync`` so the Market page's polling UI is the
+    precedent the frontend reuses rather than a second pattern to learn.
+
+    The 409 is not politeness here — it is money. Each run spends up to the whole
+    day's credit budget, so a double-clicked button would buy the same prices
+    twice and leave nothing for tonight's scheduled run.
+    """
+    if _REFRESH_STATUS["state"] == "running":
+        raise HTTPException(status_code=409,
+                            detail="A slab price refresh is already running")
+
+    _REFRESH_STATUS.update({
+        "state": "running",
+        "started_at": datetime.now(tz=timezone.utc).isoformat(),
+        "finished_at": None,
+        "candidates": None,
+        "priced": None,
+        "skipped": None,
+        "failures": None,
+        "credits_remaining": None,
+        "error": None,
+    })
+    background_tasks.add_task(_run_slab_price_refresh, repo)
+    return {"state": "started"}
+
+
+@router.get("/refresh-prices/status")
+def slab_price_refresh_status() -> dict[str, Any]:
+    """Return the current (or most recent) refresh run's status."""
+    return _REFRESH_STATUS
+
+
+# ---------------------------------------------------------------------------
+# Price pin (RFC 0009 T7)
+# ---------------------------------------------------------------------------
+
+class PricePinRequest(BaseModel):
+    pinned: bool
+
+
+@router.put("/{item_id}/price/pin")
+def set_slab_price_pin(
+    item_id: str = Path(..., max_length=64),
+    body: PricePinRequest = ...,
+    repo: InventoryRepository = Depends(get_repo),
+) -> dict[str, Any]:
+    """Protect this slab's graded price from the provider refresh, or release it.
+
+    The owner's precedence decision (2026-08-09) is that a hand-typed price is
+    NOT protected by default — the provider replaces it like any other. Pinning
+    is the deliberate act that says otherwise, and without this endpoint that
+    decision would silently collapse into "the provider always wins", which is
+    the option the owner did not choose.
+
+    Pinning does not touch the figure, its source or its ``updated_at``: it is
+    not a re-pricing and must not appear on a chart as one.
+    """
+    item = repo.get_inventory_item(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    if item.kind != "graded":
+        # Raw singles take their value from the catalog card and sealed products
+        # from the item itself; neither has a `GRADEDPRICE#` row to pin.
+        raise HTTPException(
+            status_code=400,
+            detail="Only graded slabs have a per-grade price to pin.",
+        )
+    if not item.card_id:
+        raise HTTPException(
+            status_code=404,
+            detail="This slab is not linked to a catalog card, so it has no "
+                   "price row to pin.",
+        )
+
+    if not repo.set_graded_price_pinned(item.card_id, item.company, item.grade,
+                                        body.pinned):
+        # Refusing to create the row is the point: a pin is a promise about a
+        # specific figure, and there is no figure yet to promise anything about.
+        raise HTTPException(
+            status_code=404,
+            detail="This slab has no stored price yet, so there is nothing to pin.",
+        )
+
+    return {
+        "item_id": item.item_id,
+        "card_id": item.card_id,
+        "company": item.company.value,
+        "grade": str(item.grade),
+        "pinned": body.pinned,
+    }

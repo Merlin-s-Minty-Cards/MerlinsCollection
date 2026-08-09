@@ -516,3 +516,134 @@ class TestAdminMarketConfidence:
             "/admin/market/card/en:no-card/confidence", headers=_auth(token)
         )
         assert resp.status_code == 404
+
+
+# ===========================================================================
+# RFC 0009 T7 — the graded refresh-skip bug
+# ===========================================================================
+#
+# Open since Round 2 (claude-progress.txt, KNOWN BUGS): "Admin refresh-prices
+# button silently skips graded slabs (raw-only scope); nightly sync does refresh
+# them. Scope mismatch, not a wrong number."
+#
+# The mismatch was real but narrower than the note says: `_run_market_sync`
+# already denormalized a slab's STORED graded value onto the item. What it never
+# did was FETCH one, because until T6 there was no provider to fetch from — so a
+# slab with no hand-typed value stayed unpriced no matter how often the button
+# was pressed. T7 puts the graded fetch into the same run.
+
+from decimal import Decimal as _D  # noqa: E402
+
+from merlins_collection.models.inventory import (  # noqa: E402
+    GradedInventoryItem,
+    GradingCompany,
+)
+from merlins_collection.services.slab.pricing import GradedPrices  # noqa: E402
+
+
+class _FakeGradedProvider:
+    """One vendor id, one answer, no socket. Records what it was asked for."""
+
+    def __init__(self, prices=None):
+        self._prices = prices
+        self.calls: list[str] = []
+
+    def resolve(self, *, name, set_name, number, language=None):
+        return None
+
+    def prices(self, price_source_id):
+        self.calls.append(price_source_id)
+        return self._prices
+
+
+def _graded_prices(**by_grade) -> GradedPrices:
+    return GradedPrices(
+        price_source_id="253266",
+        prices={k: _D(v) for k, v in by_grade.items()},
+        confidences={k: "high" for k in by_grade},
+        currency="USD", currency_assumed=True, as_of=None,
+    )
+
+
+class TestMarketSyncIncludesGradedSlabs:
+    def test_the_market_refresh_now_prices_a_graded_slab(self, admin_client,
+                                                         monkeypatch):
+        """RED 13. Before T7 this slab came out of the run with no value at all:
+        the depth pass excludes graded cards by design, and the denormalizer can
+        only copy a figure that somebody has already stored."""
+        from merlins_collection.routers.admin import market
+
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([_catalog_card(card_id="en:sv1-1")])
+        slab = GradedInventoryItem(
+            card_id="en:sv1-1", cost_basis=_D("300"), acquired_at=date(2026, 1, 1),
+            company=GradingCompany.PSA, grade=_D("10"), cert_number="70000001",
+            price_source_id="253266",
+        )
+        repo.put_inventory_item(slab)
+
+        provider = _FakeGradedProvider(_graded_prices(psa10="2479.5"))
+        monkeypatch.setattr(market, "build_pricing_provider", lambda: provider)
+        monkeypatch.setattr(
+            "merlins_collection.routers.admin.market.refresh_held_prices",
+            lambda repo, tcgdex_client, today: {"cards_updated": 0},
+        )
+
+        resp = client.post("/admin/market/sync", headers=_auth(token))
+        assert resp.status_code == 202
+
+        status = client.get("/admin/market/sync/status", headers=_auth(token)).json()
+        assert status["state"] == "completed", status.get("error")
+        assert provider.calls == ["253266"]
+        assert repo.get_inventory_item(
+            slab.item_id).current_market_value == _D("2479.5")
+
+    def test_the_raw_refresh_is_unchanged(self, admin_client, monkeypatch):
+        """RED 14, the regression gate. Raw singles are the overwhelming majority
+        of the table; adding a graded step must not disturb their path, their
+        counts or the status shape the Market page polls."""
+        from merlins_collection.routers.admin import market
+
+        client, repo, token = admin_client
+        called = {}
+        monkeypatch.setattr(
+            "merlins_collection.routers.admin.market.refresh_held_prices",
+            lambda repo, tcgdex_client, today: (
+                called.update(prices=True) or {"cards_updated": 3}
+            ),
+        )
+        monkeypatch.setattr(
+            "merlins_collection.routers.admin.market.refresh_inventory_market_values",
+            lambda repo: called.update(items=True) or 5,
+        )
+
+        resp = client.post("/admin/market/sync", headers=_auth(token))
+        assert resp.status_code == 202
+
+        status = client.get("/admin/market/sync/status", headers=_auth(token)).json()
+        assert status["state"] == "completed", status.get("error")
+        assert status["priced_cards"] == 3
+        assert status["updated_items"] == 5
+        assert called == {"prices": True, "items": True}
+
+    def test_a_missing_pricing_key_does_not_fail_the_market_sync(self, admin_client,
+                                                                 monkeypatch):
+        """The raw half of the run is the part this button has always been for.
+        An unconfigured graded provider must cost the graded step and nothing
+        else — `PokemonPriceTrackerClient.__init__` raises on an empty key."""
+        from merlins_collection.config import settings
+
+        # Forced empty, not assumed: `env_file=".env"` resolves against the CWD,
+        # so a run from `backend/` would load the real key and bill this test.
+        monkeypatch.setattr(settings, "pokemonpricetracker_api_key", "")
+        monkeypatch.setattr(
+            "merlins_collection.routers.admin.market.refresh_held_prices",
+            lambda repo, tcgdex_client, today: {"cards_updated": 1},
+        )
+
+        client, _repo, token = admin_client
+        client.post("/admin/market/sync", headers=_auth(token))
+
+        status = client.get("/admin/market/sync/status", headers=_auth(token)).json()
+        assert status["state"] == "completed", status.get("error")
+        assert status["priced_cards"] == 1

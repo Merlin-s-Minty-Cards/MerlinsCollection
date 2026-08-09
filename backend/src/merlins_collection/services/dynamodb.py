@@ -1040,7 +1040,8 @@ class InventoryRepository:
     # ---- graded current price (separate item; catalog put never touches it) ----
     def set_graded_market_value(self, card_id, company, grade, value: Decimal,
                                 *, source: str = "manual",
-                                confidence: str | None = None):
+                                confidence: str | None = None,
+                                pinned: bool | None = None):
         """Record the current market value for a graded slab.
 
         Stored under its own ``GRADEDPRICE#`` item so a catalog re-sync (which
@@ -1058,7 +1059,20 @@ class InventoryRepository:
         its figure (``high``/``medium``/``low``), stored alongside the price
         rather than derived from it — the difference between a number built from
         334 sales and one built from two.
+
+        ``pinned`` protects a figure from the nightly provider refresh (RFC 0009
+        T7; owner's decision, 2026-08-09: a hand-typed price is NOT protected
+        unless it is explicitly pinned). ``None`` — the default, and what every
+        caller predating T7 means — **preserves whatever the stored row says**,
+        which is why it costs a read. This method is a whole-row ``put_item``,
+        so the alternative is that an admin re-typing a value silently clears a
+        pin someone set on purpose, and finds out only when the provider
+        replaces the figure they were protecting.
         """
+        if pinned is None:
+            existing = self.get_graded_price_row(card_id, company, grade)
+            pinned = bool(existing.get("pinned")) if existing else False
+
         item = {
             "PK": f"CARD#{card_id}",
             "SK": f"GRADEDPRICE#{company}#{_grade_key(grade)}",
@@ -1071,11 +1085,29 @@ class InventoryRepository:
             "grade": _serialize(grade),
             "market_value": _serialize(value),
             "source": source,
+            "pinned": bool(pinned),
             "updated_at": datetime.now(tz=timezone.utc).isoformat(),
         }
         if confidence:
             item["confidence"] = confidence
         self._table.put_item(Item=item)
+
+    def set_graded_price_pinned(self, card_id, company, grade,
+                                pinned: bool) -> bool:
+        """Pin or unpin an existing graded price. ``False`` if there is no row.
+
+        Deliberately refuses to create a row: pinning is a promise that a
+        specific figure will not be overwritten, and there is nothing to promise
+        about a price that does not exist yet. Re-puts the row as read, so the
+        value, source, confidence and ``updated_at`` all survive — pinning is
+        not a re-pricing and must not look like one on a chart.
+        """
+        row = self.get_graded_price_row(card_id, company, grade)
+        if row is None:
+            return False
+        row["pinned"] = bool(pinned)
+        self._table.put_item(Item=row)
+        return True
 
     def get_graded_market_value(self, card_id, company, grade):
         """Return the stored graded market value, or ``None`` if none is set."""
