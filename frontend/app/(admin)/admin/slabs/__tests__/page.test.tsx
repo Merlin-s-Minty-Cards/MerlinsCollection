@@ -1,0 +1,89 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import SlabsPage from '../page'
+
+const mockApi = { get: vi.fn(), post: vi.fn(), put: vi.fn(), del: vi.fn() }
+vi.mock('@/lib/admin-api', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/admin-api')>('@/lib/admin-api')
+  return { ...actual, useAdminApi: () => mockApi }
+})
+// NOTE: useLocations returns `options`, NOT `locations` (lib/use-locations.ts:13).
+vi.mock('@/lib/use-locations', () => ({
+  useLocations: () => ({ options: [{ value: 'toploader', label: 'Toploader' }], loading: false }),
+}))
+
+function stageOne() {
+  fireEvent.change(screen.getByLabelText(/cert number/i), { target: { value: '89787279' } })
+  fireEvent.change(screen.getByLabelText(/card name/i), { target: { value: 'Gengar VMAX' } })
+  // ANCHORED — /grade/i matches both "Grade" and "Grade label" and throws
+  // "Found multiple elements". Corrected during Task 4; see its DONE note.
+  fireEvent.change(screen.getByLabelText(/^grade$/i), { target: { value: '9.5' } })
+  fireEvent.change(screen.getByLabelText(/cost/i), { target: { value: '900.50' } })
+  fireEvent.click(screen.getByRole('button', { name: /add to batch/i }))
+}
+
+describe('Slabs page', () => {
+  beforeEach(() => {
+    mockApi.get.mockReset(); mockApi.post.mockReset()
+    mockApi.get.mockResolvedValue({ items: [], total: 0 })
+    mockApi.post.mockResolvedValue({ buy_id: 'BUY1' })
+  })
+
+  it('commits create -> items -> confirm in that order with kind graded', async () => {
+    render(<SlabsPage />)
+    stageOne()
+    await screen.findByText('89787279')
+    fireEvent.click(screen.getByRole('button', { name: /commit/i }))
+
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalledTimes(3))
+    const paths = mockApi.post.mock.calls.map((c) => c[0])
+    expect(paths).toEqual(['/purchases', '/purchases/BUY1/items', '/purchases/BUY1/confirm'])
+    expect(mockApi.post.mock.calls[1][1]).toMatchObject({ kind: 'graded', cert_number: '89787279' })
+  })
+
+  it('sends buy_price and grade as JSON numbers, not strings', async () => {
+    render(<SlabsPage />)
+    stageOne()
+    await screen.findByText('89787279')
+    fireEvent.click(screen.getByRole('button', { name: /commit/i }))
+
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalledTimes(3))
+    const body = mockApi.post.mock.calls[1][1]
+    expect(typeof body.buy_price).toBe('number')
+    expect(body.buy_price).toBe(900.5)
+    expect(typeof body.grade).toBe('number')
+  })
+
+  it('never sends manual_entry — every slab is hand-typed and must not flood Triage', async () => {
+    render(<SlabsPage />)
+    stageOne()
+    await screen.findByText('89787279')
+    fireEvent.click(screen.getByRole('button', { name: /commit/i }))
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalledTimes(3))
+    expect(mockApi.post.mock.calls[1][1]).not.toHaveProperty('manual_entry')
+  })
+
+  it('stops without confirming when an item post fails, keeping the rows', async () => {
+    mockApi.post
+      .mockResolvedValueOnce({ buy_id: 'BUY1' })
+      .mockRejectedValueOnce(new Error('boom'))
+    render(<SlabsPage />)
+    stageOne()
+    await screen.findByText('89787279')
+    fireEvent.click(screen.getByRole('button', { name: /commit/i }))
+
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
+    const paths = mockApi.post.mock.calls.map((c) => c[0])
+    expect(paths).not.toContain('/purchases/BUY1/confirm')
+    expect(screen.getByText('89787279')).toBeInTheDocument()
+  })
+
+  it('clears the batch and reports the total on success', async () => {
+    render(<SlabsPage />)
+    stageOne()
+    await screen.findByText('89787279')
+    fireEvent.click(screen.getByRole('button', { name: /commit/i }))
+    await waitFor(() => expect(screen.getByText(/nothing staged/i)).toBeInTheDocument())
+    expect(screen.getByText(/900\.50/)).toBeInTheDocument()
+  })
+})
