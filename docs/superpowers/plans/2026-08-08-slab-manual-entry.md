@@ -1435,7 +1435,43 @@ corrected T3/T4/T5 rows, `README.md`'s dependency table points here, the RFC car
 amendment banner, and `t3-*.md` / `t4-*.md` carry SUPERSEDED banners naming their two
 wrong instructions. **This task is the substantive rewrite**, not the redirect.
 
-- [ ] **Step 1: Correct the RFC**
+> **DONE 2026-08-08 — commit `dea4e37`.** Five files: the RFC, `progress.md`,
+> `README.md`, `t3-*.md`, `t4-*.md`. No tests — this task is prose, and the doc edits
+> are the deliverable. All four up-front navigational corrections were **verified
+> present before rewriting** and none were redone or removed.
+>
+> **The one decision that needed the owner: what to do with the SUPERSEDED banners.**
+> Steps 2 and 3 rewrite the bodies those banners describe, so doing them as written
+> makes each doc contradict its own banner — t4's said *"describes a scan →
+> PSA-lookup pipeline… kept unedited"* directly above a form-based design, and t3's
+> cited a rule Step 3 deletes. **Owner chose: keep the banner, retune only the
+> clauses the rewrite falsifies.** Every redirect, the "T4 depends on T3 only" line
+> and the dependency change survive verbatim.
+>
+> **A pre-existing uncommitted paragraph was found in `progress.md`** — "Both are now
+> finished…", left by an earlier session and never committed. It duplicated the
+> status block this task adds, so the two were **consolidated into one**, not shipped
+> side by side. Nothing else uncommitted was swept into the commit.
+>
+> **The three traps in the brief were all real and all handled:** T3/T4 read `NOT
+> STARTED` and now read `DONE` with their shas; `follow-ups.md` was **not touched**,
+> and the two spec requirements it defers (per-row commit gating, refocus-on-success)
+> are described in the rewritten `t4-*.md` as **explicitly not built**, under their
+> own heading, rather than as shipped behaviour; the RFC's numbers were sourced from
+> `spike-findings.md` §1.1–§2.1 rather than paraphrased.
+>
+> **Two corrections went beyond the letter of Step 1, both measured, both flagged:**
+> §5.2's quota strategy was re-sized from 100 to **50 slabs/day** (it followed
+> directly from `costPerCard: 2` and would otherwise have left T7 sizing its rotation
+> off a doubled budget), and §5.3 gained T0's split verdict. `progress.md`'s status
+> legend also gained `DEFERRED`, which it lacked despite two tasks now using it.
+>
+> **Left alone deliberately:** RFC §7's `/admin/slabs/lookup/{cert}` and §8's scan
+> bar still describe the unbuilt PSA flow. The amendment banner now names them as
+> exactly that. Correcting them belongs with T2, when there is something real to
+> describe.
+
+- [x] **Step 1: Correct the RFC**
 
 In §5.2, replace "1 credit per card" with the measured **2 credits per card** (`costPerCard: 2`, 1 for the card + 1 for `includeEbay`), and add that **billing is on `limit`, not on hits** — a `limit=2` search matching zero cards still cost 4 credits.
 
@@ -1445,26 +1481,26 @@ In §9, add a row: `PSA 403 (account not approved)` → manual entry, and the me
 
 Add to §1 that intake is **manual-first**: PSA lookup pre-fills the form when available and is not required.
 
-- [ ] **Step 2: Rewrite the T4 task doc**
+- [x] **Step 2: Rewrite the T4 task doc**
 
 Replace `t4-slabs-tab-scan-to-commit.md`'s scan-and-lookup pipeline with this plan's form-based design: entry form, catalog autocomplete with free-text fallback, cert required, no `/lookup` call, dependencies **T3 only**.
 
-- [ ] **Step 3: Amend the T3 task doc**
+- [x] **Step 3: Amend the T3 task doc**
 
 Delete the `cert_verified_at is None → cert_lookup_failed` rule and record why (it would flag every slab now that manual entry is primary). Note that `BuySessionItem` is unused, so validation belongs in `add_buy_item`.
 
-- [ ] **Step 4: Update `progress.md` and `README.md`**
+- [x] **Step 4: Update `progress.md` and `README.md`**
 
 Mark T3 and T4 DONE with their commit shas, set T2 to DEFERRED with the dependency change (T4 no longer needs it), and note in the Decisions table that hand-entered slabs are not review-flagged.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add docs/rfcs/0009-slab-intake-and-graded-pricing.md docs/plans/rfc-0009
 git commit -m "docs(slabs): manual-first intake, and the RFC corrections T0 measured"
 ```
 
-- [ ] **Step 6: Tick this task's checkboxes, then hand off — this plan is complete**
+- [x] **Step 6: Tick this task's checkboxes, then hand off — this plan is complete**
 
 Tick every `- [ ]` in Task 7 above to `- [x]` and amend or add a commit so the
 record is durable — a fresh conversation trusts these boxes over any message.
