@@ -269,14 +269,10 @@ def confirm_buy_session(
 
         # Create a new inventory item
         new_item_id = new_ulid()
-        item_data = {
-            "kind": "raw",
+        common = {
             "item_id": new_item_id,
             "card_id": buy_item.get("card_id"),
             "status": "available",
-            "finish": buy_item.get("finish", "normal"),
-            "condition": buy_item.get("condition", "NM"),
-            "condition_modifier": buy_item.get("condition_modifier"),
             "language": buy_item.get("language", "EN"),
             "location": buy_item.get("location", "toploader"),
             "cost_basis": str(buy_price),
@@ -289,6 +285,32 @@ def confirm_buy_session(
             "review_reason": _review_reason_for_buy(buy_item),
         }
 
+        if buy_item.get("kind") == "graded":
+            # `str()` on grade before validation, deliberately: the frontend
+            # sends 9.5 as a JSON number, and routing it through str() gives
+            # pydantic an exact Decimal("9.5") instead of a binary float.
+            item_data = {
+                **common,
+                "kind": "graded",
+                "company": buy_item["company"],
+                "grade": str(buy_item["grade"]),
+                "cert_number": str(buy_item["cert_number"]),
+                "grade_label": buy_item.get("grade_label"),
+                "cert_verified_at": buy_item.get("cert_verified_at"),
+                "cert_image_url": buy_item.get("cert_image_url"),
+                "price_source_id": buy_item.get("price_source_id"),
+            }
+            category = ItemCategory.GRADED
+        else:
+            item_data = {
+                **common,
+                "kind": "raw",
+                "finish": buy_item.get("finish", "normal"),
+                "condition": buy_item.get("condition", "NM"),
+                "condition_modifier": buy_item.get("condition_modifier"),
+            }
+            category = ItemCategory.RAW
+
         inv_item = InventoryItemAdapter.validate_python(item_data)
         repo.put_inventory_item(inv_item)
         items_created += 1
@@ -297,7 +319,7 @@ def confirm_buy_session(
         txn = Transaction(
             type=TransactionType.PURCHASE,
             item_id=new_item_id,
-            category=ItemCategory.RAW,
+            category=category,
             date=txn_date,
             amount=buy_price,
             payment_method=payment_method,

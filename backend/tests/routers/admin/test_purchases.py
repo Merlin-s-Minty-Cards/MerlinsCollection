@@ -4,9 +4,11 @@ Covers full buy session lifecycle: create, add items, confirm, cancel.
 """
 
 from datetime import date
+from decimal import Decimal
 
 
-from merlins_collection.models.inventory import ItemStatus
+from merlins_collection.models.business import ItemCategory
+from merlins_collection.models.inventory import GradingCompany, ItemStatus
 
 
 # ---- fixtures ----
@@ -405,3 +407,88 @@ class TestConditionModifierInPurchase:
         all_items = repo.list_inventory()
         assert len(all_items) == 1
         assert all_items[0].condition_modifier is None
+
+
+class TestConfirmGraded:
+    def _graded_session(self, client, token, **overrides):
+        create = client.post("/admin/purchases", json={}, headers=_auth(token))
+        buy_id = create.json()["buy_id"]
+        payload = {
+            "kind": "graded", "name": "Gengar VMAX", "buy_price": 900.50,
+            "company": "PSA", "grade": 9.5, "cert_number": "89787279",
+            "card_id": "en:swsh8-271", "location": "toploader",
+        }
+        payload.update(overrides)
+        client.post(f"/admin/purchases/{buy_id}/items", json=payload,
+                    headers=_auth(token))
+        return buy_id
+
+    def test_confirm_creates_graded_inventory_item(self, admin_client):
+        client, repo, token = admin_client
+        buy_id = self._graded_session(client, token)
+
+        resp = client.post(f"/admin/purchases/{buy_id}/confirm", headers=_auth(token))
+        assert resp.status_code == 200
+        assert resp.json()["items_created"] == 1
+
+        items = repo.list_inventory()
+        item = next(i for i in items if getattr(i, "cert_number", None) == "89787279")
+        assert item.kind == "graded"
+        assert item.company.value == "PSA"
+        assert item.grade == Decimal("9.5")
+        # Money must survive a JSON float exactly -- not 900.4999999...
+        assert item.cost_basis == Decimal("900.50")
+
+    def test_graded_transaction_uses_graded_category(self, admin_client):
+        client, repo, token = admin_client
+        buy_id = self._graded_session(client, token)
+        client.post(f"/admin/purchases/{buy_id}/confirm", headers=_auth(token))
+
+        # `list_transactions` takes a date RANGE -- there is no no-arg form.
+        today = date.today()
+        txns = repo.list_transactions(today, today)
+        assert txns[0].category == ItemCategory.GRADED
+
+    def test_cert_pointer_row_exists_after_confirm(self, admin_client):
+        client, repo, token = admin_client
+        buy_id = self._graded_session(client, token)
+        client.post(f"/admin/purchases/{buy_id}/confirm", headers=_auth(token))
+
+        assert repo.get_item_id_by_cert(GradingCompany.PSA, "89787279") is not None
+
+    def test_catalog_matched_slab_is_not_flagged_for_review(self, admin_client):
+        """The core of the manual-first pivot: a hand-typed slab that resolved to
+        a catalog card is NOT review-flagged. Flagging every slab would make
+        Triage noise, and `cert_lookup_failed` means automation tried and failed
+        -- a human typing a slab in is the opposite of that."""
+        client, repo, token = admin_client
+        buy_id = self._graded_session(client, token)
+        client.post(f"/admin/purchases/{buy_id}/confirm", headers=_auth(token))
+
+        item = next(i for i in repo.list_inventory()
+                    if getattr(i, "cert_number", None) == "89787279")
+        assert item.needs_review is False
+        assert item.review_reason is None
+
+    def test_slab_without_catalog_match_is_flagged_no_catalog_link(self, admin_client):
+        client, repo, token = admin_client
+        buy_id = self._graded_session(client, token, card_id=None)
+        client.post(f"/admin/purchases/{buy_id}/confirm", headers=_auth(token))
+
+        item = next(i for i in repo.list_inventory()
+                    if getattr(i, "cert_number", None) == "89787279")
+        assert item.needs_review is True
+        assert item.review_reason == "no_catalog_link"
+
+    def test_raw_and_graded_in_one_session_both_confirm(self, admin_client):
+        client, repo, token = admin_client
+        buy_id = self._graded_session(client, token)
+        client.post(f"/admin/purchases/{buy_id}/items", json={
+            "name": "Pikachu", "buy_price": "5.00",
+        }, headers=_auth(token))
+
+        resp = client.post(f"/admin/purchases/{buy_id}/confirm", headers=_auth(token))
+        assert resp.json()["items_created"] == 2
+        assert resp.json()["total_cost"] == "905.50"
+        kinds = sorted(i.kind for i in repo.list_inventory())
+        assert kinds == ["graded", "raw"]
