@@ -1171,7 +1171,50 @@ done at the top of this plan.
 - Consumes: `SlabEntryForm`, `StagedSlab`, `StagingTable`.
 - Produces: the `/admin/slabs` route.
 
-- [ ] **Step 1: Write the failing test**
+> **DONE 2026-08-08 — commit `ec56727`.** 20 passed across
+> `components/admin/slabs` + `app/(admin)/admin/slabs` (the 15 existing slab
+> component tests as the regression gate + 5 new). RED was the predicted
+> `Failed to resolve import "../page"`. `npm run lint` clean on the new files —
+> the single remaining warning is pre-existing in `CardDetailModal.tsx`.
+> Implemented exactly as written below; no deviation was needed.
+>
+> **The `/grade/i` trap is now CLOSED.** Task 4 predicted it would survive into
+> this test, and it did — the `stageOne()` helper above already carried the
+> anchored `/^grade$/i`, which was copied verbatim rather than "simplified".
+> Verified against real code first: `SlabEntryForm` renders `aria-label="Grade"`
+> (`SlabEntryForm.tsx:207`) **and** `aria-label="Grade label"` (`:218`), so an
+> unanchored regex would have thrown `Found multiple elements`. **This was the
+> last place the trap survived; no later task inherits it.**
+>
+> **The vitest CLI filter `"app/(admin)/admin/slabs"` works** — the parentheses
+> are matched literally as a path substring, not as a regex group. It resolved to
+> exactly one file. No escaping needed beyond the shell quotes.
+>
+> **Two spec requirements were raised with the owner and DEFERRED, not dropped.**
+> Both are recorded in [`docs/plans/rfc-0009/follow-ups.md`](../../plans/rfc-0009/follow-ups.md)
+> under a new **T4** section, with the owner's decision (2026-08-08):
+>
+> 1. **Per-row commit gating** — the design doc's "commit is disabled while any
+>    row lacks a cost or a grade, and the button says which" is in neither
+>    `StagingTable` (presentational, Task 5's owner constraint) nor this page.
+>    Task 5 flagged it as unowned; the narrower truth found here is that it is
+>    **unreachable by construction** — `SlabEntryForm.submit` will not emit a row
+>    with a blank grade or cost (`SlabEntryForm.tsx:111-114`) and `StagingTable`
+>    has no edit path, so no staged row can lack either field. **It becomes real
+>    the moment per-row editing is added**, which both this plan's File Structure
+>    table and the design doc still promise.
+> 2. **"Refocus the cert field" on success** — the design doc requires it; the
+>    page does the toast and the clear but never returns focus, and `CertInput`'s
+>    `autoFocus` fires only on mount. Fixing it needs a prop or imperative handle
+>    on `SlabEntryForm`, outside this task's file list.
+>
+> **Task 7 needs to know:** T3 and T4 are both complete. T3 = commits `b9a9798`
+> (Task 1) and `170eb09` (Task 2). T4 = commits `c5b5a00` (Task 3), `164d3b0`
+> (Task 4), `cb0b59f` (Task 5) and `ec56727` (this task). The **T4 milestone —
+> "usable product" — is met**: intake works end to end with no scanner, no camera
+> and no PSA.
+
+- [x] **Step 1: Write the failing test**
 
 ```tsx
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -1265,14 +1308,14 @@ describe('Slabs page', () => {
 })
 ```
 
-- [ ] **Step 2: Run and confirm FAIL, then STOP.**
+- [x] **Step 2: Run and confirm FAIL, then STOP.**
 
 ```bash
 cd frontend && npx vitest run "app/(admin)/admin/slabs" --reporter=verbose
 ```
 **WAIT for owner confirmation.**
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `frontend/app/(admin)/admin/slabs/page.tsx`:
 
@@ -1351,21 +1394,21 @@ In `AdminShell.tsx`, add `ScanLine` to the `lucide-react` import and insert afte
   { href: '/admin/slabs', label: 'Slabs', icon: ScanLine },
 ```
 
-- [ ] **Step 4: Run and confirm PASS**
+- [x] **Step 4: Run and confirm PASS**
 
 ```bash
 cd frontend && npx vitest run components/admin/slabs "app/(admin)/admin/slabs" --reporter=verbose
 cd frontend && npm run lint
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add "frontend/app/(admin)/admin/slabs" frontend/components/admin/slabs frontend/components/admin/AdminShell.tsx
 git commit -m "feat(slabs): manual slab intake tab, scan to committed inventory"
 ```
 
-- [ ] **Step 6: Tick this task's checkboxes, then hand off**
+- [x] **Step 6: Tick this task's checkboxes, then hand off**
 
 Tick every `- [ ]` in Task 6 above to `- [x]` and amend or add a commit so the
 record is durable — a fresh conversation trusts these boxes over any message.
