@@ -637,7 +637,36 @@ done at the top of this plan.
   ```
   Tasks 5 and 6 consume `StagedSlab`.
 
-- [ ] **Step 1: Write the failing test**
+> **DONE 2026-08-08 — commit `164d3b0`.** 11 passed in
+> `components/admin/slabs` (CertInput's 6 as the regression gate + 5 new).
+> RED was the predicted `Failed to resolve import "../SlabEntryForm"`.
+> `next lint` clean on both slab components.
+>
+> **The `/grade/i` trap Task 3 predicted was real, and the fix was OPTION A —
+> anchor the test, do not rename the field.** The helper's grade call sites now
+> use `fill(/^grade$/i, …)`; the form still renders `Grade` and `Grade label`
+> as written below, because the defect is in the test and the operator-facing
+> label is correct. Owner delegated the choice, 2026-08-08.
+>
+> **⚠️ Task 6's page test carries the SAME defect** — `stageOne()` calls
+> `screen.getByLabelText(/grade/i)` (Step 1 of Task 6, below). It must be
+> anchored to `/^grade$/i` the same way, or it will throw `Found multiple
+> elements` rather than fail honestly. This is now the only place the trap
+> survives.
+>
+> **Two things checked against real code before implementing, both of which
+> would have broken the tests if copied blindly from the Buy page:**
+> `useAdminApi` exposes `get(path, params)` with params as a bare second
+> argument (`lib/admin-api.ts:105`), and the Buy page's `searchCatalog` guards
+> on `!api.isAuthenticated` (`buy/page.tsx:87`) — **that guard is deliberately
+> NOT mirrored here.** The test's mock api has no `isAuthenticated` field, so
+> copying it would make every catalog search return early and the autocomplete
+> test fail for a reason that has nothing to do with the form.
+>
+> `crypto.randomUUID()` verified working under this vitest/jsdom setup despite
+> having no prior use anywhere in `frontend/`.
+
+- [x] **Step 1: Write the failing test**
 
 `frontend/components/admin/slabs/__tests__/SlabEntryForm.test.tsx`:
 
@@ -656,6 +685,10 @@ vi.mock('@/lib/use-locations', () => ({
   useLocations: () => ({ options: [{ value: 'toploader', label: 'Toploader' }], loading: false }),
 }))
 
+// The grade field is filled via the ANCHORED /^grade$/i, never /grade/i: the
+// form renders both "Grade" and "Grade label", and an unanchored regex matches
+// both, so `getByLabelText` throws "Found multiple elements". Anchoring here
+// rather than renaming the field keeps the operator-facing label accurate.
 function fill(label: RegExp, value: string) {
   fireEvent.change(screen.getByLabelText(label), { target: { value } })
 }
@@ -670,7 +703,7 @@ describe('SlabEntryForm', () => {
     const onAdd = vi.fn()
     render(<SlabEntryForm onAdd={onAdd} />)
     fill(/card name/i, 'Gengar VMAX')
-    fill(/grade/i, '9.5')
+    fill(/^grade$/i, '9.5')
     fill(/cost/i, '900.50')
     fireEvent.click(screen.getByRole('button', { name: /add to batch/i }))
 
@@ -684,7 +717,7 @@ describe('SlabEntryForm', () => {
     render(<SlabEntryForm onAdd={onAdd} />)
     fill(/cert number/i, '89787279')
     fill(/card name/i, 'Some JP Card')
-    fill(/grade/i, '10')
+    fill(/^grade$/i, '10')
     fill(/cost/i, '40')
     fireEvent.click(screen.getByRole('button', { name: /add to batch/i }))
 
@@ -707,7 +740,7 @@ describe('SlabEntryForm', () => {
 
     const suggestion = await screen.findByRole('button', { name: /Gengar VMAX/ })
     fireEvent.click(suggestion)
-    fill(/grade/i, '9.5')
+    fill(/^grade$/i, '9.5')
     fill(/cost/i, '900.50')
     fireEvent.click(screen.getByRole('button', { name: /add to batch/i }))
 
@@ -729,7 +762,7 @@ describe('SlabEntryForm', () => {
     expect(await screen.findByText(/already in inventory/i)).toBeInTheDocument()
 
     fill(/card name/i, 'Gengar VMAX')
-    fill(/grade/i, '9.5')
+    fill(/^grade$/i, '9.5')
     fill(/cost/i, '900.50')
     fireEvent.click(screen.getByRole('button', { name: /add to batch/i }))
     await waitFor(() => expect(onAdd).toHaveBeenCalledTimes(1))
@@ -742,7 +775,7 @@ describe('SlabEntryForm', () => {
     fireEvent.change(screen.getByLabelText(/company/i), { target: { value: 'CGC' } })
     fill(/cert number/i, '1234')
     fill(/card name/i, 'Charizard')
-    fill(/grade/i, '9')
+    fill(/^grade$/i, '9')
     fill(/cost/i, '10')
     fireEvent.click(screen.getByRole('button', { name: /add to batch/i }))
     await waitFor(() => expect(onAdd.mock.calls[0][0].company).toBe('CGC'))
@@ -750,7 +783,7 @@ describe('SlabEntryForm', () => {
 })
 ```
 
-- [ ] **Step 2: Run and confirm FAIL, then STOP**
+- [x] **Step 2: Run and confirm FAIL, then STOP**
 
 ```bash
 cd frontend && npx vitest run components/admin/slabs --reporter=verbose
@@ -759,7 +792,7 @@ Expected: `Failed to resolve import "../SlabEntryForm"`.
 
 **Show the owner this output and WAIT for confirmation.**
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Read `frontend/app/(admin)/admin/buy/page.tsx:52-122` first and mirror its catalog-search structure — in particular the `searchSeqRef` sequence guard, which stops a slow search from overwriting a newer one's results.
 
@@ -945,20 +978,20 @@ export default function SlabEntryForm({ onAdd }: { onAdd: (row: StagedSlab) => v
 
 The duplicate check hangs off `CertInput`'s `onBlur` (added in Task 3), which is what the test's `fireEvent.blur` triggers. A failed check sets `owned` to `null` rather than showing an error: a check that threw is not evidence the cert is unowned, and it must never block the add.
 
-- [ ] **Step 4: Run and confirm PASS**
+- [x] **Step 4: Run and confirm PASS**
 
 ```bash
 cd frontend && npx vitest run components/admin/slabs --reporter=verbose
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add frontend/components/admin/slabs/SlabEntryForm.tsx frontend/components/admin/slabs/__tests__/SlabEntryForm.test.tsx
 git commit -m "feat(slabs): slab entry form with catalog autocomplete and manual fallback"
 ```
 
-- [ ] **Step 6: Tick this task's checkboxes, then hand off**
+- [x] **Step 6: Tick this task's checkboxes, then hand off**
 
 Tick every `- [ ]` in Task 4 above to `- [x]` and amend or add a commit so the
 record is durable — a fresh conversation trusts these boxes over any message.
@@ -1125,7 +1158,9 @@ vi.mock('@/lib/use-locations', () => ({
 function stageOne() {
   fireEvent.change(screen.getByLabelText(/cert number/i), { target: { value: '89787279' } })
   fireEvent.change(screen.getByLabelText(/card name/i), { target: { value: 'Gengar VMAX' } })
-  fireEvent.change(screen.getByLabelText(/grade/i), { target: { value: '9.5' } })
+  // ANCHORED — /grade/i matches both "Grade" and "Grade label" and throws
+  // "Found multiple elements". Corrected during Task 4; see its DONE note.
+  fireEvent.change(screen.getByLabelText(/^grade$/i), { target: { value: '9.5' } })
   fireEvent.change(screen.getByLabelText(/cost/i), { target: { value: '900.50' } })
   fireEvent.click(screen.getByRole('button', { name: /add to batch/i }))
 }
