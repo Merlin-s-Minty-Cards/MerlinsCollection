@@ -224,7 +224,16 @@ done at the top of this plan.
 - Consumes: session item keys from Task 1 (`kind`, `company`, `grade`, `cert_number`, `grade_label`, `cert_verified_at`, `cert_image_url`, `price_source_id`).
 - Produces: confirming a graded item writes a `GradedInventoryItem`, a `Transaction` with `category=ItemCategory.GRADED`, a timeline event, and (via `repo.put_inventory_item`, from T1) the `CERT#` pointer row.
 
-- [ ] **Step 1: Write the failing tests**
+> **DONE 2026-08-08 — commit `170eb09`.** 31 passed in
+> `backend/tests/routers/admin/test_purchases.py` (25 pre-existing + 6 new).
+> All plan identifiers (`repo.list_inventory`, `repo.list_transactions(start,
+> end)`, `repo.get_item_id_by_cert`, `GradedInventoryItem`, `GradingCompany`,
+> `ItemCategory`) verified against real code before writing tests — no
+> near-misses this time. RED confirmed all 6 new tests failing for the
+> expected reason (items always created with `kind == "raw"`) before any
+> implementation touched the file.
+
+- [x] **Step 1: Write the failing tests**
 
 Append a new class to `backend/tests/routers/admin/test_purchases.py`:
 
@@ -318,7 +327,7 @@ Add to the file's imports if absent: `from datetime import date`, `from decimal 
 
 **Verified repo API** — these names are exact, and the near-misses are the ones to avoid: it is `repo.list_inventory()` (**not** `list_inventory_items()`), `repo.list_transactions(start, end)` (**takes a date range, there is no no-arg form**), and `repo.get_item_id_by_cert(company, cert_number)`.
 
-- [ ] **Step 2: Run the tests and confirm they FAIL, then STOP**
+- [x] **Step 2: Run the tests and confirm they FAIL, then STOP**
 
 ```bash
 ./.venv/Scripts/python.exe -m pytest backend/tests/routers/admin/test_purchases.py::TestConfirmGraded -q --tb=short
@@ -327,7 +336,7 @@ Expected: failures showing items created with `kind == "raw"` — `StopIteration
 
 **Show the owner this output and WAIT for confirmation before Step 3.**
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Replace the body of the `for buy_item in items:` loop in `confirm_buy_session` (lines 240-275) so the item dict and the transaction category branch on `kind`. Keep the raw branch **byte-identical** — the smaller the diff on the existing path, the more believable the regression tests:
 
@@ -383,21 +392,21 @@ Then change the `Transaction(...)` construction to use the branch's category:
             category=category,
 ```
 
-- [ ] **Step 4: Run the tests and confirm they PASS**
+- [x] **Step 4: Run the tests and confirm they PASS**
 
 ```bash
 ./.venv/Scripts/python.exe -m pytest backend/tests/routers/admin/test_purchases.py -q --tb=short
 ```
 Expected: all pass. **The pre-existing raw tests are the regression gate** — if any of them changed behaviour, the raw branch was not kept identical.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/src/merlins_collection/routers/admin/purchases.py backend/tests/routers/admin/test_purchases.py
 git commit -m "feat(buy): confirm graded items, unbreaking slab acquisition"
 ```
 
-- [ ] **Step 6: Tick this task's checkboxes, then hand off**
+- [x] **Step 6: Tick this task's checkboxes, then hand off**
 
 Tick every `- [ ]` in Task 2 above to `- [x]` and amend or add a commit so the
 record is durable — a fresh conversation trusts these boxes over any message.
