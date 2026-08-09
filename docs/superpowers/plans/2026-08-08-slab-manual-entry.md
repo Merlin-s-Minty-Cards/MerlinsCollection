@@ -10,6 +10,26 @@
 
 **Spec:** [`docs/superpowers/specs/2026-08-08-slab-manual-entry-design.md`](../specs/2026-08-08-slab-manual-entry-design.md)
 
+## Definition of done — applies to EVERY task below
+
+One task, one conversation. A task is finished only when **all four** are true, and
+the fourth is what keeps the chain moving — a task that stops at "tests pass"
+strands the next conversation.
+
+1. **The narrow test selection the task names passes.** Never the full suite.
+2. **The work is committed**, using the task's own commit command.
+3. **That task's checkboxes in this file are ticked (`- [x]`) and committed.** These
+   checkboxes are the live record of progress; a fresh conversation reads them to
+   learn where things stand, so leaving them unticked makes the plan lie.
+4. **Your final message ends with a copy-pasteable prompt for a FRESH conversation
+   to execute the NEXT task.** Self-contained, containing: the files to read first
+   (this plan, the spec, `docs/plans/rfc-0009/progress.md`), the task number and
+   "execute that task only", the RED gate, the constraints that bite for that task,
+   and **this same four-part definition of done** with the numbers advanced.
+
+**Nothing carries between conversations except what you commit and what that prompt
+says.** Write it for someone with no memory of this one.
+
 ## Global Constraints
 
 - **TDD is a hard gate (CLAUDE.md).** RED → show the owner the failing output → **WAIT for confirmation** → GREEN. Never combine phases. Every task below marks the stop explicitly.
@@ -176,6 +196,15 @@ Expected: all pass, including the pre-existing raw tests.
 git add backend/src/merlins_collection/routers/admin/purchases.py backend/tests/routers/admin/test_purchases.py
 git commit -m "feat(buy): stage graded items in a buy session"
 ```
+
+- [ ] **Step 6: Tick this task's checkboxes, then hand off**
+
+Tick every `- [ ]` in Task 1 above to `- [x]` and amend or add a commit so the
+record is durable — a fresh conversation trusts these boxes over any message.
+
+Then end your final message with a copy-pasteable prompt for a **fresh
+conversation** to execute **Task 2 — `confirm_buy_session` creates graded items**, following the four-part definition of
+done at the top of this plan.
 
 ---
 
@@ -362,6 +391,15 @@ git add backend/src/merlins_collection/routers/admin/purchases.py backend/tests/
 git commit -m "feat(buy): confirm graded items, unbreaking slab acquisition"
 ```
 
+- [ ] **Step 6: Tick this task's checkboxes, then hand off**
+
+Tick every `- [ ]` in Task 2 above to `- [x]` and amend or add a commit so the
+record is durable — a fresh conversation trusts these boxes over any message.
+
+Then end your final message with a copy-pasteable prompt for a **fresh
+conversation** to execute **Task 3 — the `CertInput` component (frontend begins)**, following the four-part definition of
+done at the top of this plan.
+
 ---
 
 ### Task 3: `CertInput` — one input for scanner and keyboard
@@ -526,6 +564,15 @@ cd frontend && npx vitest run components/admin/slabs --reporter=verbose
 git add frontend/components/admin/slabs/CertInput.tsx frontend/components/admin/slabs/__tests__/CertInput.test.tsx
 git commit -m "feat(slabs): cert input serving scanner and keyboard equally"
 ```
+
+- [ ] **Step 6: Tick this task's checkboxes, then hand off**
+
+Tick every `- [ ]` in Task 3 above to `- [x]` and amend or add a commit so the
+record is durable — a fresh conversation trusts these boxes over any message.
+
+Then end your final message with a copy-pasteable prompt for a **fresh
+conversation** to execute **Task 4 — `SlabEntryForm`**, following the four-part definition of
+done at the top of this plan.
 
 ---
 
@@ -875,6 +922,15 @@ git add frontend/components/admin/slabs/SlabEntryForm.tsx frontend/components/ad
 git commit -m "feat(slabs): slab entry form with catalog autocomplete and manual fallback"
 ```
 
+- [ ] **Step 6: Tick this task's checkboxes, then hand off**
+
+Tick every `- [ ]` in Task 4 above to `- [x]` and amend or add a commit so the
+record is durable — a fresh conversation trusts these boxes over any message.
+
+Then end your final message with a copy-pasteable prompt for a **fresh
+conversation** to execute **Task 5 — `StagingTable`**, following the four-part definition of
+done at the top of this plan.
+
 ---
 
 ### Task 5: `StagingTable` — the batch
@@ -990,6 +1046,15 @@ export default function StagingTable({ rows, onRemove }: {
 git add frontend/components/admin/slabs/StagingTable.tsx frontend/components/admin/slabs/__tests__/StagingTable.test.tsx
 git commit -m "feat(slabs): staging table for a slab intake batch"
 ```
+
+- [ ] **Step 6: Tick this task's checkboxes, then hand off**
+
+Tick every `- [ ]` in Task 5 above to `- [x]` and amend or add a commit so the
+record is durable — a fresh conversation trusts these boxes over any message.
+
+Then end your final message with a copy-pasteable prompt for a **fresh
+conversation** to execute **Task 6 — the page, commit flow and sidebar**, following the four-part definition of
+done at the top of this plan.
 
 ---
 
@@ -1196,6 +1261,15 @@ git add "frontend/app/(admin)/admin/slabs" frontend/components/admin/slabs front
 git commit -m "feat(slabs): manual slab intake tab, scan to committed inventory"
 ```
 
+- [ ] **Step 6: Tick this task's checkboxes, then hand off**
+
+Tick every `- [ ]` in Task 6 above to `- [x]` and amend or add a commit so the
+record is durable — a fresh conversation trusts these boxes over any message.
+
+Then end your final message with a copy-pasteable prompt for a **fresh
+conversation** to execute **Task 7 — documentation catches up**, following the four-part definition of
+done at the top of this plan.
+
 ---
 
 ### Task 7: Documentation catches up with the pivot
@@ -1242,6 +1316,21 @@ Mark T3 and T4 DONE with their commit shas, set T2 to DEFERRED with the dependen
 git add docs/rfcs/0009-slab-intake-and-graded-pricing.md docs/plans/rfc-0009
 git commit -m "docs(slabs): manual-first intake, and the RFC corrections T0 measured"
 ```
+
+- [ ] **Step 6: Tick this task's checkboxes, then hand off — this plan is complete**
+
+Tick every `- [ ]` in Task 7 above to `- [x]` and amend or add a commit so the
+record is durable — a fresh conversation trusts these boxes over any message.
+
+**This is the last task in this plan**, so the handoff leaves it. Run the
+verification block below, then end your final message with a copy-pasteable prompt
+for a fresh conversation to execute **RFC 0009 T6 — pricing provider + slab list**
+(`docs/plans/rfc-0009/t6-pricing-provider-and-slab-list.md`), following the
+four-part definition of done in *that* doc, which is the RFC-task variant rather
+than the one at the top of this plan.
+
+Tell the owner in that message that intake is now usable end to end, and that T2
+(PSA lookup) and T5 (camera) remain deferred behind PSA account approval.
 
 ---
 

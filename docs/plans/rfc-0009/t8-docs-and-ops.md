@@ -112,3 +112,30 @@ git commit -m "docs(slabs): correct the third-party API section and wire product
 ```
 
 Update [`progress.md`](progress.md).
+
+## Definition of done — all four, every time
+
+This task is not finished until **all four** are true. The fourth is what keeps the
+chain moving: a task that stops at "tests pass" strands the next conversation.
+
+1. **The narrow test selection named above passes.** Not the full suite — that runs
+   once, at T-FINAL.
+2. **The work is committed**, using the commit command above.
+3. **[`progress.md`](progress.md) is updated** — status, commit sha, and anything a
+   later task needs in the Notes cell. Out-of-scope findings go to
+   [`follow-ups.md`](follow-ups.md), not here.
+4. **Your final message ends with a copy-pasteable prompt for a FRESH conversation
+   to execute the NEXT task.** It must be self-contained, and it must contain:
+   - which files to read first (always `progress.md`, plus that task's doc);
+   - the task id, and "execute that task only";
+   - the RED gate — write the failing tests, show the owner the failing output,
+     **wait for confirmation**, and only then implement (CLAUDE.md, binding);
+   - the constraints that actually bite for that task (`./.venv/Scripts/python.exe`
+     never bare `python`; do not run the full suite; any landmine this task
+     uncovered);
+   - **this same four-part definition of done**, with the task numbers advanced.
+
+The next task order is in [`README.md`](README.md) and [`progress.md`](progress.md).
+
+**Nothing carries between conversations except what you commit and what that prompt
+says.** Write it for someone with no memory of this one.
