@@ -102,6 +102,56 @@ class TestBuySessionItems:
         resp = client.delete(f"/admin/purchases/{buy_id}/items/99", headers=_auth(token))
         assert resp.status_code == 404
 
+    def test_add_graded_item_persists_slab_fields(self, admin_client):
+        client, repo, token = admin_client
+        create = client.post("/admin/purchases", json={}, headers=_auth(token))
+        buy_id = create.json()["buy_id"]
+
+        resp = client.post(f"/admin/purchases/{buy_id}/items", json={
+            "kind": "graded", "name": "Gengar VMAX", "buy_price": 900,
+            "company": "PSA", "grade": 9.5, "cert_number": "89787279",
+            "grade_label": "MINT 9.5", "card_id": "en:swsh8-271",
+        }, headers=_auth(token))
+
+        assert resp.status_code == 200
+        item = resp.json()["items"][0]
+        assert item["kind"] == "graded"
+        assert item["company"] == "PSA"
+        assert item["cert_number"] == "89787279"
+        assert item["grade_label"] == "MINT 9.5"
+
+    def test_add_item_defaults_to_raw_when_kind_absent(self, admin_client):
+        client, repo, token = admin_client
+        create = client.post("/admin/purchases", json={}, headers=_auth(token))
+        buy_id = create.json()["buy_id"]
+
+        resp = client.post(f"/admin/purchases/{buy_id}/items", json={
+            "name": "Pikachu", "buy_price": "5.00",
+        }, headers=_auth(token))
+
+        assert resp.status_code == 200
+        assert resp.json()["items"][0]["kind"] == "raw"
+
+    def test_graded_item_without_cert_is_rejected_and_session_survives(self, admin_client):
+        client, repo, token = admin_client
+        create = client.post("/admin/purchases", json={}, headers=_auth(token))
+        buy_id = create.json()["buy_id"]
+        client.post(f"/admin/purchases/{buy_id}/items", json={
+            "name": "Pikachu", "buy_price": "5.00",
+        }, headers=_auth(token))
+
+        resp = client.post(f"/admin/purchases/{buy_id}/items", json={
+            "kind": "graded", "name": "Gengar VMAX", "buy_price": 900,
+            "company": "PSA", "grade": 9.5,
+        }, headers=_auth(token))
+
+        assert resp.status_code == 422
+        assert "cert_number" in resp.json()["detail"]
+        # The previously-added item must survive a rejected sibling: losing the
+        # staged batch is the failure the batch design exists to prevent.
+        session = client.get(f"/admin/purchases/{buy_id}", headers=_auth(token)).json()
+        assert len(session["items"]) == 1
+
 
 class TestBuySessionConfirm:
     def test_confirm_creates_inventory_items(self, admin_client):

@@ -53,6 +53,17 @@ def _review_reason_for_buy(buy_item: dict[str, Any]) -> str | None:
 # Models
 # ---------------------------------------------------------------------------
 
+#: Fields a graded item cannot be staged without. Enforced HERE, at add time,
+#: rather than at confirm: a session that swallows a bad item and explodes on
+#: commit loses the whole staged batch, which is the failure the batch design
+#: exists to prevent.
+#:
+#: `cert_number` is required because without one it is not a slab, it is just a
+#: normal card (owner, 2026-08-08) -- and it is the key of the CERT# pointer
+#: row, so there is nowhere to file the item without it.
+_GRADED_REQUIRED_FIELDS = ("company", "grade", "cert_number")
+
+
 class BuySessionItem(BaseModel):
     card_id: str | None = None
     name: str
@@ -164,6 +175,17 @@ def add_buy_item(
     if "name" not in body or "buy_price" not in body:
         raise HTTPException(status_code=422, detail="name and buy_price required")
 
+    kind = body.get("kind", "raw")
+    if kind == "graded":
+        # `in (None, "")` rather than falsiness: a grade of 0 is not a real PSA
+        # grade, but the check should reject blanks, not numeric edge cases.
+        missing = [f for f in _GRADED_REQUIRED_FIELDS if body.get(f) in (None, "")]
+        if missing:
+            raise HTTPException(
+                status_code=422,
+                detail=f"graded items require: {', '.join(missing)}",
+            )
+
     validate_location(repo, body.get("location", "toploader"))
 
     buy_item = {
@@ -180,6 +202,14 @@ def add_buy_item(
         "buy_pct": body.get("buy_pct"),
         "location": body.get("location", "toploader"),
         "manual_entry": bool(body.get("manual_entry")),
+        "kind": kind,
+        "company": body.get("company"),
+        "grade": body.get("grade"),
+        "cert_number": body.get("cert_number"),
+        "grade_label": body.get("grade_label"),
+        "cert_verified_at": body.get("cert_verified_at"),
+        "cert_image_url": body.get("cert_image_url"),
+        "price_source_id": body.get("price_source_id"),
     }
     session.setdefault("items", []).append(buy_item)
     repo.put_buy_session(session)
