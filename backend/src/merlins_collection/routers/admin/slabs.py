@@ -1,8 +1,14 @@
 """``/admin/slabs`` — slab intake support and the slab list (RFC 0009).
 
-Two endpoints. ``GET /admin/slabs/certs/{cert}`` is the duplicate check a
+Five endpoints. ``GET /admin/slabs/certs/{cert}`` is the duplicate check a
 barcode scan runs before staging a slab; ``GET /admin/slabs`` is the list of
-graded stock joined to whatever market value each slab has.
+graded stock joined to whatever market value each slab has; and T7 added the
+pricing controls — ``POST /admin/slabs/refresh-prices`` with its
+``/refresh-prices/status`` poll, and ``PUT /admin/slabs/{item_id}/price/pin``.
+
+There is deliberately **no** ``/admin/slabs/lookup/{cert}``. RFC 0009 §7
+specifies one, but PSA's public API 403s at the account level, so it would be a
+mapper with nothing to map; intake is hand-entered and needs no such call.
 
 The duplicate check answers "do I already own this cert?" off the cert pointer
 row (``services.dynamodb.get_item_id_by_cert``), which is a point read — this is

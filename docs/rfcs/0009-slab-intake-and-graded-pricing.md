@@ -213,13 +213,19 @@ lesson in CLAUDE.md's Ops section applies: never put a scan on a request path.
 
 New router `routers/admin/slabs.py`:
 
-| Method | Route | Notes |
-|---|---|---|
-| `GET` | `/admin/slabs/lookup/{cert}` | PSA lookup + catalog match + price. **Read-only — writes nothing.** Returns a staged draft |
-| `GET` | `/admin/slabs/certs/{cert}` | Duplicate check against the pointer row |
-| `GET` | `/admin/slabs` | Slab list with filters (company, grade, priced/unpriced, status) |
-| `POST` | `/admin/slabs/refresh-prices` | Background refresh, mirroring the `/admin/market/sync` pattern |
-| `GET` | `/admin/slabs/quota` | Remaining daily calls per provider, so the UI can warn before it fails |
+**Reconciled with the shipped router by T8 (2026-08-09)** — the `Built?` column is
+the authority; `routers/admin/slabs.py` has **five** routes, two of which this
+table never anticipated:
+
+| Method | Route | Built? | Notes |
+|---|---|---|---|
+| `GET` | `/admin/slabs/lookup/{cert}` | ❌ **never built** | PSA lookup + catalog match + price. A mapper with nothing to map while the account 403s (§5.1); manual intake needs no such call |
+| `GET` | `/admin/slabs/certs/{cert}` | ✅ T1 | Duplicate check against the pointer row. `200 {"owned": false}` when clean, never a 404 |
+| `GET` | `/admin/slabs` | ✅ T6 | Slab list with filters (company, grade, priced/unpriced, status, limit) |
+| `POST` | `/admin/slabs/refresh-prices` | ✅ T7 | Background refresh, mirroring the `/admin/market/sync` pattern. `409` while one is running — each run can spend the whole day's credits |
+| `GET` | `/admin/slabs/refresh-prices/status` | ✅ T7 | Not in the original table. The poll half of the pattern above |
+| `PUT` | `/admin/slabs/{item_id}/price/pin` | ✅ T7 (backend only) | Not in the original table — it follows from the owner's 2026-08-09 precedence decision. **No frontend control calls it yet** |
+| `GET` | `/admin/slabs/quota` | ❌ **never built** | Would report remaining daily calls per provider. The pricing quota is per-process and in-memory, so an endpoint would report *one worker's* view; `/refresh-prices/status` returns `credits_remaining` from the run that actually spent them instead |
 
 Extended: `BuySessionItem` gains `kind` and slab fields; `confirm_buy_session`
 branches on `kind`.

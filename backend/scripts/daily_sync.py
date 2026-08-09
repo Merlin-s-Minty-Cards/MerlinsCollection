@@ -8,12 +8,19 @@ sealed snapshot and the market-value refresh offline **with a green test suite**
 until someone asks why a chart has been flat for a month, so the job now has a
 script that runs it and a test that drives that script the way cron would.
 
-Four steps, in a load-bearing order: the TCGdex depth pass
-(``refresh_held_prices``) runs first and writes the catalog prices the three
-DynamoDB-only steps then snapshot and denormalize. It is the only step that
-talks to an upstream API — and only for cards the business holds, ~300 requests,
-paced. A TCGdex outage costs the day's refresh and nothing else; the site reads
-prices from DynamoDB and never from TCGdex.
+**Five** steps, in a load-bearing order. The TCGdex depth pass
+(``refresh_held_prices``) runs first and the graded pricing pass
+(``refresh_graded_prices``, RFC 0009 T7) second, because the three
+DynamoDB-only steps that follow snapshot and denormalize whatever those two
+wrote — the other order publishes yesterday's figures for a day.
+
+Those first two are the only steps that talk to an upstream API, and both only
+for stock the business actually holds: ~300 paced TCGdex requests, plus at most
+50 metered pricing lookups (the free tier is 100 credits and a graded lookup
+costs 2). A TCGdex outage costs the day's raw refresh; an unset or dead pricing
+key costs the day's slab prices and **nothing else**, because that step degrades
+alone rather than aborting the run. The site reads every price from DynamoDB and
+never from a vendor.
 
 Exit codes, because this job is unattended and its only universally-readable
 signal is the one the shell gets:

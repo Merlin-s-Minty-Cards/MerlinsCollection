@@ -31,18 +31,37 @@ There is nothing to refresh. Add a test that asserts it (see #9).
 
 ## Stalest-first rotation
 
-The pricing free tier is **100 credits/day**. Under 100 slabs, everything refreshes
-nightly. Above it, refresh the 100 stalest and let the rest wait.
+> **CORRECTED BY T8 (2026-08-09), and the as-built behaviour follows the
+> correction, not the original text below-the-fold.** Two things in this section
+> were wrong when it was written:
+>
+> 1. **The budget is credits, not lookups.** The free tier is 100 **credits** a
+>    day and a graded lookup costs **2** (`costPerCard: 2`, measured live — 1 for
+>    the card, 1 for `includeEbay`), so the real ceiling is **50 lookups a
+>    night**, not 100. You are billed on `limit` even when the search matches
+>    **zero** cards. `refresh_graded_prices` divides by 2 (`_CREDITS_PER_LOOKUP`)
+>    and sizes itself off `PRICING_DAILY_QUOTA`, so the shipped code is correct;
+>    only this prose was not.
+> 2. **"A slab with no `price_source_id` … skip it" was REVERSED by the owner on
+>    2026-08-09.** The job DOES do first contact — it runs the fuzzy `resolve()`
+>    for a slab that has a `card_id` but no cached id, gated by T6's verified
+>    join. Nothing anywhere sets `price_source_id` (PSA intake was going to), so
+>    the original rule would have priced nothing, ever. **No `card_id`** is still
+>    a free skip.
+
+The pricing free tier is **100 credits/day = 50 lookups/day**. Under 50 slabs,
+everything refreshes nightly. Above it, refresh the 50 stalest and let the rest
+wait.
 
 - Order candidates by the age of their stored value; **null/never-priced first** —
   a slab with no value at all is more urgent than one priced yesterday.
-- Cap the run at the configured quota, not at a hardcoded 100.
-- **Respect the 60/min ceiling.** 100 sequential calls will trip it otherwise.
+- Cap the run at the configured quota, not at a hardcoded number.
+- **Respect the 60/min ceiling.** A long sequential run will trip it otherwise.
 - Dedupe by `(card_id, company, grade)` before spending credits — the existing
   function already does this and the reason is now money, not just tidiness.
-- A slab with no `card_id` or no `price_source_id` cannot be priced. Skip it without
-  spending a credit and without logging an error — it is a normal state that Triage
-  already surfaces.
+- A slab with no `card_id` cannot be priced. Skip it without spending a credit and
+  without logging an error — it is a normal state that Triage already surfaces.
+  (**A missing `price_source_id` is NOT a skip** — see the correction above.)
 
 Log a summary: candidates, refreshed, skipped, quota remaining. This is the only
 visibility into a job that runs while nobody is watching.

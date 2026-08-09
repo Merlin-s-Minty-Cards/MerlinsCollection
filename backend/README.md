@@ -68,6 +68,12 @@ credentials are normally supplied by the ambient credential chain (IAM role,
 | MCP server path | `MCP_SERVER_PATH` | `../mcp-server/dist/index.js` |
 | EUR->USD rate | `EUR_USD_RATE` | `1.08` |
 | Catalog price staleness threshold | `CATALOG_PRICE_STALE_DAYS` | `30` |
+| Graded-pricing API key | `POKEMONPRICETRACKER_API_KEY` | `""` (disables graded pricing) |
+| Graded-pricing daily budget, in **credits** | `PRICING_DAILY_QUOTA` | `100` (= **50** lookups, at 2 credits each) |
+
+`PSA_API_KEY` appears in `.env.example` but is **not** a `Settings` field — the
+cert lookup (RFC 0009 T2) is deferred while PSA approves the account, and
+`extra="ignore"` means setting it today has no effect anywhere.
 
 ## Authentication
 
@@ -99,6 +105,24 @@ The status codes are deliberate and distinguish *whose* problem it is:
 | `GET /public/shows` | **None** | All shows split into `upcoming`/`past` by the business's Pacific "today" |
 | `GET /public/featured-cards` | **None** | Up to 5 homepage cards (`name` + `image_url` only) |
 | `GET /admin/*` | Admin | Retool admin panel (inventory CRUD, sales, buys, trades, show prep, market) |
+
+### `/admin/slabs` — graded intake and pricing (RFC 0009)
+
+`routers/admin/slabs.py`. Admin-only like the rest of `/admin/*` (the auth
+dependency is on `admin_router`, not re-declared per route).
+
+| Method & path | Purpose |
+|---------------|---------|
+| `GET /admin/slabs/certs/{cert}?company=PSA` | "Do I already own this cert?" — a point read on the `CERT#` pointer row, **not** a search. **"Not owned" is a `200 {"owned": false}`, never a 404**, and the answer is a warning with override (RFC 0009 §9), never a gate |
+| `GET /admin/slabs` | The graded stock list, joined to each slab's `GRADEDPRICE#` value. Filters: `company`, `grade`, `status`, `priced`, `limit`. `priced=false` is the **unpriced worklist** — the only place an unjoinable slab surfaces, since it is deliberately not Triage-flagged |
+| `POST /admin/slabs/refresh-prices` | Kicks off `refresh_graded_prices` in the background; `202` + `{"state": "started"}`. **`409` while one is already running** — not politeness, money: each run can spend the whole day's credits |
+| `GET /admin/slabs/refresh-prices/status` | Poll the current/most recent run. Reports `state`, counts and `credits_remaining`. **`state: "failed"` when no key is configured** — the opposite of the nightly job, which degrades quietly |
+| `PUT /admin/slabs/{item_id}/price/pin` | `{"pinned": bool}` — protect this slab's stored price from the nightly provider pass, or release it. `404` if the item, its `card_id` or its price row is missing (a pin is a promise about a *specific* figure); `400` for a non-graded item. **No frontend control calls this yet**, so nothing is pinned in practice |
+
+There is **no** `/admin/slabs/lookup/{cert}`. RFC 0009 §7 specifies one, but it
+would be a PSA mapper with nothing to map (see External integrations below), and
+manual intake needs no such endpoint — catalog search and the duplicate check
+already exist.
 
 `/inventory/search` loads inventory and filters in-process; `cost_basis`
 (our purchase price) is stripped from the response and never reaches customers.
@@ -210,31 +234,66 @@ stable regardless of how a grade was spelled, `_grade_key` normalizes them
 - **MCP server** (`services/mcp_client.py`) — placeholder. Until it lands,
   `get_bedrock_service` wires a stub tool executor, so chat answers reach
   Bedrock but tool calls return a "not configured" message.
+- **PokemonPriceTracker** (`services/slab/pricing.py`) — the per-grade **slab**
+  price source, and the only outbound integration that needs a credential. The
+  TCGdex feed prices ungraded singles only, so without this a PSA 10 and a PSA 4
+  of the same card carry the same number. Free tier: 100 credits/day, 60 req/min,
+  **2 credits per lookup** → **50 slab lookups a day**; billed on `limit` even
+  when the search matches nothing, so `limit=1` is pinned. Budgets are enforced
+  **before the socket opens** by `services/slab/quota.py` (`DailyQuota` hard
+  budget + `MinuteWindow` pacer, both per-process and in-memory, self-correcting
+  from the vendor's `x-ratelimit-daily-remaining`). A price is attached **only on
+  a verified join** — the response's `externalCatalogId`, read as
+  `en:<id>`, must equal the item's own `card_id`, because the vendor's name search
+  returns the wrong card roughly a third of the time and a wrong answer is
+  indistinguishable from a right one. Japanese cards carry no `externalCatalogId`,
+  so JP slabs are unpriceable by construction. Missing key → `None` from
+  `build_pricing_provider()`, which the nightly job treats as "skip", never a
+  raise.
+- **PSA cert API** — **not built, and never successfully called.** Every
+  authenticated request returns `403 "Access to this API is limited to approved
+  customers"`; the key is valid, the account is not entitled, and no code change
+  reaches it (remedy: an approval email to `collectors-apis@collectors.com`). So
+  slab intake is hand-entered, `PSA_API_KEY` is read by nothing, and the mapper is
+  deferred rather than written against a guessed shape. When approved it supplies
+  identity only — `TotalPopulation`/`PopulationHigher` are always `null` on the
+  public API.
 
 ## Daily sync
 
 `catalog_sync.run_daily_sync(repo, client, today)` is the batch job, run on a
-schedule via **`python scripts/daily_sync.py`**. The depth pass runs FIRST —
-the order is load-bearing, since step 4 denormalizes whatever prices step 1
-just wrote:
+schedule via **`python scripts/daily_sync.py`** (in production, via
+`python -m scripts.scheduled_sync --job prices`). **Five steps**, and the order is
+load-bearing: the two writing steps come first because step 5 denormalizes
+whatever prices steps 1 and 3 just wrote.
 
-1. `refresh_held_prices` — the Tier 2 DEPTH pass, and the only step here that
-   talks to an upstream API. Fetches per-card rarity + prices from TCGdex for
-   every held *raw* Singles card (graded slabs are excluded by design — see
-   below). Never deletes, zeroes, or nulls an existing price on failure or on
-   a priceless response; aborts after 25 consecutive per-card failures rather
-   than burning the whole run against a dead endpoint (RFC 0003 §7).
-2. `snapshot_graded_prices` — record a daily history point for each owned graded
-   slab that has a manual market value.
-3. `snapshot_sealed_prices` — the same for sealed products, whose history hangs
+1. `refresh_held_prices` — the Tier 2 DEPTH pass. Fetches per-card rarity +
+   prices from TCGdex for every held *raw* Singles card (graded slabs are
+   excluded by design — see below). Never deletes, zeroes, or nulls an existing
+   price on failure or on a priceless response; aborts after 25 consecutive
+   per-card failures rather than burning the whole run against a dead endpoint
+   (RFC 0003 §7).
+2. `refresh_graded_prices` — **per-grade slab prices from PokemonPriceTracker**
+   (RFC 0009 T7). Owned slabs, stalest-first (never-priced first), deduped by
+   `(card_id, company, grade)`, capped at what today's credits can pay for —
+   **50 lookups on the free tier**, so above 50 slabs the rest wait for the next
+   night. Skips an unlinked slab and a **pinned** price for free, before any
+   socket opens. Aborts after only **5** consecutive failures, against the depth
+   pass's 25, because every failed call here is still billed. It **never calls
+   PSA**. A missing key skips this step alone and logs a warning; steps 1 and 3-5
+   run regardless.
+3. `snapshot_graded_prices` — record a daily history point for each owned graded
+   slab that has a market value (provider-fetched or hand-typed).
+4. `snapshot_sealed_prices` — the same for sealed products, whose history hangs
    off the item rather than a catalog card.
-4. `refresh_inventory_market_values` — denormalize the latest market value onto
+5. `refresh_inventory_market_values` — denormalize the latest market value onto
    each inventory item so search/list reads don't need a second lookup.
 
-Steps 2-4 touch no upstream API — only step 1 does, and only for cards the
-business actually holds (~300 requests/day, paced). The site itself never
-reads from TCGdex; every customer-facing read comes from DynamoDB, so a TCGdex
-outage delays a refresh without taking the site down.
+Only steps 1 and 2 talk to an upstream API, and both only for stock the business
+actually holds — ~300 paced TCGdex requests, plus at most 50 metered pricing
+lookups. Steps 3-5 are DynamoDB-only. The site itself never reads from either
+vendor; every customer-facing read comes from DynamoDB, so an upstream outage
+delays a refresh without taking the site down.
 
 `scripts/daily_sync.py` exits `0` on a completed run, `1` if the depth pass
 aborted on consecutive failures, or `2` if it was skipped because a catalog
@@ -249,9 +308,10 @@ Catalog data arrives through two separate passes, because TCGdex serves pricing
   see `docs/aws-setup.md` for the `--execute` / `--confirm-table` rails.
 - **Tier 2, depth** — `refresh_held_prices` (above), one request per *held raw*
   card, which is where prices and rarity come from (RFC 0003 §7). Graded slabs
-  are excluded permanently, by owner decision — their price and detail come
-  from the PSA cert API + PriceCharting once Phase 4 resumes, so a card held
-  only as a slab keeps `rarity: null` until then.
+  are excluded permanently, by owner decision: TCGdex prices ungraded singles, so
+  a slab's value comes from step 2's per-grade provider instead. A card held
+  **only** as a slab still keeps `rarity: null` — that comes from the depth pass,
+  which never visits it.
 
 ## Deploying to AWS ECS
 
@@ -285,8 +345,21 @@ See `.env.example` for the complete list. Critical production settings:
 - `DYNAMODB_TABLE_NAME` — inventory table (default: `merlins-cards`)
 - `RATE_LIMIT_TABLE_NAME` — rate-limit counters (default: `merlins-rate-limits`)
 - `CORS_ORIGINS` — frontend origin(s) allowed by CORS
-- `ADMIN_API_KEY` — static bearer token for Retool admin access
 - `FORWARDED_ALLOW_IPS` — proxy trust boundary (see Dockerfile comments)
+
+**Credentials go in `secrets`, not `environment`.** Two of these settings are
+bearer tokens, and a task definition's `environment` block is readable by anyone
+with `ecs:DescribeTaskDefinition` and is printed in the console:
+
+- `ADMIN_API_KEY` — static bearer token for Retool admin access
+- `POKEMONPRICETRACKER_API_KEY` — graded pricing (RFC 0009). The **first outbound
+  third-party credential this service holds**. Unset is a supported state: slab
+  pricing is skipped and nothing else changes
+
+Both belong in the task definition's `secrets` array, sourced from Secrets Manager
+or SSM Parameter Store. See `docs/aws-setup.md` Phase 8 for the wiring and for why
+this needs **no new task-role IAM permission** for the vendor call itself.
+`PRICING_DAILY_QUOTA` is an ordinary non-secret `environment` value.
 
 ### Infrastructure
 

@@ -56,6 +56,7 @@ order (`frontend/components/admin/AdminShell.tsx`):
 | `/admin/inventory`     | Inventory      | Inventory CRUD, granular filters, ownership column |
 | `/admin/sell`          | Sell           | Sale flow, large image preview        |
 | `/admin/buy`           | Buy            | Purchase flow, catalog-linked autocomplete, manual-entry mode |
+| `/admin/slabs`         | Slabs          | Graded intake (manual/wedge-scan cert → staged batch → commit) + the slab list. See "Slabs" below |
 | `/admin/trade`         | Trade          | Trade flow — Coming In / Going Out, basis modes (see below) |
 | `/admin/vault`         | Vault          | Sortable inventory table, ownership column |
 | `/admin/market`        | Market         | Prices, sync trigger, coverage/confidence, "check for new sets" |
@@ -108,6 +109,19 @@ item (follow-ups.md, T10 row 3).
 writes `display_name_override` and **never** `card_id`. Re-pointing a card is a
 separate, confirmed action with a before/after diff and warnings for trade
 lineage and cross-language links.
+
+**Slabs** (`/admin/slabs`, sidebar position: **between Buy and Trade**) — graded
+intake and the slab list, from RFC 0009. Intake is one cert field serving both a
+keyboard-wedge scanner and the keyboard (Enter *advances*, never submits), a
+catalog-autocomplete card picker with a free-text fallback, a client-side staging
+batch, then a commit that runs the ordinary buy session's create → items →
+confirm. `GET /admin/slabs/certs/{cert}` warns on a cert already owned — a
+**warning with override**, never a gate, because a slab sold and bought back is a
+legitimate re-entry. `/admin/slabs?priced=false` is the unpriced worklist. The
+per-grade pricing behind it is documented under "Third-Party APIs" below; two
+gaps are live and deliberate — **no per-row editing in the staging table** (so its
+commit gating is unbuilt on purpose) and **no pin control**. Full list:
+`docs/plans/rfc-0009/follow-ups.md`.
 
 **Shows** (`/admin/shows`) — CRUD for show/event days. Note this is a
 *different page* from Show Prep (`/admin/show-prep`, which moves inventory into
@@ -404,23 +418,72 @@ Two distinct modes (user picks one at a time):
 | Rekognition     | Image analysis (future: identify cards from photos)  |
 | Bedrock         | Claude AI integration for chat mode queries          |
 
-# Third-Party APIs (Planned)
-Both currently UNBUILT and ON HOLD pending owner-provided API keys (see
-claude-progress.txt Phase 4, PAUSED as of 2026-07-27 — this is not the active
-phase; do not resume it without the owner's go-ahead).
-- **PSA cert API** — slab identity verification for graded PSA cards. Cert
-  number -> verified name/set/year/card#/grade/grade label/population/official
-  images. The cert number IS the identity for a PSA slab (no fuzzy matching).
-  When Phase 4 resumes, PSA-graded slabs go through this automated cert
-  lookup.
-- **PriceCharting API** — per-grade graded-card market values (the raw
-  TCGplayer/Cardmarket price feed does not price slabs). Sheet
-  Sticker/Current Market is the fallback when no key/budget or no coverage.
-- **Non-PSA slabs (CGC/BGS/SGC) are handled differently, by design** — they
-  arrive too rarely to justify their own automated cert-lookup pipeline.
-  Instead, an admin-only manual-entry flow (staff keys in the slab's info
-  directly, including grading company) is planned for the future. This is
-  also on hold; see claude-progress.txt Section 4 Q3.
+# Third-Party APIs
+
+Authority: [`docs/rfcs/0009-slab-intake-and-graded-pricing.md`](docs/rfcs/0009-slab-intake-and-graded-pricing.md),
+with per-task status in [`docs/plans/rfc-0009/progress.md`](docs/plans/rfc-0009/progress.md).
+An earlier version of this section pointed at "claude-progress.txt Phase 4" — that
+file has no Phase 4 and never will; the admin-enhancement rounds replaced it.
+
+**Slab intake is MANUAL-FIRST, and that is the shipped design, not a stopgap.**
+An admin types (or wedge-scans) the cert number, identifies the card through
+catalog autocomplete with a free-text fallback, types company/grade/cost, stages
+a batch and commits it through the existing buy session — so slabs land in
+purchase history, timeline and show analytics like any other acquisition. There
+is **no camera** (never built) and **no cert lookup** (see PSA below). Every
+grading company goes down the same manual path; CGC/BGS/SGC are not a special
+case any more.
+
+- **PokemonPriceTracker — the graded price source, and the one that is LIVE.**
+  Per-grade market values from eBay sold comps. Not PriceCharting: the owner
+  declined a paid subscription on 2026-08-07, and any doc still naming
+  PriceCharting is stale. Free tier is **100 credits per UTC day**, and a graded
+  lookup costs **2 credits** (1 card + 1 `includeEbay`, `costPerCard: 2` read off
+  a live response) — so the real ceiling is **FIFTY lookups a day**. You are
+  billed on `limit` **even when the search matches zero cards**, which is why
+  `limit=1` is pinned. Key: `POKEMONPRICETRACKER_API_KEY`; budget knob:
+  `PRICING_DAILY_QUOTA` (credits, default 100).
+- **PSA cert API — has NEVER been called successfully. Do not build on it.**
+  Every authenticated call returns `403 {"Message":"Access to this API is limited
+  to approved customers."}`: the key is valid, the **account is not entitled**,
+  and no code change reaches it. The remedy is an approval email to
+  `collectors-apis@collectors.com`. Nothing about its response shape has ever
+  been observed, so the mapper (RFC 0009 T2) is deferred whole rather than
+  guessed at, and **`PSA_API_KEY` is read by no code** — there is no `psa_api_key`
+  field on `Settings`, so setting it today does nothing. When approval lands, PSA
+  returns as a **pre-fill** for the manual form, never a prerequisite. It will
+  supply identity only: **`TotalPopulation`/`PopulationHigher` are always `null`**
+  on the public API, so there is no population feature and no field for one.
+
+**How a slab gets priced** (`services/slab/pricing.py`, wired by
+`services/catalog_sync.py`):
+
+- Prices live in the **pre-existing** `CARD#<card_id>` / `GRADEDPRICE#<company>#
+  <grade>` rows. RFC 0009 added **no pricing schema** — the work was filling those
+  rows from an API instead of by hand.
+- `refresh_graded_prices` runs **nightly inside `run_daily_sync`** (step 3 of
+  five) and also behind `POST /admin/slabs/refresh-prices` and the Market page's
+  Sync Prices button. It walks owned slabs **stalest-first** (never-priced first),
+  deduped by `(card_id, company, grade)`, capped at what today's credits can pay
+  for. **It never calls PSA** — a cert's identity is immutable.
+- **A price attaches only on a VERIFIED JOIN**: the vendor's `externalCatalogId`,
+  read as `en:<id>`, must equal the item's own `card_id`. The vendor's name search
+  returns the wrong card roughly a third of the time and a wrong answer looks
+  exactly like a right one, so this rule is load-bearing. Japanese cards carry no
+  `externalCatalogId` at all, so **JP slabs are unpriceable by construction** and
+  are *not* Triage-flagged for it — they surface at `/admin/slabs?priced=false`.
+- **A hand-typed graded price is REPLACED by the provider unless it is pinned**
+  (owner decision, 2026-08-09). `PUT /admin/slabs/{id}/price/pin` sets the pin —
+  but **no frontend control calls it yet**, so in practice nothing is pinned and
+  the provider always wins. Anyone typing a graded value today should know it will
+  be overwritten on the next run.
+
+Both keys are bearer tokens spending a metered daily quota: never log one, never
+return one from an endpoint. Real values live in `backend/.env` (gitignored) and,
+in production, in **ECS secrets** — never a task-definition literal. An empty key
+is a supported state: `build_pricing_provider()` returns `None`, the nightly job
+skips graded pricing and every other step still runs, while the admin button
+reports `state: "failed"` because a human is standing there waiting.
 
 # Design System
 - Color scheme based on Spriggatito (forest greens, cream whites)

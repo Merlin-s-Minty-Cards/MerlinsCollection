@@ -415,7 +415,7 @@ package, no new IAM role for Lambda, no cold-start tuning.
 
 | Schedule | Cron | Job | What it does |
 |----------|------|-----|--------------|
-| `merlins-price-sync` | Daily 09:00 UTC (~5 AM ET, before shop hours) | `--job prices` | Calls `run_daily_sync`: TCGdex depth pass for held cards, graded/sealed snapshots, inventory market-value refresh |
+| `merlins-price-sync` | Daily 09:00 UTC (~5 AM ET, before shop hours) | `--job prices` | Calls `run_daily_sync` — **five steps**: TCGdex depth pass for held cards, **per-grade slab pricing (metered, see below)**, graded/sealed snapshots, inventory market-value refresh |
 | `merlins-catalog-sync` | First Monday of each month, 10:00 UTC | `--job catalog` | Calls `sync_new_sets`: seeds identity rows for any TCGdex set the catalog doesn't have yet |
 
 Both schedules have `FlexibleTimeWindow` enabled and a `RetryPolicy` with
@@ -540,6 +540,71 @@ python -m scripts.scheduled_sync --job prices
 python -m scripts.scheduled_sync --job catalog
 ```
 
+### Outbound third-party credentials (RFC 0009 graded pricing)
+
+`POKEMONPRICETRACKER_API_KEY` is the **first outbound third-party credential this
+service has ever held.** Everything before it was an AWS credential resolved from
+a role. That difference is the whole point of this subsection: a role has no
+value to paste anywhere, and this key does.
+
+**It goes in the task definition's `secrets` array, never `environment`.** An
+`environment` value is returned verbatim by `ecs:DescribeTaskDefinition` and shown
+in the console, so a key there is readable by anyone who can look at the service.
+`ADMIN_API_KEY` has the same shape and the same rule.
+
+```json
+"secrets": [
+  { "name": "POKEMONPRICETRACKER_API_KEY",
+    "valueFrom": "arn:aws:secretsmanager:us-east-1:<ACCOUNT_ID>:secret:merlins/pokemonpricetracker-api-key" },
+  { "name": "ADMIN_API_KEY",
+    "valueFrom": "arn:aws:secretsmanager:us-east-1:<ACCOUNT_ID>:secret:merlins/admin-api-key" }
+]
+```
+
+`deploy/backend-container.json` is the reference container definition and
+deliberately carries **no** `secrets` block — a dangling ARN would make the task
+fail to start for anyone who applied the file before creating the secret. Add the
+block above when you wire the real secret. `PRICING_DAILY_QUOTA` is not a secret;
+it belongs in `environment` (default `100` **credits**, i.e. 50 lookups).
+
+**Both consumers are covered by one injection.** The API service and the
+EventBridge-triggered sync task run the **same task definition** (Phase 8 above
+overrides only the container `command`), so a secret added there reaches both the
+nightly `refresh_graded_prices` pass and the admin `POST /admin/slabs/refresh-prices`
+button. Nothing separate to configure for the schedule.
+
+**IAM — read this before granting anything:**
+
+- **The task role needs NOTHING new.** The vendor call is ordinary outbound HTTPS,
+  not an AWS API. The daily/minute quota counters are **purely in-process and
+  in-memory** (`services/slab/quota.py`) — they touch **no DynamoDB table at all**,
+  not `merlins-rate-limits` and not `merlins-cards`. If a doc or a task claims this
+  RFC needs a new task-role permission, it is wrong; re-check before granting.
+  (The `dynamodb:Scan` / `UpdateItem` gap in CLAUDE.md's Ops section is a separate,
+  pre-existing catalog-cache problem and has nothing to do with these keys.)
+- **The ECS *execution* role does need one grant**, and only because of the
+  injection mechanism: `secretsmanager:GetSecretValue` on each secret ARN above
+  (or `ssm:GetParameters` + `kms:Decrypt` if you use Parameter Store with a CMK).
+  This is the execution role (`ecsTaskExecutionRole`), which pulls the image and
+  resolves secrets at task start — not the task role the application code runs as.
+- An unset key is a **supported state**, not an outage: slab pricing is skipped
+  with a warning and every other step of the nightly sync still runs. So a missed
+  grant costs slab prices, not the site.
+
+**Quota reality, so nobody sizes a schedule off the wrong number:** the free tier
+is 100 **credits** a day and one graded lookup costs **2** (card + eBay block),
+which makes it **50 slab lookups a night**. You are billed on the query `limit`
+even when the search matches zero cards. Above 50 owned slabs the job refreshes
+the 50 stalest and the rest wait for a later night — by design, not a failure.
+
+**Rotation:** both this key and the (currently unused) PSA key were pasted into a
+chat transcript during planning on 2026-08-07 and **must be rotated in their own
+vendor portals** — this is an owner action in two external web UIs that no AWS
+command performs. Rotating means: issue a new key in the vendor portal, update
+`backend/.env` locally, update the Secrets Manager secret, then force a new ECS
+deployment so tasks pick it up (secrets resolve at task start, unlike task-role
+permissions which are read per request).
+
 ### One-time catalog bootstrap (NOT scheduled)
 
 The full catalog bootstrap (`scripts/seed_catalog.py --execute --confirm-table`)
@@ -561,8 +626,16 @@ command.
 
 Backend (`backend/.env`): `AWS_REGION`, `DYNAMODB_TABLE_NAME`, `BEDROCK_MODEL_ID`,
 `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`, `MCP_SERVER_PATH`, `CORS_ORIGINS`,
-`AUTH_DISABLED`, `EUR_USD_RATE`. AWS credentials are **not** read from
-this file — see Phase 1 (`aws configure` / an IAM role in production).
+`AUTH_DISABLED`, `EUR_USD_RATE`, `POKEMONPRICETRACKER_API_KEY`,
+`PRICING_DAILY_QUOTA`. AWS credentials are **not** read from this file — see
+Phase 1 (`aws configure` / an IAM role in production). In production the two
+bearer tokens (`POKEMONPRICETRACKER_API_KEY`, `ADMIN_API_KEY`) are ECS **secrets**,
+not `environment` entries — see Phase 8.
+
+`PSA_API_KEY` appears in `backend/.env.example` but **no code reads it**: there is
+no `psa_api_key` field on `Settings` while the cert lookup (RFC 0009 T2) is
+deferred behind PSA account approval, and `Settings` ignores unknown env vars. Do
+not add it to a task definition expecting an effect.
 
 Frontend (`frontend/.env.local`): `NEXT_PUBLIC_API_URL` (backend base URL),
 `AUTH_URL`/`AUTH_SECRET` (NextAuth), `AWS_COGNITO_*` (provider),

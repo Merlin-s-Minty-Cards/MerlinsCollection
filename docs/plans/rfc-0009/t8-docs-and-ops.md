@@ -5,6 +5,43 @@
 Small task, but it carries the two things that make the feature real in production
 and it corrects documentation that is **actively wrong** today.
 
+> **THIS DOC WAS ITSELF WRONG IN FIVE PLACES. Corrected in place while executing
+> it, 2026-08-09 — the notes below are the authority over the prose under them.**
+>
+> 1. **§1: "PSA is called once per slab, ever" and "three co-equal input methods
+>    including a camera" describe a flow that DOES NOT EXIST.** PSA has never been
+>    called successfully (403, account not entitled); T2 is deferred whole and T5's
+>    camera was never built. What shipped is manual-first intake — wedge scanner or
+>    keyboard into one cert field — with pricing from PokemonPriceTracker under a
+>    verified-join rule. §1's "the 100/day quota binds only on same-day intake" is
+>    therefore about a quota nothing spends.
+> 2. **§2: "1 credit per card" is wrong and so is the 100-lookup implication.** A
+>    lookup costs **2 credits** (`costPerCard: 2`, measured live), so the free tier
+>    is **FIFTY** lookups a day — and you are billed on `limit` even when the
+>    search matches **zero** cards.
+> 3. **§2: `PSA_DAILY_QUOTA` is not a `Settings` field, and neither is
+>    `PSA_API_KEY`.** `model_config` uses `extra="ignore"`, so documenting either as
+>    a working knob advertises a setting that silently does nothing. Only
+>    `PRICING_DAILY_QUOTA` exists. `PSA_API_KEY` stays in `.env.example` as an
+>    explicitly-labelled inert placeholder (owner's request, 2026-08-08).
+> 4. **§2: PSA does not return "NO rate-limit headers" full stop.** No
+>    `X-RateLimit-*`, but a 429 **does** carry `Retry-After` (observed 833 → 797 s,
+>    a ~13-minute rolling window despite the body saying "per Day"), and a 429 is
+>    also what an unrecognized token returns. `backend/.env.example` already
+>    carried a corrected version of this comment before T8 ran — read what is there
+>    before overwriting it.
+> 5. **§3: the quota counters do NOT reuse `merlins-rate-limits`.** They are purely
+>    in-process and in-memory (`services/slab/quota.py`) and touch no table at all.
+>    §3's *conclusion* is still right — the **task role** needs nothing new — but
+>    for a different reason, and the **execution role** does need
+>    `secretsmanager:GetSecretValue` to inject the key. See `docs/aws-setup.md`
+>    Phase 8.
+>
+> Also corrected: §2's leak grep matches its own text (see the last row of
+> [`follow-ups.md`](follow-ups.md) T0). The command below now excludes
+> `docs/plans/`. **T-FINAL's copy of the same command is still uncorrected** — that
+> doc owns its own commands.
+
 ## 1. Correct CLAUDE.md
 
 The "Third-Party APIs (Planned)" section contains three errors, all recorded in
@@ -53,10 +90,21 @@ PRICING_DAILY_QUOTA=100
 before committing:
 
 ```bash
-git ls-files | xargs grep -l "pokeprice_\|^PSA_API_KEY=." 2>/dev/null
+# `docs/plans/` is excluded because three docs in it QUOTE this pattern — this
+# doc, t-final-verification.md and follow-ups.md. Without the exclusion the
+# check reports itself and trains you to wave it through.
+git ls-files | grep -v "^docs/plans/" | xargs grep -l "pokeprice_\|^PSA_API_KEY=." 2>/dev/null
+
+# Value-shaped scan, which no doc's prose can trip: an actual token after the `=`.
+git ls-files | grep -v "^docs/plans/" \
+  | xargs grep -nE "(PSA_API_KEY|POKEMONPRICETRACKER_API_KEY)[=:][\"' ]*[A-Za-z0-9_-]{8,}" 2>/dev/null
+
+git check-ignore -v backend/.env   # must print a .gitignore hit
 ```
 
-Expect no output. If anything matches, stop and fix it before committing.
+Expect no output from the two greps. If anything matches, stop and fix it before
+committing. **Both were clean on 2026-08-09**; the only matches for the
+unfiltered form were the three docs listed above.
 
 ## 3. Production secrets
 
