@@ -10,20 +10,37 @@
 > §7/§8 that assume a cert lookup, are **on hold**; §5.2 pricing is verified and
 > proceeding. See
 > [the design spec](../superpowers/specs/2026-08-08-slab-manual-entry-design.md) and
-> [findings](../plans/rfc-0009/spike-findings.md). Corrections to §5.1/§5.2/§9 are
-> assigned to the re-plan's Task 7 — until then, **trust the spec over this document
-> where they disagree.**
+> [findings](../plans/rfc-0009/spike-findings.md). **The corrections to §1/§5.1/§5.2/
+> §5.3/§9 have now landed** (re-plan Task 7, 2026-08-08), so those sections are
+> current. §7's `/admin/slabs/lookup/{cert}` and §8's scan bar are the parts still
+> describing the unbuilt PSA flow — for the intake tab **as built**, read the spec.
 
 ## 1. What this builds
 
 An `/admin/slabs` tab that turns a stack of graded slabs into priced inventory:
 
-1. **Scan** a slab's barcode (keyboard-wedge scanner, or the device camera).
-2. The barcode yields a **PSA cert number**; PSA's API turns that into a verified
-   card identity and grade.
-3. Scanned slabs **stage** in a batch. You fill in cost, then commit the batch.
+1. **Enter** a slab's cert number — typed by hand, or read into the same field by a
+   keyboard-wedge scanner. There is one input and one code path for both.
+2. The operator identifies the card through **catalog autocomplete**, with a
+   free-text fallback for anything the catalog does not hold. Company, grade and
+   cost are typed.
+3. Entered slabs **stage** in a batch, client-side. You then commit the batch.
 4. Committing writes real `graded` inventory items **and** purchase transactions.
 5. A free pricing provider supplies **per-grade market values**, refreshed nightly.
+
+**Intake is manual-first (amended 2026-08-08).** PSA's cert API is blocked at the
+account (§5.1), so nothing in this flow requires a lookup: the operator is the
+source of identity, grade and cost, and the tab works with no scanner, no camera
+and no PSA. **PSA lookup returns as a pre-fill, not a prerequisite** — when the
+account is approved it fills the same form the operator otherwise fills by hand,
+and everything downstream is unchanged. Nothing built for the manual path is
+discarded when it arrives. The camera is deferred for the same reason: it yields a
+cert number, which without PSA resolves to nothing.
+
+This is not only a stopgap. §8 already required hand entry to work in every
+degraded state, and CGC/BGS/SGC slabs were always going to be manual by design
+(§9). Making manual entry the primary path means the fallback is the path everyone
+uses, so it cannot rot.
 
 ## 2. Owner decisions locked in during planning (2026-08-07)
 
@@ -75,13 +92,40 @@ it never 500s.
 
 ### 5.1 PSA — identity only
 
+> **MEASURED 2026-08-08 (T0): every authenticated call returns `403 {"Message":
+> "Access to this API is limited to approved customers."}`.** The bullets below are
+> what PSA documents; the corrections under them are what the wire actually did. No
+> successful authenticated PSA call has ever been made from this codebase, so
+> everything about the response *shape* remains unobserved — see §5.3.
+
 - **Endpoint:** `GET https://api.psacard.com/publicapi/cert/GetByCertNumber/{cert}`
-- **Auth:** `Authorization: Bearer <token>`; token does not expire
-- **Free quota:** **100 calls/day.** Over it → HTTP 429
-- **No rate-limit headers are returned** — we must count our own calls
+- **Auth:** `Authorization: Bearer <token>`; token does not expire. **Confirmed
+  correct** — four header variants were tried, and only the two `Bearer` forms are
+  recognized at all (§1.2 of the findings)
+- **Free quota:** **100 calls/day.** Over it → HTTP 429. *Documented, not verified:
+  the account never got far enough to spend a metered call*
+- **No `X-RateLimit-*` headers are returned** — we must count our own calls
 - **Returns:** subject, year, brand, set/variety, card number, grade, auto grade,
   label type, attributes, image URL
 - **`TotalPopulation` and `PopulationHigher` are ALWAYS `null`** on the public API
+
+**Corrections T0 measured — all three are on the wire, not inferred:**
+
+1. **`403 "Access to this API is limited to approved customers"` is a third failure
+   mode, and it is the one actually happening.** It reproduced across two endpoints
+   (`GetByCertNumber` and `GetImagesByCertNumber`) and across a key the owner
+   re-issued on 2026-08-08, so it is the **account**, not the call. There is no
+   code-side fix: the remedy is an approval request to `collectors-apis@collectors.com`,
+   the address PSA's own error body supplies. §9 carries the failure-path row.
+2. **A 429 does carry `Retry-After`** — observed counting **833 → 797 s**, i.e. a
+   ~13-minute rolling window rather than a wait until UTC midnight, despite the body
+   saying "per Day". **Observed on an anonymous, keyless request and still
+   unverified for an authenticated caller**; T2 must re-measure once the account is
+   approved rather than build a calendar-day counter on this.
+3. **A 429 does not imply a spent quota.** An *unrecognized* credential (no `Bearer`
+   scheme, or `X-API-Key`) falls into the shared **anonymous** bucket and 429s,
+   while a *recognized but unentitled* token 403s. The two are distinguishable, and
+   the UI must not report "quota exhausted" for what is an entitlement problem.
 
 **Consequences, both binding:**
 
@@ -95,21 +139,48 @@ it never 500s.
 
 ### 5.2 PokemonPriceTracker — pricing
 
-- **Free tier:** 100 credits/day, 60 requests/min, 1 credit per card
+- **Free tier:** 100 credits/day, 60 requests/min, **2 credits per card**
 - **Returns:** PSA 8 / 9 / 10 values derived from **eBay completed (sold)** listings
   — the same sold-comps basis PriceCharting uses
 - Population endpoint is Business-tier ($99/mo) — **not used**
 - Escape hatch if outgrown: $9.99/mo for 20,000 credits/day
 
-**Quota strategy:** 1 credit per slab per refresh. Under 100 slabs, a full nightly
-refresh fits the free tier. Above that, refresh the **100 stalest** each night, so
-every slab refreshes within `ceil(N/100)` days and the UI shows the value's **age**
-rather than implying it is current.
+**Billing, measured 2026-08-08 (T0), and wrong twice over in the original draft:**
+
+1. **`costPerCard` is 2, not 1** — the response says so in its own body
+   (`"apiCallsConsumed": {"total": 4, …, "costPerCard": 2}`): 1 for the card, 1 for
+   `includeEbay`. Confirmed live, no longer an inference from the docs.
+2. **You are billed on `limit`, not on hits.** Cost is `2 × limit`, **always** — the
+   first probe used `limit=2`, matched **zero** cards, and was still charged 4
+   credits. `limit` is the cost dial, not a free breadth knob: **pin `limit=1`**, and
+   understand that a careless `limit=5` cuts the daily budget to 10 slabs.
+3. **The response self-reports quota** (`x-ratelimit-daily-limit`,
+   `x-ratelimit-daily-remaining`, `x-ratelimit-daily-reset`, `x-api-calls-consumed`),
+   so T6 needs no call counter of its own. Unlike PSA, **401 = auth and 429 = quota
+   are cleanly separable.**
+
+**Quota strategy:** 2 credits per slab per refresh, so the free tier is **50 slab
+lookups a day, not 100**. Under 50 slabs, a full nightly refresh fits the free tier.
+Above that, refresh the **50 stalest** each night, so every slab refreshes within
+`ceil(N/50)` days and the UI shows the value's **age** rather than implying it is
+current. **T7's rotation math must be sized off 50, not 100** — the original figure
+would have refreshed half as often as promised.
 
 ### 5.3 Unverified — T0 must confirm before any mapper is written
 
-Neither provider's exact response shape has been observed from this codebase. T0 is
-a spike whose only job is to record real responses as fixtures and answer:
+> **T0 ran on 2026-08-08 and returned a SPLIT verdict** ([`spike-findings.md`](../plans/rfc-0009/spike-findings.md)):
+> **pricing PROCEED** — 19 cards recorded as fixtures, all 200s with graded data,
+> **including 3/3 Japanese**, so coverage is better than feared and T6 is unblocked.
+> **PSA STOP** — every question below is still open for PSA and **none of it can be
+> guessed**, because the account 403s before any body is returned. T2 is a mapper
+> with nothing to map. One further finding binds T6: the vendor's **name search
+> returns the wrong card roughly a third of the time**, and a wrong answer is
+> indistinguishable from a right one, so a price may be auto-attached **only** on a
+> verified `externalCatalogId` join.
+
+Neither provider's exact response shape had been observed from this codebase when
+this RFC was written. T0 was a spike whose only job was to record real responses as
+fixtures and answer:
 
 - Exact JSON field names and nesting for both providers.
 - **Coverage of the actual shelf**, especially **Japanese slabs.** eBay-sold-derived
@@ -178,7 +249,8 @@ Card art must use the exported `TABLE_THUMB_SIZE` / `TABLE_THUMB_COLUMN` and
 
 | Case | Behavior |
 |---|---|
-| PSA key missing / API down / 429 | Manual entry; item flagged `needs_review`, machine reason `cert_lookup_failed` |
+| **PSA 403 — account not approved** | Manual entry. The message must say the fix is **account approval** (a support email to `collectors-apis@collectors.com`), **not** a retry and **not** waiting for UTC midnight. This is the state the system is in today |
+| PSA key missing / API down / 429 | Manual entry. **Flagged `cert_lookup_failed` only where automation actually tried and failed** — see the amendment below |
 | CGC / BGS / SGC slab | Manual entry, by existing design decision — too rare to justify a per-vendor pipeline |
 | Cert verified, no catalog match | `card_id=None` → lands in Triage as `missing_card_id`. Free; no new code |
 | No pricing coverage | Manual value, honestly badged, excluded from coverage stats |
@@ -187,6 +259,20 @@ Card art must use the exported `TABLE_THUMB_SIZE` / `TABLE_THUMB_COLUMN` and
 `cert_lookup_failed` joins `MACHINE_REVIEW_REASONS` (`models/inventory.py:169-174`)
 so the existing re-flag guard applies: automation must not re-flag a slab an admin
 has already passed.
+
+> **AMENDED 2026-08-08 — a hand-entered slab is NOT review-flagged.** The original
+> rule was `cert_verified_at is None` → `cert_lookup_failed`. That assumed PSA
+> verification was normal and its absence exceptional; **manual-first intake inverts
+> it**, so the rule would flag *every* slab and turn Triage into noise — which is how
+> a review queue becomes something people stop reading. `cert_lookup_failed` means
+> *automation tried and failed*, and a human deliberately typing a slab in is the
+> opposite of that.
+>
+> **The rule is now: flag only when `card_id` is missing.** That is
+> `_review_reason_for_buy`'s existing `no_catalog_link`, which Triage already derives
+> as `missing_card_id` at no cost — so this removes work rather than adding it. The
+> frontend must therefore **never send `manual_entry`**. `cert_lookup_failed` keeps
+> its literal meaning and returns to use when T2 does.
 
 ## 10. Security and secrets
 

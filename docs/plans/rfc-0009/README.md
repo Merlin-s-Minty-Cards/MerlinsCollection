@@ -22,6 +22,9 @@ them as a side errand.
 
 ## ⚠️ Re-planned 2026-08-08 — manual-first intake
 
+**The re-plan is COMPLETE: all 7 of its tasks are done, and T3 and T4 are `DONE`.**
+Intake works end to end with no scanner, no camera and no PSA. **T6 is next.**
+
 PSA's cert API is blocked at the account (403, no code-side fix), so T3 and T4 were
 re-planned. **Their authority is now
 [`docs/superpowers/plans/2026-08-08-slab-manual-entry.md`](../../superpowers/plans/2026-08-08-slab-manual-entry.md)**
@@ -43,9 +46,11 @@ conversation ends by committing and emitting the prompt for the next one.
 
 ## Vertical slicing
 
-Tasks are sliced so that **T4 is a usable product**: after T0–T4 you can scan a
-stack of slabs and have them become real, costed inventory. Everything after T4
-adds pricing and polish to a working feature rather than completing a half-built one.
+Tasks are sliced so that **T4 is a usable product**: after T0–T4 you can take a
+stack of slabs — typing each cert, or scanning it into the same field — and have
+them become real, costed inventory. Everything after T4 adds pricing and polish to a
+working feature rather than completing a half-built one. **This line is now past
+tense: T4 landed 2026-08-08.**
 
 If you run out of appetite, the natural cut lines are **after T4** (intake works,
 prices are manual) or **after T7** (intake + automated pricing; only docs remain).
@@ -56,11 +61,11 @@ prices are manual) or **after T7** (intake + automated pricing; only docs remain
 |---|---|---|---|---|
 | T0 | [t0-provider-spike.md](t0-provider-spike.md) | Verify both APIs against real data; record fixtures; **coverage gate** | spike | — |
 | T1 | [t1-slab-model-and-cert-index.md](t1-slab-model-and-cert-index.md) | Slab fields + `CERT#` pointer row + duplicate-check endpoint | backend | — |
-| T2 | [t2-psa-lookup-and-quota.md](t2-psa-lookup-and-quota.md) | **DEFERRED** — PSA is 403-blocked at the account. Not startable | backend | PSA approval |
-| T3 | ~~[t3-buy-session-graded.md](t3-buy-session-graded.md)~~ → **[manual-entry plan](../../superpowers/plans/2026-08-08-slab-manual-entry.md) Tasks 1–2** | Buy session creates graded items — fixes the `kind: "raw"` hardcode | backend | T1 |
-| T4 | ~~[t4-slabs-tab-scan-to-commit.md](t4-slabs-tab-scan-to-commit.md)~~ → **[manual-entry plan](../../superpowers/plans/2026-08-08-slab-manual-entry.md) Tasks 3–6** | **The tab.** Manual entry with catalog autocomplete → staging table → commit | frontend | **T3 only** |
+| T2 | [t2-psa-lookup-and-quota.md](t2-psa-lookup-and-quota.md) | **DEFERRED** — PSA is 403-blocked at the account. Not startable, and **blocks nothing in flight** | backend | PSA approval |
+| T3 | ~~[t3-buy-session-graded.md](t3-buy-session-graded.md)~~ → **[manual-entry plan](../../superpowers/plans/2026-08-08-slab-manual-entry.md) Tasks 1–2** | **DONE** (`b9a9798`, `170eb09`) — buy session creates graded items; the `kind: "raw"` hardcode is gone | backend | T1 |
+| T4 | ~~[t4-slabs-tab-scan-to-commit.md](t4-slabs-tab-scan-to-commit.md)~~ → **[manual-entry plan](../../superpowers/plans/2026-08-08-slab-manual-entry.md) Tasks 3–6** | **DONE** (`c5b5a00`, `164d3b0`, `cb0b59f`, `ec56727`) — **the milestone.** Manual entry with catalog autocomplete → staging table → commit | frontend | **T3 only** |
 | T5 | [t5-camera-scan.md](t5-camera-scan.md) | **DEFERRED** behind T2 — a camera yields a cert number, which without PSA resolves to nothing | frontend | T2 |
-| T6 | [t6-pricing-provider-and-slab-list.md](t6-pricing-provider-and-slab-list.md) | Pricing client + `graded_price` writes + slab list with values | full-stack | T0, T4 |
+| T6 | [t6-pricing-provider-and-slab-list.md](t6-pricing-provider-and-slab-list.md) | Pricing client + `graded_price` writes + slab list with values. **← the next task; both dependencies are now met** | full-stack | T0, T4 |
 | T7 | [t7-nightly-sync-and-refresh-fix.md](t7-nightly-sync-and-refresh-fix.md) | Nightly refresh with stalest-first rotation; fixes the graded-skip bug | backend | T6 |
 | T8 | [t8-docs-and-ops.md](t8-docs-and-ops.md) | CLAUDE.md corrections, `.env.example`, ECS secrets, README | docs/ops | T7 |
 | T-FINAL | [t-final-verification.md](t-final-verification.md) | Full suite, lint, build, PR | verification | all |
