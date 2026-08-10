@@ -7,13 +7,15 @@ gitignored (`.gitignore:60`), so it is local-only and your edits to it will neve
 appear in `git status` or reach anyone else. It now carries a pointer block sending
 readers here. Record all RFC 0009 status **in this file**.
 
-**Last updated:** 2026-08-09 (**T8 DONE.** The docs now describe what was built:
-manual-first intake, PokemonPriceTracker at 2 credits = 50 lookups a night, the
-verified-join rule, and production secrets wiring. T0/T1/T3/T4/T6/T7 also DONE;
-T2 and T5 remain DEFERRED behind PSA account approval and block nothing.
-**T-FINAL is the only task left.** Two owner actions are still outstanding and
-neither is a code task: **rotate both API keys**, and **email PSA for public-API
-approval**)
+**Last updated:** 2026-08-09 (**T-FINAL DONE — RFC 0009 IS COMPLETE.** All three
+suites green together for the first time: **1502 backend / 575 frontend / 98 MCP**,
+lint clean, leak sweep clean, `next build` green. The build caught **one real bug**
+the entire suite missed — the `/admin/slabs` priced filter never reached the backend
+— fixed under the RED gate with owner confirmation. T0/T1/T3/T4/T6/T7/T8 DONE; T2 and
+T5 remain DEFERRED behind PSA account approval and block nothing. **There is no next
+task.** Two owner actions are still outstanding and neither is a code task:
+**rotate both API keys**, and **email `collectors-apis@collectors.com` for PSA
+public-API approval**)
 **Branch:** `Polishing-For-Deployment`
 **RFC:** [`docs/rfcs/0009-slab-intake-and-graded-pricing.md`](../../rfcs/0009-slab-intake-and-graded-pricing.md)
 **Task index:** [`README.md`](README.md)
@@ -55,7 +57,7 @@ and **both tasks are now finished** — see their rows below for shas.
 | T6 | Pricing provider + slab list | **DONE** | `65ecece` | **53 backend + 8 frontend tests pass**; ruff and `next lint` clean. **The owner approved the verified-join rule** (see Decisions) — `attach_price` refuses unless `en:<externalCatalogId>` equals the item's own `card_id`, and an unpriced slab is **NOT** Triage-flagged, it surfaces at `/admin/slabs?priced=false`. **"No coverage" is an ABSENT KEY, confirmed against all 19 fixtures — not one contains a `0`** (T7 depends on this: a missing grade key means "no comps", and must never become `Decimal("0")`). Also: **nothing calls `attach_price` yet — that is T7's job.** `prices(id)` is the exact, non-fuzzy call T7 should use; `resolve()` is the fuzzy one and runs once per card ever. `services/slab/quota.py` was created HERE, not in T2 |
 | T7 | Nightly sync + refresh fix | **DONE** | `fbf1553` | **138 tests pass** in the three named files, **218 more** across the blast radius (`test_dynamodb`, `test_pricing`, `test_catalog_wipe`, the three `scripts/` files); ruff clean. `refresh_graded_prices` walks owned slabs stalest-first (never-priced first), capped at **50 lookups**, deduped by `(card_id, company, grade)`, and a per-run memo means one card is ONE call whatever grades of it we hold — so `resolve()` runs at most once per card per night. **TWO OWNER DECISIONS, 2026-08-09** (see Decisions): the job DOES do first contact, and a hand-typed price is overwritten unless **pinned**. `POST /admin/slabs/refresh-prices` + `PUT /admin/slabs/{id}/price/pin` are new; the Market button now prices slabs too. **T8 must know:** the pin has NO frontend control yet, so nothing is pinned in practice and the provider currently always wins — [`follow-ups.md`](follow-ups.md) T7 row 3 |
 | T8 | Docs + ops | **DONE** | `9afb79d` | **5 tests pass** in `test_config.py` (2 pre-existing + 3 new doc guards); the app boots with both keys **forced empty**; ruff clean on `backend/src`; leak check clean outside `docs/plans/`. **The T8 doc was itself wrong in FIVE places and now carries a correction banner** — the biggest being that it describes a PSA-per-slab flow and a camera that do not exist. **`PSA_API_KEY` is read by NO code** (no `psa_api_key` field on `Settings`; `extra="ignore"` swallows it), so it is documented as inert and `PSA_DAILY_QUOTA` was not added at all — only `PRICING_DAILY_QUOTA` exists. **The slab quota counters touch no DynamoDB table**, so the task role needs nothing new, but the ECS **execution** role needs `secretsmanager:GetSecretValue`. **KEY ROTATION IS STILL NOT DONE** — owner action in two vendor portals, procedure now written in `docs/aws-setup.md` Phase 8 |
-| T-FINAL | Verification + PR | NOT STARTED | — | **UNBLOCKED — it is the last task.** Its own leak-check command still matches its own text; exclude `docs/plans/` (T8 fixed its own copy, not T-FINAL's). Baseline for the full run: **1407 backend / 545 frontend / 98 MCP**, plus T8's 3 new `test_config.py` tests |
+| T-FINAL | Verification + PR | **DONE** | `PENDING` | **RFC 0009 IS COMPLETE.** Full suite, all three layers, measured 2026-08-09: **backend 1502 passed / 0 failed / 2m13s**, **frontend 575 passed / 78 files / 28s**, **MCP 98 passed / 7 files / 1.0s**. `ruff check backend/src` clean; `next lint` clean; leak sweep clean across all 190 branch commits; app boots with both keys forced empty and `build_pricing_provider()` returns `None`. **`next build` caught a REAL BUG the whole suite missed** — `/admin/slabs` passed `{ params: {…} }` to `api.get`, whose second arg IS the params record, so the request emitted `?params=[object Object]` and **the unpriced worklist filter silently returned every slab**. Fixed under the RED gate with 2 new tests (owner confirmed GREEN). **Vitest does not typecheck — `next build` is the only gate that catches this class; never skip it.** Also fixed this doc's self-matching leak command and its stale PSA/camera smoke checklist |
 
 Statuses: `NOT STARTED` → `RED (awaiting owner confirmation)` → `IN PROGRESS` → `DONE`,
 plus `BLOCKED` for a task that was started and cannot finish without the owner, and
@@ -142,6 +144,8 @@ The 19 cert numbers themselves are recorded in that doc's §4 coverage table.
 | 2026-08-09 | T8 | **Corrected the T8 doc IN PLACE with a five-item banner instead of executing it as written.** Its §1 described a PSA-per-slab flow and a camera that were never built, §2 had the credit math wrong twice and named two non-existent settings, §3 claimed the quota counters use `merlins-rate-limits` | The RFC precedent from T7: correct in place, keep the good parts. A task doc that survives execution unamended teaches the next reader the wrong thing — and §3's wrong *reason* for "no new IAM" was the dangerous one, since it would send someone hunting for counter rows in a table that never gets written. §3's conclusion survived; its reasoning did not |
 | 2026-08-09 | T8 | **No RED phase, stated rather than faked.** T8 changes prose, comments and a `.env` template — no behaviour — so nothing could fail first. The three tests added to `test_config.py` are **documentation guards for behaviour that already shipped** in T6/T7 and passed on their first run, by design | CLAUDE.md's gate binds behavioural change. Inventing a failing test for a docstring would have produced a fake RED and a test that asserts prose. The guards earn their place differently: four separate docs now print "100 credits = 50 lookups", so a default changed in code without them makes all four quietly wrong |
 | 2026-08-09 | T8 | `deploy/backend-container.json` was left **without** a `secrets` block; the block to paste lives in `docs/aws-setup.md` Phase 8 instead | A placeholder ARN in a file that gets applied verbatim makes the ECS task **fail to start** until the secret exists — a worse failure than the one it prevents, and a docs task has no access to mint the real ARN. The tradeoff is recorded as a follow-up: regenerating the task def from that file silently drops the key, and the run still exits `0` |
+| 2026-08-09 | T-FINAL | **Fixed the `/admin/slabs` priced-filter bug rather than logging it**, under a full RED gate: two failing tests written first, the failing output shown to the owner, GREEN only after explicit confirmation. The owner chose the **call-site** fix over widening `useAdminApi.get`'s signature | It is a real user-visible defect on a documented worklist, and it **broke `next build`**, so the branch could not deploy with it — logging it would have handed over a branch that does not build. The call-site fix is isolated: `/admin/slabs` was the only wrapper-form caller in the codebase, so changing the shared helper would have put every admin page in the blast radius to fix one line. The deeper trap (the helper accepts the wrong shape silently) is [`follow-ups.md`](follow-ups.md) T-FINAL row 1 |
+| 2026-08-09 | T-FINAL | **Corrected two things in `t-final-verification.md` itself** — its self-matching secret-leak command (now excludes `docs/plans/` and adds T8's value-shaped grep) and its §6 smoke checklist, which still told the owner to look for "PSA-verified identity" and to "scan with the camera" | Same precedent as T7's RFC amendment and T8's banner: a task doc that survives execution unamended teaches the next reader the wrong thing. The leak fix was explicitly assigned to T-FINAL by [`follow-ups.md`](follow-ups.md) T0 (each doc owns its own commands). The checklist mattered more: it is the one artifact handed to a human, and three of its rows described a flow that does not exist, so the owner would have "failed" a smoke test of features nobody built |
 | 2026-08-09 | T7 | Three test files got a `monkeypatch.setattr(settings, "pokemonpricetracker_api_key", "")` guard | `Settings.model_config` uses `env_file=".env"`, which resolves against the **CWD** — so the same test run from `backend/` rather than the repo root would load the REAL key, and the "unconfigured key" tests would make live, billed vendor calls. Forced empty, not assumed empty |
 
 
@@ -161,6 +165,39 @@ failure:
 - MCP: **98 tests / 7 files, ~1 s**.
 - Lint: ruff on `backend/src` and `npm run lint --workspace=frontend` both have
   known pre-existing findings. Compare counts; do not chase them to zero.
+
+## FINAL measurement (T-FINAL, 2026-08-09) — the number to regress against
+
+The whole system exercised together for the first time. **Everything below is
+green.** A later reader comparing against this can tell a regression from a
+pre-existing failure:
+
+| Suite | Baseline (2026-08-07) | **Final (2026-08-09)** | Delta |
+|---|---|---|---|
+| Backend | 1369 → 1407 after T1, ~2m21s | **1502 passed, 0 failed, 2m13s** | +95 from T6/T7/T8 |
+| Frontend | 545 / 73 files, ~31s | **575 passed, 78 files, 28s** | +30 = T4's 20, T6's 8, T-FINAL's 2 |
+| MCP | 98 / 7 files, ~1s | **98 passed, 7 files, 1.0s** | unchanged |
+| `ruff check backend/src` | pre-existing findings | **All checks passed** | clean |
+| `npm run lint --workspace=frontend` | pre-existing findings | **clean, exit 0** | clean |
+| `npm run build --workspace=frontend` | not previously run | **exit 0** | see below |
+
+- **The two `test_auth.py` failures did not reproduce**, consistent with T1's
+  re-measurement. Treat the original "two known failures" line as stale.
+- Backend runtime **2m13s**, so the session-scoped `mock_aws()` is intact — a
+  per-test `mock_aws()` regression would show as ~10 minutes.
+- **`next build` earned its place in the checklist.** It caught a type error that
+  all 573 frontend tests missed, because **vitest does not typecheck**. The
+  `/admin/slabs` page passed `{ params: {…} }` to `api.get`, whose second argument
+  IS the params record, so the query came out as `?params=[object Object]` and the
+  unpriced worklist silently returned every slab. Fixed under the RED gate.
+  **Never skip step 3.**
+- Lint outside the named paths is unchanged and NOT ours: `backend/scripts` and
+  `backend/tests` still carry pre-existing `I001`/`E501` findings, including
+  `scripts/daily_sync.py`'s `I001`. The named path is `backend/src`, which is clean.
+- Both vitest suites fail spuriously if invoked as `npx vitest` ("Vitest failed to
+  find the runner", or vitest 4.1.9 resolving over the workspace's 3.2.6). **Use the
+  documented `npm test --workspace=…` form**; the failure is the invocation, not the
+  code.
 
 Use `./.venv/Scripts/python.exe`, never bare `python` — the bare form resolves to an
 unrelated venv with no pytest. If results look impossible, this checkout is a git

@@ -86,4 +86,30 @@ describe('Slabs page', () => {
     await waitFor(() => expect(screen.getByText(/nothing staged/i)).toBeInTheDocument())
     expect(screen.getByText(/900\.50/)).toBeInTheDocument()
   })
+
+  // T-FINAL (2026-08-09). `useAdminApi.get(path, params?)` takes the params
+  // RECORD as its second positional argument (lib/admin-api.ts:84-88) — it is
+  // not a FetchOptions wrapper. Passing `{ params: { priced } }` makes the
+  // request builder iterate the OUTER object, so it emits
+  // `?params=%5Bobject+Object%5D` and never sends `priced` at all: the unpriced
+  // worklist silently returns every slab. Only `next build` caught this; vitest
+  // does not typecheck, so all 573 tests stayed green.
+  it('sends priced as a query param the backend can read, not a nested object', async () => {
+    render(<SlabsPage />)
+    await waitFor(() => expect(mockApi.get).toHaveBeenCalled())
+    mockApi.get.mockClear()
+
+    fireEvent.change(screen.getByLabelText(/filter slabs by pricing/i), {
+      target: { value: 'false' },
+    })
+
+    await waitFor(() => expect(mockApi.get).toHaveBeenCalled())
+    expect(mockApi.get).toHaveBeenLastCalledWith('/slabs', { priced: 'false' })
+  })
+
+  it('omits the params argument entirely when the filter is "all"', async () => {
+    render(<SlabsPage />)
+    await waitFor(() => expect(mockApi.get).toHaveBeenCalled())
+    expect(mockApi.get).toHaveBeenLastCalledWith('/slabs', undefined)
+  })
 })

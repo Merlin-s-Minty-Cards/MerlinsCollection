@@ -21,9 +21,16 @@ export default function SlabsPage() {
 
   const loadSlabs = useCallback(async () => {
     try {
-      const body = await api.get<{ items: SlabRow[]; total: number }>('/slabs', {
-        params: priced === 'all' ? undefined : { priced },
-      })
+      // `get(path, params?)` takes the params RECORD positionally — it is not a
+      // FetchOptions wrapper (lib/admin-api.ts:84-88). Wrapping it in
+      // `{ params: … }` made the request builder iterate the outer object and
+      // emit `?params=[object Object]`, so `priced` never reached the backend
+      // and the worklist returned every slab. Caught by `next build`, not by
+      // the suite — vitest does not typecheck.
+      const body = await api.get<{ items: SlabRow[]; total: number }>(
+        '/slabs',
+        priced === 'all' ? undefined : { priced },
+      )
       setSlabs(body?.items ?? [])
       setTotal(body?.total ?? 0)
       setListError(null)

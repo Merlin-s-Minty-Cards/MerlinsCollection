@@ -68,12 +68,38 @@ usable with no scanner, no camera, and no API access.**
 
 ## 5. Secret sweep
 
+**`docs/plans/` is excluded from every command below**, because three docs in it
+QUOTE these patterns — this file, [`t8-docs-and-ops.md`](t8-docs-and-ops.md) and
+[`follow-ups.md`](follow-ups.md). Without the exclusion the sweep reports *itself*,
+and a check that always cries wolf is one you learn to wave through — which is how a
+real key eventually ships. (T8 fixed its own copy on 2026-08-09 and left this one,
+since each doc owns its own commands; T-FINAL fixed this copy on 2026-08-09.)
+
+Working tree — name-shaped, then a value-shaped scan no prose can trip:
+
 ```bash
-git log -p origin/main..HEAD | grep -i "pokeprice_\|psa_api_key\s*=\s*[A-Za-z0-9]"
+git ls-files | grep -v "^docs/plans/" | xargs grep -l "pokeprice_\|^PSA_API_KEY=." 2>/dev/null
+
+git ls-files | grep -v "^docs/plans/" \
+  | xargs grep -nE "(PSA_API_KEY|POKEMONPRICETRACKER_API_KEY)[=:][\"' ]*[A-Za-z0-9_-]{8,}" 2>/dev/null
+
+git check-ignore -v backend/.env   # must print a .gitignore hit
 ```
 
-Expect no output. A key committed anywhere in this branch's history — not just the
-tip — means rewriting history before the PR, so check now rather than after review.
+Branch history — a key committed anywhere in this branch's history, not just at the
+tip, means rewriting history before the PR:
+
+```bash
+git log -p origin/main..HEAD -- . ':(exclude)docs/plans/' \
+  | grep -nE "(PSA_API_KEY|POKEMONPRICETRACKER_API_KEY)[=:][\"' ]*[A-Za-z0-9_-]{8,}"
+
+git log -p origin/main..HEAD -- . ':(exclude)docs/plans/' | grep -n "pokeprice_"
+```
+
+Expect no output from any grep, and a `.gitignore` hit for `backend/.env`. **All
+clean on 2026-08-09** across the branch's 190 commits; the only matches for the
+unfiltered form were the three docs named above. Do not conclude a key leaked
+without a *value* match — none has.
 
 ## 6. Manual smoke test
 
@@ -81,13 +107,20 @@ An agent must **not** do this. `backend/.env` points at the **same live DynamoDB
 table** as production, so an agent-run smoke test writes real inventory. The Round 4
 plan deferred this step for the same reason.
 
-Hand the owner a checklist:
+Hand the owner a checklist. **Corrected 2026-08-09 (T-FINAL):** the original list
+assumed PSA cert verification and a camera. Neither was built — PSA is blocked at the
+account (403) so T2 and T5 are deferred, and intake is manual-first by design. There
+is no "PSA-verified identity" to observe and no camera to scan with; those rows are
+replaced below rather than left to fail on contact.
 
-- [ ] Scan a real slab with the wedge scanner → row stages with PSA-verified identity
-- [ ] Type a cert number by hand → same result
-- [ ] Scan with the camera (if T5 landed)
-- [ ] Enter a cert PSA does not know → row stages as manual, editable, commits fine
-- [ ] Scan a slab already owned → duplicate warning appears, override works
+- [ ] Wedge-scan a real slab's cert barcode → the cert field fills and focus
+      *advances*; the form does not submit on the scanner's trailing Enter
+- [ ] Type a cert number by hand → same result, same path
+- [ ] Identify the card via catalog autocomplete → row stages with the catalog name
+- [ ] Identify a card the catalog does not have via the **free-text fallback** →
+      row still stages and commits
+- [ ] Enter a cert already owned → duplicate **warning** appears on blur and the
+      **override** works (it is a warning, never a gate — a re-bought slab is legitimate)
 - [ ] Commit a batch → items appear in Inventory, a purchase transaction appears in
       History, and the total is right
 - [ ] A committed slab shows a price on the Slabs tab, or an honest "not priced"
