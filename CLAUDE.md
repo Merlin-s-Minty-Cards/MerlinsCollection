@@ -118,9 +118,28 @@ batch, then a commit that runs the ordinary buy session's create → items →
 confirm. `GET /admin/slabs/certs/{cert}` warns on a cert already owned — a
 **warning with override**, never a gate, because a slab sold and bought back is a
 legitimate re-entry. `/admin/slabs?priced=false` is the unpriced worklist. The
-per-grade pricing behind it is documented under "Third-Party APIs" below; two
-gaps are live and deliberate — **no per-row editing in the staging table** (so its
-commit gating is unbuilt on purpose) and **no pin control**. Full list:
+per-grade pricing behind it is documented under "Third-Party APIs" below.
+
+**The intake toolbar has four buttons, and two of them are deliberately dead.**
+"Manual entry" is a disclosure — the form is **put away by default**, like the
+other admin tabs, and stays open across adds because intake is a batch workflow.
+"Scan cert" is **real**: it opens the form, focuses the cert field and shows a
+"waiting for scan" state, which is all a wedge scanner needs (it is just a fast
+keyboard). "Camera scan" and "Auto-fill from cert" are rendered **disabled with
+`aria-describedby` naming PSA approval as the blocker** — they are placeholders on
+purpose, so the gap reads as known rather than forgotten. Do not try to implement
+either: PSA 403s at the **account**, re-confirmed 2026-08-10 against their Swagger
+with both bearer spellings (see "Third-Party APIs").
+
+The page uses the **vault design system** (`vault-panel`, `vault-field`,
+`text-pine-*`, `bg-mint/15`) like every other admin tab. It previously used none
+of it, which is why its dropdowns rendered light-green-on-white: the admin theme
+is dark (`.vault-scope`, `#06150b`) with light-green text, so an unstyled
+`<select>` inherited the theme's text colour over the browser's default white
+background. **Never ship an admin control without `vault-field`.**
+
+Two gaps remain live and deliberate — **no per-row editing in the staging table**
+(so its commit gating is unbuilt on purpose) and **no pin control**. Full list:
 `docs/plans/rfc-0009/follow-ups.md`.
 
 **Shows** (`/admin/shows`) — CRUD for show/event days. Note this is a

@@ -45,64 +45,76 @@ export default function SlabList({ rows }: { rows: SlabRow[] }) {
   const { getImageUrl } = useCardImages(rows.map((r) => r.card_id))
 
   if (rows.length === 0) {
-    return <p className="text-sm text-gray-600">No slabs yet.</p>
+    return (
+      <p className="vault-panel rounded-xl px-4 py-6 text-center text-xs text-pine-500">
+        No slabs yet.
+      </p>
+    )
   }
 
   return (
-    <table className="w-full text-sm">
-      <thead>
-        <tr>
-          <th className={`text-left ${TABLE_THUMB_COLUMN}`}>
-            <span className="sr-only">Art</span>
-          </th>
-          <th className="text-left">Card</th>
-          <th className="text-left">Cert</th>
-          <th className="text-left">Company</th>
-          <th className="text-left">Grade</th>
-          <th className="text-left">Value</th>
-          <th className="text-left">Cost</th>
-          <th className="text-left">Status</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((row) => {
-          const age = valueAge(row.value_as_of)
-          return (
-            <tr key={row.item_id} className="border-t border-pine-800/40">
-              <td className={TABLE_THUMB_COLUMN}>
-                <CardImage
-                  imageUrl={getImageUrl(row.card_id)}
-                  alt={row.name || row.cert_number}
-                  size={TABLE_THUMB_SIZE}
-                />
-              </td>
-              <td>{row.name || <span className="text-gray-500">unnamed</span>}</td>
-              <td>{row.cert_number}</td>
-              <td>{row.company}</td>
-              <td>{row.grade}</td>
-              <td>
-                {row.market_value === null ? (
-                  // NEVER $0.00. A slab shown at zero drags every total and
-                  // misreports position while looking authoritative; "not
-                  // priced" is the honest state and, after the verified-join
-                  // rule, the ordinary one for a Japanese slab.
-                  <span className="text-amber-700">not priced</span>
-                ) : (
-                  <>
-                    <span>${row.market_value}</span>
-                    {row.price_source === 'manual' && (
-                      <span className="ml-2 rounded bg-pine-800/60 px-1 text-xs">manual</span>
-                    )}
-                    {age && <span className="ml-2 text-xs text-gray-500">{age}</span>}
-                  </>
-                )}
-              </td>
-              <td>${row.cost_basis}</td>
-              <td>{row.status}</td>
-            </tr>
-          )
-        })}
-      </tbody>
-    </table>
+    <div className="vault-panel overflow-hidden rounded-xl">
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="border-b border-pine-700/40 text-[11px] uppercase tracking-wider text-pine-400">
+            <th className={`px-3 py-2 text-left font-medium ${TABLE_THUMB_COLUMN}`}>
+              <span className="sr-only">Art</span>
+            </th>
+            <th className="px-3 py-2 text-left font-medium">Card</th>
+            <th className="px-3 py-2 text-left font-medium">Cert</th>
+            <th className="px-3 py-2 text-left font-medium">Company</th>
+            <th className="px-3 py-2 text-left font-medium">Grade</th>
+            <th className="px-3 py-2 text-left font-medium">Value</th>
+            <th className="px-3 py-2 text-left font-medium">Cost</th>
+            <th className="px-3 py-2 text-left font-medium">Status</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-pine-700/25">
+          {rows.map((row) => {
+            const age = valueAge(row.value_as_of)
+            return (
+              <tr key={row.item_id}>
+                <td className={`px-3 py-2 ${TABLE_THUMB_COLUMN}`}>
+                  <CardImage
+                    imageUrl={getImageUrl(row.card_id)}
+                    alt={row.name || row.cert_number}
+                    size={TABLE_THUMB_SIZE}
+                  />
+                </td>
+                <td className="px-3 py-2 text-pine-100">
+                  {row.name || <span className="text-pine-500">unnamed</span>}
+                </td>
+                <td className="px-3 py-2 font-mono text-pine-300">{row.cert_number}</td>
+                <td className="px-3 py-2 text-pine-300">{row.company}</td>
+                <td className="px-3 py-2 font-mono text-pine-200">{row.grade}</td>
+                <td className="px-3 py-2">
+                  {row.market_value === null ? (
+                    // NEVER $0.00. A slab shown at zero drags every total and
+                    // misreports position while looking authoritative; "not
+                    // priced" is the honest state and, after the verified-join
+                    // rule, the ordinary one for a Japanese slab.
+                    <span className="rounded border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300">
+                      not priced
+                    </span>
+                  ) : (
+                    <>
+                      <span className="font-mono text-spriggatito-400">${row.market_value}</span>
+                      {row.price_source === 'manual' && (
+                        <span className="ml-2 rounded bg-pine-800/60 px-1.5 py-0.5 text-[10px] text-pine-300">
+                          manual
+                        </span>
+                      )}
+                      {age && <span className="ml-2 text-[10px] text-pine-500">{age}</span>}
+                    </>
+                  )}
+                </td>
+                <td className="px-3 py-2 font-mono text-pine-200">${row.cost_basis}</td>
+                <td className="px-3 py-2 text-pine-300">{row.status}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
   )
 }

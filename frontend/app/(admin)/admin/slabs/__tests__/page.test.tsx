@@ -12,7 +12,14 @@ vi.mock('@/lib/use-locations', () => ({
   useLocations: () => ({ options: [{ value: 'toploader', label: 'Toploader' }], loading: false }),
 }))
 
+// The entry form is behind a disclosure now (2026-08-10), matching the other
+// admin tabs. Every staging helper has to open it first.
+function openManualEntry() {
+  fireEvent.click(screen.getByRole('button', { name: /manual entry/i }))
+}
+
 function stageOne() {
+  openManualEntry()
   fireEvent.change(screen.getByLabelText(/cert number/i), { target: { value: '89787279' } })
   fireEvent.change(screen.getByLabelText(/card name/i), { target: { value: 'Gengar VMAX' } })
   // ANCHORED — /grade/i matches both "Grade" and "Grade label" and throws
@@ -111,5 +118,60 @@ describe('Slabs page', () => {
     render(<SlabsPage />)
     await waitFor(() => expect(mockApi.get).toHaveBeenCalled())
     expect(mockApi.get).toHaveBeenLastCalledWith('/slabs', undefined)
+  })
+
+  // ---- Intake affordances (2026-08-10) -------------------------------------
+  // The page previously dumped the whole entry form on screen with no way to
+  // put it away, and offered no visible route in other than typing. These
+  // cover the disclosure, the (real) scan path, and the two placeholders whose
+  // blocker is PSA account approval — re-confirmed 403 on 2026-08-10.
+
+  describe('intake affordances', () => {
+    it('keeps the manual entry form put away until it is asked for', () => {
+      render(<SlabsPage />)
+      expect(screen.queryByLabelText(/cert number/i)).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /manual entry/i })).toHaveAttribute(
+        'aria-expanded',
+        'false',
+      )
+    })
+
+    it('reveals the entry form when Manual entry is pressed, and puts it away again', () => {
+      render(<SlabsPage />)
+      const toggle = screen.getByRole('button', { name: /manual entry/i })
+
+      fireEvent.click(toggle)
+      expect(screen.getByLabelText(/cert number/i)).toBeInTheDocument()
+      expect(toggle).toHaveAttribute('aria-expanded', 'true')
+
+      fireEvent.click(toggle)
+      expect(screen.queryByLabelText(/cert number/i)).not.toBeInTheDocument()
+    })
+
+    // The wedge scanner is just a fast keyboard, so "arm the field" IS the
+    // whole feature — there is nothing to defer here.
+    it('arms the cert field for a scan, opening the form if it was closed', async () => {
+      render(<SlabsPage />)
+      fireEvent.click(screen.getByRole('button', { name: /scan cert/i }))
+
+      const cert = screen.getByLabelText(/cert number/i)
+      expect(cert).toBeInTheDocument()
+      await waitFor(() => expect(cert).toHaveFocus())
+      expect(screen.getByText(/waiting for scan/i)).toBeInTheDocument()
+    })
+
+    it('offers a camera button but disables it, naming PSA approval as the blocker', () => {
+      render(<SlabsPage />)
+      const camera = screen.getByRole('button', { name: /camera/i })
+      expect(camera).toBeDisabled()
+      expect(camera).toHaveAccessibleDescription(/psa api approval/i)
+    })
+
+    it('offers cert auto-fill but disables it, naming the same blocker', () => {
+      render(<SlabsPage />)
+      const autofill = screen.getByRole('button', { name: /auto-fill/i })
+      expect(autofill).toBeDisabled()
+      expect(autofill).toHaveAccessibleDescription(/psa api approval/i)
+    })
   })
 })

@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { Plus } from 'lucide-react'
 import { useAdminApi } from '@/lib/admin-api'
 import { useLocations } from '@/lib/use-locations'
 import CertInput from './CertInput'
@@ -43,7 +44,17 @@ const COMPANIES = ['PSA', 'BGS', 'CGC', 'SGC']
  *
  * No condition control: conditions are meaningless for an encapsulated card.
  */
-export default function SlabEntryForm({ onAdd }: { onAdd: (row: StagedSlab) => void }) {
+export default function SlabEntryForm({
+  onAdd,
+  focusToken,
+  armed,
+}: {
+  onAdd: (row: StagedSlab) => void
+  /** Bump to pull focus back to the cert field (scan arming, post-commit). */
+  focusToken?: number
+  /** Renders the "waiting for scan" affordance on the cert field. */
+  armed?: boolean
+}) {
   const api = useAdminApi()
   // `options`, not `locations` -- see lib/use-locations.ts:13.
   const { options: locationOptions } = useLocations()
@@ -67,6 +78,14 @@ export default function SlabEntryForm({ onAdd }: { onAdd: (row: StagedSlab) => v
   // guard the Buy page uses (app/(admin)/admin/buy/page.tsx:64).
   const seqRef = useRef(0)
   const nameRef = useRef<HTMLInputElement>(null)
+  const certRef = useRef<HTMLInputElement>(null)
+
+  // Focus is driven from the page so "Scan cert" can arm this field even when
+  // the form was already open (no remount, so autoFocus would never re-fire).
+  useEffect(() => {
+    if (focusToken === undefined) return
+    certRef.current?.focus()
+  }, [focusToken])
 
   const searchCatalog = useCallback(async (q: string) => {
     if (!q.trim() || cardId) {
@@ -136,40 +155,50 @@ export default function SlabEntryForm({ onAdd }: { onAdd: (row: StagedSlab) => v
 
   return (
     <div className="flex flex-col gap-3">
-      <CertInput
-        value={cert}
-        onChange={(v) => {
-          setCert(v)
-          setOwned(null)
-        }}
-        onEnter={() => nameRef.current?.focus()}
-        onBlur={checkOwned}
-      />
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <CertInput
+          value={cert}
+          inputRef={certRef}
+          armed={armed}
+          onChange={(v) => {
+            setCert(v)
+            setOwned(null)
+          }}
+          onEnter={() => nameRef.current?.focus()}
+          onBlur={checkOwned}
+        />
+
+        <label className="flex flex-col gap-1">
+          <span className="text-[11px] uppercase tracking-wider text-pine-400">Card name</span>
+          <input
+            ref={nameRef}
+            aria-label="Card name"
+            value={name}
+            className="vault-field w-full rounded-lg px-3 py-2 text-sm"
+            onChange={(e) => {
+              setName(e.target.value)
+              setCardId(null)
+            }}
+          />
+        </label>
+      </div>
+
       {owned?.owned && (
-        <p role="status" className="text-amber-700">
+        <p
+          role="status"
+          className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300"
+        >
           Already in inventory ({owned.status}) — {owned.name}. You can still add it.
         </p>
       )}
 
-      <label className="flex flex-col gap-1">
-        <span className="text-sm font-medium">Card name</span>
-        <input
-          ref={nameRef}
-          aria-label="Card name"
-          value={name}
-          className="rounded border px-3 py-2"
-          onChange={(e) => {
-            setName(e.target.value)
-            setCardId(null)
-          }}
-        />
-      </label>
       {results.length > 0 && !cardId && (
-        <ul>
+        <ul className="vault-panel divide-y divide-pine-700/25 overflow-hidden rounded-lg">
           {results.map((c) => (
             <li key={c.card_id}>
               <button
                 type="button"
+                className="w-full px-3 py-2 text-left text-xs text-pine-200 transition-colors hover:bg-pine-800/40 hover:text-pine-100"
                 onClick={() => {
                   setCardId(c.card_id)
                   setName(c.name)
@@ -182,62 +211,66 @@ export default function SlabEntryForm({ onAdd }: { onAdd: (row: StagedSlab) => v
           ))}
         </ul>
       )}
-      {cardId && <p className="text-sm text-green-700">Linked to catalog ({cardId})</p>}
+      {cardId && (
+        <p className="text-[11px] text-spriggatito-400">Linked to catalog ({cardId})</p>
+      )}
 
-      <label className="flex flex-col gap-1">
-        <span className="text-sm font-medium">Company</span>
-        <select
-          aria-label="Company"
-          value={company}
-          className="rounded border px-3 py-2"
-          onChange={(e) => setCompany(e.target.value)}
-        >
-          {COMPANIES.map((c) => (
-            <option key={c} value={c}>
-              {c}
-            </option>
-          ))}
-        </select>
-      </label>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <label className="flex flex-col gap-1">
+          <span className="text-[11px] uppercase tracking-wider text-pine-400">Company</span>
+          <select
+            aria-label="Company"
+            value={company}
+            className="vault-field w-full rounded-lg px-3 py-2 text-sm"
+            onChange={(e) => setCompany(e.target.value)}
+          >
+            {COMPANIES.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+        </label>
 
-      <label className="flex flex-col gap-1">
-        <span className="text-sm font-medium">Grade</span>
-        <input
-          aria-label="Grade"
-          inputMode="decimal"
-          value={grade}
-          className="rounded border px-3 py-2"
-          onChange={(e) => setGrade(e.target.value)}
-        />
-      </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-[11px] uppercase tracking-wider text-pine-400">Grade</span>
+          <input
+            aria-label="Grade"
+            inputMode="decimal"
+            value={grade}
+            className="vault-field w-full rounded-lg px-3 py-2 font-mono text-sm"
+            onChange={(e) => setGrade(e.target.value)}
+          />
+        </label>
 
-      <label className="flex flex-col gap-1">
-        <span className="text-sm font-medium">Grade label</span>
-        <input
-          aria-label="Grade label"
-          value={gradeLabel}
-          className="rounded border px-3 py-2"
-          onChange={(e) => setGradeLabel(e.target.value)}
-        />
-      </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-[11px] uppercase tracking-wider text-pine-400">Grade label</span>
+          <input
+            aria-label="Grade label"
+            value={gradeLabel}
+            className="vault-field w-full rounded-lg px-3 py-2 text-sm"
+            onChange={(e) => setGradeLabel(e.target.value)}
+          />
+        </label>
 
-      <label className="flex flex-col gap-1">
-        <span className="text-sm font-medium">Cost</span>
-        <input
-          aria-label="Cost"
-          inputMode="decimal"
-          value={cost}
-          className="rounded border px-3 py-2"
-          onChange={(e) => setCost(e.target.value)}
-        />
-      </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-[11px] uppercase tracking-wider text-pine-400">Cost</span>
+          <input
+            aria-label="Cost"
+            inputMode="decimal"
+            value={cost}
+            className="vault-field w-full rounded-lg px-3 py-2 font-mono text-sm"
+            onChange={(e) => setCost(e.target.value)}
+          />
+        </label>
+      </div>
 
-      <label className="flex flex-col gap-1">
-        <span className="text-sm font-medium">Location</span>
+      <label className="flex max-w-xs flex-col gap-1">
+        <span className="text-[11px] uppercase tracking-wider text-pine-400">Location</span>
         <select
           aria-label="Location"
           value={location}
-          className="rounded border px-3 py-2"
+          className="vault-field w-full rounded-lg px-3 py-2 text-sm"
           onChange={(e) => setLocation(e.target.value)}
         >
           {locationOptions.map((l) => (
@@ -249,11 +282,19 @@ export default function SlabEntryForm({ onAdd }: { onAdd: (row: StagedSlab) => v
       </label>
 
       {error && (
-        <p role="alert" className="text-red-700">
+        <p
+          role="alert"
+          className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300"
+        >
           {error}
         </p>
       )}
-      <button type="button" onClick={submit} className="rounded bg-green-700 px-4 py-2 text-white">
+      <button
+        type="button"
+        onClick={submit}
+        className="inline-flex items-center gap-1.5 self-start rounded-lg border border-mint/30 bg-mint/15 px-3.5 py-2 text-xs font-medium text-mint transition-colors hover:bg-mint/25"
+      >
+        <Plus size={14} />
         Add to batch
       </button>
     </div>

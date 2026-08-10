@@ -7,38 +7,56 @@ export default function StagingTable({ rows, onRemove }: {
   onRemove: (key: string) => void
 }) {
   if (rows.length === 0) {
-    return <p className="text-sm text-gray-600">Nothing staged yet.</p>
+    return (
+      <p className="vault-panel rounded-xl px-4 py-6 text-center text-xs text-pine-500">
+        Nothing staged yet.
+      </p>
+    )
   }
   return (
-    <table className="w-full text-sm">
-      <thead>
-        <tr>
-          <th className="text-left">Cert</th><th className="text-left">Card</th>
-          <th className="text-left">Company</th><th className="text-left">Grade</th>
-          <th className="text-left">Cost</th><th />
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((r) => (
-          <tr key={r.key}>
-            <td>{r.cert_number}</td>
-            <td>
-              {r.name}
-              {/* Honest up front: an unlinked slab gets no automatic price and
-                  lands in Triage. Better said here than discovered later. */}
-              {!r.card_id && <span className="ml-2 text-amber-700">no catalog link</span>}
-            </td>
-            <td>{r.company}</td>
-            <td>{r.grade}</td>
-            <td>${r.buy_price}</td>
-            <td>
-              <button type="button" onClick={() => onRemove(r.key)} aria-label={`Remove ${r.cert_number}`}>
-                Remove
-              </button>
-            </td>
+    <div className="vault-panel overflow-hidden rounded-xl">
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="border-b border-pine-700/40 text-[11px] uppercase tracking-wider text-pine-400">
+            <th className="px-3 py-2 text-left font-medium">Cert</th>
+            <th className="px-3 py-2 text-left font-medium">Card</th>
+            <th className="px-3 py-2 text-left font-medium">Company</th>
+            <th className="px-3 py-2 text-left font-medium">Grade</th>
+            <th className="px-3 py-2 text-left font-medium">Cost</th>
+            <th className="px-3 py-2" />
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody className="divide-y divide-pine-700/25">
+          {rows.map((r) => (
+            <tr key={r.key}>
+              <td className="px-3 py-2 font-mono text-pine-200">{r.cert_number}</td>
+              <td className="px-3 py-2 text-pine-100">
+                {r.name}
+                {/* Honest up front: an unlinked slab gets no automatic price and
+                    lands in Triage. Better said here than discovered later. */}
+                {!r.card_id && (
+                  <span className="ml-2 rounded border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300">
+                    no catalog link
+                  </span>
+                )}
+              </td>
+              <td className="px-3 py-2 text-pine-300">{r.company}</td>
+              <td className="px-3 py-2 font-mono text-pine-200">{r.grade}</td>
+              <td className="px-3 py-2 font-mono text-spriggatito-400">${r.buy_price}</td>
+              <td className="px-3 py-2 text-right">
+                <button
+                  type="button"
+                  onClick={() => onRemove(r.key)}
+                  aria-label={`Remove ${r.cert_number}`}
+                  className="rounded px-2 py-1 text-pine-500 transition-colors hover:text-red-400"
+                >
+                  Remove
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   )
 }

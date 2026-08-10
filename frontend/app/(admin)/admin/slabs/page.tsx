@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
+import { Camera, Keyboard, RefreshCw, ScanLine, Wand2 } from 'lucide-react'
 import { useAdminApi } from '@/lib/admin-api'
 import SlabEntryForm, { type StagedSlab } from '@/components/admin/slabs/SlabEntryForm'
 import StagingTable from '@/components/admin/slabs/StagingTable'
@@ -18,6 +19,19 @@ export default function SlabsPage() {
   const [total, setTotal] = useState(0)
   const [priced, setPriced] = useState<PricedFilter>('all')
   const [listError, setListError] = useState<string | null>(null)
+
+  // Intake affordances. The form is put away by default, matching the other
+  // admin tabs — the page's resting state is the shelf, not a blank form.
+  const [entryOpen, setEntryOpen] = useState(false)
+  const [scanArmed, setScanArmed] = useState(false)
+  // Bumping this pulls focus to the cert field without remounting the form.
+  const [focusToken, setFocusToken] = useState(0)
+
+  const armScan = () => {
+    setEntryOpen(true)
+    setScanArmed(true)
+    setFocusToken((n) => n + 1)
+  }
 
   const loadSlabs = useCallback(async () => {
     try {
@@ -74,6 +88,10 @@ export default function SlabsPage() {
       const spend = rows.reduce((sum, r) => sum + Number(r.buy_price), 0)
       setResult(`Committed ${rows.length} slab(s), $${spend.toFixed(2)}`)
       setRows([])
+      // Return focus to the cert field so the next slab can go straight in --
+      // with a stack of slabs in hand, that is the interaction this page lives
+      // on. Closes the "refocus the cert field" T4 follow-up.
+      setFocusToken((n) => n + 1)
       // The batch is now real inventory, so the list below is stale.
       loadSlabs()
     } catch (e) {
@@ -87,26 +105,116 @@ export default function SlabsPage() {
 
   return (
     <div className="flex flex-col gap-6 p-6">
-      <h1 className="text-2xl font-semibold">Slabs</h1>
-      <SlabEntryForm onAdd={(row) => setRows((rs) => [...rs, row])} />
-      <StagingTable rows={rows} onRemove={(key) => setRows((rs) => rs.filter((r) => r.key !== key))} />
-      {error && <p role="alert" className="text-red-700">{error}</p>}
-      {result && <p role="status" className="text-green-700">{result}</p>}
-      <button type="button" onClick={commit} disabled={busy || rows.length === 0}
-              className="self-start rounded bg-green-700 px-4 py-2 text-white disabled:opacity-50">
-        Commit batch
-      </button>
+      <header className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-xl font-semibold text-pine-100">Slabs</h1>
+      </header>
 
+      {/* ---- Intake: how a slab gets in ------------------------------------
+          Three routes are shown, two of them deliberately dead. PSA's cert API
+          403s at the ACCOUNT ("limited to approved customers") — re-confirmed
+          2026-08-10 against their Swagger with both bearer spellings — so
+          camera capture and cert auto-fill cannot work no matter what we ship.
+          They are rendered disabled, naming the blocker, rather than omitted,
+          so the gap is visible instead of looking like an oversight. */}
       <section className="flex flex-col gap-3">
-        <div className="flex items-center gap-3">
-          <h2 className="text-lg font-semibold">Slabs on the shelf ({total})</h2>
-          <label className="text-sm">
-            Show{' '}
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              setEntryOpen((open) => !open)
+              setScanArmed(false)
+            }}
+            aria-expanded={entryOpen}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-mint/30 bg-mint/15 px-3.5 py-2 text-xs font-medium text-mint transition-colors hover:bg-mint/25"
+          >
+            <Keyboard size={14} />
+            Manual entry
+          </button>
+
+          <button
+            type="button"
+            onClick={armScan}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-pine-700/40 px-3.5 py-2 text-xs font-medium text-pine-300 transition-colors hover:border-pine-600 hover:text-pine-100"
+          >
+            <ScanLine size={14} />
+            Scan cert
+          </button>
+
+          <span className="mx-1 h-5 w-px bg-pine-700/40" aria-hidden="true" />
+
+          <button
+            type="button"
+            disabled
+            aria-describedby="psa-blocked"
+            className="inline-flex cursor-not-allowed items-center gap-1.5 rounded-lg border border-pine-700/30 px-3.5 py-2 text-xs font-medium text-pine-500 opacity-60"
+          >
+            <Camera size={14} />
+            Camera scan
+          </button>
+
+          <button
+            type="button"
+            disabled
+            aria-describedby="psa-blocked"
+            className="inline-flex cursor-not-allowed items-center gap-1.5 rounded-lg border border-pine-700/30 px-3.5 py-2 text-xs font-medium text-pine-500 opacity-60"
+          >
+            <Wand2 size={14} />
+            Auto-fill from cert
+          </button>
+        </div>
+
+        <p id="psa-blocked" className="text-[11px] text-pine-500">
+          Camera scan and cert auto-fill need PSA API approval — every call returns
+          HTTP 403 at the account, not in our code. Re-checked 2026-08-10. Until
+          then, scan the barcode into the cert field or type it: both are fully
+          supported and nothing else about intake depends on PSA.
+        </p>
+
+        {entryOpen && (
+          <div className="vault-panel rounded-xl p-4">
+            <SlabEntryForm
+              onAdd={(row) => setRows((rs) => [...rs, row])}
+              focusToken={focusToken}
+              armed={scanArmed}
+            />
+          </div>
+        )}
+      </section>
+
+      {/* ---- Staged batch ---- */}
+      <section className="flex flex-col gap-3">
+        <StagingTable rows={rows} onRemove={(key) => setRows((rs) => rs.filter((r) => r.key !== key))} />
+        {error && (
+          <p role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+            {error}
+          </p>
+        )}
+        {result && (
+          <p role="status" className="rounded-lg border border-spriggatito-400/30 bg-spriggatito-400/10 px-3 py-2 text-xs text-spriggatito-400">
+            {result}
+          </p>
+        )}
+        <button
+          type="button"
+          onClick={commit}
+          disabled={busy || rows.length === 0}
+          className="inline-flex items-center gap-1.5 self-start rounded-lg border border-mint/30 bg-mint/15 px-4 py-2 text-xs font-medium text-mint transition-colors hover:bg-mint/25 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {busy ? 'Committing…' : 'Commit batch'}
+        </button>
+      </section>
+
+      {/* ---- The shelf ---- */}
+      <section className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <h2 className="text-sm font-semibold text-pine-100">Slabs on the shelf ({total})</h2>
+          <label className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-pine-400">
+            Show
             <select
               aria-label="Filter slabs by pricing"
               value={priced}
               onChange={(e) => setPriced(e.target.value as PricedFilter)}
-              className="rounded border px-2 py-1"
+              className="vault-field rounded-lg px-2.5 py-1.5 text-xs normal-case tracking-normal"
             >
               <option value="all">All</option>
               {/* The worklist. An unpriced slab is not Triage-flagged (owner's
@@ -115,11 +223,20 @@ export default function SlabsPage() {
               <option value="true">Priced</option>
             </select>
           </label>
-          <button type="button" onClick={loadSlabs} className="rounded border px-3 py-1 text-sm">
+          <button
+            type="button"
+            onClick={loadSlabs}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-pine-700/40 px-2.5 py-1.5 text-xs font-medium text-pine-300 transition-colors hover:border-pine-600 hover:text-pine-100"
+          >
+            <RefreshCw size={13} />
             Refresh
           </button>
         </div>
-        {listError && <p role="alert" className="text-red-700">{listError}</p>}
+        {listError && (
+          <p role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+            {listError}
+          </p>
+        )}
         <SlabList rows={slabs} />
       </section>
     </div>

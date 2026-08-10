@@ -1,5 +1,7 @@
 'use client'
 
+import type { Ref } from 'react'
+
 interface CertInputProps {
   value: string
   onChange: (value: string) => void
@@ -8,6 +10,14 @@ interface CertInputProps {
   /** Fired when the field loses focus. Task 4 hangs the duplicate check here. */
   onBlur?: () => void
   disabled?: boolean
+  /**
+   * Lets the page drive focus — "Scan cert" arms this field, and a committed
+   * batch returns to it. `autoFocus` alone only fires on mount, which is why
+   * refocus-after-commit sat unfixed as a T4 follow-up.
+   */
+  inputRef?: Ref<HTMLInputElement>
+  /** Shows the armed "waiting for scan" affordance. Purely presentational. */
+  armed?: boolean
 }
 
 /**
@@ -22,11 +32,20 @@ interface CertInputProps {
  * Enter ADVANCES rather than submits -- the scanner's trailing Enter arrives
  * long before card, grade and cost are filled.
  */
-export default function CertInput({ value, onChange, onEnter, onBlur, disabled }: CertInputProps) {
+export default function CertInput({
+  value,
+  onChange,
+  onEnter,
+  onBlur,
+  disabled,
+  inputRef,
+  armed,
+}: CertInputProps) {
   return (
     <label className="flex flex-col gap-1">
-      <span className="text-sm font-medium">Cert number</span>
+      <span className="text-[11px] uppercase tracking-wider text-pine-400">Cert number</span>
       <input
+        ref={inputRef}
         type="text"
         inputMode="numeric"
         autoFocus
@@ -43,8 +62,14 @@ export default function CertInput({ value, onChange, onEnter, onBlur, disabled }
             if (value.trim()) onEnter?.()
           }
         }}
-        className="rounded border px-3 py-2"
+        className="vault-field w-full rounded-lg px-3 py-2 font-mono text-sm"
       />
+      {armed && (
+        <span className="flex items-center gap-1.5 text-[11px] text-spriggatito-400">
+          <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-spriggatito-400" />
+          Waiting for scan… scan the barcode or type the cert
+        </span>
+      )}
     </label>
   )
 }
