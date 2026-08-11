@@ -45,6 +45,13 @@ export function parseMoney(raw: string): number | null {
 }
 
 /**
+ * The one message an unreadable amount produces. It lives here, not in either
+ * component, so `MoneyInput` and `InlineEditCell`'s money mode cannot drift
+ * into telling the operator two different things about the same rejection.
+ */
+export const MONEY_PARSE_MESSAGE = "That isn't an amount I can read — try 1300 or 1,300"
+
+/**
  * The canonical string for an input field: two decimals, no grouping, so the
  * value round-trips back through `parseMoney` unchanged.
  */

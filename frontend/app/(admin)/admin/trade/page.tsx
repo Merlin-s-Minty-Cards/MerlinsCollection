@@ -11,6 +11,8 @@ import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
 import { availableModes, canConfirmBasis, type BasisMode } from '@/lib/trade-basis'
 import { buildIncomingLegBody } from '@/lib/trade-incoming-form'
+import MoneyInput from '@/components/admin/shared/MoneyInput'
+import { formatMoneyInput, parseMoney } from '@/lib/money'
 import { adminItemName } from '@/lib/admin-item-name'
 
 interface TradeLeg {
@@ -85,6 +87,10 @@ export default function AdminTradePage() {
 
   const [tradeId, setTradeId] = useState<string | null>(null)
   const [outgoing, setOutgoing] = useState<TradeLeg[]>([])
+  // Per-leg text for the outgoing value editors, keyed by item id. The editor
+  // was uncontrolled before; a money field has to own its text so a half-typed
+  // "1," is not thrown away on the next render.
+  const [outDrafts, setOutDrafts] = useState<Record<string, string>>({})
   const [incoming, setIncoming] = useState<TradeLeg[]>([])
   const [cashComponents, setCashComponents] = useState<CashComponent[]>([])
   const [balance, setBalance] = useState<TradeBalance | null>(null)
@@ -203,6 +209,7 @@ export default function AdminTradePage() {
 
   const addOutgoing = async (item: InventoryItem) => {
     if (!tradeId) return
+    // Server-sent decimal string, not typed by anyone — parseFloat is safe.
     const value = item.current_market_value || '0'
     try {
       await api.post(`/trades/${tradeId}/outgoing`, {
@@ -230,6 +237,13 @@ export default function AdminTradePage() {
     try {
       await api.del(`/trades/${tradeId}/outgoing/${item.item_id}`)
       setOutgoing((prev) => prev.filter((_, i) => i !== idx))
+      // Drop the leg's draft too: the map is keyed by item id, so re-adding the
+      // same card would otherwise resurrect whatever was typed the first time.
+      setOutDrafts((d) => {
+        const next = { ...d }
+        delete next[item.item_id as string]
+        return next
+      })
     } catch (err) {
       alert(err instanceof AdminApiError ? err.detail : 'Failed to remove')
     }
@@ -239,20 +253,25 @@ export default function AdminTradePage() {
     if (!tradeId) return
     const item = outgoing[idx]
     if (!item?.item_id) return
+    // `=== null`, not falsiness: a $0 leg is legitimate in a trade.
+    const parsed = parseMoney(newValue)
+    if (parsed === null) return
     try {
       await api.patch(`/trades/${tradeId}/outgoing/${item.item_id}`, {
-        agreed_value: parseFloat(newValue),
+        agreed_value: parsed,
       })
-      setOutgoing((prev) => prev.map((leg, i) => i === idx ? { ...leg, value: newValue } : leg))
+      setOutgoing((prev) => prev.map((leg, i) => i === idx ? { ...leg, value: String(parsed) } : leg))
     } catch (err) {
       alert(err instanceof AdminApiError ? err.detail : 'Failed to update')
     }
   }
 
-  // Bidirectional % ↔ value calculation for incoming form
+  // Bidirectional % ↔ value calculation for the incoming form. Both amounts are
+  // typed by a human, so parseMoney; `percentage` is a bounded percent and
+  // stays parseFloat.
   const handleIncomingValueChange = (newValue: string) => {
-    const market = parseFloat(inForm.market_value)
-    const val = parseFloat(newValue)
+    const market = parseMoney(inForm.market_value) ?? 0
+    const val = parseMoney(newValue) ?? 0
     let pct = ''
     if (market > 0 && val > 0) {
       pct = ((val / market) * 100).toFixed(0)
@@ -261,7 +280,7 @@ export default function AdminTradePage() {
   }
 
   const handleIncomingPctChange = (newPct: string) => {
-    const market = parseFloat(inForm.market_value)
+    const market = parseMoney(inForm.market_value) ?? 0
     const pctNum = parseFloat(newPct)
     let val = ''
     if (market > 0 && pctNum > 0) {
@@ -289,7 +308,11 @@ export default function AdminTradePage() {
   }
 
   const addIncoming = async () => {
-    if (!tradeId || !inForm.name.trim() || !inForm.value) return
+    // `=== null`, not falsiness — a $0 leg is legitimate in a trade.
+    if (!tradeId || !inForm.name.trim() || parseMoney(inForm.value) === null) return
+    // A market value that was typed but cannot be read blocks the add rather
+    // than being silently dropped from the body.
+    if (inForm.market_value.trim() !== '' && parseMoney(inForm.market_value) === null) return
     try {
       const body = buildIncomingLegBody(inForm, selectedIncomingCard)
       await api.post(`/trades/${tradeId}/incoming`, body)
@@ -337,11 +360,14 @@ export default function AdminTradePage() {
   const syncCashComponents = async () => {
     if (!tradeId) return
     // Filter out empty amounts
+    // Filter out empty and unreadable amounts. parseMoney, not parseFloat:
+    // `1,300` would otherwise pass the `> 0` test as 1 and be sent as 1.
     const validComponents = cashComponents
-      .filter((c) => c.amount && parseFloat(c.amount) > 0)
+      .map((c) => ({ ...c, parsed: parseMoney(c.amount) }))
+      .filter((c) => c.parsed !== null && c.parsed > 0)
       .map((c) => ({
         direction: c.direction,
-        amount: parseFloat(c.amount),
+        amount: c.parsed as number,
         payment_method: c.payment_method,
       }))
     try {
@@ -367,8 +393,12 @@ export default function AdminTradePage() {
 
   const syncManualBasis = async (value: string) => {
     if (!tradeId) return
+    // This used to send the raw text straight through — no parse at all, safe
+    // only while the field was type="number" and could not hold a comma.
+    const parsed = parseMoney(value)
+    if (parsed === null) return
     try {
-      await api.patch(`/trades/${tradeId}`, { manual_basis: value })
+      await api.patch(`/trades/${tradeId}`, { manual_basis: String(parsed) })
       fetchBalance()
     } catch (err) {
       alert(err instanceof AdminApiError ? err.detail : 'Failed to update manual basis')
@@ -398,6 +428,7 @@ export default function AdminTradePage() {
   const startNew = () => {
     setTradeId(null)
     setOutgoing([])
+    setOutDrafts({})
     setIncoming([])
     setCashComponents([])
     setBalance(null)
@@ -410,10 +441,13 @@ export default function AdminTradePage() {
     setIncomingCatalogResults([])
   }
 
-  const outTotal = outgoing.reduce((s, i) => s + parseFloat(String(i.value || 0)), 0)
-  const inTotal = incoming.reduce((s, i) => s + parseFloat(String(i.value || 0)), 0)
+  // Every one of these reads a value that reached state from a typed field, so
+  // all three go through parseMoney — parseFloat would make each total wrong by
+  // three orders of magnitude on a comma, and never NaN enough to notice.
+  const outTotal = outgoing.reduce((s, i) => s + (parseMoney(String(i.value ?? '0')) ?? 0), 0)
+  const inTotal = incoming.reduce((s, i) => s + (parseMoney(String(i.value ?? '0')) ?? 0), 0)
   const cashNet = cashComponents.reduce((s, c) => {
-    const amt = parseFloat(c.amount || '0')
+    const amt = parseMoney(c.amount || '0') ?? 0
     return s + (c.direction === 'they_pay' ? amt : -amt)
   }, 0)
 
@@ -488,14 +522,12 @@ export default function AdminTradePage() {
         {basisMode === 'manual' && (
           <div className="mt-2 flex items-center gap-2">
             <label className="text-[10px] text-pine-400 uppercase tracking-wider">Total cost basis</label>
-            <div className="relative">
-              <DollarSign size={10} className="absolute left-1.5 top-1/2 -translate-y-1/2 text-pine-500" />
-              <input
-                type="number"
-                step="0.01"
-                min="0"
+            <div className="relative flex flex-col">
+              <DollarSign size={10} className="absolute left-1.5 top-2.5 -translate-y-1/2 text-pine-500" />
+              <MoneyInput
+                label="Total cost basis"
                 value={manualBasis}
-                onChange={(e) => setManualBasis(e.target.value)}
+                onChange={(raw) => setManualBasis(raw)}
                 onBlur={() => syncManualBasis(manualBasis)}
                 onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
                 className="vault-field w-28 pl-5 pr-2 py-1 rounded-lg text-xs font-mono"
@@ -607,11 +639,10 @@ export default function AdminTradePage() {
               </div>
               <div>
                 <label className="text-[10px] text-pine-400 uppercase tracking-wider block mb-0.5">Market</label>
-                <input
-                  type="number"
-                  step="0.01"
+                <MoneyInput
+                  label="Incoming market value"
                   value={inForm.market_value}
-                  onChange={(e) => setInForm((f) => ({ ...f, market_value: e.target.value }))}
+                  onChange={(raw) => setInForm((f) => ({ ...f, market_value: raw }))}
                   placeholder="$"
                   className="vault-field w-full px-2 py-1.5 rounded-lg text-xs"
                 />
@@ -619,15 +650,13 @@ export default function AdminTradePage() {
               <div className="flex items-end gap-1">
                 <div className="flex-1">
                   <label className="text-[10px] font-semibold text-mint uppercase tracking-wider block mb-0.5 bg-mint/10 rounded px-1 text-center">Value</label>
-                  <input
-                    type="number"
-                    step="0.01"
+                  <MoneyInput
                     value={inForm.value}
-                    onChange={(e) => handleIncomingValueChange(e.target.value)}
+                    onChange={(raw) => handleIncomingValueChange(raw)}
                     placeholder="$"
                     // Three inputs on this row share the "$" placeholder, so
                     // the visible label has to be carried to the a11y tree too.
-                    aria-label="Trade-in value"
+                    label="Trade-in value"
                     className="vault-field w-full px-2 py-1.5 rounded-lg text-xs"
                   />
                 </div>
@@ -723,15 +752,19 @@ export default function AdminTradePage() {
                     <span className="text-xs text-pine-200 truncate flex-1 min-w-0">{item.name}</span>
                     <div className="flex items-center gap-2 flex-shrink-0">
                       <span className="text-[10px] text-pine-500">$</span>
-                      <input
-                        type="number"
-                        step="0.01"
-                        defaultValue={parseFloat(String(item.value)).toFixed(2)}
-                        onBlur={(e) => {
-                          const newVal = e.target.value
-                          if (newVal && parseFloat(newVal) !== parseFloat(String(item.value))) {
-                            updateOutgoingValue(idx, newVal)
-                          }
+                      <MoneyInput
+                        label={`Outgoing value for ${item.name}`}
+                        // Controlled now: MoneyInput has to own its text so a
+                        // half-typed "1," survives the render, which is why the
+                        // drafts map exists instead of the old defaultValue.
+                        value={outDrafts[item.item_id ?? String(idx)] ?? formatMoneyInput(parseMoney(String(item.value)) ?? 0)}
+                        onChange={(raw) => setOutDrafts((d) => ({ ...d, [item.item_id ?? String(idx)]: raw }))}
+                        onBlur={() => {
+                          const draft = outDrafts[item.item_id ?? String(idx)]
+                          if (draft === undefined) return
+                          const parsed = parseMoney(draft)
+                          if (parsed === null || parsed === parseMoney(String(item.value))) return
+                          updateOutgoingValue(idx, draft)
                         }}
                         onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
                         className="vault-field w-20 px-1.5 py-0.5 rounded text-xs text-right text-red-400 font-mono"
@@ -789,11 +822,10 @@ export default function AdminTradePage() {
                     </select>
                     <div className="relative flex-1">
                       <DollarSign size={10} className="absolute left-1.5 top-1/2 -translate-y-1/2 text-pine-500" />
-                      <input
-                        type="number"
-                        step="0.01"
+                      <MoneyInput
+                        label={`Cash amount ${idx + 1}`}
                         value={comp.amount}
-                        onChange={(e) => updateCashComponent(idx, { amount: e.target.value })}
+                        onChange={(raw) => updateCashComponent(idx, { amount: raw })}
                         onBlur={syncCashComponents}
                         className="vault-field w-full pl-5 pr-1.5 py-1 rounded text-[10px] font-mono"
                         placeholder="0.00"
@@ -820,6 +852,7 @@ export default function AdminTradePage() {
             <span className="text-[11px] text-pine-400 uppercase tracking-wider block mb-1">Balance</span>
             <div className="text-2xl font-mono font-semibold text-pine-100">
               {balance ? (() => {
+                // Every figure below comes off the server's balance response.
                 const out = parseFloat(balance.total_out_value)
                 const inc = parseFloat(balance.total_in_value)
                 const cash = balance.cash_components_net ? parseFloat(balance.cash_components_net) : parseFloat(balance.cash_delta)

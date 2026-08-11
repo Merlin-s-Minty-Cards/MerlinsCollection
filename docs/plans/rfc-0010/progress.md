@@ -6,12 +6,17 @@
 gitignored (`.gitignore:60`), so it is local-only and your edits to it will never appear in
 `git status` or reach anyone else. Record all RFC 0010 status **in this file**.
 
-**Last updated:** 2026-08-10 (T0 DONE — the RFC 0009 merge blocker is cleared)
+**Last updated:** 2026-08-11 (T1 DONE — every human-typed money field now accepts `1,300`)
 **Branch:** `Polishing-For-Deployment`
 **RFC:** [`docs/rfcs/0010-admin-round8-ledger-corrections-and-slab-manual-only.md`](../../rfcs/0010-admin-round8-ledger-corrections-and-slab-manual-only.md)
 **Task index:** [`README.md`](README.md)
 **Source of the requests:** the owner's `The plan.pdf` (12 items) plus two review comments
 on 2026-08-10 — the money-input report and the PSA/scanner reversal.
+
+## ✅ T0 AND T1 ARE DONE — start at T15
+
+T1 rolled `MoneyInput` across every admin surface where a human types money, and
+removed `parseFloat` from every one of those paths. **Start at T15.**
 
 ## ✅ T0 IS DONE — the RFC 0009 merge blocker is cleared
 
@@ -26,7 +31,7 @@ naming the row. **Start at T1.**
 | # | Task | Status | Commit | Notes |
 |---|---|---|---|---|
 | T0 | Money input + partial write | **DONE** | `0702346` | Merge blocker cleared. `frontend/lib/money.ts` exports `parseMoney`, `formatMoneyInput` **and `formatMoney`** (grouped display — the doc listed only the first two). `StagedSlab.buy_price` is now a **number**. `confirm_buy_session` is split into a build pass and a write pass; reuse `_build_purchase`, do not re-inline it |
-| T1 | `MoneyInput` rollout | **NOT STARTED** | — | T0's helper exists: `MoneyInput` takes `label` / `value` / `onChange(raw, parsed)` and callers must gate on `parsed === null`, **never falsiness** — `0` is a real cost. Read the three T0 rows in [`follow-ups.md`](follow-ups.md) first: the two `parseFloat` sticker sites become live bugs the moment their `type="number"` goes, and `sales.py`/`trades.py` still have the single-pass write shape T0 fixed only in `purchases.py` |
+| T1 | `MoneyInput` rollout | **DONE** | `e4f2867` | Shipped on **eight** surfaces — the doc's seven plus **Trade**, which its own "Why" names. `MoneyInput` gained `placeholder` / `onBlur` / `onKeyDown`; `InlineEditCell` gained `type="money"` (option a). Wire format is **unchanged** — where a string went, `String(parsed)` still goes. `MONEY_PARSE_MESSAGE` now lives in `lib/money.ts` so the three surfaces that show it cannot drift. **Percent fields deliberately untouched.** Out of scope and filed: Inventory / Shows / History-filter money inputs, and `sales.py`/`trades.py`'s single-pass write |
 | T2 | Consignor row fork | **NOT STARTED** | — | Same defect `put_show` was fixed for in RFC 0008 T7; needs a one-time reconcile for rows already forked in production |
 | T3 | Triage reasons + filter | **NOT STARTED** | — | The query is NOT broken; the 266 rows are import flags. **No sticker reason** (owner decision) |
 | T4 | Triage search | **NOT STARTED** | — | Frontend only; `name` already works on the endpoint |
@@ -81,6 +86,13 @@ that is the mistake that made RFC 0009's T-FINAL sign-off stale.
 | 2026-08-10 | T0 | **`money.ts` exports a third function, `formatMoney`** (`1300` → `$1,300.00`), grouped by hand rather than through `toLocaleString` | The doc's own StagingTable test requires comma-grouped display, which `formatMoneyInput` deliberately does not do (the input value has to round-trip back through `parseMoney`). Hand-grouping keeps the output independent of which ICU data the runtime shipped with. This is the fifth `toFixed(2)` site in the frontend — **T1 should collapse the other four into it** |
 | 2026-08-10 | T0 | **`confirm_buy_session` builds every row before writing any**, rather than only pre-checking numeric fields as the doc described | The doc's stated goal is fixing partial write *as a class*. A numeric-only check does not get there: a bad `condition`, `company` or `location` still failed `InventoryItemAdapter` **inside** the write loop and reproduced the identical half-written batch through a different door. Extracting `_build_purchase` and writing in a second pass is both stronger and shorter than the loop it replaced. Verified with a test that puts a bad `condition` on row 2 |
 | 2026-08-10 | T0 | **The partial write was MEASURED, not inferred** — 2 inventory items, 2 PURCHASE transactions, session still `draft`, all 5 rows still staged | Recorded because the UI's claim ("Nothing was created; the batch is intact") was confidently false, and the same sentence is still in `slabs/page.tsx` for the *other* failure modes it covers. It is accurate there **only because** the backend now writes nothing — if anyone reverts the confirm change, that message starts lying again |
+| 2026-08-11 | T1 | **Trade is IN scope, though the task doc's measured table omits it.** The doc's own "Why" names it (*"the owner types money on Buy, Sell, **Trade**, Prep Queue and Show Prep"*), and `follow-ups.md`'s third T0 row already assumes T1 touches Trade's inputs | Leaving it out would have made Trade the one admin page that still swallows a comma — the exact inconsistency this task exists to remove. Five Trade fields converted: manual cost basis, incoming market value, incoming trade-in value, outgoing leg value, cash-component amount |
+| 2026-08-11 | T1 | **`InlineEditCell` gained `type="money"` (option a), and it commits `String(parseMoney(draft))`** — `'1,300'` → `'1300'`, `'9.99'` → `'9.99'` unchanged. Unreadable text does not call `onSave` at all; it goes to `onError` and the editor stays open, the same shape as an `onSave` rejection | The doc recommended (a) and it held up: one change, and both inline sticker editors (Prep Queue, Show Prep) inherited it. Committing a canonical *string* rather than a number keeps every caller's existing `onSave(value: string)` contract intact |
+| 2026-08-11 | T1 | **The wire format did not change. Where a string went, `String(parsed)` still goes** — `sticker_price`, `manual_basis`, `minimum_price`. Buy/Trade already sent JSON numbers and still do | The doc's "Do not change any API contract" is load-bearing here: these amounts land in `Decimal` fields, and swapping string→number on five endpoints at once would have made a parsing fix into a serialization change. Happy side effect: the pre-existing Prep Queue test asserting `{ sticker_price: '9.99' }` stayed green untouched |
+| 2026-08-11 | T1 | **`MoneyInput` grew three props — `placeholder`, `onBlur`, `onKeyDown`** — and `MONEY_PARSE_MESSAGE` moved into `lib/money.ts` | The number inputs it replaced carried `placeholder="0.00"`, and Trade commits its cost basis and cash components **on blur**, so without a pass-through the rollout would have silently dropped both behaviours. `onBlur` runs *after* the field normalises itself. The message moved because three surfaces now render it (both components plus Market's `alert`), and three hard-coded copies is how they start disagreeing |
+| 2026-08-11 | T1 | **One pre-existing test was rewritten, deliberately: Prep Queue's `min="0"` assertion.** It is a `type="number"` attribute that cannot survive the swap; its intent (reject negatives) moved to `parseMoney`, which rejects a negative outright, and the test now asserts the inline message instead | Recorded because "every pre-existing test still passes" was the stated GREEN gate and this one could not. The behaviour is strictly better — the browser used to ignore the keystroke silently; the operator is now told |
+| 2026-08-11 | T1 | **Trade's outgoing-value editor became CONTROLLED**, backed by an `outDrafts` map keyed by item id | It was `defaultValue` + `onBlur`, which a money field cannot be: a half-typed `"1,"` has to survive the next render, and MoneyInput normalises through `onChange`. The draft is dropped on remove so re-adding the same card does not resurrect old text |
+| 2026-08-11 | T1 | **Sell's per-item price edit was found to be COSMETIC — it never reaches the API at all.** `updateItemPrice` mutates local state; `handleConfirm` PATCHes session metadata and POSTs `/confirm`, and nothing in between sends the edited `agreed_price`. Same for the bulk discount | Found while writing the "typing 1,300 sends 1300" test and discovering there is no send to assert on. Out of T1's scope (it is not a parsing defect) so it is filed in follow-ups, but it is the largest thing this task turned up: an admin discounting a card at a show is editing a number that is thrown away |
 | 2026-08-10 | T0 | **The doc's file paths were wrong in two places**, corrected as executed: the backend tests are `backend/tests/routers/admin/test_purchases.py`, and the frontend run command must be the `npm test --workspace=frontend` form, not `npx vitest` | `npx vitest` fails with "Vitest failed to find the runner" — already noted in the baseline section of this file, but the task doc contradicted it. Later task docs copy this command; check it before trusting it |
 
 *(rows below are PLANNING decisions, recorded before execution because a later task would
@@ -139,6 +151,17 @@ feature commit, so this is a fresh run, not the row above carried forward:
 | `ruff check backend/src` | — | ~3s | clean |
 | `npm run lint --workspace=frontend` | — | ~5s | clean (one pre-existing `<img>` warning in `CardDetailModal`) |
 | `npm run build --workspace=frontend` | — | — | exit 0 — **run this one**, `StagedSlab.buy_price` changed type and vitest does not typecheck |
+
+**Re-measured after T1 at `e4f2867`** — a fresh run, not the row above carried forward:
+
+| Suite | Count | Time | State |
+|---|---|---|---|
+| Frontend | **644 passed / 0 failed** (80 files) | ~30s | green — 609 + 35 new T1 tests |
+| `npm run lint --workspace=frontend` | — | ~5s | clean (the one pre-existing `<img>` warning in `CardDetailModal`) |
+| `npm run build --workspace=frontend` | — | ~18s | exit 0 |
+
+Backend and MCP were not re-run: T1 is frontend-only and touched no Python or MCP
+file. Do not carry these numbers into the next task's sign-off.
 
 **~~The frontend failures are `ChatPanel.test.tsx` and are NOT yours… do not chase it.~~
 FIXED 2026-08-11 — and that instruction was wrong.** It was not "flakiness", it was two

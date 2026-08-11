@@ -18,6 +18,8 @@ import DataTable, { Column } from '@/components/admin/shared/DataTable'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
 import StatusBadge from '@/components/admin/shared/StatusBadge'
+import MoneyInput from '@/components/admin/shared/MoneyInput'
+import { parseMoney } from '@/lib/money'
 import { adminItemName } from '@/lib/admin-item-name'
 
 // ---------------------------------------------------------------------------
@@ -225,8 +227,14 @@ export default function AdminCosignersPage() {
         .filter(Boolean)
 
       const payload: Record<string, unknown> = { item_ids: ids }
+      // split_percent is a bounded percent, not money — no thousands separator
+      // is possible, so parseFloat stays. minimum_price IS money.
       if (linkSplit.trim()) payload.split_percent = parseFloat(linkSplit) / 100
-      if (linkMinPrice.trim()) payload.minimum_price = linkMinPrice.trim()
+      if (linkMinPrice.trim()) {
+        const minPrice = parseMoney(linkMinPrice)
+        if (minPrice === null) { setLinking(false); return }
+        payload.minimum_price = String(minPrice)
+      }
 
       const result = await api.post<{ linked: number; failed_item_ids: string[] }>(
         `/cosigners/${selectedCosigner.consignor_id}/link`,
@@ -684,11 +692,10 @@ export default function AdminCosignersPage() {
                 </div>
                 <div>
                   <label className="block text-[11px] text-pine-400 mb-1">Min Price (optional)</label>
-                  <input
-                    type="number"
-                    step="0.01"
+                  <MoneyInput
+                    label="Min Price"
                     value={linkMinPrice}
-                    onChange={(e) => setLinkMinPrice(e.target.value)}
+                    onChange={(raw) => setLinkMinPrice(raw)}
                     className="vault-field w-full px-3 py-2 rounded-lg text-sm font-mono"
                     placeholder="$0.00"
                   />

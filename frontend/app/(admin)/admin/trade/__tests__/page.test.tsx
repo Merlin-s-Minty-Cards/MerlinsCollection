@@ -278,3 +278,81 @@ describe('AdminTradePage staged leg card art', () => {
     })
   })
 })
+
+// ---------------------------------------------------------------------------
+// RFC 0010 T1 — money fields accept what a human types
+// ---------------------------------------------------------------------------
+
+describe('AdminTradePage money input', () => {
+  const patchMock = vi.fn()
+  const putMock = vi.fn()
+
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    patchMock.mockReset()
+    putMock.mockReset()
+    mockApi.patch = patchMock
+    mockApi.put = putMock
+    postMock.mockResolvedValue({ trade_id: 'trade-1' })
+    patchMock.mockResolvedValue({})
+    putMock.mockResolvedValue({})
+    getMock.mockImplementation((path: string) => {
+      if (path === '/market/search') {
+        return Promise.resolve({ items: [catalogCard('c1', 'Charizard ex')], total: 1 })
+      }
+      return Promise.resolve({})
+    })
+  })
+
+  it('manual cost basis sends 1300, never the raw "1,300"', async () => {
+    render(<AdminTradePage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Manual' }))
+    const basis = screen.getByLabelText(/total cost basis/i)
+    fireEvent.change(basis, { target: { value: '1,300' } })
+    await act(async () => { fireEvent.blur(basis) })
+
+    await waitFor(() => expect(patchMock).toHaveBeenCalledWith('/trades/trade-1', { manual_basis: '1300' }))
+  })
+
+  it('does not sync a manual cost basis it cannot read', async () => {
+    render(<AdminTradePage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Manual' }))
+    patchMock.mockClear()
+    const basis = screen.getByLabelText(/total cost basis/i)
+    fireEvent.change(basis, { target: { value: '1,30' } })
+    await act(async () => { fireEvent.blur(basis) })
+
+    expect(patchMock).not.toHaveBeenCalledWith('/trades/trade-1', expect.objectContaining({ manual_basis: expect.anything() }))
+  })
+
+  it('an incoming leg sends 1300 when the admin types 1,300 for its value', async () => {
+    const nameInput = await renderTradePage()
+    fireEvent.change(nameInput, { target: { value: 'Charizard ex' } })
+    fireEvent.change(screen.getByLabelText('Trade-in value'), { target: { value: '1,300' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add incoming card' }))
+
+    await waitFor(() => expect(postMock).toHaveBeenCalledWith(
+      '/trades/trade-1/incoming',
+      expect.objectContaining({ agreed_value: 1300 }),
+    ))
+  })
+
+  it('a cash component sends 1300 when the admin types 1,300', async () => {
+    render(<AdminTradePage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }))
+    const amount = screen.getByLabelText(/cash amount/i)
+    fireEvent.change(amount, { target: { value: '1,300' } })
+    await act(async () => { fireEvent.blur(amount) })
+
+    await waitFor(() => expect(putMock).toHaveBeenCalledWith('/trades/trade-1/cash', {
+      cash_components: [expect.objectContaining({ amount: 1300 })],
+    }))
+  })
+})

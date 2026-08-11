@@ -8,12 +8,13 @@ import MoneyInput from '../MoneyInput'
  * parent actually accepts the value MoneyInput reports back. Rendering the
  * component uncontrolled would let a broken normalisation pass.
  */
-function Host({ onChange, initial = '' }: { onChange?: (r: string, p: number | null) => void; initial?: string }) {
+function Host({ onChange, initial = '', placeholder }: { onChange?: (r: string, p: number | null) => void; initial?: string; placeholder?: string }) {
   const [value, setValue] = useState(initial)
   return (
     <MoneyInput
       label="Cost"
       value={value}
+      placeholder={placeholder}
       onChange={(raw, parsed) => {
         setValue(raw)
         onChange?.(raw, parsed)
@@ -67,5 +68,14 @@ describe('MoneyInput', () => {
     render(<Host />)
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(screen.getByLabelText('Cost')).not.toHaveAttribute('aria-invalid', 'true')
+  })
+})
+
+// RFC 0010 T1. The rollout replaces number inputs that carried a placeholder
+// ("0.00"), and losing it would quietly change five admin surfaces.
+describe('MoneyInput placeholder', () => {
+  it('forwards a placeholder to the input', () => {
+    render(<Host placeholder="0.00" />)
+    expect(screen.getByLabelText('Cost')).toHaveAttribute('placeholder', '0.00')
   })
 })

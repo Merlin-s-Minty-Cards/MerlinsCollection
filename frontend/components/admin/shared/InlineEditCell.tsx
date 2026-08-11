@@ -2,12 +2,21 @@
 
 import { useRef, useState, KeyboardEvent, ReactNode } from 'react'
 import { Pencil, X } from 'lucide-react'
+import { MONEY_PARSE_MESSAGE, parseMoney } from '@/lib/money'
 
 export interface InlineEditCellProps {
   /** Current stored value, used to seed the input when editing starts. */
   value: string
-  /** HTML input type to render while editing. */
-  type: 'number' | 'url'
+  /**
+   * What to render while editing.
+   *
+   * `'money'` is a TEXT input, never `type="number"` — a number input cannot
+   * receive a comma, and `1,300` is what the owner actually types for a
+   * four-figure card. The typed text is put through `parseMoney` on commit, so
+   * `onSave` always receives a clean numeric string (`'1,300'` → `'1300'`) and
+   * an unreadable amount never reaches the API at all.
+   */
+  type: 'number' | 'url' | 'money'
   /** Read-only content shown when not editing (e.g. a formatted price or link). */
   displayValue: ReactNode
   /**
@@ -93,9 +102,32 @@ export default function InlineEditCell({
       setEditing(false)
       return
     }
+
+    // Money is parsed before it can leave: `parseFloat('1,300')` is `1` and
+    // never `NaN`, so an unreadable amount would otherwise pass every guard
+    // downstream as a plausible wrong number. Blank stays blank — clearing a
+    // price is a real edit, and the caller owns turning '' into null.
+    let outgoing = draft
+    if (type === 'money' && draft.trim() !== '') {
+      const parsed = parseMoney(draft)
+      if (parsed === null) {
+        // Same shape as an onSave rejection: the editor stays open with the
+        // offending text intact so the admin fixes it rather than losing it.
+        onError?.(new Error(MONEY_PARSE_MESSAGE))
+        return
+      }
+      outgoing = String(parsed)
+      // A value that only differs by formatting ('1,300' vs '1300') is not an
+      // edit — skip the round trip the dirty-check above would have skipped.
+      if (outgoing === value) {
+        setEditing(false)
+        return
+      }
+    }
+
     setSubmitting(true)
     try {
-      await onSave(draft)
+      await onSave(outgoing)
       setEditing(false)
     } catch (err) {
       // Keep the editor open on failure so the admin can see/retry the
@@ -132,7 +164,10 @@ export default function InlineEditCell({
             </span>
           )}
           <input
-            type={type}
+            type={type === 'money' ? 'text' : type}
+            // The mobile numeric keypad is the only thing type="number" was
+            // buying that matters on a show floor; inputMode preserves it.
+            inputMode={type === 'money' ? 'decimal' : undefined}
             step={type === 'number' ? step : undefined}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}

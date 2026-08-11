@@ -306,3 +306,57 @@ describe('AdminMarketPage catalog search failure states', () => {
     expect(screen.queryByText('Pikipek')).not.toBeInTheDocument()
   })
 })
+
+// ---------------------------------------------------------------------------
+// RFC 0010 T1 — money fields accept what a human types
+// ---------------------------------------------------------------------------
+
+describe('AdminMarketPage watchlist target price', () => {
+  const promptSpy = vi.spyOn(window, 'prompt')
+
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    promptSpy.mockReset()
+    postMock.mockResolvedValue({})
+    getMock.mockImplementation((path: string) => {
+      if (path === '/market/search') {
+        return Promise.resolve({ items: [{ card_id: 'c1', name: 'Charizard ex', set_id: 'en:sv1', set_name: 'Scarlet & Violet' }], total: 1 })
+      }
+      if (path === '/watchlist') return Promise.resolve({ entries: [] })
+      return Promise.resolve({})
+    })
+  })
+
+  afterEach(() => { promptSpy.mockReset() })
+
+  async function starTheFirstResult(typed: string | null) {
+    promptSpy.mockReturnValue(typed)
+    render(<AdminMarketPage />)
+    await act(async () => { await Promise.resolve() })
+    fireEvent.change(screen.getByPlaceholderText(/search catalog by name/i), { target: { value: 'Charizard' } })
+    await waitFor(() => expect(screen.getByText('Charizard ex')).toBeInTheDocument())
+    fireEvent.click(screen.getByTitle('Add to watchlist'))
+  }
+
+  it('sends 1300 when the admin types 1,300', async () => {
+    await starTheFirstResult('1,300')
+    await waitFor(() => expect(postMock).toHaveBeenCalledWith('/watchlist', expect.objectContaining({ target_buy_price: 1300 })))
+  })
+
+  it('still sends 1300 for a plain 1300 (regression gate)', async () => {
+    await starTheFirstResult('1300')
+    await waitFor(() => expect(postMock).toHaveBeenCalledWith('/watchlist', expect.objectContaining({ target_buy_price: 1300 })))
+  })
+
+  it('does not add a watchlist entry with a price it cannot read', async () => {
+    await starTheFirstResult('1,30')
+    await act(async () => { await Promise.resolve() })
+    expect(postMock).not.toHaveBeenCalledWith('/watchlist', expect.anything())
+  })
+
+  it('still adds with no target price when the prompt is cancelled', async () => {
+    await starTheFirstResult(null)
+    await waitFor(() => expect(postMock).toHaveBeenCalledWith('/watchlist', expect.objectContaining({ target_buy_price: null })))
+  })
+})

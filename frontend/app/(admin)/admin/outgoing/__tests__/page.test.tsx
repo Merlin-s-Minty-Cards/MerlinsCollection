@@ -65,12 +65,17 @@ describe('AdminPrepQueuePage bulk pricing', () => {
     expect(putMock).not.toHaveBeenCalled()
   })
 
-  it('the bulk sticker price input rejects negative values at the HTML level too', async () => {
+  it('the bulk sticker price input flags a negative value inline', async () => {
+    // This used to assert min="0" on a native number input. RFC 0010 T1 made
+    // the field a text input so `1,300` can be typed at all, which means the
+    // browser no longer enforces the bound — `parseMoney` does, by rejecting a
+    // negative outright, and the operator is told rather than silently ignored.
     render(<AdminPrepQueuePage />)
     await act(async () => { await Promise.resolve() })
 
     fireEvent.click(screen.getByLabelText(/select all/i))
-    expect(screen.getByPlaceholderText('0.00')).toHaveAttribute('min', '0')
+    fireEvent.change(screen.getByPlaceholderText('0.00'), { target: { value: '-5' } })
+    expect(screen.getByRole('alert')).toBeInTheDocument()
   })
 })
 
@@ -157,5 +162,66 @@ describe('AdminPrepQueuePage — Send to Triage (RFC 0008 T11)', () => {
     await waitFor(() =>
       expect(putMock).toHaveBeenCalledWith('/inventory/item-1', { needs_review: true }),
     )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// RFC 0010 T1 — money fields accept what a human types
+// ---------------------------------------------------------------------------
+
+describe('AdminPrepQueuePage money input', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    putMock.mockReset()
+    putMock.mockResolvedValue({})
+    getMock.mockImplementation((path: string) => {
+      if (path === '/inventory/search') {
+        return Promise.resolve({
+          items: [
+            { item_id: 'item-1', display_name: 'Pikachu', status: 'available', location: 'binder' },
+          ],
+        })
+      }
+      if (path === '/locations') return Promise.resolve([{ value: 'binder', label: 'Binder' }])
+      return Promise.resolve({})
+    })
+  })
+
+  it('bulk sticker sends the PARSED number, never the raw typed string', async () => {
+    // The defect this names: the guard reads parseFloat(value) and the PUT
+    // sends `value`. Harmless only while the input is type="number".
+    render(<AdminPrepQueuePage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.click(screen.getByLabelText(/select all/i))
+    fireEvent.change(screen.getByPlaceholderText('0.00'), { target: { value: '1,300' } })
+    fireEvent.click(screen.getByRole('button', { name: /set sticker/i }))
+
+    await waitFor(() => expect(putMock).toHaveBeenCalledWith('/inventory/item-1', { sticker_price: '1300' }))
+  })
+
+  it('does not apply a bulk sticker price it cannot read', async () => {
+    render(<AdminPrepQueuePage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.click(screen.getByLabelText(/select all/i))
+    fireEvent.change(screen.getByPlaceholderText('0.00'), { target: { value: '1,30' } })
+    fireEvent.click(screen.getByRole('button', { name: /set sticker/i }))
+
+    await act(async () => { await Promise.resolve() })
+    expect(putMock).not.toHaveBeenCalled()
+    expect(screen.getByRole('alert')).toBeInTheDocument()
+  })
+
+  it('inline sticker edit commits a comma-grouped amount as its parsed value', async () => {
+    render(<AdminPrepQueuePage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.click(screen.getByLabelText(/edit sticker price for/i))
+    const input = screen.getByRole('textbox')
+    fireEvent.change(input, { target: { value: '1,300' } })
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }) })
+
+    await waitFor(() => expect(putMock).toHaveBeenCalledWith('/inventory/item-1', { sticker_price: '1300' }))
   })
 })

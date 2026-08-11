@@ -11,6 +11,8 @@ import CardImage from '@/components/admin/shared/CardImage'
 import ImageToggle from '@/components/admin/shared/ImageToggle'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
 import OwnershipBadge from '@/components/admin/shared/OwnershipBadge'
+import MoneyInput from '@/components/admin/shared/MoneyInput'
+import { parseMoney } from '@/lib/money'
 import { adminItemName } from '@/lib/admin-item-name'
 
 interface SellItem {
@@ -105,8 +107,11 @@ export default function AdminSellPage() {
     })
   }, [api.isAuthenticated]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Calculate fee preview when total or payment method changes
-  const total = items.reduce((sum, i) => sum + parseFloat(String(i.agreed_price || 0)), 0)
+  // Calculate fee preview when total or payment method changes.
+  // parseMoney, not parseFloat: `agreed_price` holds whatever the admin typed
+  // into the per-item field, and `parseFloat('1,300')` is 1 — a total that is
+  // wrong by three orders of magnitude and looks entirely plausible.
+  const total = items.reduce((sum, i) => sum + (parseMoney(String(i.agreed_price ?? '0')) ?? 0), 0)
 
   useEffect(() => {
     if (total <= 0 || !api.isAuthenticated) {
@@ -141,6 +146,8 @@ export default function AdminSellPage() {
 
   const addItem = async (inv: InventoryItem) => {
     if (!sellId) return
+    // Both are server-sent Decimal strings, never comma-grouped — the one
+    // place parseFloat stays safe. See lib/money.ts.
     const sticker = parseFloat(inv.sticker_price ?? '0')
     const market = parseFloat(inv.current_market_value ?? '0')
     const price = sticker > 0 ? sticker : market
@@ -177,11 +184,16 @@ export default function AdminSellPage() {
     ))
   }
 
+  // bulkDiscount is a bounded percent, not money — it cannot carry a
+  // thousands separator, so parseFloat stays.
   const applyBulkDiscount = () => {
     const pct = parseFloat(bulkDiscount)
     if (!pct || pct <= 0 || pct > 100) return
     setItems((prev) => prev.map((i) => {
-      const original = parseFloat(String(i.sticker_price || i.original_price || i.agreed_price))
+      // The last arm of this fallback is `agreed_price`, which the admin may
+      // have typed — so the whole chain goes through parseMoney.
+      const original = parseMoney(String(i.sticker_price || i.original_price || i.agreed_price))
+      if (original === null) return i
       const discounted = (original * (1 - pct / 100)).toFixed(2)
       return { ...i, agreed_price: discounted }
     }))
@@ -242,6 +254,7 @@ export default function AdminSellPage() {
 
   // Confirmed state
   if (confirmed && confirmResult) {
+    // Server-sent, so parseFloat is safe. See lib/money.ts for the rule.
     const fee = parseFloat(confirmResult.fee)
     const net = parseFloat(confirmResult.net_revenue)
     return (
@@ -450,8 +463,10 @@ export default function AdminSellPage() {
             ) : (
               <div className="divide-y divide-pine-700/25 max-h-[380px] overflow-y-auto vault-scroll">
                 {items.map((item) => {
+                  // cost_basis is server-sent, so parseFloat is safe there.
+                  // agreed_price is typed by the admin and is not.
                   const cost = parseFloat(String(item.cost_basis || 0))
-                  const agreed = parseFloat(String(item.agreed_price || 0))
+                  const agreed = parseMoney(String(item.agreed_price ?? '0')) ?? 0
                   const marginPct = cost > 0 ? (((agreed - cost) / cost) * 100).toFixed(0) : null
                   const marginColor = marginPct && parseFloat(marginPct) >= 0 ? 'text-mint' : 'text-red-400'
                   return (
@@ -482,16 +497,16 @@ export default function AdminSellPage() {
                           </div>
                         </div>
                       </div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
                         <span className="text-[10px] text-pine-500">$</span>
-                        <input
-                          type="number"
-                          step="0.01"
-                          value={item.agreed_price}
-                          onChange={(e) => updateItemPrice(item.item_id, e.target.value)}
-                          onClick={(e) => e.stopPropagation()}
-                          className="vault-field w-20 px-1.5 py-0.5 rounded text-sm text-right text-mint font-mono"
-                        />
+                        <div className="flex flex-col items-end">
+                          <MoneyInput
+                            label={`Agreed price for ${item.name}`}
+                            value={String(item.agreed_price ?? '')}
+                            onChange={(raw) => updateItemPrice(item.item_id, raw)}
+                            className="vault-field w-20 px-1.5 py-0.5 rounded text-sm text-right text-mint font-mono"
+                          />
+                        </div>
                         <button
                           type="button"
                           onClick={(e) => { e.stopPropagation(); removeItem(item.item_id) }}

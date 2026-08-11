@@ -1,6 +1,7 @@
 'use client'
 
-import { formatMoneyInput, parseMoney } from '@/lib/money'
+import type { KeyboardEvent } from 'react'
+import { MONEY_PARSE_MESSAGE, formatMoneyInput, parseMoney } from '@/lib/money'
 
 export interface MoneyInputProps {
   /** Becomes the input's `aria-label`, so `getByLabelText('Cost')` resolves. */
@@ -10,6 +11,16 @@ export interface MoneyInputProps {
   /** Raw text plus `parseMoney`'s verdict, so the parent can gate on `null`. */
   onChange: (raw: string, parsed: number | null) => void
   className?: string
+  /** Placeholder for the input — the number inputs this replaced carried "0.00". */
+  placeholder?: string
+  /**
+   * Runs AFTER the field has normalised itself, for callers that commit on
+   * blur (Trade syncs its cost basis and cash components that way). It receives
+   * nothing: read the value you already own, and put it through `parseMoney`.
+   */
+  onBlur?: () => void
+  /** Pass-through, for callers that commit on Enter. */
+  onKeyDown?: (e: KeyboardEvent<HTMLInputElement>) => void
 }
 
 /**
@@ -24,7 +35,15 @@ export interface MoneyInputProps {
  * mistyped `1,300` displayed as a perfectly correct-looking `$1,300` right up
  * until it reached the server as `null`.
  */
-export default function MoneyInput({ label, value, onChange, className }: MoneyInputProps) {
+export default function MoneyInput({
+  label,
+  value,
+  onChange,
+  className,
+  placeholder,
+  onBlur,
+  onKeyDown,
+}: MoneyInputProps) {
   const parsed = parseMoney(value)
   // Blank is not an error — it is a field nobody has filled in yet.
   const invalid = value.trim() !== '' && parsed === null
@@ -35,19 +54,22 @@ export default function MoneyInput({ label, value, onChange, className }: MoneyI
         type="text"
         aria-label={label}
         inputMode="decimal"
+        placeholder={placeholder}
         value={value}
         aria-invalid={invalid || undefined}
         className={className ?? 'vault-field w-full rounded-lg px-3 py-2 font-mono text-sm'}
         onChange={(e) => onChange(e.target.value, parseMoney(e.target.value))}
+        onKeyDown={onKeyDown}
         onBlur={() => {
           // Only normalise what we understood. Rewriting an unreadable value
           // would destroy what the operator typed while they are fixing it.
           if (parsed !== null) onChange(formatMoneyInput(parsed), parsed)
+          onBlur?.()
         }}
       />
       {invalid && (
         <span role="alert" className="text-[11px] text-red-300">
-          That isn&apos;t an amount I can read — try 1300 or 1,300
+          {MONEY_PARSE_MESSAGE}
         </span>
       )}
     </>

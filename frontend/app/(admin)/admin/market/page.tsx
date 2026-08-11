@@ -5,6 +5,7 @@ import { TrendingUp, Trash2, Star, RefreshCw, PackagePlus } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { describeApiError, type ApiErrorDescription } from '@/lib/admin-error'
 import { getCoverageBannerState, type MarketCoverage } from '@/lib/market-coverage'
+import { MONEY_PARSE_MESSAGE, parseMoney } from '@/lib/money'
 import SearchInput from '@/components/admin/shared/SearchInput'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 
@@ -301,12 +302,24 @@ export default function AdminMarketPage() {
 
   const addToWatchlist = async (card: CatalogCard) => {
     const target = prompt('Target buy price (optional):')
+    // A prompt is still a human typing money, so it gets the same discipline as
+    // a MoneyInput: parseMoney, and `=== null` rather than falsiness. Cancelling
+    // (null) or leaving it blank means "no target"; an unreadable amount is an
+    // error the admin is told about, never a silently truncated 1.
+    let targetBuyPrice: number | null = null
+    if (target !== null && target.trim() !== '') {
+      targetBuyPrice = parseMoney(target)
+      if (targetBuyPrice === null) {
+        alert(MONEY_PARSE_MESSAGE)
+        return
+      }
+    }
     try {
       await api.post('/watchlist', {
         card_id: card.card_id,
         name: card.name,
         set_name: card.set_name || card.set_id || '',
-        target_buy_price: target ? parseFloat(target) : null,
+        target_buy_price: targetBuyPrice,
       })
       loadWatchlist()
     } catch (err) {

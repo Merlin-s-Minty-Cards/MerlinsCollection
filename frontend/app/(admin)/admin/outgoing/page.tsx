@@ -10,6 +10,8 @@ import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import CardImage, { TABLE_THUMB_SIZE, TABLE_THUMB_COLUMN } from '@/components/admin/shared/CardImage'
 import ImageToggle from '@/components/admin/shared/ImageToggle'
 import InlineEditCell from '@/components/admin/shared/InlineEditCell'
+import MoneyInput from '@/components/admin/shared/MoneyInput'
+import { parseMoney } from '@/lib/money'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
 import TriageRowAction from '@/components/admin/shared/TriageRowAction'
 import type { TriageItem } from '@/lib/triage'
@@ -137,17 +139,21 @@ export default function AdminPrepQueuePage() {
 
   const handleBulkStickerApply = async () => {
     if (selectedIds.size === 0 || !bulkStickerValue.trim()) return
-    const price = parseFloat(bulkStickerValue)
     // Same guard Show Prep's handleBulkStickerUpdate uses — without it a
-    // negative/NaN value silently applies to every selected item and drops
-    // them all from the queue (its whole criterion is "no sticker price
-    // yet"), per Round 6 audit finding 5.
-    if (isNaN(price) || price < 0) return
+    // negative/unreadable value silently applies to every selected item and
+    // drops them all from the queue (its whole criterion is "no sticker price
+    // yet"), per Round 6 audit finding 5. `parseMoney` rejects a negative
+    // outright, so the old `price < 0` arm is folded into the null check.
+    const price = parseMoney(bulkStickerValue)
+    if (price === null) return
     setBulkUpdating(true)
     let updated = 0
     for (const id of selectedIds) {
       try {
-        await api.put(`/inventory/${id}`, { sticker_price: bulkStickerValue })
+        // The PARSED value, not the raw text: this used to send the string the
+        // admin typed, which was harmless only while the input was
+        // type="number" and could not hold a comma (RFC 0010 T1).
+        await api.put(`/inventory/${id}`, { sticker_price: String(price) })
         updated++
       } catch { /* continue on error, matches show-prep's bulk pattern */ }
     }
@@ -272,7 +278,7 @@ export default function AdminPrepQueuePage() {
       render: (item) => (
         <InlineEditCell
           value={item.sticker_price ?? ''}
-          type="number"
+          type="money"
           prefix="$"
           placeholder="0.00"
           aria-label={`Edit sticker price for ${getItemName(item)}`}
@@ -379,6 +385,9 @@ export default function AdminPrepQueuePage() {
     return items.reduce((sum, item) => {
       const raw = item.current_market_value ?? item.cost_basis
       if (raw == null) return sum
+      // parseFloat is safe HERE and only here: this is a server-sent Decimal
+      // string, which is never grouped. Anything a human typed must go through
+      // parseMoney instead — see lib/money.ts.
       const n = typeof raw === 'string' ? parseFloat(raw) : raw
       return sum + (isNaN(n) ? 0 : n)
     }, 0)
@@ -433,14 +442,12 @@ export default function AdminPrepQueuePage() {
           <span className="text-xs text-pine-200">
             <span className="font-mono text-mint">{selectedIds.size}</span> selected
           </span>
-          <div className="relative">
-            <span className="absolute left-1.5 top-1/2 -translate-y-1/2 text-[10px] text-pine-500">$</span>
-            <input
-              type="number"
-              step="0.01"
-              min="0"
+          <div className="relative flex flex-col">
+            <span className="absolute left-1.5 top-2 -translate-y-1/2 text-[10px] text-pine-500">$</span>
+            <MoneyInput
+              label="Bulk sticker price"
               value={bulkStickerValue}
-              onChange={(e) => setBulkStickerValue(e.target.value)}
+              onChange={(raw) => setBulkStickerValue(raw)}
               placeholder="0.00"
               className="vault-field w-20 pl-4 pr-1.5 py-1 rounded-lg text-xs font-mono"
             />

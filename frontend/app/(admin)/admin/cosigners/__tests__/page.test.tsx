@@ -152,3 +152,74 @@ describe('AdminCosignersPage', () => {
     alertSpy.mockRestore()
   })
 })
+
+// ---------------------------------------------------------------------------
+// RFC 0010 T1 — money fields accept what a human types
+// ---------------------------------------------------------------------------
+
+describe('AdminCosignersPage link minimum price', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    delMock.mockReset()
+    postMock.mockResolvedValue({ linked: 1, failed_item_ids: [] })
+    getMock.mockImplementation((path: string) => {
+      if (path === '/cosigners') return Promise.resolve([cosigner])
+      if (path === `/cosigners/${cosigner.consignor_id}/analytics`) {
+        return Promise.resolve({ consignor_id: cosigner.consignor_id, total_items: 1, items_sold: 0, total_value: '20.00' })
+      }
+      if (path === `/cosigners/${cosigner.consignor_id}/assets`) {
+        return Promise.resolve({ items: [asset], total: 1 })
+      }
+      return Promise.resolve({})
+    })
+  })
+
+  // "Link Items" names both the button that opens the modal and the one that
+  // submits it, so they are told apart by position: the modal's is the later.
+  const submitLink = () => {
+    const buttons = screen.getAllByRole('button', { name: /link items/i })
+    fireEvent.click(buttons[buttons.length - 1])
+  }
+
+  async function openLinkForm() {
+    await selectCosigner()
+    fireEvent.click(screen.getByRole('button', { name: /link items/i }))
+    fireEvent.change(screen.getByPlaceholderText(/item_id_1/i), { target: { value: 'item-1' } })
+    return screen.getByLabelText(/min price/i)
+  }
+
+  it('sends 1300 when the admin types 1,300', async () => {
+    const minPrice = await openLinkForm()
+    fireEvent.change(minPrice, { target: { value: '1,300' } })
+    submitLink()
+
+    await waitFor(() => expect(postMock).toHaveBeenCalledWith(
+      `/cosigners/${cosigner.consignor_id}/link`,
+      expect.objectContaining({ minimum_price: '1300' }),
+    ))
+  })
+
+  it('still sends 1300 for a plain 1300 (regression gate)', async () => {
+    const minPrice = await openLinkForm()
+    fireEvent.change(minPrice, { target: { value: '1300' } })
+    submitLink()
+
+    await waitFor(() => expect(postMock).toHaveBeenCalledWith(
+      `/cosigners/${cosigner.consignor_id}/link`,
+      expect.objectContaining({ minimum_price: '1300' }),
+    ))
+  })
+
+  it('does not link with a minimum price it cannot read', async () => {
+    const minPrice = await openLinkForm()
+    fireEvent.change(minPrice, { target: { value: '1,30' } })
+    submitLink()
+
+    await act(async () => { await Promise.resolve() })
+    expect(postMock).not.toHaveBeenCalledWith(
+      `/cosigners/${cosigner.consignor_id}/link`,
+      expect.anything(),
+    )
+  })
+})

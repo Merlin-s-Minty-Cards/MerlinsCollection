@@ -7,9 +7,11 @@ import { describeApiError, type ApiErrorDescription } from '@/lib/admin-error'
 import { CONDITION_OPTIONS, parseCondition } from '@/lib/constants'
 import { useLocations } from '@/lib/use-locations'
 import { buyFormMode, buildBuyItemBody } from '@/lib/buy-form'
+import { parseMoney } from '@/lib/money'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
 import CardImage from '@/components/admin/shared/CardImage'
+import MoneyInput from '@/components/admin/shared/MoneyInput'
 
 interface BuyItem {
   name: string
@@ -144,21 +146,28 @@ export default function AdminBuyPage() {
       market_value: marketPrice,
       image_url: card.images?.small || null,
       // Recalculate buy_price if percentage is set
+      // `marketPrice` came off a catalog card (a server number), `buy_pct` is
+      // a bounded percent — neither can be comma-grouped, but the money side
+      // goes through parseMoney anyway so one rule covers the whole file.
       buy_price: f.buy_pct && marketPrice
-        ? ((parseFloat(f.buy_pct) / 100) * parseFloat(marketPrice)).toFixed(2)
+        ? ((parseFloat(f.buy_pct) / 100) * (parseMoney(marketPrice) ?? 0)).toFixed(2)
         : f.buy_price,
     }))
     setNameSearch('')
     setCatalogResults([])
   }
 
-  // Bidirectional percentage calculation
+  // Bidirectional percentage calculation. Both money fields are typed by a
+  // human, so every read of them goes through parseMoney — parseFloat('1,300')
+  // is 1 and never NaN, which would quietly recompute the percentage off a
+  // number 1300× too small. `buy_pct` is a bounded percent and stays parseFloat.
   const updateBuyPrice = (price: string) => {
     setForm((f) => {
       const newForm = { ...f, buy_price: price }
-      if (price && f.market_value) {
-        const pct = ((parseFloat(price) / parseFloat(f.market_value)) * 100).toFixed(0)
-        newForm.buy_pct = pct
+      const priceNum = parseMoney(price)
+      const marketNum = parseMoney(f.market_value)
+      if (priceNum !== null && marketNum) {
+        newForm.buy_pct = ((priceNum / marketNum) * 100).toFixed(0)
       } else {
         newForm.buy_pct = ''
       }
@@ -169,9 +178,9 @@ export default function AdminBuyPage() {
   const updateBuyPct = (pct: string) => {
     setForm((f) => {
       const newForm = { ...f, buy_pct: pct }
-      if (pct && f.market_value) {
-        const price = ((parseFloat(pct) / 100) * parseFloat(f.market_value)).toFixed(2)
-        newForm.buy_price = price
+      const marketNum = parseMoney(f.market_value)
+      if (pct && marketNum !== null) {
+        newForm.buy_price = ((parseFloat(pct) / 100) * marketNum).toFixed(2)
       } else {
         newForm.buy_price = ''
       }
@@ -182,9 +191,9 @@ export default function AdminBuyPage() {
   const updateMarketValue = (mv: string) => {
     setForm((f) => {
       const newForm = { ...f, market_value: mv }
-      if (f.buy_pct && mv) {
-        const price = ((parseFloat(f.buy_pct) / 100) * parseFloat(mv)).toFixed(2)
-        newForm.buy_price = price
+      const marketNum = parseMoney(mv)
+      if (f.buy_pct && marketNum !== null) {
+        newForm.buy_price = ((parseFloat(f.buy_pct) / 100) * marketNum).toFixed(2)
       }
       return newForm
     })
@@ -205,14 +214,22 @@ export default function AdminBuyPage() {
   }, [api.isAuthenticated]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const addItem = async () => {
-    if (!buyId || !form.name.trim() || !form.buy_price) return
+    // `=== null`, never falsiness: parseMoney('0') is 0, and a free card is a
+    // real thing at a buy table (a throw-in, a bulk lot).
+    const buyPrice = parseMoney(form.buy_price)
+    const marketRaw = form.market_value.trim()
+    const marketValue = marketRaw === '' ? null : parseMoney(marketRaw)
+    if (!buyId || !form.name.trim() || buyPrice === null) return
+    // A market value that was typed but cannot be read must block the add, not
+    // silently become null — that would look like "no market value known".
+    if (marketRaw !== '' && marketValue === null) return
     try {
       const body = buildBuyItemBody(
         {
           name: form.name.trim(),
           ...parseCondition(form.condition),
-          buy_price: parseFloat(form.buy_price),
-          market_value: form.market_value ? parseFloat(form.market_value) : null,
+          buy_price: buyPrice,
+          market_value: marketValue,
           set_name: form.set_name || null,
           location: form.location,
           number: form.card_number || null,
@@ -221,7 +238,15 @@ export default function AdminBuyPage() {
         manualMode,
       )
       await api.post(`/purchases/${buyId}/items`, body)
-      setItems((prev) => [...prev, { ...form, is_catalog_match: !!selectedCard }])
+      // Store the CANONICAL amounts in the cart, not the raw text: the totals
+      // and the per-row percentage below read these back, and '1,300' would
+      // reduce to 1 in every one of them.
+      setItems((prev) => [...prev, {
+        ...form,
+        buy_price: String(buyPrice),
+        market_value: marketValue === null ? '' : String(marketValue),
+        is_catalog_match: !!selectedCard,
+      }])
       setForm({ name: '', condition: 'NM', buy_price: '', market_value: '', set_name: '', location: 'toploader', card_number: '', buy_pct: '', image_url: null })
       setSelectedCard(null)
       setManualMode(false)
@@ -274,8 +299,12 @@ export default function AdminBuyPage() {
     setBuyDate(new Date().toISOString().split('T')[0])
   }
 
+  // Safe: `addItem` normalises both amounts through parseMoney before an item
+  // ever reaches this array, so these are canonical numeric strings — not the
+  // raw text a human typed, which is what they used to be.
   const totalCost = items.reduce((sum, i) => sum + parseFloat(i.buy_price || '0'), 0)
   const totalMarket = items.reduce((sum, i) => sum + parseFloat(i.market_value || '0'), 0)
+  // confirmResult comes back from the server, so parseFloat is safe on it.
   const avgBuyPct = totalMarket > 0 ? ((totalCost / totalMarket) * 100).toFixed(0) : '—'
 
   if (confirmed && confirmResult) {
@@ -321,6 +350,7 @@ export default function AdminBuyPage() {
             ) : (
               <div className="divide-y divide-pine-700/25 max-h-[420px] overflow-y-auto vault-scroll">
                 {items.map((item, idx) => {
+                  // Safe: `addItem` stores canonical amounts, never raw text.
                   const buyPct = item.market_value && parseFloat(item.market_value) > 0
                     ? ((parseFloat(item.buy_price) / parseFloat(item.market_value)) * 100).toFixed(0)
                     : null
@@ -560,13 +590,25 @@ export default function AdminBuyPage() {
                 {mode === 'manual' && (
                   <label className="block">
                     <span className="text-[11px] text-pine-400">Market Value ($)</span>
-                    <input type="number" step="0.01" value={form.market_value} onChange={(e) => updateMarketValue(e.target.value)} className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs" placeholder="0.00" />
+                    <MoneyInput
+                      label="Market Value"
+                      value={form.market_value}
+                      onChange={(raw) => updateMarketValue(raw)}
+                      placeholder="0.00"
+                      className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs"
+                    />
                   </label>
                 )}
                 <div className="grid grid-cols-5 gap-2 items-end">
                   <label className="col-span-2">
                     <span className="text-[11px] text-pine-400">Buy Price ($)</span>
-                    <input type="number" step="0.01" value={form.buy_price} onChange={(e) => updateBuyPrice(e.target.value)} className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs" placeholder="0.00" />
+                    <MoneyInput
+                      label="Buy Price"
+                      value={form.buy_price}
+                      onChange={(raw) => updateBuyPrice(raw)}
+                      placeholder="0.00"
+                      className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs"
+                    />
                   </label>
                   <div className="flex items-center justify-center pb-1">
                     <span className="text-[10px] text-pine-500">or</span>
@@ -582,7 +624,8 @@ export default function AdminBuyPage() {
                 <button
                   type="button"
                   onClick={addItem}
-                  disabled={!form.name.trim() || !form.buy_price}
+                  // `=== null`, not falsiness — a $0 buy price is legitimate.
+                  disabled={!form.name.trim() || parseMoney(form.buy_price) === null}
                   className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium bg-spriggatito-400/15 text-spriggatito-400 border border-spriggatito-400/30 hover:bg-spriggatito-400/25 disabled:opacity-40 transition-colors"
                 >
                   <Plus size={14} />

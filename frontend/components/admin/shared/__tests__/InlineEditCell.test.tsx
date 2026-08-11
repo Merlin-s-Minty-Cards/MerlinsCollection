@@ -187,3 +187,82 @@ describe('InlineEditCell', () => {
     expect(screen.getByText('$', { selector: 'span' })).toBeInTheDocument()
   })
 })
+
+// RFC 0010 T1. `type="money"` is the inline-edit counterpart of MoneyInput:
+// a text input that accepts what a human types (`1,300`) and commits the
+// parsed value, instead of a number input the comma never reaches.
+describe('InlineEditCell type="money"', () => {
+  const renderMoneyCell = (onSave = vi.fn(), onError?: (e: unknown) => void) => {
+    render(
+      <InlineEditCell
+        value="12.50"
+        type="money"
+        displayValue={<span>$12.50</span>}
+        onSave={onSave}
+        onError={onError}
+      />
+    )
+    fireEvent.click(screen.getByText('$12.50'))
+    return { onSave, input: screen.getByRole('textbox') as HTMLInputElement }
+  }
+
+  it('edits through a text input carrying the decimal keypad hint, not a number input', () => {
+    const { input } = renderMoneyCell()
+    // type="number" is what makes `1,300` un-typeable; inputMode is the only
+    // thing it was buying that matters, and it must survive the swap.
+    expect(input.type).toBe('text')
+    expect(input.inputMode).toBe('decimal')
+    expect(screen.queryByRole('spinbutton')).not.toBeInTheDocument()
+  })
+
+  it('commits a comma-grouped amount as its parsed value', async () => {
+    const { onSave, input } = renderMoneyCell()
+    fireEvent.change(input, { target: { value: '1,300' } })
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Enter' })
+    })
+    expect(onSave).toHaveBeenCalledWith('1300')
+  })
+
+  it('still commits a plain amount unchanged (regression gate)', async () => {
+    const { onSave, input } = renderMoneyCell()
+    fireEvent.change(input, { target: { value: '9.99' } })
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Enter' })
+    })
+    expect(onSave).toHaveBeenCalledWith('9.99')
+  })
+
+  it('never calls onSave with an unreadable amount, and keeps the editor open', async () => {
+    const onSave = vi.fn()
+    const onError = vi.fn()
+    const { input } = renderMoneyCell(onSave, onError)
+    fireEvent.change(input, { target: { value: '1,30' } })
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Enter' })
+    })
+    expect(onSave).not.toHaveBeenCalled()
+    expect(onError).toHaveBeenCalledTimes(1)
+    // The editor stays open with the offending text intact, exactly as it does
+    // when onSave rejects — the admin fixes it rather than losing it.
+    expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('1,30')
+  })
+
+  it('commits an empty value as empty, so clearing a price still works', async () => {
+    const { onSave, input } = renderMoneyCell()
+    fireEvent.change(input, { target: { value: '' } })
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Enter' })
+    })
+    expect(onSave).toHaveBeenCalledWith('')
+  })
+
+  it('commits a zero amount — a free card is a real thing at a buy table', async () => {
+    const { onSave, input } = renderMoneyCell()
+    fireEvent.change(input, { target: { value: '0' } })
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Enter' })
+    })
+    expect(onSave).toHaveBeenCalledWith('0')
+  })
+})

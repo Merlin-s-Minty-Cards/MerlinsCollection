@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, act } from '@testing-library/react'
+import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
 import AdminShowPrepPage from '../page'
 
 const getMock = vi.fn()
@@ -132,5 +132,73 @@ describe('AdminShowPrepPage inline sticker editing', () => {
     })
     const link = await screen.findByTitle('https://www.tcgplayer.com/product/12345')
     expect(link).toHaveAttribute('href', 'https://www.tcgplayer.com/product/12345')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// RFC 0010 T1 — money fields accept what a human types
+// ---------------------------------------------------------------------------
+
+describe('AdminShowPrepPage money input', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    putMock.mockReset()
+    putMock.mockResolvedValue({})
+    getMock.mockImplementation((path: string) => {
+      if (path === '/show-prep/mispriced') {
+        return Promise.resolve({ items: [mispricedItem], total_flagged: 1 })
+      }
+      if (path === '/show-prep/location-summary') {
+        return Promise.resolve({ locations: { 'binder-a': 1 }, total: 1 })
+      }
+      if (path === '/locations') return Promise.resolve([{ value: 'binder-a', label: 'Binder A' }])
+      return Promise.resolve({})
+    })
+  })
+
+  async function renderWithSelection() {
+    render(<AdminShowPrepPage />)
+    await act(async () => { await Promise.resolve() })
+    fireEvent.click(screen.getByLabelText(/select all/i))
+    return screen.getByLabelText('Bulk sticker price')
+  }
+
+  it('bulk sticker sends the PARSED number, never the raw typed string', async () => {
+    const input = await renderWithSelection()
+    fireEvent.change(input, { target: { value: '1,300' } })
+    fireEvent.click(screen.getByRole('button', { name: /set sticker/i }))
+
+    await waitFor(() => expect(putMock).toHaveBeenCalledWith('/inventory/item-1', { sticker_price: '1300' }))
+  })
+
+  it('still sends a plain 1300 unchanged (regression gate)', async () => {
+    const input = await renderWithSelection()
+    fireEvent.change(input, { target: { value: '1300' } })
+    fireEvent.click(screen.getByRole('button', { name: /set sticker/i }))
+
+    await waitFor(() => expect(putMock).toHaveBeenCalledWith('/inventory/item-1', { sticker_price: '1300' }))
+  })
+
+  it('does not apply a bulk sticker price it cannot read', async () => {
+    const input = await renderWithSelection()
+    fireEvent.change(input, { target: { value: '1,30' } })
+    fireEvent.click(screen.getByRole('button', { name: /set sticker/i }))
+
+    await act(async () => { await Promise.resolve() })
+    expect(putMock).not.toHaveBeenCalled()
+    expect(screen.getByRole('alert')).toBeInTheDocument()
+  })
+
+  it('inline sticker edit commits a comma-grouped amount as its parsed value', async () => {
+    render(<AdminShowPrepPage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.click(screen.getByLabelText(/edit sticker price for/i))
+    const input = screen.getByRole('textbox')
+    fireEvent.change(input, { target: { value: '1,300' } })
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }) })
+
+    await waitFor(() => expect(putMock).toHaveBeenCalledWith('/inventory/item-1', { sticker_price: '1300' }))
   })
 })

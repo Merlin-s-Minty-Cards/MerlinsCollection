@@ -89,3 +89,60 @@ describe('AdminSellPage ownership indicator', () => {
     expect(await screen.findByText('Owned')).toBeInTheDocument()
   })
 })
+
+// ---------------------------------------------------------------------------
+// RFC 0010 T1 — money fields accept what a human types
+// ---------------------------------------------------------------------------
+
+describe('AdminSellPage money input', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    postMock.mockResolvedValue({ sell_id: 'sell-1', status: 'draft' })
+    getMock.mockImplementation((path: string) => {
+      if (path === '/inventory/search') {
+        return Promise.resolve({
+          items: [{
+            item_id: 'item-1',
+            card_id: 'sv1-25',
+            display_name: 'Pikachu',
+            condition: 'NM',
+            current_market_value: '30.00',
+            cost_basis: '10.00',
+            sticker_price: null,
+            status: 'available',
+          }],
+          total: 1,
+        })
+      }
+      return Promise.resolve({})
+    })
+  })
+
+  async function addPikachuToCart() {
+    render(<AdminSellPage />)
+    await act(async () => { await Promise.resolve() })
+    fireEvent.change(screen.getByPlaceholderText(/search/i), { target: { value: 'Pikachu' } })
+    fireEvent.click(await screen.findByText('Pikachu'))
+    return await screen.findByLabelText(/agreed price/i)
+  }
+
+  it('totals 1,300 as $1300.00, not $1.00', async () => {
+    const priceInput = await addPikachuToCart()
+    fireEvent.change(priceInput, { target: { value: '1,300' } })
+    // parseFloat('1,300') is 1 and never NaN, so the wrong total looks fine.
+    expect(await screen.findByText('$1300.00')).toBeInTheDocument()
+  })
+
+  it('still totals a plain 1300 correctly (regression gate)', async () => {
+    const priceInput = await addPikachuToCart()
+    fireEvent.change(priceInput, { target: { value: '1300' } })
+    expect(await screen.findByText('$1300.00')).toBeInTheDocument()
+  })
+
+  it('flags an unreadable agreed price inline', async () => {
+    const priceInput = await addPikachuToCart()
+    fireEvent.change(priceInput, { target: { value: '1,30' } })
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+  })
+})

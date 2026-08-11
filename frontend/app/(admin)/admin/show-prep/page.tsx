@@ -11,6 +11,8 @@ import CardImage, { TABLE_THUMB_SIZE, TABLE_THUMB_COLUMN } from '@/components/ad
 import ImageToggle from '@/components/admin/shared/ImageToggle'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
 import InlineEditCell from '@/components/admin/shared/InlineEditCell'
+import MoneyInput from '@/components/admin/shared/MoneyInput'
+import { parseMoney } from '@/lib/money'
 
 interface MispricedItem {
   item_id: string
@@ -130,12 +132,16 @@ export default function AdminShowPrepPage() {
     setUpdatingStickers(true)
     setMoveResult(null)
     let updated = 0
-    const price = parseFloat(stickerValue)
-    if (isNaN(price) || price < 0) { setUpdatingStickers(false); return }
+    // parseMoney, not parseFloat: `parseFloat('1,300')` is 1 and never NaN, so
+    // it slips past an isNaN guard as a plausible wrong number. A negative is
+    // rejected by the parser itself, which is why `price < 0` is gone.
+    const price = parseMoney(stickerValue)
+    if (price === null) { setUpdatingStickers(false); return }
 
     for (const id of selectedIds) {
       try {
-        await api.put(`/inventory/${id}`, { sticker_price: stickerValue })
+        // The PARSED value, not the raw text the admin typed (RFC 0010 T1).
+        await api.put(`/inventory/${id}`, { sticker_price: String(price) })
         updated++
       } catch { /* continue on error */ }
     }
@@ -157,12 +163,14 @@ export default function AdminShowPrepPage() {
       if (trimmed === '') {
         await api.put(`/inventory/${itemId}`, { sticker_price: null })
       } else {
-        const price = parseFloat(trimmed)
-        if (isNaN(price) || price < 0) {
+        // InlineEditCell type="money" has already parsed this, so `trimmed` is
+        // a clean numeric string by the time it arrives. Re-checking is cheap
+        // and keeps the handler correct if it is ever called from elsewhere.
+        const price = parseMoney(trimmed)
+        if (price === null) {
           throw new Error('Enter a valid, non-negative sticker price')
         }
-        // Send the parsed number, not the raw typed string — parseFloat
-        // tolerates trailing garbage ("12abc" -> 12) that must not reach the API.
+        // Send the parsed number, not the raw typed string.
         await api.put(`/inventory/${itemId}`, { sticker_price: String(price) })
       }
       setItemEditError(null)
@@ -201,7 +209,9 @@ export default function AdminShowPrepPage() {
     }
   }
 
-  // Apply local sort
+  // Apply local sort. The parseFloat calls below read server-sent Decimal
+  // strings, which are never comma-grouped — that is the one place parseFloat
+  // stays safe. Anything a human typed goes through parseMoney (lib/money.ts).
   const sortedMispriced = [...mispriced].sort((a, b) => {
     if (!sortKey) return 0
     if (sortKey === 'delta_pct') {
@@ -276,8 +286,7 @@ export default function AdminShowPrepPage() {
       render: (item) => (
         <InlineEditCell
           value={item.sticker_price ? String(item.sticker_price) : ''}
-          type="number"
-          step="0.01"
+          type="money"
           prefix="$"
           placeholder="0.00"
           saving={savingItemId === item.item_id}
@@ -503,13 +512,12 @@ export default function AdminShowPrepPage() {
             {/* Bulk sticker update */}
             <div className="border-l border-pine-700/40 pl-3 flex items-center gap-2">
               <Tag size={13} className="text-amber-400" />
-              <div className="relative">
-                <span className="absolute left-1.5 top-1/2 -translate-y-1/2 text-[10px] text-pine-500">$</span>
-                <input
-                  type="number"
-                  step="0.01"
+              <div className="relative flex flex-col">
+                <span className="absolute left-1.5 top-2 -translate-y-1/2 text-[10px] text-pine-500">$</span>
+                <MoneyInput
+                  label="Bulk sticker price"
                   value={stickerValue}
-                  onChange={(e) => setStickerValue(e.target.value)}
+                  onChange={(raw) => setStickerValue(raw)}
                   placeholder="0.00"
                   className="vault-field w-20 pl-4 pr-1.5 py-1 rounded-lg text-xs font-mono"
                 />

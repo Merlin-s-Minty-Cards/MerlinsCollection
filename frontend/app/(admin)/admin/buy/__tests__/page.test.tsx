@@ -125,3 +125,74 @@ describe('AdminBuyPage catalog search failure states', () => {
     expect(screen.queryByText('Pikipek')).not.toBeInTheDocument()
   })
 })
+
+// ---------------------------------------------------------------------------
+// RFC 0010 T1 — money fields accept what a human types
+// ---------------------------------------------------------------------------
+
+describe('AdminBuyPage money input', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    postMock.mockResolvedValue({ buy_id: 'buy-1' })
+    getMock.mockImplementation((path: string) => {
+      if (path === '/locations') return Promise.resolve([{ value: 'toploader', label: 'Toploader' }])
+      if (path === '/market/search') {
+        return Promise.resolve({ items: [catalogCard('c1', 'Charizard ex')], total: 1 })
+      }
+      return Promise.resolve({})
+    })
+  })
+
+  // Gets the form into catalog mode, which is where Buy Price lives.
+  async function pickACard() {
+    const input = await renderBuyPage()
+    fireEvent.change(input, { target: { value: 'Charizard' } })
+    await waitFor(() => expect(screen.getByText('Charizard ex')).toBeInTheDocument())
+    fireEvent.click(screen.getByText('Charizard ex'))
+    return screen.getByLabelText('Buy Price')
+  }
+
+  it('sends 1300 when the admin types 1,300 into Buy Price', async () => {
+    const priceInput = await pickACard()
+    fireEvent.change(priceInput, { target: { value: '1,300' } })
+    fireEvent.click(screen.getByRole('button', { name: /add to purchase/i }))
+
+    await waitFor(() => expect(postMock).toHaveBeenCalledWith(
+      '/purchases/buy-1/items',
+      expect.objectContaining({ buy_price: 1300 }),
+    ))
+  })
+
+  it('still sends 1300 for a plain 1300 (regression gate)', async () => {
+    const priceInput = await pickACard()
+    fireEvent.change(priceInput, { target: { value: '1300' } })
+    fireEvent.click(screen.getByRole('button', { name: /add to purchase/i }))
+
+    await waitFor(() => expect(postMock).toHaveBeenCalledWith(
+      '/purchases/buy-1/items',
+      expect.objectContaining({ buy_price: 1300 }),
+    ))
+  })
+
+  it('blocks the add and says so when the buy price is unreadable', async () => {
+    const priceInput = await pickACard()
+    // `1,30` is the plausible-looking typo the grouping rule exists to catch.
+    fireEvent.change(priceInput, { target: { value: '1,30' } })
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /add to purchase/i }))
+    await act(async () => { await Promise.resolve() })
+    expect(postMock).not.toHaveBeenCalledWith('/purchases/buy-1/items', expect.anything())
+  })
+
+  it('totals the cart from the parsed amount, not a truncated one', async () => {
+    const priceInput = await pickACard()
+    fireEvent.change(priceInput, { target: { value: '1,300' } })
+    fireEvent.click(screen.getByRole('button', { name: /add to purchase/i }))
+
+    // parseFloat('1,300') is 1 — the total would read $1.00 and look plausible.
+    // Two places show it: the cart row and the Total Cost line.
+    expect(await screen.findAllByText('$1300.00')).toHaveLength(2)
+  })
+})

@@ -58,3 +58,32 @@ describe('buildIncomingLegBody', () => {
     expect(body.agreed_value).toBe(5)
   })
 })
+
+// RFC 0010 T1 — the leg's amounts are typed by a human, so parseFloat is banned
+// here: parseFloat('1,300') is 1 and never NaN, so a $1,299 loss passes every
+// isNaN guard downstream.
+describe('buildIncomingLegBody money parsing', () => {
+  it('parses a comma-grouped agreed value', () => {
+    const body = buildIncomingLegBody(
+      { name: 'Charizard', card_number: '', set_name: '', market_value: '', value: '1,300' },
+      null,
+    )
+    expect(body.agreed_value).toBe(1300)
+  })
+
+  it('parses a comma-grouped market value', () => {
+    const body = buildIncomingLegBody(
+      { name: 'Charizard', card_number: '', set_name: '', market_value: '2,500.50', value: '1300' },
+      null,
+    )
+    expect(body.market_value).toBe(2500.5)
+  })
+
+  it('omits an unreadable market value rather than sending a truncated one', () => {
+    const body = buildIncomingLegBody(
+      { name: 'Charizard', card_number: '', set_name: '', market_value: '1,30', value: '1300' },
+      null,
+    )
+    expect(body.market_value).toBeUndefined()
+  })
+})

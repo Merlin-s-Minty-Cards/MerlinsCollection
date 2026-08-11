@@ -334,6 +334,8 @@ export default function AdminAnalyticsPage() {
   // Shows aggregate metrics
   // ---------------------------------------------------------------------------
 
+  // Read-only dashboard: every figure here is a server-sent decimal string,
+  // which is never comma-grouped. Nothing on this page is typed by a human.
   const totalRevenue = analytics.reduce((sum, a) => sum + (parseFloat(a.total_sold) || 0), 0)
   const totalSpend = analytics.reduce((sum, a) => sum + (parseFloat(a.total_bought) || 0), 0)
   const netProfit = analytics.reduce((sum, a) => sum + (parseFloat(a.net_sales) || 0), 0)
