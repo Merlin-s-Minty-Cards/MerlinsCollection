@@ -159,6 +159,40 @@ archived shows unless `?include_archived=true`; `repo.list_shows()` and
 `repo.get_show()` stay archive-agnostic so `/shows/{id}/analytics` keeps
 resolving for an archived show.
 
+## ARCHIVING IS ONE PATTERN — every archivable entity behaves identically
+
+Owner rule, 2026-08-10: *"if there are other things that get archived, they
+should be the same… Archived entities are hidden by default but can be viewed in
+case they need to be pulled back or referenced."*
+
+**`/admin/shows` is the reference implementation. Copy it; do not reinvent it.**
+The contract, all six parts:
+
+1. a boolean `archived` field on the model (never a status enum value, never a
+   second "active" flag meaning the inverse);
+2. `DELETE`/archive sets it — **nothing is ever destroyed**, and there is **no
+   409 in-use guard**, because nothing dangles when nothing is removed;
+3. an `unarchive` route, because archiving that cannot be undone is just a
+   slower delete;
+4. the list endpoint **hides archived rows unless `?include_archived=true`**;
+5. the UI has a **"Show archived"** toggle, and while it is on the archived rows
+   are visibly marked (`Archived` badge + dimmed) rather than silently mixed in;
+6. the confirm dialog says *archive*, and says what is preserved — see
+   `frontend/app/(admin)/admin/shows/page.tsx:264-274, 416` for the exact
+   wording to mirror.
+
+**An `Archived` badge never reuses inventory-status vocabulary.** Rendering an
+archived *person* or *event* as `SOLD` is the bug this rule exists to prevent
+(it shipped on `/admin/cosigners`, which showed a deactivated consignor as
+"SOLD").
+
+Entities on this pattern: **`Show`**, **`Consignor`** (RFC 0010 T2). Entities
+deliberately NOT on it: **`Location`**, which hard-deletes behind a 409 in-use
+guard because a location is a label with no history of its own. `DELETE
+/admin/inventory/{item_id}` is a third thing again — its soft mode sets
+`ItemStatus.LOST`, a real lifecycle state rather than an archive flag; see
+`docs/plans/rfc-0010/follow-ups.md` before treating it as one.
+
 **`put_show` gotcha:** the SK embeds the show DATE and, during an import, the
 generation. Both move underneath an ordinary admin edit, so `put_show` now
 sweeps superseded rows for the same `show_id` after writing — otherwise
@@ -207,6 +241,76 @@ implementations, kept deliberately in sync — `itemTitle`
 (chat). Never inline `display_name || product_name` in new code; call the
 helper. `CardDetailModal` shows **both** name fields, since editing
 `display_name` on a catalog-matched item is a silent no-op.
+
+## A CARD IS NEVER IDENTIFIED BY NAME ALONE — a card search MUST show image AND price
+
+**Owner rule, 2026-08-10, and it is absolute:** *"when searching for a card, name
+alone is not sufficient, it needs to have an image"* — extended the same day:
+*"I also want prices displayed as well."*
+
+**Three fields, always: name, image, price.** This applies to **every** surface
+where a human picks a card out of a list of candidates — catalog autocompletes,
+repair-tool pickers, watchlist add, search results, anywhere a set of cards is
+offered and one must be chosen. The image answers *"is this the card?"*; the price
+answers *"what do I do about it?"*, which at a buy table is the only question that
+matters. A picker missing either field is incomplete.
+
+Why it is a rule and not a preference: Pokémon names collide relentlessly across
+sets, printings, finishes and languages, so a list of names is a list of things
+the operator cannot tell apart. They are standing at a table with the physical
+card in hand.
+
+**Both fields are already in the response.** `CatalogCard.images` and
+`CatalogCard.prices` (`models/catalog.py`) are both populated and
+`GET /admin/market/search` returns them via `model_dump`. A picker without art or
+a price is not missing data; it is discarding data it was handed.
+
+**`/admin/buy`'s catalog dropdown is the reference row**
+(`frontend/app/(admin)/admin/buy/page.tsx:418-440`): `CardImage size="sm"` beside
+a two-line block — name on line 1, `set · #number · rarity` on line 2, with
+`min-w-0 flex-1` + `truncate` so a long name shrinks instead of shoving the image.
+Use the shared `CardPickerRow` component; three of the five pickers were built
+from this pattern and dropped the image on the way, which is why this is a
+component and a rule rather than a habit.
+
+**Price rendering — the honest cases are the ones that get this wrong:**
+
+- The figure comes from the **backend**, chosen with `_market_price(card,
+  "normal")` — the ONE shared finish-aware lookup (`models/inventory.py:388`).
+  Passing a default finish buys its whole fallback walk for free. **Never
+  re-implement price selection in the frontend**: a catalog result has no item and
+  therefore no finish, and a second copy of that walk is exactly how 174 of 213
+  live items once went unpriced.
+- **An absent price is never `$0.00`, never blank, and never a guess.**
+  `FinishPrice` bands are written only when a provider published a figure, so
+  absent means absent — the same discipline the graded prices already document.
+- **`detail: "brief"` vs `"full"` is a real distinction and the UI must keep it.**
+  `brief` = *we have never fetched a price for this card*; `full` with no band =
+  *no provider covers this card*. The model preserves that difference
+  deliberately; collapsing both to "—" throws away the only signal that says
+  whether waiting will help.
+- **Show the age when the figure is stale.** A price from six days ago is fine; a
+  three-month-old one is a different claim and must not look identical.
+- **A catalog price is a NEAR MINT market figure and is NOT condition-adjusted** —
+  there is no item and therefore no condition. Never present it as a sale price.
+
+Catalog prices are filled by the **weekly cycle** (`refresh_catalog_prices`, RFC
+0010 T17): every catalog card is re-priced at least once a week, by Friday. Before
+that job runs, most of the 31,603 catalog rows have **no** price at all — which is
+why the rules above lead with the absent cases instead of treating them as edges.
+
+**Adding these fields is not finished when they render. The layout has to be
+better, not merely more informative.** Owner: *"the UI has to be thought about so
+that adding an image next to the name is still readable, not squished into a page,
+and looks very clean from a design perspective so that users can do things as
+quickly as possible."* So: the text block gets `min-w-0` and truncates; the image
+never shrinks and never grows; real card proportions (5:7) — a stretched thumbnail
+misrepresents what the operator is comparing against; a card-less or failed id
+renders the **placeholder**, never a collapsed row, because rows that change height
+as art loads make the list jump under the cursor mid-click. Speed is the point:
+keep the debounce, keep the batching, never fire a request per row.
+
+**Check this rule before writing any card-picking UI, and check it in review.**
 
 **Card art: import the size, never re-pick it.** `TABLE_THUMB_SIZE` (`xs`,
 56×78 — real card proportions) and `TABLE_THUMB_COLUMN` (`w-16`) are exported
