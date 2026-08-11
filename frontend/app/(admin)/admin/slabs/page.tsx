@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Camera, Keyboard, RefreshCw, ScanLine, Wand2 } from 'lucide-react'
 import { useAdminApi } from '@/lib/admin-api'
+import { formatMoney } from '@/lib/money'
 import SlabEntryForm, { type StagedSlab } from '@/components/admin/slabs/SlabEntryForm'
 import StagingTable from '@/components/admin/slabs/StagingTable'
 import SlabList, { type SlabRow } from '@/components/admin/slabs/SlabList'
@@ -79,14 +80,18 @@ export default function SlabsPage() {
           grade: Number(r.grade),
           cert_number: r.cert_number,
           grade_label: r.grade_label || null,
-          buy_price: Number(r.buy_price),
+          // Already a number: SlabEntryForm parses at staging time, so the
+          // staging table and this body carry the same value. `Number(...)`
+          // here would be a second, weaker parse of a string that no longer
+          // exists.
+          buy_price: r.buy_price,
           location: r.location,
         })
       }
 
       await api.post(`/purchases/${buyId}/confirm`, {})
-      const spend = rows.reduce((sum, r) => sum + Number(r.buy_price), 0)
-      setResult(`Committed ${rows.length} slab(s), $${spend.toFixed(2)}`)
+      const spend = rows.reduce((sum, r) => sum + r.buy_price, 0)
+      setResult(`Committed ${rows.length} slab(s), ${formatMoney(spend)}`)
       setRows([])
       // Return focus to the cert field so the next slab can go straight in --
       // with a stack of slabs in hand, that is the interaction this page lives

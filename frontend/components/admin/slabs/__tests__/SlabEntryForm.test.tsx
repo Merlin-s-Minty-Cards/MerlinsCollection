@@ -51,7 +51,8 @@ describe('SlabEntryForm', () => {
     await waitFor(() => expect(onAdd).toHaveBeenCalledTimes(1))
     expect(onAdd.mock.calls[0][0]).toMatchObject({
       cert_number: '89787279', card_id: null, name: 'Some JP Card',
-      company: 'PSA', grade: '10', buy_price: '40',
+      // A staged row carries the PARSED number, not the typed text (T0).
+      company: 'PSA', grade: '10', buy_price: 40,
     })
   })
 
@@ -93,6 +94,52 @@ describe('SlabEntryForm', () => {
     fill(/cost/i, '900.50')
     fireEvent.click(screen.getByRole('button', { name: /add to batch/i }))
     await waitFor(() => expect(onAdd).toHaveBeenCalledTimes(1))
+  })
+
+  // ---- RFC 0010 T0: the cost field accepts what a human types --------------
+  // The owner's report, 2026-08-10: "typing 1,300 for cost will break the
+  // commit, but typing 1300 is accepted. Both should work."
+
+  it('stages 1,300 as the number 1300 — the owner-reported input', async () => {
+    const onAdd = vi.fn()
+    render(<SlabEntryForm onAdd={onAdd} />)
+    fill(/cert number/i, '89787279')
+    fill(/card name/i, 'Gengar VMAX')
+    fill(/^grade$/i, '9.5')
+    fill(/cost/i, '1,300')
+    fireEvent.click(screen.getByRole('button', { name: /add to batch/i }))
+
+    await waitFor(() => expect(onAdd).toHaveBeenCalledTimes(1))
+    expect(onAdd.mock.calls[0][0].buy_price).toBe(1300)
+  })
+
+  it('stages $40 as the number 40', async () => {
+    const onAdd = vi.fn()
+    render(<SlabEntryForm onAdd={onAdd} />)
+    fill(/cert number/i, '11111111')
+    fill(/card name/i, 'Pikachu')
+    fill(/^grade$/i, '10')
+    fill(/cost/i, '$40')
+    fireEvent.click(screen.getByRole('button', { name: /add to batch/i }))
+
+    await waitFor(() => expect(onAdd).toHaveBeenCalledTimes(1))
+    expect(onAdd.mock.calls[0][0].buy_price).toBe(40)
+  })
+
+  it('blocks the add on an unreadable cost and says why, rather than guessing', async () => {
+    const onAdd = vi.fn()
+    render(<SlabEntryForm onAdd={onAdd} />)
+    fill(/cert number/i, '22222222')
+    fill(/card name/i, 'Charizard')
+    fill(/^grade$/i, '9')
+    fill(/cost/i, '1,30')
+    fireEvent.click(screen.getByRole('button', { name: /add to batch/i }))
+
+    expect(onAdd).not.toHaveBeenCalled()
+    // MoneyInput raises its own inline alert too, so assert across all of them
+    // rather than pinning which one carries the message.
+    const alerts = screen.getAllByRole('alert').map((el) => el.textContent ?? '')
+    expect(alerts.join(' ')).toMatch(/cost/i)
   })
 
   it('defaults company to PSA and allows CGC', async () => {

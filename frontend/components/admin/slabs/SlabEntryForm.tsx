@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Plus } from 'lucide-react'
 import { useAdminApi } from '@/lib/admin-api'
+import { parseMoney } from '@/lib/money'
 import { useLocations } from '@/lib/use-locations'
+import MoneyInput from '@/components/admin/shared/MoneyInput'
 import CertInput from './CertInput'
 
 export interface StagedSlab {
@@ -14,7 +16,8 @@ export interface StagedSlab {
   company: string
   grade: string
   grade_label: string
-  buy_price: string
+  /** PARSED, not the raw text. A staged row is what will be sent. */
+  buy_price: number
   location: string
 }
 
@@ -127,8 +130,21 @@ export default function SlabEntryForm({
       )
       return
     }
-    if (!grade.trim() || !cost.trim()) {
+    if (!grade.trim()) {
       setError('Grade and cost are required.')
+      return
+    }
+    // `=== null`, never falsiness: a free card costs 0, and 0 is a real answer.
+    const parsedCost = parseMoney(cost)
+    if (parsedCost === null) {
+      // MoneyInput already explains what a readable amount looks like, right
+      // under the field. This says why the ADD was refused, not the same
+      // sentence a second time.
+      setError(
+        cost.trim()
+          ? `Cost "${cost.trim()}" is not a readable amount — fix it before adding.`
+          : 'Grade and cost are required.',
+      )
       return
     }
     setError(null)
@@ -140,7 +156,7 @@ export default function SlabEntryForm({
       company,
       grade: grade.trim(),
       grade_label: gradeLabel.trim(),
-      buy_price: cost.trim(),
+      buy_price: parsedCost,
       location,
     })
     setCert('')
@@ -255,13 +271,7 @@ export default function SlabEntryForm({
 
         <label className="flex flex-col gap-1">
           <span className="text-[11px] uppercase tracking-wider text-pine-400">Cost</span>
-          <input
-            aria-label="Cost"
-            inputMode="decimal"
-            value={cost}
-            className="vault-field w-full rounded-lg px-3 py-2 font-mono text-sm"
-            onChange={(e) => setCost(e.target.value)}
-          />
+          <MoneyInput label="Cost" value={cost} onChange={(raw) => setCost(raw)} />
         </label>
       </div>
 

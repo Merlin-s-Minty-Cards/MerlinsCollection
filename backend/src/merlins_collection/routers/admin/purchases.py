@@ -63,6 +63,129 @@ def _review_reason_for_buy(buy_item: dict[str, Any]) -> str | None:
 #: row, so there is nowhere to file the item without it.
 _GRADED_REQUIRED_FIELDS = ("company", "grade", "cert_number")
 
+#: Numeric fields on a staged item, as ``(field, required)``. Every one of them
+#: reaches ``Decimal`` or pydantic during confirm, so every one of them can take
+#: the whole batch down mid-write if it is malformed.
+_STAGED_NUMERIC_FIELDS = (
+    ("buy_price", True),
+    ("market_value", False),
+    ("buy_pct", False),
+)
+
+
+def _coerce_decimal(value: Any, field: str, *, required: bool) -> Decimal | None:
+    """Coerce a JSON number or numeric string to an exact ``Decimal``.
+
+    Raises ``ValueError`` with an operator-readable message rather than letting
+    ``InvalidOperation`` escape as an unhandled 500.
+
+    Two traps this exists for:
+
+    * ``Decimal("NaN")`` and ``Decimal("Infinity")`` both PARSE. A bare
+      try/except around the conversion is not enough — ``is_finite()`` is part
+      of the check, not a nicety.
+    * conversion goes through ``str()`` so a JSON float lands as an exact
+      ``Decimal`` rather than its binary approximation (CLAUDE.md, Ops).
+
+    Accepts a number or a numeric string on purpose: MCP and curl are real
+    clients, and the backend is the last line rather than a mirror of one
+    form's habits.
+    """
+    if value is None or value == "":
+        if required:
+            raise ValueError(f"{field} is required")
+        return None
+    try:
+        dec = Decimal(str(value))
+    except (ArithmeticError, TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be an amount, got {value!r}") from exc
+    if not dec.is_finite():
+        raise ValueError(f"{field} must be a finite amount, got {value!r}")
+    return dec
+
+
+def _build_purchase(
+    buy_item: dict[str, Any],
+    *,
+    txn_date: date,
+    payment_method: str,
+    show_id: str | None,
+) -> tuple[Any, Transaction, dict[str, Any]]:
+    """Build the inventory item, transaction and timeline event for one row.
+
+    Pure: it writes nothing. Raises ``ValueError`` (which pydantic's
+    ``ValidationError`` subclasses) if the row cannot be turned into a valid
+    purchase, so the caller can reject the whole batch before touching the repo.
+    """
+    # The numeric fields are coerced explicitly rather than left to pydantic:
+    # `buy_price` becomes `cost_basis` BEFORE validation, so an unusable amount
+    # would otherwise raise `InvalidOperation` here rather than a readable
+    # error, and `market_value`/`buy_pct` never reach a validator at all.
+    for field, required in _STAGED_NUMERIC_FIELDS:
+        _coerce_decimal(buy_item.get(field), field, required=required)
+    buy_price = _coerce_decimal(buy_item["buy_price"], "buy_price", required=True)
+
+    new_item_id = new_ulid()
+    common = {
+        "item_id": new_item_id,
+        "card_id": buy_item.get("card_id"),
+        "status": "available",
+        "language": buy_item.get("language", "EN"),
+        "location": buy_item.get("location", "toploader"),
+        "cost_basis": str(buy_price),
+        "market_value_at_purchase": buy_item.get("market_value"),
+        "current_market_value": buy_item.get("market_value"),
+        "acquired_at": txn_date.isoformat(),
+        "acquired_show_id": show_id,
+        "display_name": buy_item.get("name"),
+        "needs_review": bool(buy_item.get("manual_entry")) or buy_item.get("card_id") is None,
+        "review_reason": _review_reason_for_buy(buy_item),
+    }
+
+    if buy_item.get("kind") == "graded":
+        _coerce_decimal(buy_item.get("grade"), "grade", required=True)
+        # `str()` on grade before validation, deliberately: the frontend
+        # sends 9.5 as a JSON number, and routing it through str() gives
+        # pydantic an exact Decimal("9.5") instead of a binary float.
+        item_data = {
+            **common,
+            "kind": "graded",
+            "company": buy_item["company"],
+            "grade": str(buy_item["grade"]),
+            "cert_number": str(buy_item["cert_number"]),
+            "grade_label": buy_item.get("grade_label"),
+            "cert_verified_at": buy_item.get("cert_verified_at"),
+            "cert_image_url": buy_item.get("cert_image_url"),
+            "price_source_id": buy_item.get("price_source_id"),
+        }
+        category = ItemCategory.GRADED
+    else:
+        item_data = {
+            **common,
+            "kind": "raw",
+            "finish": buy_item.get("finish", "normal"),
+            "condition": buy_item.get("condition", "NM"),
+            "condition_modifier": buy_item.get("condition_modifier"),
+        }
+        category = ItemCategory.RAW
+
+    inv_item = InventoryItemAdapter.validate_python(item_data)
+    txn = Transaction(
+        type=TransactionType.PURCHASE,
+        item_id=new_item_id,
+        category=category,
+        date=txn_date,
+        amount=buy_price,
+        payment_method=payment_method,
+        show_id=show_id,
+    )
+    event = {
+        "item_id": new_item_id, "txn_id": txn.txn_id, "type": "purchase",
+        "date": txn_date.isoformat(), "amount": str(buy_price),
+        "payment_method": payment_method, "show_id": show_id,
+    }
+    return inv_item, txn, event
+
 
 class BuySessionItem(BaseModel):
     card_id: str | None = None
@@ -175,6 +298,16 @@ def add_buy_item(
     if "name" not in body or "buy_price" not in body:
         raise HTTPException(status_code=422, detail="name and buy_price required")
 
+    # At ADD, not at confirm. `Number("1,300")` is NaN, which JSON-serialises to
+    # `null`, and the presence check above waves it straight through — the item
+    # then explodes mid-write on commit. Same reasoning as
+    # `_GRADED_REQUIRED_FIELDS`: a session that swallows a bad item and blows up
+    # on commit loses the whole staged batch.
+    try:
+        _coerce_decimal(body["buy_price"], "buy_price", required=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     kind = body.get("kind", "raw")
     if kind == "graded":
         # `in (None, "")` rather than falsiness: a grade of 0 is not a real PSA
@@ -257,81 +390,51 @@ def confirm_buy_session(
 
     payment_method = session.get("payment_method") or "cash"
     show_id = session.get("show_id")
-    total_cost = Decimal("0")
-    items_created = 0
 
     purchase_date_str = session.get("purchase_date")
     txn_date = date.fromisoformat(purchase_date_str) if purchase_date_str else date.today()
 
-    for buy_item in items:
-        buy_price = Decimal(str(buy_item["buy_price"]))
-        total_cost += buy_price
-
-        # Create a new inventory item
-        new_item_id = new_ulid()
-        common = {
-            "item_id": new_item_id,
-            "card_id": buy_item.get("card_id"),
-            "status": "available",
-            "language": buy_item.get("language", "EN"),
-            "location": buy_item.get("location", "toploader"),
-            "cost_basis": str(buy_price),
-            "market_value_at_purchase": buy_item.get("market_value"),
-            "current_market_value": buy_item.get("market_value"),
-            "acquired_at": txn_date.isoformat(),
-            "acquired_show_id": show_id,
-            "display_name": buy_item.get("name"),
-            "needs_review": bool(buy_item.get("manual_entry")) or buy_item.get("card_id") is None,
-            "review_reason": _review_reason_for_buy(buy_item),
-        }
-
-        if buy_item.get("kind") == "graded":
-            # `str()` on grade before validation, deliberately: the frontend
-            # sends 9.5 as a JSON number, and routing it through str() gives
-            # pydantic an exact Decimal("9.5") instead of a binary float.
-            item_data = {
-                **common,
-                "kind": "graded",
-                "company": buy_item["company"],
-                "grade": str(buy_item["grade"]),
-                "cert_number": str(buy_item["cert_number"]),
-                "grade_label": buy_item.get("grade_label"),
-                "cert_verified_at": buy_item.get("cert_verified_at"),
-                "cert_image_url": buy_item.get("cert_image_url"),
-                "price_source_id": buy_item.get("price_source_id"),
-            }
-            category = ItemCategory.GRADED
-        else:
-            item_data = {
-                **common,
-                "kind": "raw",
-                "finish": buy_item.get("finish", "normal"),
-                "condition": buy_item.get("condition", "NM"),
-                "condition_modifier": buy_item.get("condition_modifier"),
-            }
-            category = ItemCategory.RAW
-
-        inv_item = InventoryItemAdapter.validate_python(item_data)
-        repo.put_inventory_item(inv_item)
-        items_created += 1
-
-        # Record PURCHASE transaction
-        txn = Transaction(
-            type=TransactionType.PURCHASE,
-            item_id=new_item_id,
-            category=category,
-            date=txn_date,
-            amount=buy_price,
-            payment_method=payment_method,
-            show_id=show_id,
+    # ---- Pass 1: BUILD every row. Nothing is written here. -----------------
+    #
+    # Confirm writes an inventory item, a PURCHASE transaction and a timeline
+    # event per row, with no rollback and `status` set to `confirmed` only at
+    # the end. When it was one pass, a five-row batch with a bad amount on row 3
+    # left rows 1-2 as real inventory with real transactions, the session still
+    # `draft`, and the UI reporting "Nothing was created; the batch is intact"
+    # — which was false. Pressing Commit again then duplicated rows 1-2.
+    #
+    # Building everything first is simpler and stronger than compensating after
+    # a partial write, and it fixes partial write as a CLASS: a bad `condition`,
+    # `company` or `location` fails pydantic in here, where nothing has been
+    # written yet, instead of halfway down the batch.
+    problems: list[str] = []
+    built: list[tuple[Any, Transaction, dict[str, Any]]] = []
+    for idx, buy_item in enumerate(items, start=1):
+        try:
+            built.append(_build_purchase(
+                buy_item,
+                txn_date=txn_date,
+                payment_method=payment_method,
+                show_id=show_id,
+            ))
+        except ValueError as exc:
+            # ValueError covers pydantic's ValidationError, which subclasses it.
+            # 1-based, to match the row the operator is looking at.
+            problems.append(f"row {idx}: {exc}")
+    if problems:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Nothing was written. Fix and retry — {'; '.join(problems)}",
         )
-        repo.put_transaction(txn)
 
-        repo.put_timeline_event(new_item_id, {
-            "item_id": new_item_id, "txn_id": txn.txn_id, "type": "purchase",
-            "date": txn_date.isoformat(), "amount": str(buy_price),
-            "payment_method": payment_method, "show_id": show_id,
-        })
+    # ---- Pass 2: WRITE. Everything here has already been validated. --------
+    total_cost = Decimal("0")
+    for inv_item, txn, event in built:
+        repo.put_inventory_item(inv_item)
+        repo.put_transaction(txn)
+        repo.put_timeline_event(inv_item.item_id, event)
+        total_cost += txn.amount
+    items_created = len(built)
 
     # Update session
     session["status"] = "confirmed"

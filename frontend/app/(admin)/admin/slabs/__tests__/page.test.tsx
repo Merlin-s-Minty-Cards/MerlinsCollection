@@ -120,6 +120,44 @@ describe('Slabs page', () => {
     expect(mockApi.get).toHaveBeenLastCalledWith('/slabs', undefined)
   })
 
+  // ---- RFC 0010 T0: a comma-typed cost survives the whole path -------------
+
+  it('sends buy_price as a JSON number when the cost was typed as 1,300', async () => {
+    render(<SlabsPage />)
+    openManualEntry()
+    fireEvent.change(screen.getByLabelText(/cert number/i), { target: { value: '89787279' } })
+    fireEvent.change(screen.getByLabelText(/card name/i), { target: { value: 'Gengar VMAX' } })
+    fireEvent.change(screen.getByLabelText(/^grade$/i), { target: { value: '9.5' } })
+    fireEvent.change(screen.getByLabelText(/cost/i), { target: { value: '1,300' } })
+    fireEvent.click(screen.getByRole('button', { name: /add to batch/i }))
+
+    await screen.findByText('89787279')
+    fireEvent.click(screen.getByRole('button', { name: /commit/i }))
+
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalledTimes(3))
+    const body = mockApi.post.mock.calls[1][1]
+    expect(typeof body.buy_price).toBe('number')
+    expect(body.buy_price).toBe(1300)
+  })
+
+  it('reports a committed total that matches the total shown while staged', async () => {
+    render(<SlabsPage />)
+    openManualEntry()
+    fireEvent.change(screen.getByLabelText(/cert number/i), { target: { value: '89787279' } })
+    fireEvent.change(screen.getByLabelText(/card name/i), { target: { value: 'Gengar VMAX' } })
+    fireEvent.change(screen.getByLabelText(/^grade$/i), { target: { value: '9.5' } })
+    fireEvent.change(screen.getByLabelText(/cost/i), { target: { value: '1,300' } })
+    fireEvent.click(screen.getByRole('button', { name: /add to batch/i }))
+
+    // The staged total is the pre-commit signal the old table lacked entirely.
+    const staged = await screen.findByRole('row', { name: /batch total/i })
+    expect(staged).toHaveTextContent('$1,300.00')
+
+    fireEvent.click(screen.getByRole('button', { name: /commit/i }))
+    await waitFor(() => expect(screen.getByText(/nothing staged/i)).toBeInTheDocument())
+    expect(screen.getByRole('status')).toHaveTextContent('$1,300.00')
+  })
+
   // ---- Intake affordances (2026-08-10) -------------------------------------
   // The page previously dumped the whole entry form on screen with no way to
   // put it away, and offered no visible route in other than typing. These

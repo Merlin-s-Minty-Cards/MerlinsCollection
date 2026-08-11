@@ -492,3 +492,238 @@ class TestConfirmGraded:
         assert resp.json()["total_cost"] == "905.50"
         kinds = sorted(i.kind for i in repo.list_inventory())
         assert kinds == ["graded", "raw"]
+
+
+# ===========================================================================
+# RFC 0010 T0: a bad money value is rejected at ADD, and a batch never
+# half-commits.
+#
+# The failure this covers: `Number("1,300")` is NaN, which JSON-serialises to
+# `null`, which `add_buy_item` accepted with a 200 because it only checked
+# `"buy_price" not in body`. `confirm_buy_session` then hit
+# `Decimal(str(None))` on row 3 of a 5-row batch -- after rows 1-2 already had
+# real inventory items, real PURCHASE transactions and real timeline events
+# written, with no rollback and the session still `draft`. The UI said
+# "Nothing was created; the batch is intact", which was false, and pressing
+# Commit again duplicated rows 1-2.
+# ===========================================================================
+
+class TestAddBuyItemMoneyGuard:
+    def _session(self, client, token) -> str:
+        return client.post("/admin/purchases", json={}, headers=_auth(token)).json()["buy_id"]
+
+    def test_null_buy_price_is_rejected_and_nothing_is_staged(self, admin_client):
+        client, repo, token = admin_client
+        buy_id = self._session(client, token)
+
+        resp = client.post(f"/admin/purchases/{buy_id}/items", json={
+            "name": "Gengar VMAX", "buy_price": None,
+        }, headers=_auth(token))
+
+        assert resp.status_code == 422
+        assert "buy_price" in resp.json()["detail"]
+        session = client.get(f"/admin/purchases/{buy_id}", headers=_auth(token)).json()
+        assert session["items"] == []
+
+    def test_absent_buy_price_is_rejected(self, admin_client):
+        client, repo, token = admin_client
+        buy_id = self._session(client, token)
+
+        resp = client.post(f"/admin/purchases/{buy_id}/items", json={
+            "name": "Gengar VMAX",
+        }, headers=_auth(token))
+        assert resp.status_code == 422
+
+    def test_unreadable_buy_price_string_is_rejected(self, admin_client):
+        """The backend is the last line, not a mirror of one form's habits --
+        MCP and curl are real clients and can send anything."""
+        client, repo, token = admin_client
+        buy_id = self._session(client, token)
+
+        resp = client.post(f"/admin/purchases/{buy_id}/items", json={
+            "name": "Gengar VMAX", "buy_price": "1,300",
+        }, headers=_auth(token))
+        assert resp.status_code == 422
+
+    def test_non_finite_buy_price_is_rejected(self, admin_client):
+        """`Decimal("NaN")` and `Decimal("Infinity")` both PARSE. A try/except
+        around the coercion is not enough on its own."""
+        client, repo, token = admin_client
+        buy_id = self._session(client, token)
+
+        for value in ("NaN", "Infinity", "-Infinity"):
+            resp = client.post(f"/admin/purchases/{buy_id}/items", json={
+                "name": "Gengar VMAX", "buy_price": value,
+            }, headers=_auth(token))
+            assert resp.status_code == 422, value
+
+    def test_numeric_string_buy_price_is_accepted(self, admin_client):
+        client, repo, token = admin_client
+        buy_id = self._session(client, token)
+
+        resp = client.post(f"/admin/purchases/{buy_id}/items", json={
+            "name": "Gengar VMAX", "buy_price": "1300",
+        }, headers=_auth(token))
+        assert resp.status_code == 200
+
+    def test_json_number_buy_price_is_accepted(self, admin_client):
+        client, repo, token = admin_client
+        buy_id = self._session(client, token)
+
+        resp = client.post(f"/admin/purchases/{buy_id}/items", json={
+            "name": "Gengar VMAX", "buy_price": 1300,
+        }, headers=_auth(token))
+        assert resp.status_code == 200
+
+
+class TestConfirmNeverHalfWrites:
+    """Confirm validates the WHOLE batch before the first write.
+
+    These seed the session through the repo rather than through
+    ``POST /items``: the add-time guard above now blocks a bad row from being
+    staged that way, and a session written by an older build (or another
+    client) is exactly the case this pre-validation exists for.
+    """
+
+    def _seed(self, repo, items: list[dict]) -> str:
+        from datetime import datetime, timezone
+
+        from merlins_collection.models.inventory import new_ulid
+
+        buy_id = new_ulid()
+        repo.put_buy_session({
+            "buy_id": buy_id,
+            "status": "draft",
+            "show_id": None,
+            "created_at": datetime.now(tz=timezone.utc).isoformat(),
+            "created_by": "admin",
+            "items": items,
+            "total_cost": None,
+            "payment_method": "cash",
+            "counterparty": None,
+            "notes": None,
+        })
+        return buy_id
+
+    @staticmethod
+    def _row(n: int, **over) -> dict:
+        row = {
+            "card_id": "en:base1-4", "name": f"Card {n}", "set_name": None,
+            "number": None, "condition": "NM", "condition_modifier": None,
+            "finish": "normal", "language": "EN", "market_value": None,
+            "buy_price": "10.00", "buy_pct": None, "location": "toploader",
+            "manual_entry": False, "kind": "raw", "company": None,
+            "grade": None, "cert_number": None, "grade_label": None,
+            "cert_verified_at": None, "cert_image_url": None,
+            "price_source_id": None,
+        }
+        row.update(over)
+        return row
+
+    def test_bad_row_three_writes_nothing_at_all(self, admin_client):
+        """THE partial-write test. Five rows, row 3 unusable: zero inventory
+        items, zero transactions, and a 422 that names the row."""
+        client, repo, token = admin_client
+        buy_id = self._seed(repo, [
+            self._row(1), self._row(2), self._row(3, buy_price=None),
+            self._row(4), self._row(5),
+        ])
+
+        resp = client.post(f"/admin/purchases/{buy_id}/confirm", headers=_auth(token))
+
+        assert resp.status_code == 422
+        # 1-based for a human standing at the table, matching the staging table.
+        assert "3" in str(resp.json()["detail"])
+        assert repo.list_inventory() == []
+        today = date.today()
+        assert repo.list_transactions(today, today) == []
+
+    def test_rejected_batch_stays_draft_with_its_items_intact(self, admin_client):
+        client, repo, token = admin_client
+        buy_id = self._seed(repo, [
+            self._row(1), self._row(2), self._row(3, buy_price=None),
+        ])
+
+        client.post(f"/admin/purchases/{buy_id}/confirm", headers=_auth(token))
+
+        session = client.get(f"/admin/purchases/{buy_id}", headers=_auth(token)).json()
+        assert session["status"] == "draft"
+        assert len(session["items"]) == 3
+
+    def test_corrected_retry_commits_the_whole_batch(self, admin_client):
+        client, repo, token = admin_client
+        buy_id = self._seed(repo, [
+            self._row(1), self._row(2), self._row(3, buy_price=None),
+        ])
+        client.post(f"/admin/purchases/{buy_id}/confirm", headers=_auth(token))
+
+        # The operator fixes row 3 and presses Commit again.
+        client.delete(f"/admin/purchases/{buy_id}/items/2", headers=_auth(token))
+        client.post(f"/admin/purchases/{buy_id}/items", json={
+            "name": "Card 3", "buy_price": 1300, "card_id": "en:base1-4",
+        }, headers=_auth(token))
+
+        resp = client.post(f"/admin/purchases/{buy_id}/confirm", headers=_auth(token))
+        assert resp.status_code == 200
+        assert resp.json()["items_created"] == 3
+        assert resp.json()["total_cost"] == "1320.00"
+        assert len(repo.list_inventory()) == 3
+
+    def test_a_fully_valid_batch_still_commits_all_five(self, admin_client):
+        """The regression gate: a batch that commits today must still commit."""
+        client, repo, token = admin_client
+        buy_id = self._seed(repo, [self._row(n) for n in range(1, 6)])
+
+        resp = client.post(f"/admin/purchases/{buy_id}/confirm", headers=_auth(token))
+
+        assert resp.status_code == 200
+        assert resp.json()["items_created"] == 5
+        assert resp.json()["total_cost"] == "50.00"
+        assert len(repo.list_inventory()) == 5
+
+    def test_other_numeric_fields_are_pre_validated_too(self, admin_client):
+        """`buy_price` was the trigger, not the class. Every numeric field on a
+        staged row is coerced before the first write, or the next one to arrive
+        malformed reproduces the same partial commit."""
+        client, repo, token = admin_client
+
+        for field, bad in (
+            ("market_value", "1,300"),
+            ("buy_pct", "seventy"),
+        ):
+            buy_id = self._seed(repo, [self._row(1), self._row(2, **{field: bad})])
+            resp = client.post(f"/admin/purchases/{buy_id}/confirm", headers=_auth(token))
+            assert resp.status_code == 422, field
+            assert repo.list_inventory() == [], field
+
+    def test_a_bad_non_numeric_field_also_writes_nothing(self, admin_client):
+        """`buy_price` was the door, not the room. A row that fails pydantic —
+        a bad condition, company or status — reproduced the identical partial
+        commit through `InventoryItemAdapter` inside the write loop. Confirm
+        builds every row before it writes any, so this fails with nothing
+        written too."""
+        client, repo, token = admin_client
+        buy_id = self._seed(repo, [
+            self._row(1), self._row(2, condition="MINTISH"), self._row(3),
+        ])
+
+        resp = client.post(f"/admin/purchases/{buy_id}/confirm", headers=_auth(token))
+
+        assert resp.status_code == 422
+        assert "2" in str(resp.json()["detail"])
+        assert repo.list_inventory() == []
+        today = date.today()
+        assert repo.list_transactions(today, today) == []
+
+    def test_a_graded_row_with_an_unusable_grade_writes_nothing(self, admin_client):
+        client, repo, token = admin_client
+        buy_id = self._seed(repo, [
+            self._row(1),
+            self._row(2, kind="graded", company="PSA", grade="MINT",
+                      cert_number="89787279"),
+        ])
+
+        resp = client.post(f"/admin/purchases/{buy_id}/confirm", headers=_auth(token))
+
+        assert resp.status_code == 422
+        assert repo.list_inventory() == []
