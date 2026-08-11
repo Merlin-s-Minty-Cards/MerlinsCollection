@@ -415,7 +415,7 @@ package, no new IAM role for Lambda, no cold-start tuning.
 
 | Schedule | Cron | Job | What it does |
 |----------|------|-----|--------------|
-| `merlins-price-sync` | Daily 09:00 UTC (~5 AM ET, before shop hours) | `--job prices` | Calls `run_daily_sync` — **five steps**: TCGdex depth pass for held cards, **per-grade slab pricing (metered, see below)**, graded/sealed snapshots, inventory market-value refresh |
+| `merlins-price-sync` | Daily 09:00 UTC (~5 AM ET, before shop hours) | `--job prices` | Calls `run_daily_sync` — **six steps**: TCGdex depth pass for held cards, **per-grade slab pricing (metered, see below)**, graded/sealed snapshots, inventory market-value refresh, and the **weekly catalog price cycle** (RFC 0010 T17 — ~5,500 unheld catalog cards a night, stalest-first, so the whole catalog is re-priced within a week; adds ~24 min to the run) |
 | `merlins-catalog-sync` | First Monday of each month, 10:00 UTC | `--job catalog` | Calls `sync_new_sets`: seeds identity rows for any TCGdex set the catalog doesn't have yet |
 
 Both schedules have `FlexibleTimeWindow` enabled and a `RetryPolicy` with

@@ -12,9 +12,13 @@ individual steps are exposed for testing:
   raw items' prices through the SAME finish-aware helper as the read paths
   (``models.inventory._market_price``) rather than its own lookup — see the
   function's docstring for why that sharing is load-bearing (Phase 12).
-- ``refresh_held_prices`` — the Tier 2 DEPTH pass: the one step here that talks
-  to TCGdex, fetching per-card detail (rarity + prices) for the cards the
-  business actually holds.
+- ``refresh_held_prices`` — the Tier 2 DEPTH pass: fetches per-card detail
+  (rarity + prices) from TCGdex for the cards the business actually holds.
+- ``refresh_catalog_prices`` — the weekly CYCLE (RFC 0010 T17): the same
+  per-card fetch for a slice of the catalog we do NOT own, ~5,500 a night
+  stalest-first, so every one of the ~31,300 remaining rows is re-priced at
+  least once a week. Both passes share ``_refresh_one_card``; each owns only its
+  candidate selection and its budget.
 
 Each function takes ``repo`` (an ``InventoryRepository``) and returns a small
 summary dict so the job can log what it did.
@@ -577,20 +581,93 @@ def refresh_held_prices(repo, client, today: date, *,
 
 def _refresh_held_prices(repo, client, today, request_delay_seconds,
                          max_consecutive_failures) -> dict:
-    """The depth pass proper; ``refresh_held_prices`` owns the lock around it."""
+    """The depth pass proper; ``refresh_held_prices`` owns the lock around it.
+
+    Held cards are fetched in sorted order — see the wrapper's docstring for
+    why an unsorted walk would abandon a different arbitrary subset every time.
+    """
+    return _refresh_cards(
+        repo, client, sorted(_held_card_ids(repo)), today,
+        request_delay_seconds=request_delay_seconds,
+        max_consecutive_failures=max_consecutive_failures,
+        label="depth pass",
+    )
+
+
+def _refresh_one_card(repo, client, card_id, language, tcgdex_id, today,
+                      stale_days) -> str | None:
+    """Fetch, map and write ONE catalog card. ``None`` means TCGdex 404'd it.
+
+    **This is a specification, not a loop body** (RFC 0003 §7), which is why
+    both passes share it rather than each keeping a copy:
+
+    - a 404 writes NOTHING — in particular no bare identity row for a card that
+      has no catalog row yet, which would publish an empty shell we never had
+      data for. Any existing row keeps the price it already has.
+    - a *priceless success* — a complete HTTP 200 whose ``pricing`` block yields
+      no band, which ``services.tcgdex`` calls routine rather than exceptional —
+      is still written, because it can carry a corrected ``rarity``, but through
+      ``upsert_catalog_card_preserving_prices``, which omits an empty ``prices``
+      from the write so the stored bands survive.
+    - **an existing price is never deleted, zeroed or nulled**, on any path.
+
+    Errors are RAISED, not swallowed: the budget and the consecutive-failure
+    posture belong to the caller, which is the only thing the two passes
+    legitimately disagree about.
+    """
+    raw = client.get_card(language, tcgdex_id)
+    if raw is None:
+        return None
+    card = _annotate_stale_prices(
+        to_catalog_card(raw, language, fx_rate=settings.eur_usd_rate),
+        today, stale_days,
+    )
+    # NOT `batch_upsert_catalog_cards`: that is a whole-item put and an empty
+    # `prices` would erase yesterday's bands (RFC 0003 §7).
+    repo.upsert_catalog_card_preserving_prices(card)
+    repo.append_price_points(to_price_points(card, today))
+    return "priced" if card.prices else "no_usable_price"
+
+
+def _refresh_cards(repo, client, card_ids, today, *, request_delay_seconds,
+                   max_consecutive_failures, label, deadline=None) -> dict:
+    """Walk ``card_ids``, pricing each through ``_refresh_one_card``.
+
+    The failure posture is the depth pass's, unchanged, because it runs
+    unattended and RFC 0003 §7 specifies it: a per-card error is caught, counted
+    and stepped over; ``max_consecutive_failures`` in a row aborts rather than
+    burning thousands of timeouts against a dead endpoint; the counter RESETS on
+    a success so a scatter of unlucky cards never trips it; and a 404 **neither
+    increments nor resets** it, because counting retirements as failures would
+    let a pocket of retired cards abort the job every morning, forever.
+
+    ``deadline`` (a ``time.monotonic()`` value) is the one thing the weekly
+    catalog cycle needs and the ~300-card depth pass does not: a mis-set nightly
+    budget must not be able to outlive the catalog lock's 3600 s TTL. Crossing
+    it is a CLEAN stop — reported, but not a failure — because nothing is broken;
+    the cards it did not reach are simply still the stalest and tomorrow takes
+    them. ``None`` disables the check entirely, so the depth pass does not so
+    much as read the clock.
+    """
     stale_days = settings.catalog_price_stale_days
     updated = failures = not_found = unparsable = requested = 0
     no_usable_price = 0
     consecutive = 0
-    aborted = False
-    for card_id in sorted(_held_card_ids(repo)):
+    aborted = runtime_exceeded = False
+    for card_id in card_ids:
+        if deadline is not None and time.monotonic() >= deadline:
+            runtime_exceeded = True
+            logger.warning("%s: runtime cap reached after %d cards; stopping "
+                           "cleanly rather than outliving the catalog lock",
+                           label, requested)
+            break
         parsed = parse_card_id(card_id)
         if parsed is None:
             # A pokemontcg.io-era id, or one no language claims. Counted rather
             # than raised, and kept OUT of `failures` so a pocket of legacy rows
             # can never trip the consecutive-failure abort on a healthy endpoint.
             unparsable += 1
-            logger.warning("depth pass: %r is not a TCGdex card id; skipping", card_id)
+            logger.warning("%s: %r is not a TCGdex card id; skipping", label, card_id)
             continue
         language, tcgdex_id = parsed
         if requested and request_delay_seconds:
@@ -599,45 +676,197 @@ def _refresh_held_prices(repo, client, today, request_delay_seconds,
             time.sleep(request_delay_seconds)
         requested += 1
         try:
-            raw = client.get_card(language, tcgdex_id)
-            if raw is None:
-                # Retired upstream. Nothing is written — in particular no bare
-                # identity row for a card that has no catalog row yet, which
-                # would publish an empty shell we never had data for. Any
-                # existing row keeps the price it already has.
-                not_found += 1
-                logger.info("depth pass: %s is gone from TCGdex (404)", card_id)
-                continue
-            card = _annotate_stale_prices(
-                to_catalog_card(raw, language, fx_rate=settings.eur_usd_rate),
-                today, stale_days,
-            )
-            if not card.prices:
-                # A complete 200 that no provider prices. Counted, not failed:
-                # nothing is broken, there is simply no figure to publish today.
-                no_usable_price += 1
-                logger.info("depth pass: %s returned no usable price; "
-                            "keeping the stored band", card_id)
-            # NOT `batch_upsert_catalog_cards`: that is a whole-item put and an
-            # empty `prices` would erase yesterday's bands (RFC 0003 §7).
-            repo.upsert_catalog_card_preserving_prices(card)
-            repo.append_price_points(to_price_points(card, today))
+            outcome = _refresh_one_card(repo, client, card_id, language,
+                                        tcgdex_id, today, stale_days)
         except Exception as exc:  # noqa: BLE001 - one bad card must not end the run
             failures += 1
             consecutive += 1
-            logger.warning("depth pass: %s failed (%s: %s)", card_id,
+            logger.warning("%s: %s failed (%s: %s)", label, card_id,
                            type(exc).__name__, exc)
             if consecutive >= max_consecutive_failures:
-                logger.error("depth pass aborted after %d consecutive failures; "
-                             "existing prices are untouched", consecutive)
+                logger.error("%s aborted after %d consecutive failures; "
+                             "existing prices are untouched", label, consecutive)
                 aborted = True
                 break
             continue
+        if outcome is None:
+            # Retired upstream — neither a success nor an infrastructure
+            # failure, so `consecutive` is left exactly where it was.
+            not_found += 1
+            logger.info("%s: %s is gone from TCGdex (404)", label, card_id)
+            continue
+        if outcome == "no_usable_price":
+            # Fetched fine, nobody prices it. A SUBSET of `cards_updated`, not a
+            # failure — "priced" and "priceless" are different operational facts.
+            no_usable_price += 1
+            logger.info("%s: %s returned no usable price; keeping the stored "
+                        "band", label, card_id)
         consecutive = 0
         updated += 1
     return {"cards_updated": updated, "failures": failures,
             "not_found": not_found, "unparsable_card_ids": unparsable,
-            "no_usable_price": no_usable_price, "aborted": aborted}
+            "no_usable_price": no_usable_price, "aborted": aborted,
+            "runtime_exceeded": runtime_exceeded}
+
+
+# ---------------------------------------------------------------------------
+# The weekly catalog price cycle (RFC 0010 T17)
+# ---------------------------------------------------------------------------
+
+# 45 minutes, against the catalog lock's 3600 s TTL. The cap exists so a
+# mis-typed `CATALOG_REFRESH_CARDS_PER_NIGHT` cannot blow that TTL: at 5,500
+# cards x 0.262 s the pass takes ~24 min, but a stray zero would make it ~4 h,
+# and the failure mode there is not a stale price — an expired lock is
+# STEALABLE, and a write landing across a reseed's swap carries the superseded
+# generation and is swept, so the card silently vanishes from a live catalog.
+_CATALOG_MAX_RUNTIME_SECONDS = 2700
+
+# 162 ms of TCGdex latency + the 100 ms courtesy delay, measured 2026-08-10.
+# Exported because both the runtime estimate in `scripts/reprice_catalog.py` and
+# the sizing argument above are derived from this one number.
+SECONDS_PER_CARD = 0.262
+
+
+def as_utc(moment: datetime) -> datetime:
+    """``moment`` as an aware UTC datetime, treating a naive one as UTC.
+
+    Stored ``last_synced_at`` values are written aware, but a row from an older
+    writer can come back naive — and comparing the two raises ``TypeError``
+    mid-sort, which would take down the nightly job over a formatting detail.
+    """
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def select_catalog_refresh_candidates(repo, *, limit: int | None) -> list[str]:
+    """Catalog cards to re-price, never-priced first then stalest, capped.
+
+    ``limit=None`` means "every candidate" and is for the one-time reprice
+    script; the nightly cycle always passes a number.
+
+    **The ordering is the design.** ``detail == "brief"`` is checked FIRST and
+    not as a tiebreak, because ``last_synced_at`` is bumped by ANY write
+    including ``sync_new_sets``' breadth pass — so a brand-new row with no price
+    at all looks *fresher* than a priced row from last week. Ordering on the
+    timestamp alone would push exactly the cards this cycle exists to reach to
+    the back of the queue. Same shape as ``refresh_graded_prices``: never-priced
+    first, then stalest, capped at a budget.
+
+    Held cards are excluded: ``refresh_held_prices`` covers them every night, so
+    fetching them here would be pure waste, and disjoint candidate sets keep the
+    two passes' summary counts readable. A card held only as a graded SLAB is
+    not in that set and is therefore a candidate here — correctly: this writes a
+    catalog card's raw-single bands, which is what a catalog row is, and never
+    touches the ``GRADEDPRICE#`` row the graded pipeline owns.
+
+    The scan is streamed and only three small fields per card are kept: the
+    whole catalog parsed and held at once measures ~93 MB.
+    """
+    if limit is not None and limit <= 0:
+        return []
+    held = _held_card_ids(repo)
+    plan = [
+        (0 if card.detail == "brief" else 1, as_utc(card.last_synced_at), card.card_id)
+        for card in repo.iter_catalog_cards()
+        if card.card_id not in held
+    ]
+    plan.sort()
+    chosen = plan if limit is None else plan[:limit]
+    return [card_id for _priority, _synced, card_id in chosen]
+
+
+def _catalog_summary(*, candidates: int = 0, result: dict | None = None,
+                     skipped: str | None = None) -> dict:
+    """The catalog pass's counts under their OWN keys.
+
+    Prefixed rather than merged into the depth pass's, or a 5,500-card catalog
+    walk and a 300-card held refresh become indistinguishable in the one report
+    anybody reads. Every key is always present — including ``catalog_skipped:
+    None`` on the happy path — so a reader never has to tell "absent" from
+    "zero" (the same reasoning as ``_no_pricing_provider_summary``).
+    """
+    result = result or {}
+    return {
+        "catalog_skipped": skipped,
+        "catalog_candidates": candidates,
+        "catalog_cards_updated": result.get("cards_updated", 0),
+        "catalog_failures": result.get("failures", 0),
+        "catalog_not_found": result.get("not_found", 0),
+        "catalog_unparsable_card_ids": result.get("unparsable_card_ids", 0),
+        "catalog_no_usable_price": result.get("no_usable_price", 0),
+        "catalog_aborted": result.get("aborted", False),
+        "catalog_runtime_exceeded": result.get("runtime_exceeded", False),
+    }
+
+
+def refresh_catalog_prices(repo, client, today: date, *,
+                           cards_per_night: int | None = None,
+                           card_ids=None,
+                           request_delay_seconds: float = 0.1,
+                           max_consecutive_failures: int = 25,
+                           max_runtime_seconds: float = _CATALOG_MAX_RUNTIME_SECONDS,
+                           ) -> dict:
+    """Re-price a slice of the catalog we do NOT own — the weekly cycle (T17).
+
+    ``refresh_held_prices`` prices the ~300 cards the business holds. Every
+    other row in the 31,603-row catalog has no price at all, which is backwards
+    for the Buy table: the card someone is trying to sell you is by definition
+    one you do not own yet. This pass walks the rest, ~5,500 a night
+    (``CATALOG_REFRESH_CARDS_PER_NIGHT``), so every row is re-priced at least
+    once a week — 5.7 nights per cycle, leaving Friday as slack.
+
+    **It is deliberately not one full-catalog pass a night**, and the reason is
+    the lock rather than the clock: 31,603 x 0.262 s is 2 h 18 min, which
+    outlives the catalog lock's 3600 s TTL. See ``_CATALOG_MAX_RUNTIME_SECONDS``
+    for what an expired lock actually costs.
+
+    A night that fails loses nothing: its cards stay stale, so tomorrow's
+    stalest-first selection picks them up. **There is no cycle cursor** — a
+    cursor is state that can be wrong, and it strands whatever an aborted night
+    skipped.
+
+    ``card_ids`` bypasses selection, and exists for ``scripts/reprice_catalog.py``:
+    that script selects ONCE for its whole run and feeds this function chunks, so
+    a card TCGdex 404s (and which therefore never gets a fresher
+    ``last_synced_at``) is not re-fetched by every subsequent chunk. Nightly the
+    retry is correct and free; inside one overnight run it would eat the budget.
+    """
+    lock_gen = new_ulid()
+    try:
+        repo.acquire_catalog_lock(lock_gen)
+    except CatalogReseedInProgressError:
+        logger.warning("catalog price cycle skipped: a catalog reseed holds "
+                       "the catalog lock")
+        return _catalog_summary(skipped="catalog reseed in flight")
+    try:
+        repo.set_catalog_generation(repo.current_catalog_generation())
+        if card_ids is None:
+            limit = (settings.catalog_refresh_cards_per_night
+                     if cards_per_night is None else cards_per_night)
+            card_ids = select_catalog_refresh_candidates(repo, limit=limit)
+        else:
+            card_ids = list(card_ids)
+        result = _refresh_cards(
+            repo, client, card_ids, today,
+            request_delay_seconds=request_delay_seconds,
+            max_consecutive_failures=max_consecutive_failures,
+            label="catalog cycle",
+            deadline=time.monotonic() + max_runtime_seconds,
+        )
+        logger.info("catalog cycle: %d candidates, %d updated, %d not found, "
+                    "%d failures%s%s", len(card_ids), result["cards_updated"],
+                    result["not_found"], result["failures"],
+                    " (ABORTED)" if result["aborted"] else "",
+                    " (RUNTIME CAP)" if result["runtime_exceeded"] else "")
+        return _catalog_summary(candidates=len(card_ids), result=result)
+    finally:
+        # Same three as the depth pass, and for the same reasons: an unexpected
+        # raise must not leave the lock held for its full hour-long TTL, must not
+        # leave this process stamping later writes with a generation from a run
+        # that never finished, and must not leave the API serving prices this
+        # pass replaced.
+        repo.set_catalog_generation(None)
+        repo.release_catalog_lock(lock_gen)
+        catalog_cache.invalidate()
 
 
 def run_daily_sync(repo, client, today: date, *, pricing_provider=None) -> dict:
@@ -660,6 +889,12 @@ def run_daily_sync(repo, client, today: date, *, pricing_provider=None) -> dict:
     the newest and least load-bearing of the four steps, and T8's checklist
     includes rotating both keys, so "no key right now" is a state this job will
     really meet.
+
+    The weekly catalog cycle (T17) runs LAST, and that is the mirror image of
+    the depth pass's argument: it prices cards we do NOT own, so it feeds no
+    denormalizer and nothing downstream reads what it wrote. Putting a
+    ~24-minute catalog walk anywhere earlier would delay publishing today's
+    figures for the stock actually on the table.
     """
     summary = dict(refresh_held_prices(repo, client, today))
 
@@ -673,6 +908,7 @@ def run_daily_sync(repo, client, today: date, *, pricing_provider=None) -> dict:
     summary.update(snapshot_graded_prices(repo, today))
     summary.update(snapshot_sealed_prices(repo, today))
     summary["items_refreshed"] = refresh_inventory_market_values(repo)
+    summary.update(refresh_catalog_prices(repo, client, today))
     return summary
 
 

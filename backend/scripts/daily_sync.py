@@ -8,11 +8,15 @@ sealed snapshot and the market-value refresh offline **with a green test suite**
 until someone asks why a chart has been flat for a month, so the job now has a
 script that runs it and a test that drives that script the way cron would.
 
-**Five** steps, in a load-bearing order. The TCGdex depth pass
+**Six** steps, in a load-bearing order. The TCGdex depth pass
 (``refresh_held_prices``) runs first and the graded pricing pass
 (``refresh_graded_prices``, RFC 0009 T7) second, because the three
 DynamoDB-only steps that follow snapshot and denormalize whatever those two
-wrote — the other order publishes yesterday's figures for a day.
+wrote — the other order publishes yesterday's figures for a day. The weekly
+catalog cycle (``refresh_catalog_prices``, RFC 0010 T17) runs LAST for the
+mirror-image reason: it prices cards the business does not own, so nothing
+downstream reads it, and a ~24-minute catalog walk must never delay today's
+figures for the stock actually on the table.
 
 Those first two are the only steps that talk to an upstream API, and both only
 for stock the business actually holds: ~300 paced TCGdex requests, plus at most
@@ -26,9 +30,9 @@ Exit codes, because this job is unattended and its only universally-readable
 signal is the one the shell gets:
 
 ===  ============================================================
-  0  the depth pass completed (per-card failures may still be > 0)
-  1  the depth pass ABORTED on consecutive failures — upstream is down
-  2  the depth pass was SKIPPED — the catalog lock was held, it did nothing
+  0  every pass completed (per-card failures may still be > 0)
+  1  a TCGdex pass ABORTED on consecutive failures — upstream is down
+  2  a TCGdex pass was SKIPPED — the catalog lock was held, it did nothing
 ===  ============================================================
 
 ``1`` and ``2`` are distinct because they need different responses: chase
@@ -37,6 +41,12 @@ success on purpose — a lock-skip is tolerable once and pathological if it
 repeats, no single run can tell those apart, and with the reseed side unwired
 the only thing that can be holding this lock is a dead depth pass. A week of
 silent no-ops must not look like a week of clean runs.
+
+Both codes cover the weekly catalog cycle as well as the depth pass, and the
+printed message names which one died. The cycle earns the same treatment
+because it is on a six-night rotation with only Friday as slack: three nights
+lost silently and the week's "every card re-priced by Friday" promise is gone
+with nothing in the logs to say so.
 
 Run from ``backend/`` with the project venv active:
 
@@ -85,6 +95,20 @@ def _report(summary: dict) -> int:
               f"TCGdex as down. Existing prices are untouched; the "
               f"DynamoDB-only steps still ran.")
         return EXIT_ABORTED
+    if summary.get("catalog_aborted"):
+        print(f"ABORTED: the weekly catalog price cycle stopped after "
+              f"{summary.get('catalog_failures', '?')} consecutive failures — "
+              f"treat TCGdex as down. The depth pass and the DynamoDB-only "
+              f"steps completed; tonight's ~5,500-card slice of the catalog did "
+              f"not, and its cards stay stale for tomorrow to pick up.")
+        return EXIT_ABORTED
+    if summary.get("catalog_skipped"):
+        print(f"SKIPPED: the weekly catalog price cycle did not run "
+              f"({summary['catalog_skipped']}). The depth pass and the "
+              f"DynamoDB-only steps still ran. Clear a stale catalog lock if "
+              f"this repeats — three lost nights put the week's coverage "
+              f"promise past Friday.")
+        return EXIT_SKIPPED
     print("OK: all steps completed.")
     return EXIT_OK
 

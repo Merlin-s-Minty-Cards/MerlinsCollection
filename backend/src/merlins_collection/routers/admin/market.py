@@ -22,6 +22,7 @@ from merlins_collection.models.inventory import market_price_and_finish, new_uli
 from merlins_collection.services import catalog_cache
 from merlins_collection.services.card_text import admin_item_name
 from merlins_collection.services.catalog_sync import (
+    as_utc,
     build_pricing_provider,
     refresh_graded_prices,
     refresh_held_prices,
@@ -407,6 +408,15 @@ def catalog_sync_status() -> dict[str, Any]:
 # Coverage Report
 # ---------------------------------------------------------------------------
 
+# The weekly cycle's deadline, expressed as a number that can be checked (RFC
+# 0010 T17). The cycle re-prices every catalog card within ~6 nights, so a
+# `full` row that has gone 8 days without a write means the cycle missed it —
+# the healthy value for `catalog_cards_stale` is 0, and any other value means
+# the promise is not being kept. 8 rather than 7 so a single lost night, which
+# the design absorbs on purpose, does not read as a breach.
+_CATALOG_CYCLE_STALE_DAYS = 8
+
+
 @router.get("/coverage")
 def market_coverage(repo: InventoryRepository = Depends(get_repo)) -> dict[str, Any]:
     """Report how much of inventory and the catalog actually carry a price.
@@ -415,6 +425,14 @@ def market_coverage(repo: InventoryRepository = Depends(get_repo)) -> dict[str, 
     leave every item unpriced if it has never run, or if items don't resolve
     to a catalog card. ``unmatched_sample`` is capped at 50 to keep the
     payload bounded.
+
+    ``catalog_cards_brief`` and ``catalog_cards_stale`` are DIFFERENT facts and
+    are deliberately not summed: a ``brief`` row has never had a price fetched
+    at all (the weekly cycle has not reached it yet, and counts down to 0 over
+    the first ~6 nights), while a stale ``full`` row was priced once and the
+    cycle has since missed its slot. Collapsing them would throw away the only
+    signal that says whether waiting helps — the same honesty requirement
+    ``CatalogCard.detail`` exists to preserve.
     """
     items = repo.list_inventory()
     total_items = len(items)
@@ -426,6 +444,14 @@ def market_coverage(repo: InventoryRepository = Depends(get_repo)) -> dict[str, 
     cards = _scan_catalog(repo)
     catalog_cards = len(cards)
     catalog_cards_with_prices = sum(1 for c in cards if c.prices)
+    catalog_cards_brief = sum(1 for c in cards if c.detail == "brief")
+    stale_before = datetime.now(tz=timezone.utc) - timedelta(
+        days=_CATALOG_CYCLE_STALE_DAYS
+    )
+    catalog_cards_stale = sum(
+        1 for c in cards
+        if c.detail == "full" and as_utc(c.last_synced_at) < stale_before
+    )
 
     if total_items:
         pct = (Decimal(items_with_market_value) / Decimal(total_items) * 100).quantize(
@@ -450,6 +476,9 @@ def market_coverage(repo: InventoryRepository = Depends(get_repo)) -> dict[str, 
         "items_with_market_value": items_with_market_value,
         "catalog_cards": catalog_cards,
         "catalog_cards_with_prices": catalog_cards_with_prices,
+        "catalog_cards_brief": catalog_cards_brief,
+        "catalog_cards_stale": catalog_cards_stale,
+        "catalog_stale_threshold_days": _CATALOG_CYCLE_STALE_DAYS,
         "item_coverage_pct": item_coverage_pct,
         "unmatched_sample": unmatched_sample,
     }

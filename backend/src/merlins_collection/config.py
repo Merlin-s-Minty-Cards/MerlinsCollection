@@ -36,6 +36,18 @@ class Settings(BaseSettings):
     # the age is appended to `value_note` instead, so a customer-facing number is
     # never silently ancient and never silently withheld either (RFC 0003 §7).
     catalog_price_stale_days: int = 30
+    # How many UNHELD catalog cards the nightly job re-prices (RFC 0010 T17).
+    # The owner's requirement is "the entire catalog re-priced by Friday of each
+    # week", and this is the knob that delivers it: 31,300 / 5,500 = 5.7 nights,
+    # so a cycle starting Saturday finishes Thursday and Friday is slack — which
+    # is what survives a bad night, rather than merely being true when nothing
+    # goes wrong. It is a tunable and not a magic number because the arithmetic
+    # changes the moment the catalog does.
+    #
+    # Do NOT raise this toward a full nightly pass. 31,603 x 0.262 s is 2h18m,
+    # which outlives the catalog lock's 3600 s TTL; `_CATALOG_MAX_RUNTIME_SECONDS`
+    # in `services/catalog_sync.py` is the backstop and explains what that costs.
+    catalog_refresh_cards_per_night: int = 5500
     # Comma-separated browser origins allowed to call the API (CORS).
     cors_origins: str = "http://localhost:3000"
     # Dev-only: inject a fake user instead of verifying Cognito JWTs.

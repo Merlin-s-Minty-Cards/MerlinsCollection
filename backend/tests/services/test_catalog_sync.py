@@ -1895,3 +1895,506 @@ class TestDailySyncWiring:
         assert summary["graded_priced"] == 0
         assert summary["graded_points_written"] == 1, "the snapshot still ran"
         assert summary["items_refreshed"] == 1, "the denormalization still ran"
+
+
+# ===========================================================================
+# RFC 0010 T17 — the weekly catalog price cycle
+#
+# `refresh_held_prices` prices only the ~300 cards the business OWNS. Every
+# other row in the 31,603-row catalog has no price at all, which is backwards
+# for the Buy table: the card someone is trying to sell you is by definition one
+# you do not own yet. T17 adds a second pass that walks the REST of the catalog,
+# ~5,500 cards a night, stalest-first, so every row is re-priced at least once a
+# week.
+#
+# A single full-catalog pass per night is not viable and the reason is the LOCK,
+# not the clock: 31,603 x 0.262s = 2h18m, which outlives the catalog lock's
+# 3600s TTL, at which point the lock looks like a crashed holder and becomes
+# stealable — and a write landing across a reseed's swap carries the superseded
+# generation and is swept, so the card silently disappears from a live catalog.
+# ===========================================================================
+
+CATALOG_EPOCH = datetime(2020, 1, 1, tzinfo=timezone.utc)
+
+
+def _cat_card(card_id, *, detail="full", synced=None, prices=None, name="Card"):
+    """A stored catalog row with an EXACT `detail` and `last_synced_at`.
+
+    Those two fields are the entire ordering predicate for the weekly cycle, so
+    every test here sets them precisely rather than inheriting "now".
+    """
+    return CatalogCard(
+        card_id=card_id, name=name, set_id="en:swsh1", set_name="S&S", number="1",
+        images=CardImages(), detail=detail,
+        last_synced_at=synced or CATALOG_EPOCH,
+        prices={f: FinishPrice(market=m) for f, m in (prices or {}).items()},
+    )
+
+
+def _seed_cards(repo, cards):
+    repo.batch_upsert_catalog_cards(cards)
+
+
+class _FakeClock:
+    """A deterministic stand-in for the `time` module inside `catalog_sync`.
+
+    Patched over the module's `time` REFERENCE rather than over `time.monotonic`
+    itself, so a test that fast-forwards this job's clock cannot perturb
+    botocore's or moto's.
+    """
+
+    def __init__(self, *, step=0.0):
+        self.now = 0.0
+        self.step = step
+        self.sleeps = []
+
+    def monotonic(self):
+        value = self.now
+        self.now += self.step
+        return value
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+
+
+class TestCatalogRefreshCandidates:
+    """Which cards tonight's cycle picks, and in what order."""
+
+    def test_a_never_priced_card_outranks_a_stale_priced_one_even_when_newer(
+        self, dynamo_repo,
+    ):
+        """THE trap: `last_synced_at` is bumped by ANY write, including the
+        breadth pass — so a `brief` row `sync_new_sets` wrote yesterday looks
+        FRESHER than a priced row from last week while having no price at all.
+        Ordering on the timestamp alone pushes brand-new, never-priced cards to
+        the back of the queue, which is exactly the population this cycle exists
+        to reach. `detail` is therefore checked FIRST, not as a tiebreak.
+        """
+        from merlins_collection.services.catalog_sync import (
+            select_catalog_refresh_candidates,
+        )
+
+        _seed_cards(dynamo_repo, [
+            _cat_card("en:swsh1-100", detail="full",
+                      synced=datetime(2020, 1, 1, tzinfo=timezone.utc)),
+            _cat_card("en:swsh1-101", detail="brief",
+                      synced=datetime(2026, 8, 10, tzinfo=timezone.utc)),
+        ])
+
+        assert select_catalog_refresh_candidates(dynamo_repo, limit=1) == [
+            "en:swsh1-101"
+        ]
+
+    def test_priced_rows_are_ordered_oldest_first(self, dynamo_repo):
+        from merlins_collection.services.catalog_sync import (
+            select_catalog_refresh_candidates,
+        )
+
+        _seed_cards(dynamo_repo, [
+            _cat_card("en:swsh1-110", synced=datetime(2026, 8, 1, tzinfo=timezone.utc)),
+            _cat_card("en:swsh1-111", synced=datetime(2026, 6, 1, tzinfo=timezone.utc)),
+            _cat_card("en:swsh1-112", synced=datetime(2026, 7, 1, tzinfo=timezone.utc)),
+        ])
+
+        assert select_catalog_refresh_candidates(dynamo_repo, limit=3) == [
+            "en:swsh1-111", "en:swsh1-112", "en:swsh1-110",
+        ]
+
+    def test_the_selection_is_capped_at_the_nightly_budget(self, dynamo_repo):
+        """The cap is the whole design: 5,500 x 0.262s is ~24 min against a
+        3600s lock TTL, where the full catalog is 2h18m and blows it."""
+        from merlins_collection.services.catalog_sync import (
+            select_catalog_refresh_candidates,
+        )
+
+        _seed_cards(dynamo_repo, [
+            _cat_card(f"en:swsh1-{120 + i}", synced=CATALOG_EPOCH + timedelta(days=i))
+            for i in range(5)
+        ])
+
+        assert len(select_catalog_refresh_candidates(dynamo_repo, limit=2)) == 2
+
+    def test_held_cards_are_excluded_because_the_daily_pass_covers_them(
+        self, dynamo_repo,
+    ):
+        """Fetching a card twice in one night is pure waste, and disjoint
+        candidate sets keep the two passes' summaries readable."""
+        from merlins_collection.services.catalog_sync import (
+            select_catalog_refresh_candidates,
+        )
+
+        _seed_cards(dynamo_repo, [
+            _cat_card("en:swsh1-130"),
+            _cat_card("en:swsh1-131"),
+        ])
+        dynamo_repo.put_inventory_item(_raw_item(card_id="en:swsh1-130"))
+
+        assert select_catalog_refresh_candidates(dynamo_repo, limit=10) == [
+            "en:swsh1-131"
+        ]
+
+    def test_a_sold_copy_does_not_exclude_a_card_from_the_catalog_cycle(
+        self, dynamo_repo,
+    ):
+        """`_held_card_ids` counts only AVAILABLE/ON_HOLD, so a card we used to
+        own gets no daily refresh — it must fall through to the weekly cycle
+        rather than into the gap between the two passes."""
+        from merlins_collection.services.catalog_sync import (
+            select_catalog_refresh_candidates,
+        )
+
+        _seed_cards(dynamo_repo, [_cat_card("en:swsh1-135")])
+        dynamo_repo.put_inventory_item(
+            _raw_item(card_id="en:swsh1-135", status=ItemStatus.SOLD)
+        )
+
+        assert select_catalog_refresh_candidates(dynamo_repo, limit=10) == [
+            "en:swsh1-135"
+        ]
+
+    def test_a_night_where_every_card_is_fresh_still_selects_the_stalest(
+        self, dynamo_repo,
+    ):
+        """The cycle keeps turning. Selecting nothing once everything is fresh
+        would make the first full week the only week that ever runs."""
+        from merlins_collection.services.catalog_sync import (
+            select_catalog_refresh_candidates,
+        )
+
+        now = datetime.now(tz=timezone.utc)
+        _seed_cards(dynamo_repo, [
+            _cat_card("en:swsh1-140", synced=now - timedelta(minutes=1)),
+            _cat_card("en:swsh1-141", synced=now - timedelta(minutes=5)),
+        ])
+
+        assert select_catalog_refresh_candidates(dynamo_repo, limit=1) == [
+            "en:swsh1-141"
+        ]
+
+    def test_graded_and_sealed_inventory_contribute_no_candidates(self, dynamo_repo):
+        """Candidates come from the CATALOG, never from inventory. A sealed box
+        has no `card_id` field at all (not merely a null one) and a slab's price
+        comes from the graded pipeline, so neither may invent a row to fetch."""
+        from merlins_collection.services.catalog_sync import (
+            select_catalog_refresh_candidates,
+        )
+
+        dynamo_repo.put_inventory_item(_graded_item(card_id="en:swsh1-150"))
+        dynamo_repo.put_inventory_item(SealedInventoryItem(
+            product_name="Box", product_type="booster_box",
+            cost_basis=Decimal("400"), acquired_at=date(2026, 1, 1),
+        ))
+
+        assert select_catalog_refresh_candidates(dynamo_repo, limit=10) == []
+
+
+class TestRefreshCatalogPrices:
+    """The pass itself — the shared per-card body, the budget and the lock."""
+
+    def test_a_priceless_success_never_deletes_the_stored_bands(self, dynamo_repo):
+        """The extraction's regression gate. `_refresh_held_prices`' per-card
+        body is a specification, not a loop: an HTTP 200 whose pricing block
+        yields no band must still be written (it can carry a corrected rarity)
+        but through `upsert_catalog_card_preserving_prices`, so yesterday's
+        bands survive. Sharing the body is the only way both passes keep it."""
+        from merlins_collection.services.catalog_sync import refresh_catalog_prices
+
+        _seed_cards(dynamo_repo, [
+            _cat_card(CARD_ID, prices={"holofoil": Decimal("9.25")}),
+        ])
+        client = FakeTcgdexClient(cards={(Language.EN, "swsh1-1"): PRICELESS_RAW})
+
+        summary = refresh_catalog_prices(dynamo_repo, client, date(2026, 6, 22),
+                                         cards_per_night=10,
+                                         request_delay_seconds=0)
+
+        card = dynamo_repo.get_catalog_card(CARD_ID)
+        assert card.prices["holofoil"].market == Decimal("9.25")  # not nulled
+        assert card.rarity == "Rare Holo V (reprint)"
+        assert summary["catalog_no_usable_price"] == 1
+        assert summary["catalog_cards_updated"] == 1
+        assert summary["catalog_failures"] == 0
+
+    def test_a_404_is_not_found_and_neither_increments_nor_resets_the_counter(
+        self, dynamo_repo,
+    ):
+        """Same discriminator as the depth pass's own 404 test: with
+        `max_consecutive_failures=2` and outcomes [fail, notfound, fail], a 404
+        that counted would abort one call early and one that reset would abort
+        one call late."""
+        from merlins_collection.services.catalog_sync import refresh_catalog_prices
+
+        _seed_cards(dynamo_repo, [
+            _cat_card(f"en:swsh1-{160 + i}",
+                      synced=CATALOG_EPOCH + timedelta(days=i))
+            for i in range(4)
+        ])
+        client = SequencedTcgdexClient(outcomes=["fail", "notfound", "fail", "fail"])
+
+        summary = refresh_catalog_prices(dynamo_repo, client, date(2026, 6, 22),
+                                         cards_per_night=10,
+                                         request_delay_seconds=0,
+                                         max_consecutive_failures=2)
+
+        assert len(client.calls) == 3
+        assert summary["catalog_aborted"] is True
+        assert summary["catalog_failures"] == 2
+        assert summary["catalog_not_found"] == 1
+
+    def test_a_per_card_error_is_counted_and_the_run_continues(self, dynamo_repo):
+        from merlins_collection.services.catalog_sync import refresh_catalog_prices
+
+        _seed_cards(dynamo_repo, [
+            _cat_card("en:swsh1-1", prices={"holofoil": Decimal("9.25")},
+                      synced=CATALOG_EPOCH),
+            _cat_card("en:swsh1-5", synced=CATALOG_EPOCH + timedelta(days=1)),
+        ])
+        client = FakeTcgdexClient(
+            cards={(Language.EN, "swsh1-5"): _detail("swsh1-5", "5", market="2.00")},
+            errors={(Language.EN, "swsh1-1"): RuntimeError("boom")},
+        )
+
+        summary = refresh_catalog_prices(dynamo_repo, client, date(2026, 6, 22),
+                                         cards_per_night=10,
+                                         request_delay_seconds=0)
+
+        assert summary["catalog_failures"] == 1
+        assert summary["catalog_aborted"] is False
+        # the failing card keeps the price it already had...
+        assert dynamo_repo.get_catalog_card(
+            "en:swsh1-1").prices["holofoil"].market == Decimal("9.25")
+        # ...and the run went on to the next card in the same pass
+        assert dynamo_repo.get_catalog_card(
+            "en:swsh1-5").prices["holofoil"].market == Decimal("2.00")
+
+    def test_the_run_aborts_after_max_consecutive_failures_and_reports_it(
+        self, dynamo_repo,
+    ):
+        """A week of half-runs must not look like a week of clean ones, so the
+        abort is a reported fact and not merely a shorter loop."""
+        from merlins_collection.services.catalog_sync import refresh_catalog_prices
+
+        _seed_cards(dynamo_repo, [
+            _cat_card(f"en:swsh1-{170 + i}",
+                      synced=CATALOG_EPOCH + timedelta(days=i))
+            for i in range(5)
+        ])
+        client = FakeTcgdexClient(always_raise=RuntimeError("dead endpoint"))
+
+        summary = refresh_catalog_prices(dynamo_repo, client, date(2026, 6, 22),
+                                         cards_per_night=10,
+                                         request_delay_seconds=0,
+                                         max_consecutive_failures=2)
+
+        assert summary["catalog_aborted"] is True
+        assert len(client.calls) == 2
+
+    def test_the_runtime_cap_stops_the_loop_cleanly_and_reports_it(
+        self, dynamo_repo, monkeypatch,
+    ):
+        """A mis-set `cards_per_night` must not be able to outlive the catalog
+        lock's 3600s TTL. That failure mode loses catalog ROWS, not prices: an
+        expired lock is stealable, and a write landing across a reseed's swap
+        carries the superseded generation and is swept."""
+        import merlins_collection.services.catalog_sync as catalog_sync_module
+        from merlins_collection.services.catalog_sync import refresh_catalog_prices
+
+        _seed_cards(dynamo_repo, [
+            _cat_card(f"en:swsh1-{180 + i}",
+                      synced=CATALOG_EPOCH + timedelta(days=i))
+            for i in range(4)
+        ])
+        client = FakeTcgdexClient(cards={
+            (Language.EN, f"swsh1-{180 + i}"): _detail(f"swsh1-{180 + i}", str(i))
+            for i in range(4)
+        })
+        monkeypatch.setattr(catalog_sync_module, "time", _FakeClock(step=10.0))
+
+        summary = refresh_catalog_prices(dynamo_repo, client, date(2026, 6, 22),
+                                         cards_per_night=10,
+                                         request_delay_seconds=0,
+                                         max_runtime_seconds=25)
+
+        assert summary["catalog_runtime_exceeded"] is True
+        assert summary["catalog_aborted"] is False  # a clean stop, not a failure
+        assert 0 < len(client.calls) < 4
+
+    def test_the_catalog_lock_is_released_even_when_the_run_raises(
+        self, dynamo_repo, monkeypatch,
+    ):
+        """An unexpected raise must not leave the lock held for its full
+        hour-long TTL, blocking tomorrow's run and any reseed."""
+        from merlins_collection.services.catalog_sync import refresh_catalog_prices
+
+        _seed_cards(dynamo_repo, [_cat_card(CARD_ID)])
+        client = FakeTcgdexClient(cards={(Language.EN, "swsh1-1"): RAW})
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("unexpected repo failure")
+
+        monkeypatch.setattr(dynamo_repo, "iter_catalog_cards", _boom)
+
+        with pytest.raises(RuntimeError):
+            refresh_catalog_prices(dynamo_repo, client, date(2026, 6, 22),
+                                   cards_per_night=10, request_delay_seconds=0)
+
+        dynamo_repo.acquire_catalog_lock("post-crash-probe")
+        dynamo_repo.release_catalog_lock("post-crash-probe")
+
+    def test_a_lock_held_by_someone_else_skips_the_pass_without_failing(
+        self, dynamo_repo,
+    ):
+        from merlins_collection.services.catalog_sync import refresh_catalog_prices
+
+        _seed_cards(dynamo_repo, [
+            _cat_card(CARD_ID, prices={"holofoil": Decimal("9.25")}),
+        ])
+        dynamo_repo.acquire_catalog_lock("reseed-in-flight")
+        try:
+            client = FakeTcgdexClient(cards={(Language.EN, "swsh1-1"): RAW})
+            summary = refresh_catalog_prices(dynamo_repo, client, date(2026, 6, 22),
+                                             cards_per_night=10,
+                                             request_delay_seconds=0)
+
+            assert summary["catalog_skipped"] == "catalog reseed in flight"
+            assert summary["catalog_cards_updated"] == 0
+            assert client.calls == []  # not one request was attempted
+        finally:
+            dynamo_repo.release_catalog_lock("reseed-in-flight")
+
+    def test_an_aborted_night_is_picked_up_by_the_next_run_with_no_cursor(
+        self, dynamo_repo,
+    ):
+        """The reason there is no cycle cursor: a cursor is state that can be
+        wrong, and it strands whatever an aborted night skipped. With
+        stalest-first, last night's untouched cards are simply the stalest
+        remaining and tomorrow takes them automatically."""
+        from merlins_collection.services.catalog_sync import refresh_catalog_prices
+
+        ids = [f"en:swsh1-{190 + i}" for i in range(4)]
+        _seed_cards(dynamo_repo, [
+            _cat_card(cid, synced=CATALOG_EPOCH + timedelta(days=i))
+            for i, cid in enumerate(ids)
+        ])
+        cards = {
+            (Language.EN, f"swsh1-{190 + i}"): _detail(f"swsh1-{190 + i}", str(i))
+            for i in range(4)
+        }
+
+        first = FakeTcgdexClient(cards=cards)
+        refresh_catalog_prices(dynamo_repo, first, date(2026, 6, 22),
+                               cards_per_night=2, request_delay_seconds=0)
+        assert [c[1] for c in first.calls] == ["swsh1-190", "swsh1-191"]
+
+        second = FakeTcgdexClient(cards=cards)
+        refresh_catalog_prices(dynamo_repo, second, date(2026, 6, 23),
+                               cards_per_night=2, request_delay_seconds=0)
+        assert [c[1] for c in second.calls] == ["swsh1-192", "swsh1-193"]
+
+    def test_an_explicit_card_id_list_bypasses_selection(self, dynamo_repo):
+        """The one-time reprice script selects ONCE for the whole run and feeds
+        the pass its chunks, so a card that 404s (and therefore stays stale) is
+        not re-fetched by every later chunk of the same run."""
+        from merlins_collection.services.catalog_sync import refresh_catalog_prices
+
+        _seed_cards(dynamo_repo, [
+            _cat_card("en:swsh1-200", synced=CATALOG_EPOCH),
+            _cat_card("en:swsh1-201", synced=CATALOG_EPOCH + timedelta(days=1)),
+        ])
+        client = FakeTcgdexClient(cards={
+            (Language.EN, "swsh1-201"): _detail("swsh1-201", "201"),
+        })
+
+        summary = refresh_catalog_prices(dynamo_repo, client, date(2026, 6, 22),
+                                         card_ids=["en:swsh1-201"],
+                                         request_delay_seconds=0)
+
+        assert [c[1] for c in client.calls] == ["swsh1-201"]
+        assert summary["catalog_candidates"] == 1
+
+
+class TestCatalogPassWiring:
+    """How the nightly job carries the new step."""
+
+    def test_run_daily_sync_runs_the_catalog_pass_after_the_denormalization(
+        self, dynamo_repo, monkeypatch,
+    ):
+        """It prices cards we do NOT own, so it feeds no denormalizer and goes
+        last — a 24-minute catalog walk must never delay publishing today's
+        figures for the stock actually on the table."""
+        import merlins_collection.services.catalog_sync as catalog_sync_module
+        from merlins_collection.services.catalog_sync import run_daily_sync
+
+        order = []
+
+        def _fake_denorm(repo):
+            order.append("denormalize")
+            return 0
+
+        def _fake_catalog(repo, client, today, **kwargs):
+            order.append("catalog")
+            return {"catalog_cards_updated": 0}
+
+        monkeypatch.setattr(catalog_sync_module,
+                            "refresh_inventory_market_values", _fake_denorm)
+        monkeypatch.setattr(catalog_sync_module,
+                            "refresh_catalog_prices", _fake_catalog)
+
+        run_daily_sync(dynamo_repo, FakeTcgdexClient(), date(2026, 6, 22),
+                       pricing_provider=None)
+
+        assert order == ["denormalize", "catalog"]
+
+    def test_the_catalog_pass_counts_are_their_own_keys_not_the_held_passs(
+        self, dynamo_repo,
+    ):
+        """Merging them would make a 5,500-card catalog walk indistinguishable
+        from a 300-card depth pass in the one report anybody reads."""
+        from merlins_collection.services.catalog_sync import run_daily_sync
+
+        held_id = "en:swsh1-1"
+        catalog_id = "en:swsh1-210"
+        dynamo_repo.put_inventory_item(_raw_item(card_id=held_id))
+        _seed_cards(dynamo_repo, [_cat_card(catalog_id)])
+        client = FakeTcgdexClient(cards={
+            (Language.EN, "swsh1-1"): RAW,
+            (Language.EN, "swsh1-210"): _detail("swsh1-210", "210"),
+        })
+
+        summary = run_daily_sync(dynamo_repo, client, date(2026, 6, 22))
+
+        assert summary["cards_updated"] == 1          # the held pass
+        assert summary["catalog_cards_updated"] == 1  # the catalog pass
+        assert summary["catalog_candidates"] == 1
+
+    def test_a_catalog_pass_failure_does_not_abort_the_rest_of_the_job(
+        self, dynamo_repo,
+    ):
+        """Degrade alone, exactly as the graded pricing step does."""
+        from merlins_collection.services.catalog_sync import run_daily_sync
+
+        dynamo_repo.put_inventory_item(_raw_item(card_id=CARD_ID))
+        _seed_cards(dynamo_repo, [
+            _cat_card(f"en:swsh1-{220 + i}",
+                      synced=CATALOG_EPOCH + timedelta(days=i))
+            for i in range(3)
+        ])
+
+        class _HeldOkCatalogDead:
+            """TCGdex answers for the held card and dies for everything else."""
+
+            def __init__(self):
+                self.calls = []
+
+            def get_card(self, language, tcgdex_id):
+                self.calls.append((language, tcgdex_id))
+                if tcgdex_id == "swsh1-1":
+                    return RAW
+                raise RuntimeError("dead endpoint")
+
+        summary = run_daily_sync(dynamo_repo, _HeldOkCatalogDead(),
+                                 date(2026, 6, 22))
+
+        assert summary["cards_updated"] == 1        # the depth pass still landed
+        assert summary["items_refreshed"] == 1      # and the denormalization ran
+        assert summary["catalog_failures"] > 0

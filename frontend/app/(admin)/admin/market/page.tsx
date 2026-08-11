@@ -386,6 +386,12 @@ export default function AdminMarketPage() {
               Prices refresh values for cards you hold. New Sets adds newly released cards to the catalog.
             </p>
 
+            {banner.cycle && (
+              <p className={banner.cycleBehind ? 'text-amber-400' : 'text-pine-500'}>
+                {banner.cycle}
+              </p>
+            )}
+
             {banner.catalogEmpty && (
               <p className="text-amber-400">
                 Catalog is empty — run backend/scripts/seed_catalog.py once, then press Sync Prices.

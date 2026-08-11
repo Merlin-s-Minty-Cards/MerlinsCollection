@@ -6,19 +6,23 @@
 gitignored (`.gitignore:60`), so it is local-only and your edits to it will never appear in
 `git status` or reach anyone else. Record all RFC 0010 status **in this file**.
 
-**Last updated:** 2026-08-11 (T15 DONE — every card picker shows name, image AND price)
+**Last updated:** 2026-08-11 (T17 DONE — the weekly catalog price cycle now fills those prices in)
 **Branch:** `Polishing-For-Deployment`
 **RFC:** [`docs/rfcs/0010-admin-round8-ledger-corrections-and-slab-manual-only.md`](../../rfcs/0010-admin-round8-ledger-corrections-and-slab-manual-only.md)
 **Task index:** [`README.md`](README.md)
 **Source of the requests:** the owner's `The plan.pdf` (12 items) plus two review comments
 on 2026-08-10 — the money-input report and the PSA/scanner reversal.
 
-## ✅ T0, T1 AND T15 ARE DONE — start at T17
+## ✅ T0, T1, T15 AND T17 ARE DONE — start at T2
 
-T15 gave all five catalog pickers one shared row carrying name, image AND price
-(`components/admin/shared/CardPickerRow.tsx`), and `GET /admin/market/search` now
-returns `display_price` + `display_finish`. **Start at T17**, which fills those
-prices in — most catalog rows honestly read *"no price yet"* until it runs.
+T15 gave all five catalog pickers one shared row carrying name, image AND price;
+T17 built the job that fills those prices in. **Start at T2.**
+
+**T17 shipped code, not data.** The nightly cycle reaches full catalog coverage on
+its own in ~6 nights, but it has not run yet — so most of the 31,603 rows still
+honestly read *"no price yet"* in every picker. The owner can skip that wait with
+one overnight `scripts/reprice_catalog.py` run; it is the first row of "Blocked /
+needs the owner" below. **Nothing is blocked on it.**
 
 ## ✅ T0 IS DONE — the RFC 0009 merge blocker is cleared
 
@@ -47,7 +51,7 @@ naming the row. **Start at T1.**
 | T12 | Slabs: PSA out, price at intake | **NOT STARTED** | — | Keep `CertInput`'s Enter handling. Pricing runs AFTER commit, never inside it |
 | T13 | Grouped navigation | **NOT STARTED** | — | Every route path unchanged |
 | T15 | Card picker: image + price | **DONE** | `b322e03` | One shared `CardPickerRow` with **five** callers (Buy, Trade, Triage ×2, Slabs, Market). Backend: `market_price_and_finish()` in `models/inventory.py` is now the walk and `_market_price` delegates to it — **do not add a second lookup to get a finish**. `display_price` is a **string** (`"12.34"`), `null` when absent. The component is **generic in the card type**, so callers keep their own `CatalogCard`; each one now `extends PickerCard`. Thumb is `TABLE_THUMB_SIZE` (`xs`), **not** the `sm` the task doc named — see Decisions. Fixed on the way: Market's row was a `<button>` nested inside a `<button>` |
-| T17 | Weekly catalog price cycle | **NOT STARTED** | — | ~5,500 cards/night stalest-first (~24 min), six nights + Friday slack. Needs **no schema change** — `last_synced_at` + `detail` already carry the ordering. A full nightly pass would outlive the catalog lock. **Second deliverable: `scripts/reprice_catalog.py`** — the owner's one-time overnight full re-price, chunked so it never holds the lock for more than ~9 min, resumable for free via stalest-first |
+| T17 | Weekly catalog price cycle | **DONE** | `<T17-SHA>` | Shipped as specified, plus one shape change: `refresh_catalog_prices` takes an optional **`card_ids`** so the reprice script selects ONCE per run and feeds it chunks — without it a permanently-404 card leads every chunk (see Decisions). The extraction is **two** helpers, not one: `_refresh_one_card` (the per-card spec the doc named) inside a shared `_refresh_cards` loop, which took `_refresh_held_prices` from 60 lines to a 6-line delegate. New config knob `CATALOG_REFRESH_CARDS_PER_NIGHT` (5500). Summary keys are all `catalog_`-prefixed and **always present**, including `catalog_skipped: None`. Coverage adds `catalog_cards_brief` / `catalog_cards_stale` / `catalog_stale_threshold_days` (8), rendered in the Market banner. **Read the first follow-up row before trusting the exit codes** — production runs `scheduled_sync.py`, not `daily_sync.py` |
 | T16 | Unmatched-card valuation | **NOT STARTED** | — | Answers "how do we price a card with no catalog match". Mostly surfacing a capability that already works: the nightly job skips unlinked items |
 | T14 | Docs + ops | **NOT STARTED** | — | RFC 0009 T2/T5 → WON'T DO. Note the two CLAUDE.md rules added during planning (card images, archiving) are already in place — do not re-add them |
 | T-FINAL | Verification + PR | **NOT STARTED** | — | `next build` is not optional |
@@ -73,7 +77,7 @@ that is the mistake that made RFC 0009's T-FINAL sign-off stale.
 
 | Item | Needed from owner | Blocks |
 |---|---|---|
-| **Run `scripts/reprice_catalog.py` overnight once, after T17 lands** | It prices all ~31,300 unheld catalog rows in one ~2 h 18 min run, so the weekly cycle starts from full coverage instead of taking ~6 nights to reach it. Dry-run it first (it prints the ETA), then `--execute --confirm-table merlins-cards`. It is chunked and resumable — Ctrl-C and re-run is safe | nothing; the nightly cycle gets there on its own, this just skips the wait |
+| **Run `scripts/reprice_catalog.py` overnight once — T17 has LANDED, this is ready now** | It prices all ~31,300 unheld catalog rows in one ~2 h 18 min run, so the weekly cycle starts from full coverage instead of taking ~6 nights to reach it. **Prove it on a slice first:** `--limit 200` dry run, then `--limit 200 --execute --confirm-table merlins-cards`, then the uncapped `--execute --confirm-table merlins-cards`. The dry run prints the candidate count, chunk plan and ETA before anything is written. It is chunked (lock taken/released per chunk) and resumable — Ctrl-C and re-run is safe, and there is no checkpoint file to clean up. **It needs `dynamodb:Scan`** | nothing; the nightly cycle gets there on its own, this just skips the wait |
 | **Work the `blank_condition` queue — this is data remediation, not code** | Every card the import found with no condition was stored as **NM**, the most expensive tier, and customer prices scale down from it. Until someone checks each card, those are listed **above** their value (LP → 1.22×, MP → 1.72×). T3 makes them filterable and fixable in place; **only the owner can actually fix them.** Surface the count during T3 so the size of the job is known | nothing in code; real money on the live site |
 | ~~Should the import stop setting `needs_review` for `blank_condition`?~~ | **CLOSED 2026-08-10.** The importer will never run again, so its flagging is historical — do not edit it. And the reason turns out to be a money defect, so it is emphatically worth reviewing | — |
 | **Does voiding a PURCHASE need to work in the first cut?** | Voiding a sale returns an item to stock. Voiding a purchase should arguably *remove* an item that may since have been sold or traded. Sales-only, with purchases returning a clear 400, is the honest small version | T11 scope |
@@ -99,6 +103,12 @@ that is the mistake that made RFC 0009's T-FINAL sign-off stale.
 | 2026-08-11 | T15 | **`_market_price` was REFACTORED, not copied: `market_price_and_finish()` now holds the walk and `_market_price` is a one-line delegate.** Every existing caller is untouched | `display_finish` cannot be obtained from `_market_price`, and looking the price up a second time to discover which key produced it would have been the fifth reimplementation the docstring bans by name. The walk is byte-identical (the original's `order = []; if finish not in order: append` is unconditionally `[finish]`), and the final fallback loop iterates `.items()` instead of `.values()` for the key |
 | 2026-08-11 | T15 | **`CardPickerRow` is GENERIC in the card type (`<T extends PickerCard>`), and grew two seams beyond the doc's `card`/`onSelect`/`action` — `nameBadge` and `selected`** | Generic because every page carries a wider `CatalogCard` (Buy reads `prices`, Market keeps an index signature) and `onSelect` handing back the narrow type meant a cast at all five call sites. `nameBadge` exists because Market renders a name-match-confidence chip inline with the name and silently dropping it while "improving" the row would be a regression; `selected` replaces the highlight class Market already had. `PickerCard.images` is `{ small?: string \| null }` — **not** an optional whole object — so it stays assignable to the narrower shapes already in `lib/` |
 | 2026-08-11 | T15 | **The doc's backend test path is wrong: it is `backend/tests/routers/admin/test_market.py`, not `backend/tests/test_market.py`.** And its 4th backend RED test (`detail` present on every item) **passed before any change** — `detail` is a model field and `model_dump` has always emitted it | Second doc-path error in this RFC after T0's; check the path before trusting it. The 4th test was kept as a regression guard rather than dressed up as new work — the frontend now depends on that field to tell *"never fetched"* from *"no provider covers it"*. Also: `npx vitest` **did** work from `frontend/` this time, contrary to the note in this file's baseline section |
+| 2026-08-11 | T17 | **`refresh_catalog_prices` gained an optional `card_ids` parameter, and the one-time script selects ONCE for its whole run rather than re-selecting per chunk.** The task doc's shape — "a driver that calls the same `refresh_catalog_prices` with a huge budget", chunked — would have re-selected before every chunk | A 404 writes nothing, so the card's `last_synced_at` never moves and it stays at the **head** of the stalest-first queue. Re-selecting per chunk therefore re-fetches every retired card in all ~16 chunks, and they lead each one. Nightly that retry is correct and free; inside a single overnight run it eats the budget and can stop the run finishing. Selecting once is also what makes the progress output and the ETA honest. Still one pricing implementation — the driver supplies candidates, nothing else |
+| 2026-08-11 | T17 | **The extraction is TWO helpers, not the one the doc named.** `_refresh_one_card` is the per-card specification it asked for; `_refresh_cards` is the surrounding loop — pacing, the consecutive-failure counter, the abort, the runtime cap | The loop was as duplicated as the body and just as delicate (the 404 that must *neither* increment *nor* reset is a property of the loop, not the fetch). Extracting only the body would have left two copies of that. Net effect is a **reduction**: `_refresh_held_prices` went from ~60 lines to a 6-line delegate, and the 114 pre-existing tests in `test_catalog_sync.py` passed unchanged, which is what proves the extraction faithful |
+| 2026-08-11 | T17 | **The runtime cap is an elapsed-time bound on the loop (`deadline`), not a start-time assertion** — and it is `None` for the depth pass, which therefore does not read the clock at all | The doc offered either. A start-time assert only catches a mis-set *constant*; the bound also catches a night where TCGdex is merely slow, which is the likelier way a 24-minute pass becomes a 60-minute one. `None` rather than a huge default so the ~300-card depth pass is provably unchanged — no new call, no new failure mode |
+| 2026-08-11 | T17 | **`catalog_cards_brief` and `catalog_cards_stale` are rendered in the Market banner**, and the frontend fields are **optional**, with the line rendering as nothing (not zero) when they are absent | The doc's Files list was backend-only but its requirement says "add to `/admin/market`'s coverage panel" — a number no panel shows is not auditable. Optional because a response from before T17 does not carry them, and defaulting to `0` would render *"0 never priced · 0 past 8 days"*, i.e. a healthy cycle, on an API that has none. Only `catalog_cards_stale > 0` turns the line amber; a large `brief` count is the first cycle still running, which is the design working |
+| 2026-08-11 | T17 | **The doc's four test paths are ALL wrong — the third such case in this RFC.** Real paths: `backend/tests/services/test_catalog_sync.py`, `backend/tests/scripts/test_daily_sync.py`, `backend/tests/routers/admin/test_market.py`, `backend/tests/scripts/test_reprice_catalog.py` | Following T0's and T15's rows: **check the path before trusting a task doc's test command.** The doc's own narrow-selection command would have collected nothing and reported success |
+| 2026-08-11 | T17 | **Production never runs `daily_sync.py`.** The EventBridge schedule runs `python -m scripts.scheduled_sync --job prices`, which returns 0 unconditionally — so the exit codes T17 added (and the ones the depth pass already had) signal to nobody | Found while checking where the new step actually executes. The **feature** is fine: `scheduled_sync` calls `run_daily_sync`, so the cycle runs nightly and its counts land in the CloudWatch JSON summary. Only the exit code is lost. Filed rather than fixed — changing what a scheduled ECS task returns is an ops-visible change and the owner's call. **First row of follow-ups.md's execution section** |
 | 2026-08-11 | T15 | **Buy's and Trade's rows previously rendered `CardImage` only `{card.images?.small && …}`** — so a card with no art produced a SHORTER row | Fixed as part of the shared row, and it is the reason the doc makes it a named test: rows that change height as art loads make the list jog under the cursor mid-click, which on a picker means selecting the wrong card. The placeholder is now always rendered, at the same size |
 | 2026-08-10 | T0 | **The doc's file paths were wrong in two places**, corrected as executed: the backend tests are `backend/tests/routers/admin/test_purchases.py`, and the frontend run command must be the `npm test --workspace=frontend` form, not `npx vitest` | `npx vitest` fails with "Vitest failed to find the runner" — already noted in the baseline section of this file, but the task doc contradicted it. Later task docs copy this command; check it before trusting it |
 
@@ -189,7 +199,34 @@ the build failed on `PickerCard.images` being `{…} | null` where
 five-call-site signature change is exactly the shape vitest does not typecheck. Fixed
 by narrowing `images` to an optional object with nullable members. **Run the build.**
 
-**Not verified here, and it needs the owner:** the task doc's manual check — searching
+**Re-measured after T17** — a fresh run, not a row above carried forward:
+
+| Suite | Count | Time | State |
+|---|---|---|---|
+| Backend | **1554 passed / 0 failed** | 2m28s | green — 1519 + 35 new T17 tests |
+| Frontend | **673 passed / 0 failed** (81 files) | ~32s | green — 670 + 3 new T17 tests |
+| Narrow T17 selection (4 files) | 149 passed / 0 failed | ~17s | green — and **114 of those 149 are pre-existing**, which is what proves the `_refresh_one_card` extraction faithful |
+| `ruff check backend/src` | — | ~3s | clean |
+| `npm run lint --workspace=frontend` | — | ~5s | clean (the one pre-existing `<img>` warning in `CardDetailModal`) |
+| `npm run build --workspace=frontend` | — | ~40s | exit 0 |
+
+MCP was not re-run: T17 touched no MCP file.
+
+**`ruff check backend/scripts` is NOT clean, and it was not clean before T17 either.**
+`daily_sync.py` carries a pre-existing `I001` (import sort) and a `DTZ011`, verified by
+running ruff against the file at `HEAD`. The project's documented lint command is
+`ruff check backend/src`, which is why `backend/scripts` has drifted. The two new/edited
+scripts are themselves clean. Do not "fix" `daily_sync.py`'s imports inside a feature
+commit — it is a whole-directory sweep or nothing.
+
+**Not verified here, and it needs the owner:** T17's manual check — running the nightly
+job against live data with `CATALOG_REFRESH_CARDS_PER_NIGHT=50` and confirming 50
+`brief` rows come back `full`, then proving the script at `--limit 200`. Both write to
+the live table and spend real requests against a volunteer-run free API. **Prerequisite:
+the ECS task role needs `dynamodb:Scan`** — the candidate selection scans the catalog,
+the same permission gap CLAUDE.md records for catalog search.
+
+**Also not verified here, and it needs the owner:** T15's manual check — searching
 `Charizard`/`Pikachu` in all five pickers with real cards in hand, confirming a
 Japanese card on the `missing_english_name` queue is identifiable by its art, and
 checking 100%/150% zoom. That needs live catalog data and a human holding a card;

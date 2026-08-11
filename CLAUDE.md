@@ -605,7 +605,7 @@ case any more.
   <grade>` rows. RFC 0009 added **no pricing schema** — the work was filling those
   rows from an API instead of by hand.
 - `refresh_graded_prices` runs **nightly inside `run_daily_sync`** (step 3 of
-  five) and also behind `POST /admin/slabs/refresh-prices` and the Market page's
+  six) and also behind `POST /admin/slabs/refresh-prices` and the Market page's
   Sync Prices button. It walks owned slabs **stalest-first** (never-priced first),
   deduped by `(card_id, company, grade)`, capped at what today's credits can pay
   for. **It never calls PSA** — a cert's identity is immutable.

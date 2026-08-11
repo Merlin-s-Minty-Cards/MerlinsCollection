@@ -73,6 +73,41 @@ describe('getCoverageBannerState', () => {
     })
     expect(state.showUnmatched).toBe(false)
   })
+
+  // RFC 0010 T17 — the weekly cycle promises every catalog card is re-priced by
+  // Friday. That needs a number the owner can check, not a cadence that should
+  // produce it, and the two counts are different facts: `brief` has never been
+  // priced at all, `stale` was priced once and the cycle has since missed it.
+
+  it('reports the weekly cycle counts and flags a cycle that is behind', () => {
+    const state = getCoverageBannerState({
+      ...base,
+      catalog_cards_brief: 1200,
+      catalog_cards_stale: 3,
+      catalog_stale_threshold_days: 8,
+    })
+    expect(state.cycle).toBe('weekly cycle: 1200 never priced · 3 past 8 days')
+    expect(state.cycleBehind).toBe(true)
+  })
+
+  it('does not flag a healthy cycle, even while the first pass is still running', () => {
+    // ~31,300 rows are `brief` until the first cycle finishes, which takes ~6
+    // nights. That is the cycle working, not failing — only a stale `full` row
+    // means a slot was missed.
+    const state = getCoverageBannerState({
+      ...base,
+      catalog_cards_brief: 31300,
+      catalog_cards_stale: 0,
+      catalog_stale_threshold_days: 8,
+    })
+    expect(state.cycleBehind).toBe(false)
+  })
+
+  it('renders no cycle line at all when the API did not send the counts', () => {
+    // Never "0 never priced" from absent data: that is a claim the response did
+    // not make, and it would read as a healthy cycle on an API that has none.
+    expect(getCoverageBannerState(base).cycle).toBeNull()
+  })
 })
 
 describe('AdminMarketPage sync poll lifecycle', () => {

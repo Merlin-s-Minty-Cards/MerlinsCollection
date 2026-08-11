@@ -132,7 +132,57 @@ def test_a_clean_run_still_exits_zero(monkeypatch, capsys):
         "cards_updated": 3, "failures": 0, "not_found": 0,
         "unparsable_card_ids": 0, "no_usable_price": 0, "aborted": False,
         "graded_points_written": 1, "sealed_points_written": 1, "items_refreshed": 2,
+        "catalog_cards_updated": 5500, "catalog_failures": 0,
+        "catalog_aborted": False, "catalog_skipped": None,
     })
 
     assert script.main() == 0
     assert "cards_updated: 3" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# RFC 0010 T17 — the weekly catalog cycle is a fifth failure surface.
+#
+# It walks ~5,500 cards a night on a six-night rotation with Friday as slack, so
+# a night it silently drops is a night of the week's coverage promise gone. The
+# depth pass's exit codes exist for exactly this reason; the catalog pass gets
+# the same treatment rather than a quiet zero.
+# ---------------------------------------------------------------------------
+
+
+def test_an_aborted_catalog_pass_exits_non_zero(monkeypatch, capsys):
+    """The depth pass completed, so the old checks all pass — and without this
+    the run reports OK while the week's catalog coverage silently stalled."""
+    script = _script_returning(monkeypatch, {
+        "cards_updated": 3, "failures": 0, "not_found": 0,
+        "unparsable_card_ids": 0, "no_usable_price": 0, "aborted": False,
+        "graded_points_written": 1, "sealed_points_written": 1, "items_refreshed": 2,
+        "catalog_candidates": 5500, "catalog_cards_updated": 12,
+        "catalog_failures": 25, "catalog_aborted": True, "catalog_skipped": None,
+    })
+
+    code = script.main()
+
+    assert code != 0
+    out = capsys.readouterr().out
+    assert "ABORTED" in out.upper()
+    assert "catalog" in out.lower()      # says WHICH pass, not just that one died
+    assert "catalog_failures: 25" in out  # the summary is still printed in full
+
+
+def test_a_lock_skipped_catalog_pass_exits_non_zero(monkeypatch, capsys):
+    """A week of half-runs must not look like a week of clean ones."""
+    script = _script_returning(monkeypatch, {
+        "cards_updated": 3, "failures": 0, "not_found": 0,
+        "unparsable_card_ids": 0, "no_usable_price": 0, "aborted": False,
+        "graded_points_written": 1, "sealed_points_written": 1, "items_refreshed": 2,
+        "catalog_candidates": 0, "catalog_cards_updated": 0, "catalog_failures": 0,
+        "catalog_aborted": False, "catalog_skipped": "catalog reseed in flight",
+    })
+
+    code = script.main()
+
+    assert code != 0
+    out = capsys.readouterr().out
+    assert "SKIPPED" in out.upper()
+    assert "catalog reseed in flight" in out

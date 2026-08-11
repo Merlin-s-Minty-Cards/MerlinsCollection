@@ -419,6 +419,56 @@ class TestAdminMarketCoverage:
         assert data["total_items"] == 0
         assert data["item_coverage_pct"] == "0"
 
+    # -- RFC 0010 T17: the weekly cycle's promise, made auditable --------
+    #
+    # "Every catalog card re-priced by Friday" needs a number that can be
+    # checked, not just a cadence that should produce it. A `full` row older
+    # than 8 days means the cycle missed it; the healthy value is 0.
+
+    def test_coverage_counts_stale_full_rows_and_brief_rows_separately(
+        self, admin_client,
+    ):
+        """They are DIFFERENT facts and collapsing them throws away the only
+        signal that says whether waiting will help: a `brief` row has never had
+        a price fetched (the cycle has not reached it yet), while a stale `full`
+        row was priced once and the cycle has since missed its slot."""
+        client, repo, token = admin_client
+        now = datetime.now(tz=timezone.utc)
+        repo.batch_upsert_catalog_cards([
+            _catalog_card(card_id="en:sv1-1", detail="full",
+                          prices={"holofoil": FinishPrice(market=Decimal("10"))}
+                          ).model_copy(update={"last_synced_at": now}),
+            _catalog_card(card_id="en:sv1-2", detail="full",
+                          prices={"holofoil": FinishPrice(market=Decimal("10"))}
+                          ).model_copy(update={
+                              "last_synced_at": now - timedelta(days=20)}),
+            _catalog_card(card_id="en:sv1-3", detail="brief").model_copy(
+                update={"last_synced_at": now - timedelta(days=20)}),
+        ])
+
+        data = client.get("/admin/market/coverage", headers=_auth(token)).json()
+
+        assert data["catalog_cards_brief"] == 1
+        # ...and the 20-day-old BRIEF row is NOT double-counted as stale: it has
+        # never been priced at all, which the brief count already says.
+        assert data["catalog_cards_stale"] == 1
+        assert data["catalog_stale_threshold_days"] == 8
+
+    def test_coverage_reports_zero_stale_when_every_full_row_is_fresh(
+        self, admin_client,
+    ):
+        """The healthy value. A counter that cannot read 0 is not an audit."""
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([
+            _catalog_card(card_id="en:sv1-1", detail="full",
+                          prices={"holofoil": FinishPrice(market=Decimal("10"))}),
+        ])
+
+        data = client.get("/admin/market/coverage", headers=_auth(token)).json()
+
+        assert data["catalog_cards_stale"] == 0
+        assert data["catalog_cards_brief"] == 0
+
 
 # ===========================================================================
 # Sync Trigger
