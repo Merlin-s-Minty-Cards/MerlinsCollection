@@ -6,6 +6,7 @@ import { useAdminApi } from '@/lib/admin-api'
 import { parseMoney } from '@/lib/money'
 import { useLocations } from '@/lib/use-locations'
 import MoneyInput from '@/components/admin/shared/MoneyInput'
+import CardPickerRow, { type PickerCard } from '@/components/admin/shared/CardPickerRow'
 import CertInput from './CertInput'
 
 export interface StagedSlab {
@@ -21,12 +22,7 @@ export interface StagedSlab {
   location: string
 }
 
-interface CatalogCard {
-  card_id: string
-  name: string
-  set_name?: string
-  number?: string
-}
+type CatalogCard = PickerCard
 
 interface OwnedCheck {
   owned: boolean
@@ -209,20 +205,17 @@ export default function SlabEntryForm({
       )}
 
       {results.length > 0 && !cardId && (
-        <ul className="vault-panel divide-y divide-pine-700/25 overflow-hidden rounded-lg">
+        <ul className="vault-panel max-h-[28rem] divide-y divide-pine-700/25 overflow-y-auto vault-scroll rounded-lg">
           {results.map((c) => (
             <li key={c.card_id}>
-              <button
-                type="button"
-                className="w-full px-3 py-2 text-left text-xs text-pine-200 transition-colors hover:bg-pine-800/40 hover:text-pine-100"
-                onClick={() => {
-                  setCardId(c.card_id)
-                  setName(c.name)
+              <CardPickerRow
+                card={c}
+                onSelect={(picked) => {
+                  setCardId(picked.card_id)
+                  setName(picked.name)
                   setResults([])
                 }}
-              >
-                {c.name} — {c.set_name} #{c.number}
-              </button>
+              />
             </li>
           ))}
         </ul>

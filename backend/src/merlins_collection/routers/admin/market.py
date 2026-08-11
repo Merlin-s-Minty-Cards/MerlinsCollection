@@ -18,7 +18,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from merlins_collection.dependencies import get_repo
-from merlins_collection.models.inventory import new_ulid
+from merlins_collection.models.inventory import market_price_and_finish, new_ulid
 from merlins_collection.services import catalog_cache
 from merlins_collection.services.card_text import admin_item_name
 from merlins_collection.services.catalog_sync import (
@@ -118,7 +118,7 @@ def market_search(
     # Cap the response to keep the payload bounded — the catalog scan behind
     # this endpoint is unindexed by name/number, so `total` still reflects the
     # full match count even once `items` is capped.
-    serialized = [c.model_dump(mode="json") for c in cards[:50]]
+    serialized = [_with_display_price(c) for c in cards[:50]]
 
     # Timed and logged so the next "search looks broken" report can be read off
     # the API logs instead of costing another workstation investigation (RFC
@@ -514,6 +514,34 @@ def delete_watchlist_entry(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _with_display_price(card) -> dict[str, Any]:
+    """One serialized catalog card, plus the picker's price column.
+
+    A card picker must show name, image AND price (CLAUDE.md). ``prices`` is a
+    dict keyed by finish, so "the price of this card" needs a *choice* — and
+    the frontend cannot make it: a catalog result has no item, therefore no
+    finish, and ``_market_price`` returns ``None`` without one. Passing
+    ``"normal"`` as the default buys the entire fallback walk for free.
+
+    **Do not re-implement that walk in a caller** (in TypeScript or anywhere
+    else); ``models.inventory._market_price``'s docstring names the divergence
+    that produced — 174 of 213 live items silently unpriced.
+
+    ``display_price`` is a string, matching how pydantic already serializes
+    every other ``Decimal`` in this payload, and ``None`` when the card has no
+    band at all. **Never ``0``**: ``FinishPrice`` bands are written only when a
+    provider actually published a figure, so absent means absent.
+
+    Returns a fresh dict. The cards themselves come from the shared catalog
+    cache and must never be mutated (``services/catalog_cache``).
+    """
+    price, finish = market_price_and_finish(card, "normal")
+    data = card.model_dump(mode="json")
+    data["display_price"] = str(price) if price is not None else None
+    data["display_finish"] = finish
+    return data
+
 
 def _scan_catalog(repo: InventoryRepository):
     """Every catalog card, served from the process cache when it is warm.

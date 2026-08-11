@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, act, waitFor, within } from '@testing-library/react'
 import AdminBuyPage from '../page'
 import { AdminApiError } from '@/lib/admin-api'
 
@@ -194,5 +194,62 @@ describe('AdminBuyPage money input', () => {
     // parseFloat('1,300') is 1 — the total would read $1.00 and look plausible.
     // Two places show it: the cart row and the Total Cost line.
     expect(await screen.findAllByText('$1300.00')).toHaveLength(2)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// RFC 0010 T15 — a card picker shows name, image AND price
+// ---------------------------------------------------------------------------
+
+describe('AdminBuyPage catalog picker (RFC 0010 T15)', () => {
+  const priced = {
+    card_id: 'en:base1-4',
+    name: 'Charizard',
+    set_id: 'base1',
+    set_name: 'Base Set',
+    number: '004',
+    rarity: 'Rare Holo',
+    images: { small: 'https://img.example/zard.png' },
+    display_price: '189.99',
+    display_finish: 'holofoil',
+    detail: 'full',
+    last_synced_at: new Date().toISOString(),
+  }
+
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    postMock.mockResolvedValue({ buy_id: 'buy-1' })
+    getMock.mockImplementation((path: string) => {
+      if (path === '/locations') return Promise.resolve([{ value: 'toploader', label: 'Toploader' }])
+      if (path === '/market/search') return Promise.resolve({ items: [priced], total: 1 })
+      return Promise.resolve({})
+    })
+  })
+
+  it('renders both the art and the price on every candidate', async () => {
+    const input = await renderBuyPage()
+    fireEvent.change(input, { target: { value: 'Charizard' } })
+
+    const row = await screen.findByTestId('card-picker-row')
+    expect(within(row).getByAltText('Charizard')).toHaveAttribute('src', 'https://img.example/zard.png')
+    expect(within(row).getByTestId('card-picker-price').textContent).toContain('$189.99')
+  })
+
+  it('still pre-fills the purchase form from the chosen candidate', async () => {
+    // The regression half. Buy is a live money path; the display change must
+    // not disturb what selecting a row actually does.
+    const input = await renderBuyPage()
+    fireEvent.change(input, { target: { value: 'Charizard' } })
+    fireEvent.click(await screen.findByRole('button', { name: /Charizard/ }))
+
+    await waitFor(() => expect(screen.getByLabelText('Buy Price')).toBeInTheDocument())
+    fireEvent.change(screen.getByLabelText('Buy Price'), { target: { value: '80' } })
+    fireEvent.click(screen.getByRole('button', { name: /add to purchase/i }))
+
+    await waitFor(() => expect(postMock).toHaveBeenCalledWith(
+      '/purchases/buy-1/items',
+      expect.objectContaining({ name: 'Charizard', buy_price: 80 }),
+    ))
   })
 })

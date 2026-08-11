@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import SlabEntryForm from '../SlabEntryForm'
 
 const mockApi = { get: vi.fn(), post: vi.fn(), put: vi.fn(), del: vi.fn() }
@@ -153,5 +153,55 @@ describe('SlabEntryForm', () => {
     fill(/cost/i, '10')
     fireEvent.click(screen.getByRole('button', { name: /add to batch/i }))
     await waitFor(() => expect(onAdd.mock.calls[0][0].company).toBe('CGC'))
+  })
+
+  // ---- RFC 0010 T15: the picker shows name, image AND price ----------------
+
+  describe('catalog picker', () => {
+    const priced = {
+      card_id: 'en:swsh8-271',
+      name: 'Gengar VMAX',
+      set_id: 'swsh8',
+      set_name: 'Fusion Strike',
+      number: '271',
+      rarity: 'Secret Rare',
+      images: { small: 'https://img.example/gengar.png' },
+      display_price: '189.99',
+      display_finish: 'holofoil',
+      detail: 'full',
+      last_synced_at: new Date().toISOString(),
+    }
+
+    async function searchFor(term: string) {
+      mockApi.get.mockResolvedValue({ items: [priced], total: 1 })
+      render(<SlabEntryForm onAdd={vi.fn()} />)
+      fill(/card name/i, term)
+      return screen.findByTestId('card-picker-row')
+    }
+
+    it('renders both the art and the price on every candidate', async () => {
+      const row = await searchFor('Gengar')
+      expect(within(row).getByAltText('Gengar VMAX')).toHaveAttribute(
+        'src', 'https://img.example/gengar.png',
+      )
+      expect(within(row).getByTestId('card-picker-price').textContent).toContain('$189.99')
+    })
+
+    it('still links the staged row to the catalog when a candidate is chosen', async () => {
+      mockApi.get.mockResolvedValue({ items: [priced], total: 1 })
+      const onAdd = vi.fn()
+      render(<SlabEntryForm onAdd={onAdd} />)
+      fill(/cert number/i, '89787279')
+      fill(/card name/i, 'Gengar')
+
+      const row = await screen.findByTestId('card-picker-row')
+      fireEvent.click(within(row).getByRole('button', { name: /Gengar VMAX/ }))
+      fill(/^grade$/i, '9.5')
+      fill(/cost/i, '900.50')
+      fireEvent.click(screen.getByRole('button', { name: /add to batch/i }))
+
+      await waitFor(() => expect(onAdd).toHaveBeenCalled())
+      expect(onAdd.mock.calls[0][0].card_id).toBe('en:swsh8-271')
+    })
   })
 })

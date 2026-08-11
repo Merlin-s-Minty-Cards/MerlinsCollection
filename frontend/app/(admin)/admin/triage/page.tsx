@@ -5,6 +5,7 @@ import { AlertTriangle, Link2, Languages, Check } from 'lucide-react'
 import { useAdminApi } from '@/lib/admin-api'
 import { useCardImages } from '@/lib/use-card-images'
 import CardImage, { TABLE_THUMB_SIZE } from '@/components/admin/shared/CardImage'
+import CardPickerRow, { type PickerCard } from '@/components/admin/shared/CardPickerRow'
 import DataTable, { type Column } from '@/components/admin/shared/DataTable'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
 import {
@@ -31,13 +32,7 @@ import {
  * The union comes from `GET /admin/inventory/search?triage=true`.
  */
 
-interface CatalogCard {
-  card_id: string
-  name: string
-  set_name?: string
-  number?: string
-  images?: { small?: string; large?: string }
-}
+type CatalogCard = PickerCard
 
 /** Which repair tool is open, and on which item. */
 type OpenTool = { item: TriageItem; tool: 'repoint' | 'name' } | null
@@ -446,14 +441,7 @@ function RepointDialog({
           onQueryChange={setQuery}
           results={results}
           renderAction={(card) => (
-            <button
-              type="button"
-              onClick={() => setCandidate(card)}
-              className="w-full text-left px-3 py-2 rounded-md hover:bg-pine-800/60"
-            >
-              <span className="text-[13px] text-pine-100">{card.name}</span>
-              <span className="ml-2 text-[10px] text-pine-500 font-mono">{card.card_id}</span>
-            </button>
+            <CardPickerRow card={card} onSelect={setCandidate} />
           )}
         />
       )}
@@ -523,18 +511,23 @@ function NameDialog({
           onQueryChange={setQuery}
           results={results}
           renderAction={(card) => (
-            <div className="flex items-center justify-between gap-2 px-3 py-2">
-              <span className="text-[13px] text-pine-100 truncate">{card.name}</span>
-              <button
-                type="button"
-                disabled={saving}
-                onClick={() => save(card.name)}
-                className="flex-shrink-0 px-2 py-1 rounded-md text-[11px] text-mint
-                           border border-mint/30 hover:bg-mint/10 disabled:opacity-50"
-              >
-                Use this name
-              </button>
-            </div>
+            // No `onSelect`: on this dialog the ONLY thing a row can do is
+            // lend its name. A clickable row here would be a row that looks
+            // like it re-links the item.
+            <CardPickerRow
+              card={card}
+              action={
+                <button
+                  type="button"
+                  disabled={saving}
+                  onClick={() => save(card.name)}
+                  className="px-2 py-1 rounded-md text-[11px] text-mint
+                             border border-mint/30 hover:bg-mint/10 disabled:opacity-50"
+                >
+                  Use this name
+                </button>
+              }
+            />
           )}
         />
       </div>
@@ -594,6 +587,17 @@ function NameDialog({
 // Small shared pieces
 // ---------------------------------------------------------------------------
 
+/**
+ * The candidate list both repair dialogs search through.
+ *
+ * `renderAction` survives because the two dialogs need DIFFERENT actions on
+ * the same row shape — "Use this name" versus select-as-candidate — and the
+ * distinction between them is the one rule in this feature that must not
+ * break. Each caller renders a `CardPickerRow`, which is what puts the art and
+ * the price on the row: this page is where the owner's report came from, and
+ * on the `missing_english_name` queue the name is in Japanese, so a name-only
+ * list asks the admin to choose between rows they cannot read.
+ */
 function CatalogPicker({
   query,
   onQueryChange,
@@ -623,7 +627,9 @@ function CatalogPicker({
                    text-pine-100 focus:outline-none focus:border-mint/60"
         autoFocus
       />
-      <div className="mt-2 max-h-56 overflow-y-auto vault-scroll divide-y divide-pine-700/25">
+      {/* Tall enough for ~5 candidates with art: scanning five cards at a
+          glance is the whole point of putting the art there. */}
+      <div className="mt-2 max-h-[28rem] overflow-y-auto vault-scroll divide-y divide-pine-700/25">
         {results.map((card) => (
           <div key={card.card_id}>{renderAction(card)}</div>
         ))}
@@ -651,7 +657,10 @@ function Dialog({
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="vault-panel rounded-xl p-5 w-full max-w-lg shadow-2xl border border-pine-700/50"
+        // max-w-2xl, not max-w-lg: with art in the candidate rows the narrower
+        // dialog squeezes the name until it truncates to nothing, which is
+        // worse than the name-only list it replaced.
+        className="vault-panel rounded-xl p-5 w-full max-w-2xl shadow-2xl border border-pine-700/50"
       >
         <h2 className="text-sm font-semibold text-pine-100 mb-3">{label}</h2>
         {children}

@@ -11,6 +11,7 @@ import { parseMoney } from '@/lib/money'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
 import CardImage from '@/components/admin/shared/CardImage'
+import CardPickerRow, { type PickerCard } from '@/components/admin/shared/CardPickerRow'
 import MoneyInput from '@/components/admin/shared/MoneyInput'
 
 interface BuyItem {
@@ -26,15 +27,8 @@ interface BuyItem {
   is_catalog_match?: boolean
 }
 
-interface CatalogCard {
-  card_id: string
-  name: string
-  set_id?: string
-  set_name?: string
-  number?: string
-  rarity?: string
+interface CatalogCard extends PickerCard {
   artist?: string
-  images?: { small?: string; large?: string }
   prices?: Record<string, { market?: number | string | null }>
   [key: string]: unknown
 }
@@ -444,28 +438,17 @@ export default function AdminBuyPage() {
                   </div>
                 </label>
 
-                {/* Catalog search dropdown — only in search mode */}
+                {/* Catalog search dropdown — only in search mode.
+                    Capped tall enough for ~5 candidates: scanning five cards at
+                    a glance IS the workflow at a buy table. */}
                 {mode === 'search' && catalogResults.length > 0 && (
-                  <div className="absolute z-20 left-0 right-0 mt-1 vault-panel rounded-lg border border-pine-700/50 max-h-56 overflow-y-auto vault-scroll shadow-xl">
+                  <div className="absolute z-20 left-0 right-0 mt-1 vault-panel rounded-lg border border-pine-700/50 max-h-[28rem] overflow-y-auto vault-scroll shadow-xl">
                     {catalogResults.map((card) => (
-                      <button
+                      <CardPickerRow
                         key={card.card_id}
-                        type="button"
-                        onClick={() => selectCatalogCard(card)}
-                        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-pine-800/60 transition-colors text-left"
-                      >
-                        {card.images?.small && (
-                          <CardImage imageUrl={card.images.small} alt={card.name} size="sm" />
-                        )}
-                        <div className="min-w-0 flex-1">
-                          <div className="text-xs text-pine-100 truncate">{card.name}</div>
-                          <div className="text-[10px] text-pine-400">
-                            {card.set_name || card.set_id}
-                            {card.number && ` · #${card.number}`}
-                            {card.rarity && ` · ${card.rarity}`}
-                          </div>
-                        </div>
-                      </button>
+                        card={card}
+                        onSelect={selectCatalogCard}
+                      />
                     ))}
                     {searchingCatalog && (
                       <div className="px-3 py-2 text-[10px] text-pine-500">Searching&hellip;</div>

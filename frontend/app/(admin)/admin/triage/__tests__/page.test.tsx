@@ -464,3 +464,94 @@ describe('AdminTriagePage card art', () => {
     expect(within(row).getByLabelText(/no image/i)).toBeInTheDocument()
   })
 })
+
+// ===========================================================================
+// RFC 0010 T15 — the catalog picker shows the card, not just its name
+// ===========================================================================
+
+describe('AdminTriagePage catalog picker (RFC 0010 T15)', () => {
+  // The report that produced the standing CLAUDE.md rule came from THIS page:
+  // on the `missing_english_name` queue the item's name is in Japanese, so a
+  // name-only candidate list asks the admin to choose between rows they
+  // literally cannot read.
+  const priced = {
+    card_id: 'en:base1-4',
+    name: 'Charizard',
+    set_name: 'Base Set',
+    number: '004',
+    rarity: 'Rare Holo',
+    images: { small: 'https://img.example/zard.png' },
+    display_price: '189.99',
+    display_finish: 'holofoil',
+    detail: 'full',
+    last_synced_at: new Date().toISOString(),
+  }
+
+  function mockPicker(item: unknown) {
+    getMock.mockImplementation((path: string) => {
+      if (path === '/inventory/search') return Promise.resolve({ items: [item], total: 1 })
+      if (path === '/market/search') return Promise.resolve({ items: [priced], total: 1 })
+      if (path === '/locations') return Promise.resolve([])
+      return Promise.resolve({})
+    })
+  }
+
+  async function openPicker(button: RegExp) {
+    fireEvent.click(await screen.findByRole('button', { name: button }))
+    fireEvent.change(await screen.findByLabelText(/search the catalog/i), {
+      target: { value: 'Charizard' },
+    })
+    return screen.findByTestId('card-picker-row')
+  }
+
+  it('shows the art and the price in the re-point dialog', async () => {
+    mockPicker(flaggedItem)
+    render(<AdminTriagePage />)
+
+    const row = await openPicker(/re-point/i)
+    expect(within(row).getByAltText('Charizard')).toHaveAttribute('src', 'https://img.example/zard.png')
+    expect(within(row).getByTestId('card-picker-price').textContent).toContain('$189.99')
+  })
+
+  it('shows the art and the price in the name dialog', async () => {
+    mockPicker(jpItem)
+    render(<AdminTriagePage />)
+
+    const row = await openPicker(/assign english name/i)
+    expect(within(row).getByAltText('Charizard')).toHaveAttribute('src', 'https://img.example/zard.png')
+    expect(within(row).getByTestId('card-picker-price').textContent).toContain('$189.99')
+  })
+
+  it('still reaches the two-stage confirm when a re-point candidate is picked', async () => {
+    mockPicker(flaggedItem)
+    render(<AdminTriagePage />)
+
+    const row = await openPicker(/re-point/i)
+    fireEvent.click(within(row).getByRole('button', { name: /Charizard/ }))
+
+    const confirm = await screen.findByRole('dialog', { name: /confirm re-point/i })
+    expect(putMock).not.toHaveBeenCalled()
+    fireEvent.click(within(confirm).getByRole('button', { name: /confirm/i }))
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith('/inventory/flagged-1', { card_id: 'en:base1-4' }),
+    )
+  })
+
+  it('still writes ONLY display_name_override from the name dialog', async () => {
+    // The one rule in this feature that must not break. A row that now carries
+    // a `card_id`, art and a price is exactly the row a reader would assume
+    // re-links the item — it must not.
+    mockPicker(jpItem)
+    render(<AdminTriagePage />)
+
+    const row = await openPicker(/assign english name/i)
+    fireEvent.click(within(row).getByRole('button', { name: /use this name/i }))
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith('/inventory/jp-1', {
+        display_name_override: 'Charizard',
+      }),
+    )
+    expect(putMock.mock.calls[0][1]).not.toHaveProperty('card_id')
+  })
+})

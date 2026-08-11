@@ -5,6 +5,7 @@ import { Plus, X, Check, Eye, EyeOff, DollarSign, Calendar, Banknote, CreditCard
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { describeApiError, type ApiErrorDescription } from '@/lib/admin-error'
 import CardImage, { TABLE_THUMB_SIZE } from '@/components/admin/shared/CardImage'
+import CardPickerRow, { type PickerCard } from '@/components/admin/shared/CardPickerRow'
 import { useCardImages } from '@/lib/use-card-images'
 import SearchInput from '@/components/admin/shared/SearchInput'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
@@ -60,13 +61,7 @@ interface InventoryItem {
   [key: string]: unknown
 }
 
-interface IncomingCatalogCard {
-  card_id: string
-  name: string
-  set_id?: string
-  set_name?: string
-  number?: string
-  images?: { small?: string; large?: string }
+interface IncomingCatalogCard extends PickerCard {
   prices?: Record<string, { market?: number | string | null }>
   [key: string]: unknown
 }
@@ -568,25 +563,13 @@ export default function AdminTradePage() {
                   />
                 </div>
                 {!selectedIncomingCard && incomingCatalogResults.length > 0 && (
-                  <div className="absolute z-20 left-0 right-0 mt-1 vault-panel rounded-lg border border-pine-700/50 max-h-56 overflow-y-auto vault-scroll shadow-xl">
+                  <div className="absolute z-20 left-0 right-0 mt-1 vault-panel rounded-lg border border-pine-700/50 max-h-[28rem] overflow-y-auto vault-scroll shadow-xl">
                     {incomingCatalogResults.map((card) => (
-                      <button
+                      <CardPickerRow
                         key={card.card_id}
-                        type="button"
-                        onClick={() => selectIncomingCatalogCard(card)}
-                        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-pine-800/60 transition-colors text-left"
-                      >
-                        {card.images?.small && (
-                          <CardImage imageUrl={card.images.small} alt={card.name} size="sm" />
-                        )}
-                        <div className="min-w-0 flex-1">
-                          <div className="text-xs text-pine-100 truncate">{card.name}</div>
-                          <div className="text-[10px] text-pine-400">
-                            {card.set_name || card.set_id}
-                            {card.number && ` · #${card.number}`}
-                          </div>
-                        </div>
-                      </button>
+                        card={card}
+                        onSelect={selectIncomingCatalogCard}
+                      />
                     ))}
                     {searchingIncomingCatalog && (
                       <div className="px-3 py-2 text-[10px] text-pine-500">Searching&hellip;</div>

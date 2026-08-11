@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, act, waitFor, within } from '@testing-library/react'
 import AdminMarketPage from '../page'
 import { AdminApiError } from '@/lib/admin-api'
 import { getCoverageBannerState, type MarketCoverage } from '@/lib/market-coverage'
@@ -358,5 +358,78 @@ describe('AdminMarketPage watchlist target price', () => {
   it('still adds with no target price when the prompt is cancelled', async () => {
     await starTheFirstResult(null)
     await waitFor(() => expect(postMock).toHaveBeenCalledWith('/watchlist', expect.objectContaining({ target_buy_price: null })))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// RFC 0010 T15 — a card picker shows name, image AND price
+// ---------------------------------------------------------------------------
+
+describe('AdminMarketPage catalog picker (RFC 0010 T15)', () => {
+  const priced = {
+    card_id: 'en:base1-4',
+    name: 'Charizard',
+    set_id: 'base1',
+    set_name: 'Base Set',
+    number: '004',
+    rarity: 'Rare Holo',
+    images: { small: 'https://img.example/zard.png' },
+    display_price: '189.99',
+    display_finish: 'holofoil',
+    detail: 'full',
+    last_synced_at: new Date().toISOString(),
+  }
+
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    postMock.mockResolvedValue({})
+    getMock.mockImplementation((path: string) => {
+      if (path === '/market/search') return Promise.resolve({ items: [priced], total: 1 })
+      if (path === '/watchlist') return Promise.resolve({ entries: [] })
+      // The trend/confidence shapes are spelled out because clicking a row is
+      // now exercised: a bare `{}` here does not resemble the real response,
+      // and the page reads `points` off it unguarded (see follow-ups.md).
+      if (path.endsWith('/trend')) return Promise.resolve({ card_id: 'en:base1-4', points: [] })
+      if (path.endsWith('/confidence')) {
+        return Promise.resolve({ level: 'low', points: 0, volatility_pct: '0', trend_pct: '0', reason: 'no data' })
+      }
+      return Promise.resolve({})
+    })
+  })
+
+  async function search() {
+    render(<AdminMarketPage />)
+    await act(async () => { await Promise.resolve() })
+    fireEvent.change(screen.getByPlaceholderText(/search catalog by name/i), { target: { value: 'Charizard' } })
+    return screen.findByTestId('card-picker-row')
+  }
+
+  it('renders both the art and the price on every candidate', async () => {
+    const row = await search()
+    expect(within(row).getByAltText('Charizard')).toHaveAttribute('src', 'https://img.example/zard.png')
+    expect(within(row).getByTestId('card-picker-price').textContent).toContain('$189.99')
+  })
+
+  it('still loads the price history when a candidate is clicked', async () => {
+    const row = await search()
+    fireEvent.click(within(row).getByRole('button', { name: /Charizard/ }))
+
+    await waitFor(() => expect(getMock).toHaveBeenCalledWith(
+      '/market/card/en:base1-4/trend',
+      { days: 90 },
+    ))
+  })
+
+  it('still stars a candidate onto the watchlist', async () => {
+    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue(null)
+    const row = await search()
+    fireEvent.click(within(row).getByTitle('Add to watchlist'))
+
+    await waitFor(() => expect(postMock).toHaveBeenCalledWith(
+      '/watchlist',
+      expect.objectContaining({ card_id: 'en:base1-4' }),
+    ))
+    promptSpy.mockRestore()
   })
 })

@@ -8,13 +8,9 @@ import { getCoverageBannerState, type MarketCoverage } from '@/lib/market-covera
 import { MONEY_PARSE_MESSAGE, parseMoney } from '@/lib/money'
 import SearchInput from '@/components/admin/shared/SearchInput'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
+import CardPickerRow, { type PickerCard } from '@/components/admin/shared/CardPickerRow'
 
-interface CatalogCard {
-  card_id: string
-  name: string
-  set_id?: string
-  set_name?: string
-  rarity?: string
+interface CatalogCard extends PickerCard {
   prices?: Record<string, unknown>
   [key: string]: unknown
 }
@@ -484,33 +480,34 @@ export default function AdminMarketPage() {
                     const matchConfidence = getMatchConfidence(query, card.name)
                     const style = CONFIDENCE_STYLES[matchConfidence]
                     return (
-                      <button
+                      // The star used to be a <button> nested INSIDE the row
+                      // button — invalid HTML, and only `stopPropagation` kept
+                      // it from also loading the price history. As a
+                      // CardPickerRow `action` the two are siblings.
+                      <CardPickerRow
                         key={card.card_id}
-                        type="button"
-                        onClick={() => loadPriceHistory(card)}
-                        className={`w-full flex items-center justify-between px-3 py-2.5 text-left hover:bg-pine-800/50 transition-colors ${selectedCard?.card_id === card.card_id ? 'bg-pine-800/60' : ''}`}
-                      >
-                        <div className="min-w-0 flex-1">
-                          <div className="text-xs text-pine-100 truncate flex items-center gap-2">
-                            {card.name}
-                            <span
-                              title="name match quality"
-                              className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${style.bg} ${style.text} flex-shrink-0`}
-                            >
-                              {style.label}
-                            </span>
-                          </div>
-                          <div className="text-[10px] text-pine-400">{card.set_name || card.set_id} {card.rarity && `· ${card.rarity}`}</div>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={(e) => { e.stopPropagation(); addToWatchlist(card) }}
-                          className="p-1 text-pine-500 hover:text-amber-400 transition-colors shrink-0"
-                          title="Add to watchlist"
-                        >
-                          <Star size={13} />
-                        </button>
-                      </button>
+                        card={card}
+                        selected={selectedCard?.card_id === card.card_id}
+                        onSelect={loadPriceHistory}
+                        nameBadge={
+                          <span
+                            title="name match quality"
+                            className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium border ${style.bg} ${style.text} flex-shrink-0`}
+                          >
+                            {style.label}
+                          </span>
+                        }
+                        action={
+                          <button
+                            type="button"
+                            onClick={() => addToWatchlist(card)}
+                            className="p-1 text-pine-500 hover:text-amber-400 transition-colors"
+                            title="Add to watchlist"
+                          >
+                            <Star size={13} />
+                          </button>
+                        }
+                      />
                     )
                   })}
                 </div>

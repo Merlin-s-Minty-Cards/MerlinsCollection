@@ -26,7 +26,7 @@ from merlins_collection.models.inventory import (
 
 def _catalog_card(card_id="en:sv1-1", name="Pikachu", set_id="sv1",
                   set_name="Scarlet & Violet", number="001", rarity="Common",
-                  prices=None):
+                  prices=None, detail="brief"):
     return CatalogCard(
         card_id=card_id,
         name=name,
@@ -40,6 +40,7 @@ def _catalog_card(card_id="en:sv1-1", name="Pikachu", set_id="sv1",
         ),
         last_synced_at=datetime.now(tz=timezone.utc),
         prices=prices or {},
+        detail=detail,
     )
 
 
@@ -154,6 +155,94 @@ class TestAdminMarketSearch:
         data = resp.json()
         assert len(data["items"]) == 1
         assert data["items"][0]["number"] == "25"
+
+
+class TestAdminMarketSearchDisplayPrice:
+    """The picker's price column (RFC 0010 T15).
+
+    A card picker must show name, image AND price (CLAUDE.md). ``prices`` is
+    keyed by finish, so "the price of this card" needs a *choice* — and a
+    catalog result has no item and therefore no finish, so the frontend cannot
+    make it. The backend picks the figure with the one shared authority,
+    ``models.inventory._market_price``, and hands the picker a flat
+    ``display_price`` plus the ``display_finish`` it came from.
+    """
+
+    def _first(self, client, token, name):
+        resp = client.get(f"/admin/market/search?name={name}", headers=_auth(token))
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert len(items) >= 1
+        return items[0]
+
+    def test_search_returns_display_price_and_finish(self, admin_client):
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([
+            _catalog_card(
+                card_id="en:sv1-25", name="Pikachu", detail="full",
+                prices={"normal": FinishPrice(market=Decimal("12.34"),
+                                              source="tcgplayer")},
+            ),
+        ])
+
+        item = self._first(client, token, "pikachu")
+        assert item["display_price"] == "12.34"
+        assert item["display_finish"] == "normal"
+
+    def test_holofoil_only_card_still_yields_a_figure(self, admin_client):
+        """Proves the fallback WALK is used, not an exact 'normal' match.
+
+        A holo-only card carries no ``normal`` band at all. If this returns
+        ``None`` the endpoint is doing a dict lookup instead of calling
+        ``_market_price`` — the exact divergence that left 174 of 213 live
+        items unpriced.
+        """
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([
+            _catalog_card(
+                card_id="en:base1-4", name="Charizard", detail="full",
+                prices={"holofoil": FinishPrice(market=Decimal("189.99"),
+                                                source="tcgplayer")},
+            ),
+        ])
+
+        item = self._first(client, token, "charizard")
+        assert item["display_price"] == "189.99"
+        assert item["display_finish"] == "holofoil"
+
+    def test_card_with_no_bands_yields_null_not_zero(self, admin_client):
+        """An absent price is ABSENT. Never ``0``, never ``"0"``, never ``""``.
+
+        ``FinishPrice`` bands are only written when a provider published a
+        figure, so a card with no bands has no price — and rendering that as
+        ``$0.00`` would tell a buyer a card is worthless.
+        """
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([
+            _catalog_card(card_id="en:sv1-99", name="Bulbasaur", detail="full"),
+        ])
+
+        item = self._first(client, token, "bulbasaur")
+        assert item["display_price"] is None
+        assert item["display_finish"] is None
+
+    def test_detail_is_present_on_every_item(self, admin_client):
+        """'never fetched' and 'no provider covers it' are DIFFERENT facts.
+
+        ``detail`` is the only field that keeps them apart, so the picker
+        cannot render them differently without it.
+        """
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([
+            _catalog_card(card_id="en:sv1-1", name="Squirtle", detail="brief"),
+            _catalog_card(card_id="en:sv1-2", name="Squirtle ex", number="002",
+                          detail="full"),
+        ])
+
+        resp = client.get("/admin/market/search?name=squirtle", headers=_auth(token))
+        items = resp.json()["items"]
+        assert len(items) == 2
+        assert {i["detail"] for i in items} == {"brief", "full"}
 
 
 # ===========================================================================

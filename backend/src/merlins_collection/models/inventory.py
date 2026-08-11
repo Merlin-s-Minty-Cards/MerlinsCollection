@@ -385,6 +385,31 @@ _MARKET_FINISH_FALLBACK = (
 )
 
 
+def market_price_and_finish(card, finish: str | None) -> tuple[Decimal | None, str | None]:
+    """``_market_price``'s answer plus WHICH finish it came from.
+
+    The walk lives here and ``_market_price`` delegates to it, so there is
+    still exactly ONE implementation — see that function's docstring for why
+    that matters. Split out for RFC 0010 T15: a card picker shows the figure
+    *and* names its finish, because a holofoil price quoted against a normal
+    card is the kind of mismatch that costs money at a buy table. Getting the
+    finish by looking the price up a second time would be the fifth copy.
+    """
+    if not finish:
+        return None, None
+    prices = getattr(card, "prices", None) or {}
+    order: list[str] = [finish]
+    order += [f for f in _MARKET_FINISH_FALLBACK if f not in order]
+    for key in order:
+        band = prices.get(key)
+        if band is not None and band.market is not None:
+            return band.market, key
+    for key, band in prices.items():
+        if band is not None and band.market is not None:
+            return band.market, key
+    return None, None
+
+
 def _market_price(card, finish: str | None) -> Decimal | None:
     """The catalog market price (USD) for a card, preferring the item's finish.
 
@@ -410,21 +435,7 @@ def _market_price(card, finish: str | None) -> Decimal | None:
     no finish and commands a grade premium the catalog does not know, so it gets
     no market price here and the caller keeps the slab's own figure.
     """
-    if not finish:
-        return None
-    prices = getattr(card, "prices", None) or {}
-    order: list[str] = []
-    if finish not in order:
-        order.append(finish)
-    order += [f for f in _MARKET_FINISH_FALLBACK if f not in order]
-    for key in order:
-        band = prices.get(key)
-        if band is not None and band.market is not None:
-            return band.market
-    for band in prices.values():
-        if band is not None and band.market is not None:
-            return band.market
-    return None
+    return market_price_and_finish(card, finish)[0]
 
 
 class CardSummary(BaseModel):

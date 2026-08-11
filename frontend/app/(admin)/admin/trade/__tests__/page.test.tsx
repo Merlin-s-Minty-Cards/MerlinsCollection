@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, act, waitFor, within } from '@testing-library/react'
 import AdminTradePage from '../page'
 import { AdminApiError } from '@/lib/admin-api'
 
@@ -354,5 +354,63 @@ describe('AdminTradePage money input', () => {
     await waitFor(() => expect(putMock).toHaveBeenCalledWith('/trades/trade-1/cash', {
       cash_components: [expect.objectContaining({ amount: 1300 })],
     }))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// RFC 0010 T15 — a card picker shows name, image AND price
+// ---------------------------------------------------------------------------
+
+describe('AdminTradePage incoming catalog picker (RFC 0010 T15)', () => {
+  const priced = {
+    card_id: 'en:base1-4',
+    name: 'Charizard',
+    set_id: 'base1',
+    set_name: 'Base Set',
+    number: '004',
+    rarity: 'Rare Holo',
+    images: { small: 'https://img.example/zard.png' },
+    display_price: '189.99',
+    display_finish: 'holofoil',
+    detail: 'full',
+    last_synced_at: new Date().toISOString(),
+  }
+
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    postMock.mockResolvedValue({ trade_id: 'trade-1' })
+    getMock.mockImplementation((path: string) => {
+      if (path === '/market/search') return Promise.resolve({ items: [priced], total: 1 })
+      return Promise.resolve({})
+    })
+  })
+
+  it('renders both the art and the price on every candidate', async () => {
+    const nameInput = await renderTradePage()
+    fireEvent.change(nameInput, { target: { value: 'Charizard' } })
+
+    const row = await screen.findByTestId('card-picker-row')
+    expect(within(row).getByAltText('Charizard')).toHaveAttribute('src', 'https://img.example/zard.png')
+    expect(within(row).getByTestId('card-picker-price').textContent).toContain('$189.99')
+  })
+
+  it('still stages the chosen candidate as an incoming leg', async () => {
+    const nameInput = await renderTradePage()
+    fireEvent.change(nameInput, { target: { value: 'Charizard' } })
+    const row = await screen.findByTestId('card-picker-row')
+    await act(async () => {
+      fireEvent.click(within(row).getByRole('button', { name: /Charizard/ }))
+    })
+
+    fireEvent.change(screen.getByLabelText('Trade-in value'), { target: { value: '100' } })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Add incoming card' }))
+    })
+
+    await waitFor(() => expect(postMock).toHaveBeenCalledWith(
+      '/trades/trade-1/incoming',
+      expect.objectContaining({ card_id: 'en:base1-4', agreed_value: 100 }),
+    ))
   })
 })

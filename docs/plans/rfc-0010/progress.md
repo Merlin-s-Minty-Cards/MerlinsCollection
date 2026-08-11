@@ -6,17 +6,19 @@
 gitignored (`.gitignore:60`), so it is local-only and your edits to it will never appear in
 `git status` or reach anyone else. Record all RFC 0010 status **in this file**.
 
-**Last updated:** 2026-08-11 (T1 DONE — every human-typed money field now accepts `1,300`)
+**Last updated:** 2026-08-11 (T15 DONE — every card picker shows name, image AND price)
 **Branch:** `Polishing-For-Deployment`
 **RFC:** [`docs/rfcs/0010-admin-round8-ledger-corrections-and-slab-manual-only.md`](../../rfcs/0010-admin-round8-ledger-corrections-and-slab-manual-only.md)
 **Task index:** [`README.md`](README.md)
 **Source of the requests:** the owner's `The plan.pdf` (12 items) plus two review comments
 on 2026-08-10 — the money-input report and the PSA/scanner reversal.
 
-## ✅ T0 AND T1 ARE DONE — start at T15
+## ✅ T0, T1 AND T15 ARE DONE — start at T17
 
-T1 rolled `MoneyInput` across every admin surface where a human types money, and
-removed `parseFloat` from every one of those paths. **Start at T15.**
+T15 gave all five catalog pickers one shared row carrying name, image AND price
+(`components/admin/shared/CardPickerRow.tsx`), and `GET /admin/market/search` now
+returns `display_price` + `display_finish`. **Start at T17**, which fills those
+prices in — most catalog rows honestly read *"no price yet"* until it runs.
 
 ## ✅ T0 IS DONE — the RFC 0009 merge blocker is cleared
 
@@ -44,7 +46,7 @@ naming the row. **Start at T1.**
 | T11 | Transaction void | **NOT STARTED** | — | **Largest risk in the RFC.** One countability predicate, every reader named in the task doc |
 | T12 | Slabs: PSA out, price at intake | **NOT STARTED** | — | Keep `CertInput`'s Enter handling. Pricing runs AFTER commit, never inside it |
 | T13 | Grouped navigation | **NOT STARTED** | — | Every route path unchanged |
-| T15 | Card picker: image + price | **NOT STARTED** | — | The rule is already in **CLAUDE.md**; this makes the code match. Art **and** prices are already in the search response — Triage/Slabs/Market discard both. `/admin/buy` is the reference row. **Ships independently of T17**: build the absent-price states properly and there is no frontend follow-up |
+| T15 | Card picker: image + price | **DONE** | `PENDING` | One shared `CardPickerRow` with **five** callers (Buy, Trade, Triage ×2, Slabs, Market). Backend: `market_price_and_finish()` in `models/inventory.py` is now the walk and `_market_price` delegates to it — **do not add a second lookup to get a finish**. `display_price` is a **string** (`"12.34"`), `null` when absent. The component is **generic in the card type**, so callers keep their own `CatalogCard`; each one now `extends PickerCard`. Thumb is `TABLE_THUMB_SIZE` (`xs`), **not** the `sm` the task doc named — see Decisions. Fixed on the way: Market's row was a `<button>` nested inside a `<button>` |
 | T17 | Weekly catalog price cycle | **NOT STARTED** | — | ~5,500 cards/night stalest-first (~24 min), six nights + Friday slack. Needs **no schema change** — `last_synced_at` + `detail` already carry the ordering. A full nightly pass would outlive the catalog lock. **Second deliverable: `scripts/reprice_catalog.py`** — the owner's one-time overnight full re-price, chunked so it never holds the lock for more than ~9 min, resumable for free via stalest-first |
 | T16 | Unmatched-card valuation | **NOT STARTED** | — | Answers "how do we price a card with no catalog match". Mostly surfacing a capability that already works: the nightly job skips unlinked items |
 | T14 | Docs + ops | **NOT STARTED** | — | RFC 0009 T2/T5 → WON'T DO. Note the two CLAUDE.md rules added during planning (card images, archiving) are already in place — do not re-add them |
@@ -93,6 +95,11 @@ that is the mistake that made RFC 0009's T-FINAL sign-off stale.
 | 2026-08-11 | T1 | **One pre-existing test was rewritten, deliberately: Prep Queue's `min="0"` assertion.** It is a `type="number"` attribute that cannot survive the swap; its intent (reject negatives) moved to `parseMoney`, which rejects a negative outright, and the test now asserts the inline message instead | Recorded because "every pre-existing test still passes" was the stated GREEN gate and this one could not. The behaviour is strictly better — the browser used to ignore the keystroke silently; the operator is now told |
 | 2026-08-11 | T1 | **Trade's outgoing-value editor became CONTROLLED**, backed by an `outDrafts` map keyed by item id | It was `defaultValue` + `onBlur`, which a money field cannot be: a half-typed `"1,"` has to survive the next render, and MoneyInput normalises through `onChange`. The draft is dropped on remove so re-adding the same card does not resurrect old text |
 | 2026-08-11 | T1 | **Sell's per-item price edit was found to be COSMETIC — it never reaches the API at all.** `updateItemPrice` mutates local state; `handleConfirm` PATCHes session metadata and POSTs `/confirm`, and nothing in between sends the edited `agreed_price`. Same for the bulk discount | Found while writing the "typing 1,300 sends 1300" test and discovering there is no send to assert on. Out of T1's scope (it is not a parsing defect) so it is filed in follow-ups, but it is the largest thing this task turned up: an admin discounting a card at a show is editing a number that is thrown away |
+| 2026-08-11 | T15 | **The picker thumbnail is `TABLE_THUMB_SIZE` (`xs`, 56×78), NOT the `size="sm"` the task doc's Design section names.** The doc contradicts itself: its readability section costs the row at *"a 56×78 thumb plus two text lines… ~5rem of row height"* and requires ~5 candidates visible at once | `sm` is 96×136, so five rows would need ~42rem of dropdown — which is exactly the "squished into a page" the owner's ask rules out. The `size="sm"` line describes Buy's existing code rather than the requirement, and CLAUDE.md already fixes 56×78 as *the* admin row thumbnail ("import the size, never re-pick it"). Dropdown caps went `max-h-56` → `max-h-[28rem]` on Buy, Trade and Triage; Triage's dialog went `max-w-lg` → `max-w-2xl` |
+| 2026-08-11 | T15 | **`_market_price` was REFACTORED, not copied: `market_price_and_finish()` now holds the walk and `_market_price` is a one-line delegate.** Every existing caller is untouched | `display_finish` cannot be obtained from `_market_price`, and looking the price up a second time to discover which key produced it would have been the fifth reimplementation the docstring bans by name. The walk is byte-identical (the original's `order = []; if finish not in order: append` is unconditionally `[finish]`), and the final fallback loop iterates `.items()` instead of `.values()` for the key |
+| 2026-08-11 | T15 | **`CardPickerRow` is GENERIC in the card type (`<T extends PickerCard>`), and grew two seams beyond the doc's `card`/`onSelect`/`action` — `nameBadge` and `selected`** | Generic because every page carries a wider `CatalogCard` (Buy reads `prices`, Market keeps an index signature) and `onSelect` handing back the narrow type meant a cast at all five call sites. `nameBadge` exists because Market renders a name-match-confidence chip inline with the name and silently dropping it while "improving" the row would be a regression; `selected` replaces the highlight class Market already had. `PickerCard.images` is `{ small?: string \| null }` — **not** an optional whole object — so it stays assignable to the narrower shapes already in `lib/` |
+| 2026-08-11 | T15 | **The doc's backend test path is wrong: it is `backend/tests/routers/admin/test_market.py`, not `backend/tests/test_market.py`.** And its 4th backend RED test (`detail` present on every item) **passed before any change** — `detail` is a model field and `model_dump` has always emitted it | Second doc-path error in this RFC after T0's; check the path before trusting it. The 4th test was kept as a regression guard rather than dressed up as new work — the frontend now depends on that field to tell *"never fetched"* from *"no provider covers it"*. Also: `npx vitest` **did** work from `frontend/` this time, contrary to the note in this file's baseline section |
+| 2026-08-11 | T15 | **Buy's and Trade's rows previously rendered `CardImage` only `{card.images?.small && …}`** — so a card with no art produced a SHORTER row | Fixed as part of the shared row, and it is the reason the doc makes it a named test: rows that change height as art loads make the list jog under the cursor mid-click, which on a picker means selecting the wrong card. The placeholder is now always rendered, at the same size |
 | 2026-08-10 | T0 | **The doc's file paths were wrong in two places**, corrected as executed: the backend tests are `backend/tests/routers/admin/test_purchases.py`, and the frontend run command must be the `npm test --workspace=frontend` form, not `npx vitest` | `npx vitest` fails with "Vitest failed to find the runner" — already noted in the baseline section of this file, but the task doc contradicted it. Later task docs copy this command; check it before trusting it |
 
 *(rows below are PLANNING decisions, recorded before execution because a later task would
@@ -162,6 +169,31 @@ feature commit, so this is a fresh run, not the row above carried forward:
 
 Backend and MCP were not re-run: T1 is frontend-only and touched no Python or MCP
 file. Do not carry these numbers into the next task's sign-off.
+
+**Re-measured after T15** — a fresh run, not a row above carried forward:
+
+| Suite | Count | Time | State |
+|---|---|---|---|
+| Backend | **1519 passed / 0 failed** | 2m27s | green — 1515 + 4 new T15 tests |
+| Frontend | **670 passed / 0 failed** (81 files) | ~32s | green — 644 + 26 new T15 tests |
+| Narrow T15 selection (9 files) | 107 passed / 0 failed | ~12s | green |
+| `ruff check backend/src` | — | ~3s | clean |
+| `npm run lint --workspace=frontend` | — | ~5s | clean (the one pre-existing `<img>` warning in `CardDetailModal`) |
+| `npm run build --workspace=frontend` | — | ~40s | exit 0 — **and it caught a real type error vitest could not**, see below |
+
+MCP was not re-run: T15 touched no MCP file.
+
+**`next build` earned its place in the checklist.** With all 107 focused tests green,
+the build failed on `PickerCard.images` being `{…} | null` where
+`lib/trade-incoming-form.ts` declares `{ small?: string | null } | undefined` — a
+five-call-site signature change is exactly the shape vitest does not typecheck. Fixed
+by narrowing `images` to an optional object with nullable members. **Run the build.**
+
+**Not verified here, and it needs the owner:** the task doc's manual check — searching
+`Charizard`/`Pikachu` in all five pickers with real cards in hand, confirming a
+Japanese card on the `missing_english_name` queue is identifiable by its art, and
+checking 100%/150% zoom. That needs live catalog data and a human holding a card;
+tests can assert classes, not readability.
 
 **~~The frontend failures are `ChatPanel.test.tsx` and are NOT yours… do not chase it.~~
 FIXED 2026-08-11 — and that instruction was wrong.** It was not "flakiness", it was two
