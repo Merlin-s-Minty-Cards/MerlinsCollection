@@ -4,10 +4,11 @@ import AdminCosignersPage from '../page'
 
 const getMock = vi.fn()
 const postMock = vi.fn()
+const patchMock = vi.fn()
 const delMock = vi.fn()
 
 const mockApi = {
-  get: getMock, post: postMock, put: vi.fn(), patch: vi.fn(), del: delMock,
+  get: getMock, post: postMock, put: vi.fn(), patch: patchMock, del: delMock,
   isAuthenticated: true, isLoading: false,
 }
 
@@ -22,7 +23,7 @@ const cosigner = {
   email: 'alice@example.com',
   phone: null,
   payout_percent: '60',
-  active: true,
+  archived: false,
   notes: null,
 }
 
@@ -221,5 +222,103 @@ describe('AdminCosignersPage link minimum price', () => {
       `/cosigners/${cosigner.consignor_id}/link`,
       expect.anything(),
     )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// RFC 0010 T2 — archived, not "SOLD"; hidden by default; restorable
+//
+// The owner's report: deleting the duplicate Harry "set the new 85% one to
+// 'Sold'". Rendering an archived PERSON with the inventory-status vocabulary is
+// the bug this block exists to prevent. /admin/shows is the reference
+// implementation — same toggle, same badge, same per-row archive/unarchive.
+// ---------------------------------------------------------------------------
+
+const archivedCosigner = {
+  ...cosigner,
+  consignor_id: 'cons-2',
+  name: 'Harry',
+  email: null,
+  payout_percent: '85',
+  archived: true,
+}
+
+describe('AdminCosignersPage archiving', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    patchMock.mockReset()
+    delMock.mockReset()
+    getMock.mockImplementation((path: string, params?: Record<string, unknown>) => {
+      if (path === '/cosigners') {
+        return Promise.resolve(
+          params?.include_archived ? [cosigner, archivedCosigner] : [cosigner],
+        )
+      }
+      return Promise.resolve({})
+    })
+  })
+
+  const toggleArchived = () =>
+    fireEvent.click(screen.getByLabelText(/show archived/i))
+
+  it('hides archived cosigners until "Show archived" is on', async () => {
+    render(<AdminCosignersPage />)
+    await screen.findByText('Alice')
+    expect(screen.queryByText('Harry')).not.toBeInTheDocument()
+
+    toggleArchived()
+
+    expect(await screen.findByText('Harry')).toBeInTheDocument()
+    expect(getMock).toHaveBeenCalledWith('/cosigners', { include_archived: true })
+  })
+
+  it('marks an archived cosigner "Archived", never "Sold"', async () => {
+    render(<AdminCosignersPage />)
+    await screen.findByText('Alice')
+    toggleArchived()
+    await screen.findByText('Harry')
+
+    expect(screen.getByText(/^archived$/i)).toBeInTheDocument()
+    expect(screen.queryByText(/^sold$/i)).not.toBeInTheDocument()
+  })
+
+  it('offers Unarchive on an archived row and Archive on a live one', async () => {
+    postMock.mockResolvedValueOnce({ ...archivedCosigner, archived: false })
+    render(<AdminCosignersPage />)
+    await screen.findByText('Alice')
+    toggleArchived()
+    await screen.findByText('Harry')
+
+    expect(screen.queryByLabelText('Archive Harry')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('Unarchive Harry'))
+
+    await waitFor(() =>
+      expect(postMock).toHaveBeenCalledWith('/cosigners/cons-2/unarchive'),
+    )
+    expect(screen.getByLabelText('Archive Alice')).toBeInTheDocument()
+  })
+
+  it('surfaces the duplicate-name detail from a 409 instead of a generic message', async () => {
+    const { AdminApiError } = await import('@/lib/admin-api')
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {})
+    postMock.mockRejectedValueOnce(
+      new AdminApiError(409, 'A cosigner named "Harry" already exists.'),
+    )
+    render(<AdminCosignersPage />)
+    await screen.findByText('Alice')
+
+    fireEvent.click(screen.getByRole('button', { name: /new cosigner/i }))
+    fireEvent.change(screen.getByPlaceholderText(/cosigner name/i), {
+      target: { value: 'Harry' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^create$/i }))
+
+    await waitFor(() =>
+      expect(alertSpy).toHaveBeenCalledWith(
+        expect.stringContaining('A cosigner named "Harry" already exists.'),
+      ),
+    )
+    alertSpy.mockRestore()
   })
 })

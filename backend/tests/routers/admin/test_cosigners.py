@@ -1,12 +1,25 @@
 """Tests for the admin cosigners router (``/admin/cosigners/...``).
 
 A2: Cosigner Management — CRUD + asset linking + analytics.
+
+RFC 0010 T2 adds three groups below, all driven by one owner report: *"editing
+one of the consignors in this case harry creates a duplicate harry with whatever
+you edited as different … Also I cant delete the extra name from this menu and
+when i tried to it set the new 85% one to 'Sold'"*.
+
+``TestCosignerStorageIsUpsert`` pins the STORAGE shape, the same way
+``test_shows.py`` does for shows — ``put_consignor`` writes
+``SK=CONSIGNOR#{id}``, suffixed with the import generation while an import is
+running. That suffix survives ``finalize_import``, and an admin edit runs with no
+generation, so "write the consignor again" is only an upsert when the generation
+has not moved. The one-time import only ever created, so it never hit this;
+``PATCH`` does, on the most ordinary edit there is.
 """
 
 from datetime import date
 from decimal import Decimal
 
-
+from merlins_collection.models.business import Consignor
 from merlins_collection.models.inventory import (
     Condition,
     ConsignmentTerms,
@@ -43,6 +56,26 @@ def _auth(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _create(client, token, **overrides) -> dict:
+    """POST a cosigner and return the created body (asserting it worked)."""
+    body = {"name": "Alice"}
+    body.update(overrides)
+    resp = client.post("/admin/cosigners", json=body, headers=_auth(token))
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+def _listing(client, token, *, include_archived=None) -> list[dict]:
+    params = {} if include_archived is None else {"include_archived": include_archived}
+    resp = client.get("/admin/cosigners", params=params, headers=_auth(token))
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def _rows_for(repo, consignor_id: str) -> list[Consignor]:
+    return [c for c in repo.list_consignors() if c.consignor_id == consignor_id]
+
+
 # ===========================================================================
 # CRUD
 # ===========================================================================
@@ -62,7 +95,9 @@ class TestCosignerCreate:
         assert data["name"] == "Alice"
         assert data["email"] == "alice@example.com"
         assert data["payout_percent"] == "60"
-        assert data["active"] is True
+        # Rewritten for RFC 0010 T2: was ``data["active"] is True``. Same fact,
+        # under the name CLAUDE.md's archiving contract already established.
+        assert data["archived"] is False
         assert "consignor_id" in data
 
     def test_create_minimal(self, admin_client):
@@ -136,8 +171,15 @@ class TestCosignerUpdate:
 
 
 class TestCosignerDelete:
-    def test_delete_deactivates(self, admin_client):
-        """DELETE marks cosigner as inactive rather than hard deleting."""
+    def test_delete_archives(self, admin_client):
+        """DELETE archives the cosigner rather than hard deleting.
+
+        Rewritten for RFC 0010 T2: this asserted ``active is False``, and
+        ``active`` no longer exists as a writable field — a second boolean
+        meaning what ``archived`` already means is how the next reader
+        introduces a bug. The behaviour it guards (DELETE never destroys) is
+        unchanged and is asserted harder in ``TestArchiveCosigner``.
+        """
         client, repo, token = admin_client
         create = client.post("/admin/cosigners", json={"name": "Alice"}, headers=_auth(token))
         cid = create.json()["consignor_id"]
@@ -145,9 +187,234 @@ class TestCosignerDelete:
         resp = client.delete(f"/admin/cosigners/{cid}", headers=_auth(token))
         assert resp.status_code == 200
 
-        # Check it's now inactive
         get_resp = client.get(f"/admin/cosigners/{cid}", headers=_auth(token))
-        assert get_resp.json()["active"] is False
+        assert get_resp.json()["archived"] is True
+
+
+# ===========================================================================
+# Storage shape — editing must not fork the consignor into two rows
+# ===========================================================================
+
+class TestCosignerStorageIsUpsert:
+    """The owner's bug. ``put_consignor`` generation-scopes its SK, so a
+    consignor the spreadsheet import wrote lives at ``CONSIGNOR#{id}#{gen}``
+    while an admin edit — which runs with no generation — writes
+    ``CONSIGNOR#{id}``. A different sort key in the same partition: the row is
+    not updated, a second one appears.
+
+    ``put_show`` documents and fixes this exact pattern (RFC 0008 T7). The
+    consignor id is NOT the fork axis — ``import_consignments`` assigns a
+    deterministic id, so re-importing Harry re-uses Harry's id. Only the
+    generation moves.
+    """
+
+    def test_editing_an_imported_cosigner_does_not_duplicate_it(self, admin_client):
+        client, repo, token = admin_client
+
+        repo.set_import_generation("gen-1")
+        repo.put_consignor(Consignor(consignor_id="harry-1", name="Harry",
+                                     payout_percent=Decimal("70")))
+        repo.set_import_generation(None)
+
+        resp = client.patch("/admin/cosigners/harry-1",
+                            json={"payout_percent": "85"}, headers=_auth(token))
+        assert resp.status_code == 200, resp.text
+
+        rows = _rows_for(repo, "harry-1")
+        assert len(rows) == 1, f"editing an imported cosigner left {len(rows)} rows"
+
+    def test_the_surviving_row_carries_the_edited_values(self, admin_client):
+        client, repo, token = admin_client
+
+        repo.set_import_generation("gen-1")
+        repo.put_consignor(Consignor(consignor_id="harry-1", name="Harry",
+                                     payout_percent=Decimal("70")))
+        repo.set_import_generation(None)
+
+        client.patch("/admin/cosigners/harry-1",
+                     json={"payout_percent": "85", "name": "Harry Potter"},
+                     headers=_auth(token))
+
+        rows = _rows_for(repo, "harry-1")
+        assert len(rows) == 1
+        assert rows[0].payout_percent == Decimal("85")
+        assert rows[0].name == "Harry Potter"
+
+    def test_import_generations_still_coexist(self, admin_client):
+        """The sweep must NOT reach across generations: load-then-swap relies on
+        the prior generation's copy surviving until ``finalize_import`` decides
+        commit or rollback (dynamodb.py BLOCKING-1b)."""
+        _client, repo, _token = admin_client
+
+        repo.set_import_generation("gen-1")
+        repo.put_consignor(Consignor(consignor_id="dual-1", name="Gen One"))
+        repo.set_import_generation("gen-2")
+        repo.put_consignor(Consignor(consignor_id="dual-1", name="Gen Two"))
+        repo.set_import_generation(None)
+
+        assert len(_rows_for(repo, "dual-1")) == 2, \
+            "the prior generation's copy must survive the load phase"
+
+    def test_the_list_shows_one_entry_per_cosigner_after_an_edit(self, admin_client):
+        """The symptom the owner actually saw: two Harrys in the menu."""
+        client, repo, token = admin_client
+
+        repo.set_import_generation("gen-1")
+        repo.put_consignor(Consignor(consignor_id="harry-1", name="Harry"))
+        repo.set_import_generation(None)
+
+        client.patch("/admin/cosigners/harry-1",
+                     json={"payout_percent": "85"}, headers=_auth(token))
+
+        listing = _listing(client, token)
+        assert [c["consignor_id"] for c in listing].count("harry-1") == 1
+
+
+# ===========================================================================
+# Duplicate-name guard (409) — the owner asked for this explicitly
+# ===========================================================================
+
+class TestCosignerNameGuard:
+    def test_creating_a_cosigner_with_an_existing_name_is_rejected(self, admin_client):
+        client, _repo, token = admin_client
+        _create(client, token, name="Harry")
+
+        resp = client.post("/admin/cosigners", json={"name": "Harry"},
+                           headers=_auth(token))
+        assert resp.status_code == 409, resp.text
+        assert "Harry" in resp.json()["detail"]
+
+    def test_the_match_ignores_case_and_surrounding_whitespace(self, admin_client):
+        client, _repo, token = admin_client
+        _create(client, token, name="Harry")
+
+        resp = client.post("/admin/cosigners", json={"name": "  harry "},
+                           headers=_auth(token))
+        assert resp.status_code == 409, resp.text
+
+    def test_renaming_onto_another_cosigner_is_rejected(self, admin_client):
+        client, _repo, token = admin_client
+        _create(client, token, name="Harry")
+        bob = _create(client, token, name="Bob")
+
+        resp = client.patch(f"/admin/cosigners/{bob['consignor_id']}",
+                            json={"name": "Harry"}, headers=_auth(token))
+        assert resp.status_code == 409, resp.text
+
+    def test_a_patch_that_does_not_move_the_name_is_allowed(self, admin_client):
+        """Scoped to *another* consignor, so re-saving Harry as "Harry" — or a
+        PATCH that never touches the name — is not an error."""
+        client, _repo, token = admin_client
+        harry = _create(client, token, name="Harry")
+
+        untouched = client.patch(f"/admin/cosigners/{harry['consignor_id']}",
+                                 json={"payout_percent": "85"}, headers=_auth(token))
+        assert untouched.status_code == 200, untouched.text
+
+        resaved = client.patch(f"/admin/cosigners/{harry['consignor_id']}",
+                               json={"name": "Harry"}, headers=_auth(token))
+        assert resaved.status_code == 200, resaved.text
+
+    def test_an_archived_cosigner_still_counts_as_a_collision(self, admin_client):
+        """Otherwise two live rows appear the moment it is unarchived."""
+        client, _repo, token = admin_client
+        harry = _create(client, token, name="Harry")
+        client.delete(f"/admin/cosigners/{harry['consignor_id']}", headers=_auth(token))
+
+        resp = client.post("/admin/cosigners", json={"name": "Harry"},
+                           headers=_auth(token))
+        assert resp.status_code == 409, resp.text
+
+
+# ===========================================================================
+# Archive / unarchive — /admin/shows is the reference implementation
+# ===========================================================================
+
+class TestArchiveCosigner:
+    """Owner decision, 2026-08-10: *"If a cosignor is deleted, then it is okay to
+    archive them, but those cosignors should be hidden by default, and their
+    value should be displayed as archived instead of sold."*
+
+    Nothing is ever destroyed, so there is no hard-delete route and — exactly as
+    for shows — no 409 in-use guard: a consignor with real consignment history
+    archives like any other, and nothing dangles because nothing is removed.
+    """
+
+    def test_archive_sets_the_flag_without_destroying_the_row(self, admin_client):
+        client, repo, token = admin_client
+        harry = _create(client, token, name="Harry")
+
+        resp = client.delete(f"/admin/cosigners/{harry['consignor_id']}",
+                             headers=_auth(token))
+
+        assert resp.status_code == 200, resp.text
+        stored = repo.get_consignor(harry["consignor_id"])
+        assert stored is not None, "archive must never delete the consignor"
+        assert stored.archived is True
+
+    def test_archived_cosigners_are_hidden_from_the_default_listing(self, admin_client):
+        client, _repo, token = admin_client
+        harry = _create(client, token, name="Harry")
+        bob = _create(client, token, name="Bob")
+        client.delete(f"/admin/cosigners/{harry['consignor_id']}", headers=_auth(token))
+
+        ids = [c["consignor_id"] for c in _listing(client, token)]
+        assert harry["consignor_id"] not in ids
+        assert bob["consignor_id"] in ids
+
+    def test_include_archived_brings_them_back(self, admin_client):
+        client, _repo, token = admin_client
+        harry = _create(client, token, name="Harry")
+        client.delete(f"/admin/cosigners/{harry['consignor_id']}", headers=_auth(token))
+
+        listing = _listing(client, token, include_archived=True)
+        entry = next(c for c in listing if c["consignor_id"] == harry["consignor_id"])
+        assert entry["archived"] is True
+
+    def test_unarchive_returns_it_to_the_default_listing(self, admin_client):
+        client, _repo, token = admin_client
+        harry = _create(client, token, name="Harry")
+        client.delete(f"/admin/cosigners/{harry['consignor_id']}", headers=_auth(token))
+
+        resp = client.post(f"/admin/cosigners/{harry['consignor_id']}/unarchive",
+                           headers=_auth(token))
+        assert resp.status_code == 200, resp.text
+
+        ids = [c["consignor_id"] for c in _listing(client, token)]
+        assert harry["consignor_id"] in ids
+
+    def test_a_legacy_row_with_active_false_reads_as_archived(self, admin_client):
+        """THE PRODUCTION-DATA GATE. The owner has already soft-deleted a Harry,
+        so at least one live row carries ``active: False`` and no ``archived``
+        attribute. It must render as archived, not as active and not as a 500."""
+        client, repo, token = admin_client
+        repo._table.put_item(Item={
+            "PK": "CONSIGNORLIST",
+            "SK": "CONSIGNOR#legacy-harry",
+            "entity": "consignor",
+            "consignor_id": "legacy-harry",
+            "name": "Harry",
+            "payout_percent": "85",
+            "active": False,
+        })
+
+        assert repo.get_consignor("legacy-harry").archived is True
+        assert "legacy-harry" not in [c["consignor_id"] for c in _listing(client, token)]
+        entry = next(c for c in _listing(client, token, include_archived=True)
+                     if c["consignor_id"] == "legacy-harry")
+        assert entry["archived"] is True
+
+    def test_archiving_a_cosigner_with_linked_inventory_succeeds(self, admin_client):
+        """No in-use guard, by design — shows deliberately have none either."""
+        client, repo, token = admin_client
+        harry = _create(client, token, name="Harry")
+        repo.put_inventory_item(_raw(item_id="item-1", consignment=ConsignmentTerms(
+            consignor_id=harry["consignor_id"], split_percent=Decimal("0.5"))))
+
+        resp = client.delete(f"/admin/cosigners/{harry['consignor_id']}",
+                             headers=_auth(token))
+        assert resp.status_code == 200, resp.text
+        assert repo.get_inventory_item("item-1").consignment is not None
 
 
 # ===========================================================================

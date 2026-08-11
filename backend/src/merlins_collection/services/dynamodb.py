@@ -1361,21 +1361,63 @@ class InventoryRepository:
 
     # ---- consignors ----
     def put_consignor(self, consignor: Consignor):
-        """Insert one consignor (generation-scoped during an import)."""
+        """Upsert one consignor (generation-scoped during an import).
+
+        Identical shape to ``put_show``, and it had the identical bug. Every
+        consignor the spreadsheet import wrote keeps its ``#<gen>`` suffix after
+        ``finalize_import`` commits, while an admin edit runs with no generation
+        set and writes an unsuffixed SK — a DIFFERENT sort key in the same
+        partition. Without the sweep below, editing an imported consignor forks
+        them into two rows: the list shows the same person twice, and a delete
+        or archive flips only one of them. The consignor id is not the fork
+        axis; ``import_consignments`` assigns a deterministic id, so only the
+        generation moves.
+
+        Ordering matters: write FIRST, then delete the superseded rows. A crash
+        in between leaves a visible duplicate that the next write cleans up,
+        rather than deleting the only copy of the consignor.
+
+        The sweep is skipped mid-import. There, coexisting generations are the
+        point — ``finalize_import``'s load-then-swap needs the prior
+        generation's copy to survive until commit/rollback is decided (see
+        ``_gen_sk``). Do not "simplify" this by dropping ``_gen_sk``: that
+        trades a visible duplicate for an unrecoverable import.
+        """
+        sk = self._gen_sk(f"CONSIGNOR#{consignor.consignor_id}")
         body = _serialize(consignor.model_dump(mode="python"))
         self._table.put_item(Item={
             "PK": "CONSIGNORLIST",
-            "SK": self._gen_sk(f"CONSIGNOR#{consignor.consignor_id}"),
+            "SK": sk,
             "entity": "consignor", **self._gen(), **body,
         })
+        if self._import_gen:
+            return
+        for row in self.list_consignor_rows():
+            if row.get("consignor_id") == consignor.consignor_id and row["SK"] != sk:
+                self._table.delete_item(Key={"PK": "CONSIGNORLIST", "SK": row["SK"]})
+
+    def list_consignor_rows(self):
+        """Raw CONSIGNORLIST rows, sort keys included.
+
+        ``list_consignors`` validates into the model, which drops PK/SK — and
+        the SK is the only thing telling a forked consignor's two copies apart.
+        Used by ``put_consignor``'s sweep and by
+        ``scripts/reconcile_consignors.py``, which cleans up the forks that
+        already exist. Nothing on a request path needs the raw shape.
+        """
+        return self._query_all(KeyConditionExpression=Key("PK").eq("CONSIGNORLIST"))
 
     def list_consignors(self):
-        items = self._query_all(KeyConditionExpression=Key("PK").eq("CONSIGNORLIST"))
-        return [Consignor.model_validate(i) for i in items]
+        return [Consignor.model_validate(i) for i in self.list_consignor_rows()]
 
     def get_consignor(self, consignor_id: str):
-        """Get a single consignor by id."""
-        items = self._query_all(KeyConditionExpression=Key("PK").eq("CONSIGNORLIST"))
+        """Get a single consignor by id.
+
+        Deliberately archive-agnostic, like ``get_show``: an archived consignor
+        is hidden from the listing, not gone, so every reader that resolves one
+        by id — assets, analytics, unarchive — must keep working.
+        """
+        items = self.list_consignor_rows()
         for item in items:
             if item.get("consignor_id") == consignor_id:
                 return Consignor.model_validate(item)

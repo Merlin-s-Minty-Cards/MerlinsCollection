@@ -7,6 +7,11 @@ const statusStyles: Record<string, string> = {
   draft: 'bg-pine-400/15 text-pine-300 border-pine-400/30',
   confirmed: 'bg-mint/15 text-mint border-mint/30',
   cancelled: 'bg-red-500/15 text-red-400 border-red-500/30',
+  // Entity lifecycle, NOT inventory status. A person or an event is `active` /
+  // `archived`; rendering one as AVAILABLE or SOLD is the bug this pair exists
+  // to retire (a deactivated consignor used to show up as "SOLD").
+  active: 'bg-mint/15 text-mint border-mint/30',
+  archived: 'bg-pine-700/40 text-pine-300 border-pine-600/30',
 }
 
 interface StatusBadgeProps {

@@ -5,7 +5,8 @@ import {
   Users,
   Plus,
   Edit3,
-  Trash2,
+  Archive,
+  ArchiveRestore,
   Link2,
   BarChart3,
   X,
@@ -33,7 +34,10 @@ interface Cosigner {
   phone?: string | null
   contact?: string | null
   payout_percent: string | number
-  active: boolean
+  // "Deleted" in this UI. Archived cosigners are hidden until "Show archived"
+  // is on, and they are badged `Archived` — never `SOLD`, which is inventory
+  // vocabulary and is what the owner saw a deactivated person rendered as.
+  archived: boolean
   notes?: string | null
   [key: string]: unknown
 }
@@ -67,6 +71,7 @@ export default function AdminCosignersPage() {
   const [cosigners, setCosigners] = useState<Cosigner[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
+  const [includeArchived, setIncludeArchived] = useState(false)
 
   // Form mode
   const [formOpen, setFormOpen] = useState(false)
@@ -93,8 +98,10 @@ export default function AdminCosignersPage() {
   const [linkMinPrice, setLinkMinPrice] = useState('')
   const [linking, setLinking] = useState(false)
 
-  // Delete confirmation
-  const [deleteTarget, setDeleteTarget] = useState<Cosigner | null>(null)
+  // Archive is the destructive-looking action, so it is gated. Unarchive is
+  // not: restoring something can be undone by archiving again.
+  const [archiveTarget, setArchiveTarget] = useState<Cosigner | null>(null)
+  const [archiving, setArchiving] = useState(false)
 
   // Unlink confirmation
   const [unlinkTarget, setUnlinkTarget] = useState<CosignerAsset | null>(null)
@@ -104,22 +111,22 @@ export default function AdminCosignersPage() {
   // Data fetching
   // ---------------------------------------------------------------------------
 
-  const fetchCosigners = useCallback(async () => {
-    if (!api.isAuthenticated) return
+  // Returns a canceller rather than taking one: flipping "Show archived" twice
+  // in quick succession puts two requests in flight for two DIFFERENT lists,
+  // and without this the slower one wins and the table contradicts the toggle.
+  const fetchCosigners = useCallback(() => {
+    if (!api.isAuthenticated) return () => {}
+    let cancelled = false
     setLoading(true)
-    try {
-      const res = await api.get<Cosigner[]>('/cosigners')
-      setCosigners(Array.isArray(res) ? res : [])
-    } catch {
-      setCosigners([])
-    } finally {
-      setLoading(false)
-    }
-  }, [api])
+    api
+      .get<Cosigner[]>('/cosigners', { include_archived: includeArchived })
+      .then((res) => { if (!cancelled) setCosigners(Array.isArray(res) ? res : []) })
+      .catch(() => { if (!cancelled) setCosigners([]) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [api, includeArchived])
 
-  useEffect(() => {
-    fetchCosigners()
-  }, [fetchCosigners])
+  useEffect(() => fetchCosigners(), [fetchCosigners])
 
   const fetchDetail = useCallback(
     async (cosigner: Cosigner) => {
@@ -197,19 +204,31 @@ export default function AdminCosignersPage() {
     }
   }
 
-  const handleDelete = async () => {
-    if (!deleteTarget) return
+  const handleArchive = async () => {
+    if (!archiveTarget) return
+    setArchiving(true)
     try {
-      await api.del(`/cosigners/${deleteTarget.consignor_id}`)
-      setDeleteTarget(null)
-      if (selectedCosigner?.consignor_id === deleteTarget.consignor_id) {
+      await api.del(`/cosigners/${archiveTarget.consignor_id}`)
+      if (selectedCosigner?.consignor_id === archiveTarget.consignor_id) {
         setSelectedCosigner(null)
         setAnalytics(null)
         setAssets([])
       }
+      setArchiveTarget(null)
       fetchCosigners()
     } catch (err) {
-      alert(err instanceof AdminApiError ? err.detail : 'Failed to delete cosigner')
+      alert(err instanceof AdminApiError ? err.detail : 'Failed to archive cosigner')
+    } finally {
+      setArchiving(false)
+    }
+  }
+
+  const handleUnarchive = async (cosigner: Cosigner) => {
+    try {
+      await api.post(`/cosigners/${cosigner.consignor_id}/unarchive`)
+      fetchCosigners()
+    } catch (err) {
+      alert(err instanceof AdminApiError ? err.detail : 'Failed to unarchive cosigner')
     }
   }
 
@@ -293,7 +312,12 @@ export default function AdminCosignersPage() {
       label: 'Name',
       className: 'min-w-[140px]',
       render: (item) => (
-        <span className="text-pine-100 text-sm font-medium">{item.name}</span>
+        // Dimmed as well as badged: while "Show archived" is on, an archived
+        // row must read as archived at a glance rather than being silently
+        // mixed in with the live ones.
+        <span className={`text-sm font-medium ${item.archived ? 'text-pine-400' : 'text-pine-100'}`}>
+          {item.name}
+        </span>
       ),
     },
     {
@@ -319,11 +343,9 @@ export default function AdminCosignersPage() {
       ),
     },
     {
-      key: 'active',
+      key: 'archived',
       label: 'Status',
-      render: (item) => (
-        <StatusBadge status={item.active ? 'available' : 'sold'} />
-      ),
+      render: (item) => <StatusBadge status={item.archived ? 'archived' : 'active'} />,
     },
     {
       key: '_actions',
@@ -342,17 +364,25 @@ export default function AdminCosignersPage() {
           >
             <Edit3 size={14} />
           </button>
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation()
-              setDeleteTarget(item)
-            }}
-            className="p-1 rounded text-pine-400 hover:text-red-400 transition-colors"
-            aria-label={`Delete ${item.name}`}
-          >
-            <Trash2 size={14} />
-          </button>
+          {item.archived ? (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); handleUnarchive(item) }}
+              className="p-1 rounded text-pine-400 hover:text-mint transition-colors"
+              aria-label={`Unarchive ${item.name}`}
+            >
+              <ArchiveRestore size={14} />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); setArchiveTarget(item) }}
+              className="p-1 rounded text-pine-400 hover:text-red-400 transition-colors"
+              aria-label={`Archive ${item.name}`}
+            >
+              <Archive size={14} />
+            </button>
+          )}
         </div>
       ),
     },
@@ -427,6 +457,19 @@ export default function AdminCosignersPage() {
               placeholder="Search cosigners…"
               className="flex-1"
             />
+            <label
+              htmlFor="include-archived"
+              className="inline-flex items-center gap-2 text-xs text-pine-300 cursor-pointer whitespace-nowrap"
+            >
+              <input
+                id="include-archived"
+                type="checkbox"
+                checked={includeArchived}
+                onChange={(e) => setIncludeArchived(e.target.checked)}
+                className="accent-mint"
+              />
+              Show archived
+            </label>
             <button
               type="button"
               onClick={openCreateForm}
@@ -464,7 +507,7 @@ export default function AdminCosignersPage() {
                       {selectedCosigner.name}
                     </h2>
                   </div>
-                  <StatusBadge status={selectedCosigner.active ? 'available' : 'sold'} />
+                  <StatusBadge status={selectedCosigner.archived ? 'archived' : 'active'} />
                 </div>
                 <div className="space-y-1.5 text-xs text-pine-300">
                   {selectedCosigner.email && <p>Email: {selectedCosigner.email}</p>}
@@ -725,14 +768,17 @@ export default function AdminCosignersPage() {
         </div>
       )}
 
-      {/* Delete confirmation */}
+      {/* Archive confirmation. The copy says ARCHIVE and says what is kept —
+          nothing about a consignor is ever destroyed, so a dialog that implies
+          deletion is describing something the backend will not do. */}
       <ConfirmDialog
-        open={!!deleteTarget}
-        title="Deactivate Cosigner"
-        description={`This will deactivate "${deleteTarget?.name}". Their linked items will remain in inventory.`}
-        confirmLabel="Deactivate"
-        onConfirm={handleDelete}
-        onCancel={() => setDeleteTarget(null)}
+        open={!!archiveTarget}
+        title="Archive Cosigner"
+        description={`This will archive "${archiveTarget?.name}" and hide them from the list. Nothing is deleted: their consignment history and linked items are preserved, and you can restore them with "Show archived".`}
+        confirmLabel="Archive"
+        loading={archiving}
+        onConfirm={handleArchive}
+        onCancel={() => setArchiveTarget(null)}
       />
 
       {/* Unlink confirmation — every other destructive action touched or

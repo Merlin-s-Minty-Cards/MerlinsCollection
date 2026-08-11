@@ -6,17 +6,24 @@
 gitignored (`.gitignore:60`), so it is local-only and your edits to it will never appear in
 `git status` or reach anyone else. Record all RFC 0010 status **in this file**.
 
-**Last updated:** 2026-08-11 (T17 DONE — the weekly catalog price cycle now fills those prices in)
+**Last updated:** 2026-08-11 (T2 DONE — editing a consignor no longer forks the row)
 **Branch:** `Polishing-For-Deployment`
 **RFC:** [`docs/rfcs/0010-admin-round8-ledger-corrections-and-slab-manual-only.md`](../../rfcs/0010-admin-round8-ledger-corrections-and-slab-manual-only.md)
 **Task index:** [`README.md`](README.md)
 **Source of the requests:** the owner's `The plan.pdf` (12 items) plus two review comments
 on 2026-08-10 — the money-input report and the PSA/scanner reversal.
 
-## ✅ T0, T1, T15 AND T17 ARE DONE — start at T2
+## ✅ T0, T1, T2, T15 AND T17 ARE DONE — start at T3
 
 T15 gave all five catalog pickers one shared row carrying name, image AND price;
-T17 built the job that fills those prices in. **Start at T2.**
+T17 built the job that fills those prices in; T2 stopped an admin edit forking a
+consignor into two rows. **Start at T3.**
+
+**T2 shipped code plus a script the owner still has to run.** The fork can no
+longer happen, but the two Harrys already in the live table are still there until
+someone runs `scripts/reconcile_consignors.py`. It is the second row of "Blocked /
+needs the owner" below. **Nothing is blocked on it** — the page is correct and
+usable either way; it just shows the duplicate until the script runs.
 
 **T17 shipped code, not data.** The nightly cycle reaches full catalog coverage on
 its own in ~6 nights, but it has not run yet — so most of the 31,603 rows still
@@ -38,7 +45,7 @@ naming the row. **Start at T1.**
 |---|---|---|---|---|
 | T0 | Money input + partial write | **DONE** | `0702346` | Merge blocker cleared. `frontend/lib/money.ts` exports `parseMoney`, `formatMoneyInput` **and `formatMoney`** (grouped display — the doc listed only the first two). `StagedSlab.buy_price` is now a **number**. `confirm_buy_session` is split into a build pass and a write pass; reuse `_build_purchase`, do not re-inline it |
 | T1 | `MoneyInput` rollout | **DONE** | `571b3bc` | Shipped on **eight** surfaces — the doc's seven plus **Trade**, which its own "Why" names. `MoneyInput` gained `placeholder` / `onBlur` / `onKeyDown`; `InlineEditCell` gained `type="money"` (option a). Wire format is **unchanged** — where a string went, `String(parsed)` still goes. `MONEY_PARSE_MESSAGE` now lives in `lib/money.ts` so the three surfaces that show it cannot drift. **Percent fields deliberately untouched.** Out of scope and filed: Inventory / Shows / History-filter money inputs, and `sales.py`/`trades.py`'s single-pass write |
-| T2 | Consignor row fork | **NOT STARTED** | — | Same defect `put_show` was fixed for in RFC 0008 T7; needs a one-time reconcile for rows already forked in production |
+| T2 | Consignor row fork | **DONE** | `<pending>` | `put_consignor` sweeps like `put_show`. `Consignor.active` is **gone** — replaced by `archived`, with a before-validator migrating a stored `active: False`. New repo method **`list_consignor_rows()`** (raw rows with SKs) backs both the sweep and the script; `list_consignors` now delegates to it. Router gained `_save_cosigner`/`_require_cosigner` (mirroring `_save_show`), a 409 name guard, `?include_archived=`, and `POST /admin/cosigners/{id}/unarchive`; **`DELETE` is the archive** and now returns the updated consignor, not `{"status": "deactivated"}`. `StatusBadge` gained **`active`/`archived`** styles — use those for any person or event. `scripts/reconcile_consignors.py` keeps the **unsuffixed** row, not the highest generation (see Decisions) |
 | T3 | Triage reasons + filter | **NOT STARTED** | — | The query is NOT broken; the 266 rows are import flags. **No sticker reason** (owner decision) |
 | T4 | Triage search | **NOT STARTED** | — | Frontend only; `name` already works on the endpoint |
 | T5 | Detail modal live updates | **NOT STARTED** | — | Changes `onUpdated`'s signature across six mounting pages; parameter is optional so nothing breaks |
@@ -78,6 +85,7 @@ that is the mistake that made RFC 0009's T-FINAL sign-off stale.
 | Item | Needed from owner | Blocks |
 |---|---|---|
 | **Run `scripts/reprice_catalog.py` overnight once — T17 has LANDED, this is ready now** | It prices all ~31,300 unheld catalog rows in one ~2 h 18 min run, so the weekly cycle starts from full coverage instead of taking ~6 nights to reach it. **Prove it on a slice first:** `--limit 200` dry run, then `--limit 200 --execute --confirm-table merlins-cards`, then the uncapped `--execute --confirm-table merlins-cards`. The dry run prints the candidate count, chunk plan and ETA before anything is written. It is chunked (lock taken/released per chunk) and resumable — Ctrl-C and re-run is safe, and there is no checkpoint file to clean up. **It needs `dynamodb:Scan`** | nothing; the nightly cycle gets there on its own, this just skips the wait |
+| **Run `scripts/reconcile_consignors.py` once — T2 has LANDED, this is ready now** | The sweep stops NEW forks; it does not merge the duplicate Harry already in the live table, because nothing rewrites a consignor until someone edits it. **Prove it with the dry run first:** `../.venv/Scripts/python.exe scripts/reconcile_consignors.py` prints every row it would keep and every row it would remove, and writes nothing. Then `--execute --confirm-table merlins-cards`. It keeps the row carrying the admin's edits (the 85% Harry). **Do not run it during an import** — coexisting generations are load-then-swap's whole point during the load phase. Report the count back into this file | nothing; the page is correct either way, it just still lists the duplicate |
 | **Work the `blank_condition` queue — this is data remediation, not code** | Every card the import found with no condition was stored as **NM**, the most expensive tier, and customer prices scale down from it. Until someone checks each card, those are listed **above** their value (LP → 1.22×, MP → 1.72×). T3 makes them filterable and fixable in place; **only the owner can actually fix them.** Surface the count during T3 so the size of the job is known | nothing in code; real money on the live site |
 | ~~Should the import stop setting `needs_review` for `blank_condition`?~~ | **CLOSED 2026-08-10.** The importer will never run again, so its flagging is historical — do not edit it. And the reason turns out to be a money defect, so it is emphatically worth reviewing | — |
 | **Does voiding a PURCHASE need to work in the first cut?** | Voiding a sale returns an item to stock. Voiding a purchase should arguably *remove* an item that may since have been sold or traded. Sales-only, with purchases returning a clear 400, is the honest small version | T11 scope |
@@ -110,6 +118,13 @@ that is the mistake that made RFC 0009's T-FINAL sign-off stale.
 | 2026-08-11 | T17 | **The doc's four test paths are ALL wrong — the third such case in this RFC.** Real paths: `backend/tests/services/test_catalog_sync.py`, `backend/tests/scripts/test_daily_sync.py`, `backend/tests/routers/admin/test_market.py`, `backend/tests/scripts/test_reprice_catalog.py` | Following T0's and T15's rows: **check the path before trusting a task doc's test command.** The doc's own narrow-selection command would have collected nothing and reported success |
 | 2026-08-11 | T17 | **Production never runs `daily_sync.py`.** The EventBridge schedule runs `python -m scripts.scheduled_sync --job prices`, which returns 0 unconditionally — so the exit codes T17 added (and the ones the depth pass already had) signal to nobody | Found while checking where the new step actually executes. The **feature** is fine: `scheduled_sync` calls `run_daily_sync`, so the cycle runs nightly and its counts land in the CloudWatch JSON summary. Only the exit code is lost. Filed rather than fixed — changing what a scheduled ECS task returns is an ops-visible change and the owner's call. **First row of follow-ups.md's execution section** |
 | 2026-08-11 | T15 | **Buy's and Trade's rows previously rendered `CardImage` only `{card.images?.small && …}`** — so a card with no art produced a SHORTER row | Fixed as part of the shared row, and it is the reason the doc makes it a named test: rows that change height as art loads make the list jog under the cursor mid-click, which on a picker means selecting the wrong card. The placeholder is now always rendered, at the same size |
+| 2026-08-11 | T2 | **The reconcile script keeps the UNSUFFIXED row, which is the OPPOSITE of what the task doc's text says** (*"keeps the highest-generation row (the most recently written)"* — those are two different rows) | An admin edit runs with no import generation, so it writes `CONSIGNOR#<id>` with no suffix. That row is therefore the most recently written of the pair **and** the one carrying the values the admin typed — the owner's 85% Harry. Keeping the highest `#<gen>` suffix would have silently discarded exactly the edit that made the fork visible, i.e. the script would have "fixed" the bug by throwing away the user's data. Highest-generation is kept only as the fallback for a consignor no admin ever edited, where every row is suffixed. Both branches are named tests |
+| 2026-08-11 | T2 | **The script removes rows by re-writing the winner through `put_consignor`**, rather than issuing its own deletes | The sweep T2 just installed already encodes "which rows are superseded". A second copy of that rule inside a script that runs once, unattended, against live data is exactly the divergence this repo keeps paying for — and this way the cleanup exercises the fix rather than paralleling it |
+| 2026-08-11 | T2 | **Two pre-existing tests were rewritten, deliberately** — `test_create_cosigner`'s `data["active"] is True` and `test_delete_deactivates`'s `active is False` (now `test_delete_archives`) | The GREEN gate says the pre-existing suites stay green, and these two could not: the task doc's own "do not leave `active` and `archived` both live as writable fields" removes the field they assert on. Both now assert `archived`; the behaviour they guard (create defaults to live, DELETE never destroys) is unchanged and is asserted harder in the new `TestArchiveCosigner`. Same shape as T1's `min="0"` rewrite |
+| 2026-08-11 | T2 | **A new repo method, `list_consignor_rows()`** — raw rows with sort keys — and `list_consignors` now delegates to it | The SK is the only thing that tells a forked consignor's two copies apart, and the `Consignor` model drops it. Both the sweep and the script need it; the alternative was a one-time script reaching into `repo._table` and `repo._query_all`, i.e. two callers depending on privates to do the most delicate write in the round |
+| 2026-08-11 | T2 | **`StatusBadge` gained `active` and `archived` styles** rather than the page growing a private badge | CLAUDE.md's rule is *"an `Archived` badge never reuses inventory-status vocabulary"*, and shows already hand-rolls its own badge span — a second hand-rolled copy here would make three vocabularies for one concept. Two lines in the shared map means the next archivable entity gets it free. `active` is mint (as `available` was) so the row does not visually change for a live consignor |
+| 2026-08-11 | T2 | **One of the four frontend RED tests passed before any change** — the 409 duplicate-name message. Kept as a regression guard, not dressed up as new work | The page's `catch` already renders `err.detail`. The reason the owner saw a useless message is that the **backend never sent a 409**; nothing on the frontend was broken. Same call as T15's 4th backend test. Three backend tests are in the same position and are labelled in the file: the mid-import coexistence test, the "PATCH that does not move the name" test, and the "archiving with linked inventory succeeds" test — each pins a deliberate *absence* (no sweep across generations, no over-broad guard, no in-use guard) |
+| 2026-08-11 | T2 | **The task doc's test paths were wrong for the FOURTH time in this RFC**, and its frontend command was the `npx vitest` form this file records as broken. Both corrected **in the task doc itself** this time, not just here | Following T0's, T15's and T17's rows. Correcting only the progress file has demonstrably not worked — three later docs copied the bad command. Real paths: `backend/tests/routers/admin/test_cosigners.py`, `backend/tests/services/test_dynamodb.py`, `backend/tests/scripts/test_reconcile_consignors.py` |
 | 2026-08-10 | T0 | **The doc's file paths were wrong in two places**, corrected as executed: the backend tests are `backend/tests/routers/admin/test_purchases.py`, and the frontend run command must be the `npm test --workspace=frontend` form, not `npx vitest` | `npx vitest` fails with "Vitest failed to find the runner" — already noted in the baseline section of this file, but the task doc contradicted it. Later task docs copy this command; check it before trusting it |
 
 *(rows below are PLANNING decisions, recorded before execution because a later task would
@@ -211,6 +226,34 @@ by narrowing `images` to an optional object with nullable members. **Run the bui
 | `npm run build --workspace=frontend` | — | ~40s | exit 0 |
 
 MCP was not re-run: T17 touched no MCP file.
+
+**Re-measured after T2** — a fresh run, not a row above carried forward:
+
+| Suite | Count | Time | State |
+|---|---|---|---|
+| Backend | **1574 passed / 0 failed** | 2m45s | green — 1554 + 20 new T2 tests |
+| Frontend | **677 passed / 0 failed** (81 files) | ~30s | green — 673 + 4 new T2 tests |
+| Narrow T2 selection (3 backend files) | 118 passed / 0 failed | ~13s | green |
+| Narrow T2 selection (1 frontend file) | 13 passed / 0 failed | ~1.4s | green |
+| `ruff check backend/src` | — | ~3s | clean |
+| `npm run lint --workspace=frontend` | — | ~5s | clean (the one pre-existing `<img>` warning in `CardDetailModal`) |
+| `npm run build --workspace=frontend` | — | ~40s | exit 0 |
+
+MCP was not re-run: T2 touched no MCP file, and nothing in `mcp-server/` reads a
+consignor.
+
+**`ruff check backend/tests` is NOT clean, and it was not clean before T2 either.**
+`test_cosigners.py` carries **6 pre-existing** violations (one `I001`, five `E501`)
+— verified by stashing the change and running ruff against the file at `HEAD`,
+which reports the same six. The two files T2 added are themselves clean. Same
+call as T17 made for `backend/scripts`: **do not "fix" the pre-existing ones
+inside a feature commit** — it is a whole-directory sweep or nothing.
+
+**Not verified here, and it needs the owner:** T2's manual check — editing the
+real imported Harry and confirming ONE row with the edited values, seeing the
+409 text on a second "Harry", archiving/unarchiving through the toggle, and
+confirming the already-soft-deleted Harry renders as **Archived** rather than
+"SOLD". That needs the live table; tests can assert the contract, not the data.
 
 **`ruff check backend/scripts` is NOT clean, and it was not clean before T17 either.**
 `daily_sync.py` carries a pre-existing `I001` (import sort) and a `DTZ011`, verified by

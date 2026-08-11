@@ -9,7 +9,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from merlins_collection.dependencies import get_repo
 from merlins_collection.models.business import Consignor
@@ -20,6 +20,68 @@ from merlins_collection.models.inventory import (
 from merlins_collection.services.dynamodb import InventoryRepository
 
 router = APIRouter(prefix="/cosigners", tags=["admin-cosigners"])
+
+# Fields a PATCH may move. ``archived`` is deliberately absent: the two archive
+# transitions below are its only writers, so there is one path per transition
+# rather than two that can disagree. A legacy ``active`` in the body is ignored
+# rather than 422'd — see ``Consignor._archived_from_legacy_active``.
+_PATCHABLE = ("name", "contact", "email", "phone", "payout_percent", "notes")
+
+
+# ---------------------------------------------------------------------------
+# Duplicate-name guard
+# ---------------------------------------------------------------------------
+
+def _normalized(name: str) -> str:
+    """Fold a name for comparison: case-insensitive, whitespace-insensitive."""
+    return " ".join(name.split()).casefold()
+
+
+def _reject_duplicate_name(
+    repo: InventoryRepository, name: str, *, exclude_id: str | None = None
+) -> None:
+    """409 if ``name`` collides with ANOTHER consignor's.
+
+    Scoped to another so re-saving Harry as "Harry", or a PATCH that never
+    touches the name, is not an error.
+
+    An ARCHIVED consignor still collides. It is hidden, not gone, and letting a
+    live duplicate be created beside it means two rows with the same name appear
+    the moment it is unarchived — so the detail says the row is archived, or an
+    admin gets a 409 pointing at somebody they cannot see.
+    """
+    target = _normalized(name)
+    for other in repo.list_consignors():
+        if other.consignor_id == exclude_id or _normalized(other.name) != target:
+            continue
+        where = " (archived — turn on View archived to see them)" if other.archived else ""
+        raise HTTPException(
+            status_code=409,
+            detail=f'A cosigner named "{other.name}" already exists{where}.',
+        )
+
+
+def _save_cosigner(
+    repo: InventoryRepository, existing: Consignor, changes: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge ``changes`` onto ``existing``, re-validate, store, and serialize.
+
+    Shared by the update and both archive transitions so all three go through
+    one validation path and one write.
+    """
+    merged = existing.model_dump(mode="python")
+    merged.update(changes)
+    merged["consignor_id"] = existing.consignor_id  # never reassignable
+    updated = Consignor.model_validate(merged)
+    repo.put_consignor(updated)
+    return updated.model_dump(mode="json")
+
+
+def _require_cosigner(repo: InventoryRepository, consignor_id: str) -> Consignor:
+    consignor = repo.get_consignor(consignor_id)
+    if consignor is None:
+        raise HTTPException(status_code=404, detail="Cosigner not found")
+    return consignor
 
 
 # ---------------------------------------------------------------------------
@@ -32,13 +94,14 @@ def create_cosigner(
     repo: InventoryRepository = Depends(get_repo),
 ) -> dict[str, Any]:
     """Create a new cosigner profile."""
+    name = str(body["name"]).strip()
+    _reject_duplicate_name(repo, name)
     consignor = Consignor(
-        name=body["name"],
+        name=name,
         contact=body.get("contact"),
         email=body.get("email"),
         phone=body.get("phone"),
         payout_percent=Decimal(str(body.get("payout_percent", "50"))),
-        active=body.get("active", True),
         notes=body.get("notes"),
     )
     repo.put_consignor(consignor)
@@ -47,10 +110,17 @@ def create_cosigner(
 
 @router.get("")
 def list_cosigners(
+    include_archived: bool = Query(False),
     repo: InventoryRepository = Depends(get_repo),
 ) -> list[dict[str, Any]]:
-    """List all cosigner profiles."""
+    """Every cosigner. Archived ones are excluded unless asked for.
+
+    Only THIS listing hides them. ``repo.get_consignor`` stays archive-agnostic
+    so assets, analytics and unarchive keep resolving an archived consignor.
+    """
     cosigners = repo.list_consignors()
+    if not include_archived:
+        cosigners = [c for c in cosigners if not c.archived]
     return [c.model_dump(mode="json") for c in cosigners]
 
 
@@ -60,10 +130,7 @@ def get_cosigner(
     repo: InventoryRepository = Depends(get_repo),
 ) -> dict[str, Any]:
     """Get a single cosigner profile."""
-    consignor = repo.get_consignor(consignor_id)
-    if consignor is None:
-        raise HTTPException(status_code=404, detail="Cosigner not found")
-    return consignor.model_dump(mode="json")
+    return _require_cosigner(repo, consignor_id).model_dump(mode="json")
 
 
 @router.patch("/{consignor_id}")
@@ -73,39 +140,47 @@ def update_cosigner(
     repo: InventoryRepository = Depends(get_repo),
 ) -> dict[str, Any]:
     """Partial update of a cosigner profile."""
-    consignor = repo.get_consignor(consignor_id)
-    if consignor is None:
-        raise HTTPException(status_code=404, detail="Cosigner not found")
+    consignor = _require_cosigner(repo, consignor_id)
 
-    # Merge updates
-    data = consignor.model_dump(mode="python")
-    for key in ("name", "contact", "email", "phone", "payout_percent", "active", "notes"):
-        if key in body:
-            if key == "payout_percent":
-                data[key] = Decimal(str(body[key]))
-            else:
-                data[key] = body[key]
+    changes: dict[str, Any] = {}
+    for key in _PATCHABLE:
+        if key not in body:
+            continue
+        if key == "payout_percent":
+            changes[key] = Decimal(str(body[key]))
+        elif key == "name":
+            changes[key] = str(body[key]).strip()
+            _reject_duplicate_name(repo, changes[key], exclude_id=consignor_id)
+        else:
+            changes[key] = body[key]
 
-    updated = Consignor.model_validate(data)
-    repo.put_consignor(updated)
-    return updated.model_dump(mode="json")
+    return _save_cosigner(repo, consignor, changes)
 
 
 @router.delete("/{consignor_id}")
-def delete_cosigner(
+def archive_cosigner(
     consignor_id: str,
     repo: InventoryRepository = Depends(get_repo),
 ) -> dict[str, Any]:
-    """Deactivate a cosigner (soft delete — sets active=False)."""
-    consignor = repo.get_consignor(consignor_id)
-    if consignor is None:
-        raise HTTPException(status_code=404, detail="Cosigner not found")
+    """Hide a cosigner from the default listing.
 
-    data = consignor.model_dump(mode="python")
-    data["active"] = False
-    updated = Consignor.model_validate(data)
-    repo.put_consignor(updated)
-    return {"status": "deactivated", "consignor_id": consignor_id}
+    "Delete" in the admin UI, and an ARCHIVE in fact — the owner's decision, and
+    the same contract shows follow. Idempotent and non-destructive: there is
+    deliberately no 409 in-use guard, because nothing is destroyed, so a
+    consignor with real consignment history archives like any other and their
+    linked items keep pointing at a row that still exists.
+    """
+    return _save_cosigner(repo, _require_cosigner(repo, consignor_id), {"archived": True})
+
+
+@router.post("/{consignor_id}/unarchive")
+def unarchive_cosigner(
+    consignor_id: str,
+    repo: InventoryRepository = Depends(get_repo),
+) -> dict[str, Any]:
+    """Restore an archived cosigner. Archiving that cannot be undone is just a
+    slower delete, which is the thing this feature exists to avoid."""
+    return _save_cosigner(repo, _require_cosigner(repo, consignor_id), {"archived": False})
 
 
 # ---------------------------------------------------------------------------

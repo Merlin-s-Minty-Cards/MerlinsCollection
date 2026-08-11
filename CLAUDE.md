@@ -182,9 +182,11 @@ The contract, all six parts:
    wording to mirror.
 
 **An `Archived` badge never reuses inventory-status vocabulary.** Rendering an
-archived *person* or *event* as `SOLD` is the bug this rule exists to prevent
-(it shipped on `/admin/cosigners`, which showed a deactivated consignor as
-"SOLD").
+archived *person* or *event* as `SOLD` is the bug this rule exists to prevent —
+it shipped on `/admin/cosigners`, which showed a deactivated consignor as
+"SOLD", and RFC 0010 T2 fixed it. `StatusBadge` now carries two entity-lifecycle
+styles, **`active`** and **`archived`**; pass those for a person or an event and
+never `available`/`sold`.
 
 Entities on this pattern: **`Show`**, **`Consignor`** (RFC 0010 T2). Entities
 deliberately NOT on it: **`Location`**, which hard-deletes behind a 409 in-use
@@ -212,7 +214,28 @@ clickable to navigate the chain.
 
 **Cosigners** (`/admin/cosigners`) — CRUD + payout-link tool for consignors;
 card assignment is still raw item-ID entry (no picker UI, deliberately out of
-scope).
+scope). "Delete" is an **archive** on the six-part contract above, and
+`Consignor.archived` **replaced `Consignor.active`** in RFC 0010 T2 — a
+`model_validator(mode="before")` reads a legacy stored `active: False` as
+`archived: True`, because the owner had already soft-deleted one. There is no
+writable `active` field any more; an `active` key on an inbound payload is
+migrated, not rejected.
+
+**Editing a consignor used to FORK the row**, exactly as editing a show once
+did: `put_consignor` generation-scopes its SK, so an import-written consignor
+lives at `CONSIGNOR#<id>#<gen>` while an admin edit (no generation) writes
+`CONSIGNOR#<id>`. It now sweeps superseded rows after writing, on the same rules
+as `put_show` — **write first, then delete**, and **never sweep mid-import**.
+`scripts/reconcile_consignors.py` collapses the forks that already exist (dry
+run by default, `--execute --confirm-table`); it keeps the **unsuffixed** row,
+which is the admin's edit and the newest, falling back to the highest generation
+only when no admin edit exists. `put_payout` and `put_debt` share the shape and
+are **not** fixed — no UI can trigger them yet; see
+`docs/plans/rfc-0010/follow-ups.md`.
+
+Consignor names carry a **409 duplicate guard** (case- and
+whitespace-insensitive, scoped to *another* consignor, and an archived consignor
+still collides — otherwise unarchiving resurrects a duplicate).
 
 **Customer prices are CONDITION-ADJUSTED.** The catalog relays one market
 figure per finish and that figure is a **Near Mint** price. Every

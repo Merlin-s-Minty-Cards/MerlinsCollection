@@ -70,8 +70,12 @@ current-gen one, i.e. the 85% copy — and
 - **Create:** `backend/scripts/reconcile_consignors.py` — one-time fork reconcile
 - **Modify:** `frontend/app/(admin)/admin/cosigners/page.tsx` — badge vocabulary,
   "View archived" toggle, unarchive action, 409 messaging
-- **Tests:** `backend/tests/test_dynamodb.py`, `backend/tests/test_cosigners.py`,
+- **Tests:** `backend/tests/services/test_dynamodb.py`,
+  `backend/tests/routers/admin/test_cosigners.py`,
+  `backend/tests/scripts/test_reconcile_consignors.py`,
   `frontend/app/(admin)/admin/cosigners/__tests__/page.test.tsx`
+  *(paths corrected during execution — the originals were `backend/tests/test_*.py`,
+  which do not exist. Fourth wrong path in this RFC; check before trusting one.)*
 
 ## Design
 
@@ -214,9 +218,14 @@ surfaces the duplicate-name message rather than the generic `alert`.
 Run:
 
 ```bash
-./.venv/Scripts/python.exe -m pytest backend/tests/test_dynamodb.py backend/tests/test_cosigners.py -q --tb=short
-cd frontend && npx vitest run "app/(admin)/admin/cosigners" --reporter=verbose
+./.venv/Scripts/python.exe -m pytest backend/tests/routers/admin/test_cosigners.py \
+  backend/tests/services/test_dynamodb.py backend/tests/scripts/test_reconcile_consignors.py \
+  -q --tb=short
+npm test --workspace=frontend -- "app/(admin)/admin/cosigners"
 ```
+
+*(Both commands corrected during execution. The frontend one was `npx vitest`, which
+`progress.md` records as failing with "Vitest failed to find the runner".)*
 
 Note: anything creating a table must depend on `_clean_aws` **explicitly** — nothing else
 drops a table now that the moto mock outlives the test (CLAUDE.md).

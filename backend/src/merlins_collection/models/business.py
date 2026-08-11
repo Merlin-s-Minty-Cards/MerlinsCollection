@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from merlins_collection.models.inventory import new_ulid
 
@@ -138,8 +138,35 @@ class Consignor(BaseModel):
     email: str | None = None
     phone: str | None = None
     payout_percent: Decimal = Decimal("50")  # default payout % to consignor
-    active: bool = True
+    # "Deleted" in the admin UI, and the same contract as ``Show.archived``:
+    # nothing is ever destroyed, so a consignment ledger can never lose its
+    # counterparty and an archived consignor stays recoverable.
+    archived: bool = False
     notes: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _archived_from_legacy_active(cls, data):
+        """Read a pre-RFC-0010 row's ``active: False`` as ``archived: True``.
+
+        ``active`` meant exactly this under a worse name and was read almost
+        nowhere — only written at create and by the soft delete. It is gone as a
+        field, because two live booleans for one concept is how the next reader
+        introduces a bug, and ``archived`` is the name CLAUDE.md's archiving
+        contract already established.
+
+        The mapping is not hypothetical: the owner had already soft-deleted a
+        consignor before this landed, so at least one production row carries
+        ``active: False`` and must render as archived rather than as active.
+
+        An explicit ``archived`` always wins; ``active`` is consulted only when
+        the row predates the field, so an old client's payload is migrated
+        rather than rejected.
+        """
+        if isinstance(data, dict) and "active" in data and data.get("archived") is None:
+            data = dict(data)
+            data["archived"] = not bool(data.pop("active"))
+        return data
 
 
 class Payout(BaseModel):
