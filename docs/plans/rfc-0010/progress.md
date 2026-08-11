@@ -31,7 +31,7 @@ naming the row. **Start at T1.**
 | # | Task | Status | Commit | Notes |
 |---|---|---|---|---|
 | T0 | Money input + partial write | **DONE** | `0702346` | Merge blocker cleared. `frontend/lib/money.ts` exports `parseMoney`, `formatMoneyInput` **and `formatMoney`** (grouped display — the doc listed only the first two). `StagedSlab.buy_price` is now a **number**. `confirm_buy_session` is split into a build pass and a write pass; reuse `_build_purchase`, do not re-inline it |
-| T1 | `MoneyInput` rollout | **DONE** | `e4f2867` | Shipped on **eight** surfaces — the doc's seven plus **Trade**, which its own "Why" names. `MoneyInput` gained `placeholder` / `onBlur` / `onKeyDown`; `InlineEditCell` gained `type="money"` (option a). Wire format is **unchanged** — where a string went, `String(parsed)` still goes. `MONEY_PARSE_MESSAGE` now lives in `lib/money.ts` so the three surfaces that show it cannot drift. **Percent fields deliberately untouched.** Out of scope and filed: Inventory / Shows / History-filter money inputs, and `sales.py`/`trades.py`'s single-pass write |
+| T1 | `MoneyInput` rollout | **DONE** | `571b3bc` | Shipped on **eight** surfaces — the doc's seven plus **Trade**, which its own "Why" names. `MoneyInput` gained `placeholder` / `onBlur` / `onKeyDown`; `InlineEditCell` gained `type="money"` (option a). Wire format is **unchanged** — where a string went, `String(parsed)` still goes. `MONEY_PARSE_MESSAGE` now lives in `lib/money.ts` so the three surfaces that show it cannot drift. **Percent fields deliberately untouched.** Out of scope and filed: Inventory / Shows / History-filter money inputs, and `sales.py`/`trades.py`'s single-pass write |
 | T2 | Consignor row fork | **NOT STARTED** | — | Same defect `put_show` was fixed for in RFC 0008 T7; needs a one-time reconcile for rows already forked in production |
 | T3 | Triage reasons + filter | **NOT STARTED** | — | The query is NOT broken; the 266 rows are import flags. **No sticker reason** (owner decision) |
 | T4 | Triage search | **NOT STARTED** | — | Frontend only; `name` already works on the endpoint |
@@ -152,7 +152,7 @@ feature commit, so this is a fresh run, not the row above carried forward:
 | `npm run lint --workspace=frontend` | — | ~5s | clean (one pre-existing `<img>` warning in `CardDetailModal`) |
 | `npm run build --workspace=frontend` | — | — | exit 0 — **run this one**, `StagedSlab.buy_price` changed type and vitest does not typecheck |
 
-**Re-measured after T1 at `e4f2867`** — a fresh run, not the row above carried forward:
+**Re-measured after T1 at `571b3bc`** — a fresh run, not the row above carried forward:
 
 | Suite | Count | Time | State |
 |---|---|---|---|
