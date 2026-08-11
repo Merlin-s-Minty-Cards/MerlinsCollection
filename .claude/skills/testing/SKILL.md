@@ -31,5 +31,6 @@ A test you have never watched fail proves nothing. **Red** is the evidence that 
 ## Reading the result
 
 - Establish the **baseline** first: a failure that predates the change is a finding, a new one is a regression that blocks. Check whether a pre-existing failure touches the files you changed before concluding it is unrelated.
+- **"Flaky" names a symptom, not a diagnosis.** A result that changes run to run still has a cause that persists between runs, and "pre-existing" assigns blame rather than describing health. Reproduce in a loop until it fails, then read the **first** failure — when the failure count wobbles between runs, the later ones are usually collateral from the first. Until it is diagnosed, report it as undiagnosed and let the user decide whether to carry it.
 - Carry pass/skip counts across a change (`1353 → 1370`). The delta shows what you added and confirms nothing vanished quietly.
 - **A change that breaks an existing test is a decision.** Read that test's intent first: if the intent still holds, the change is wrong; if the intent is now obsolete, update the test and record inside it why the expectation moved.

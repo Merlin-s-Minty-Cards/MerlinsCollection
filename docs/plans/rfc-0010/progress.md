@@ -135,15 +135,33 @@ feature commit, so this is a fresh run, not the row above carried forward:
 | Suite | Count | Time | State |
 |---|---|---|---|
 | Backend | 1515 passed / 0 failed | 2m09s | green |
-| Frontend | 609 tests, **604 passed / 5 failed** | ~35s | **RED — same pre-existing ChatPanel flake** |
+| Frontend | **609 passed / 0 failed** | ~29s | **green — the ChatPanel flake is fixed, see below** |
 | `ruff check backend/src` | — | ~3s | clean |
 | `npm run lint --workspace=frontend` | — | ~5s | clean (one pre-existing `<img>` warning in `CardDetailModal`) |
 | `npm run build --workspace=frontend` | — | — | exit 0 — **run this one**, `StagedSlab.buy_price` changed type and vitest does not typecheck |
 
-**The frontend failures are `components/inventory/__tests__/ChatPanel.test.tsx` and are
-NOT yours.** That file and its component are untouched by this branch (`git log main..HEAD`
-is empty for both) and it passes **12/12 in isolation** — it is flakiness that only appears
-under full-suite parallel load. Do not chase it; carry the count into T-FINAL and say so.
+**~~The frontend failures are `ChatPanel.test.tsx` and are NOT yours… do not chase it.~~
+FIXED 2026-08-11 — and that instruction was wrong.** It was not "flakiness", it was two
+real defects, and telling three successive tasks not to look at it is why it survived RFC
+0009 and most of RFC 0010's planning:
+
+1. `beforeEach` called `vi.clearAllMocks()`, which does **not** drain the
+   `mockResolvedValueOnce` queue — proven with a two-test probe, where the second test
+   received the first's leftover value. So a test that ended early handed its unconsumed
+   replies to its neighbours, which then failed on another test's data.
+2. The history-cap test typed ~120 characters through `userEvent` at the default
+   per-keystroke delay: **3317 ms of the 5000 ms budget with the machine idle**, so under
+   full-suite parallel load it timed out — and its 12 queued replies cascaded into four
+   neighbours.
+
+That is why the failure count wobbled between 1 and 7 and why the file passed 12/12 alone.
+Fixed with `mockedApiFetch.mockReset()` and a shared `userEvent.setup({ delay: null })`
+(3317 ms → 994 ms). **Verified across five consecutive full-suite runs: 609/609 every
+time.** The rule went into CLAUDE.md and the `testing` skill.
+
+**The lesson for the rest of this RFC:** a wobbling failure *count* is the tell that one
+failure is causing the others — read the first one. "Pre-existing" assigns blame; it says
+nothing about whether the suite is healthy.
 
 **A pass count is not a suite result.** RFC 0009's recorded "575 passed" was read off a red
 run and the fail count was never carried across, which is how a stale sign-off happened.

@@ -488,8 +488,8 @@ Wait 30s+ for backend, 15s+ for frontend/mcp before first poll.
 
 ### Approximate Runtimes
 Measured 2026-08-07, after the fixture rework below:
-- Backend: **~2 minutes** (1369 tests, 52 files) — was ~10 minutes
-- Frontend: **~31 seconds** (545 tests, 73 files)
+- Backend: **~2 minutes** (1515 tests) — was ~10 minutes
+- Frontend: **~29 seconds** (609 tests, 80 files)
 - MCP Server: **~1 second** (98 tests, 7 files)
 
 **Do not reintroduce a per-test `mock_aws()`.** The backend suite spent **93% of
@@ -512,6 +512,24 @@ Frontend: the ~20 pure-logic test files carry `// @vitest-environment node`,
 since constructing a jsdom per file was the suite's largest single cost.
 `vitest.setup.ts` guards its DOM work behind `HAS_DOM` and imports
 testing-library dynamically — keep both if you add a setup step.
+
+**`vi.clearAllMocks()` does NOT drain a `mockResolvedValueOnce` queue, and a
+queued `Once` value outranks a later `mockResolvedValue`.** Measured 2026-08-10
+with a two-test probe: after `clearAllMocks`, the next test received the previous
+test's leftover value instead of its own fixture. So any test that ends without
+consuming everything it queued — a timeout, an early assertion failure — hands
+its leftovers to the tests after it, which then fail on another test's data.
+**In a `beforeEach`, reset the mock (`mockReset()`), don't clear it.**
+
+This is what made `ChatPanel.test.tsx` look flaky for weeks. One test typed ~120
+characters through `userEvent` at its default per-keystroke delay, taking 3.3s of
+the 5s budget **with the machine idle**; under full-suite parallel load it
+crossed the timeout, and its 12 queued replies then cascaded into four
+neighbours. The failure *count* changed run to run, which is the tell that one
+failure is causing the others. Fixed 2026-08-11 by `mockReset()` plus a shared
+`userEvent.setup({ delay: null })` — same events, without a macrotask per
+character (3317ms → 994ms). **Reach for `delay: null` in any test that types
+more than a few characters.**
 
 ### Quick commands that DO work with execute_pwsh
 - `ruff check backend/src` (lint, ~3s)
