@@ -58,6 +58,12 @@ A **user-invoked** skill whose job is to point at your other user-invoked skills
 
 _Avoid_: dispatcher, menu, registry, index, router procedure
 
+### Delta Pointer
+
+A **context pointer** from one **model-invoked** skill to another, reached for when a split would otherwise duplicate shared content: the pointed-to skill carries the shared procedure, and the pointing skill states only what's different about its own case. Distinct from a **Router Skill** on both axes that define it — a router is **user-invoked** and only hints, where a delta pointer connects two skills that both actually fire; a router indexes many skills, where a delta pointer targets one specific shared procedure. What keeps a **granularity** split from costing double the content.
+
+_Avoid_: shared step, common logic, base skill
+
 ### Granularity
 
 How finely you divide skills. Finer division spends one of the two loads: more **model-invoked** skills spend **context load** (more descriptions crowding the window and competing for attention); more **user-invoked** skills spend **cognitive load** (more for the human to remember and reach for). Two cuts guide the division. By **invocation**, split off a model-invoked skill where you have a distinct **leading word** to trigger it — a trigger word you actually use in your prompts. By **sequence**, split a run of **steps** where a step's **post-completion steps** need hiding, since isolating it in its own context clears what follows. Beware the reverse: merging sequences exposes each step's post-completion steps to what follows, inviting premature completion.

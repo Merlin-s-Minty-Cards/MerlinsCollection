@@ -1,7 +1,6 @@
 ---
 name: writing-great-skills
 description: Reference for writing and editing skills well — the vocabulary and principles that make a skill predictable.
-disable-model-invocation: true
 ---
 
 A skill exists to wrangle determinism out of a stochastic system. **Predictability** — the agent taking the same _process_ every run, not producing the same output — is the root virtue; every lever below serves it.
@@ -49,6 +48,8 @@ Where the ladder decides _how far down_ a piece sits, **co-location** decides _w
 
 - **By invocation** — split off a **model-invoked** skill when you have a distinct **leading word** that should trigger it on its own, or another skill must reach it. You pay **context load** for the new always-loaded **description**, so that independent reach has to be worth it.
 - **By sequence** — split a run of **steps** when the steps still ahead (a step's **post-completion steps**) tempt the agent to rush the one in front of it (**premature completion**). Keeping them out of view encourages the agent to do more **legwork** on the current task.
+
+A split only pays for itself if the halves don't silently re-explain each other. Where one **model-invoked** skill's body names another and states only what's different about its own case — a **delta pointer** — the pointed-to skill carries the shared procedure once, instead of both halves carrying their own copy of it. This is not a **router skill**: a router is **user-invoked** and only hints at what it names; a delta pointer connects two skills that both actually fire.
 
 ## Pruning
 
