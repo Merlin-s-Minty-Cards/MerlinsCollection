@@ -6,24 +6,27 @@
 gitignored (`.gitignore:60`), so it is local-only and your edits to it will never appear in
 `git status` or reach anyone else. Record all RFC 0010 status **in this file**.
 
-**Last updated:** 2026-08-10 (planning complete, nothing implemented)
+**Last updated:** 2026-08-10 (T0 DONE — the RFC 0009 merge blocker is cleared)
 **Branch:** `Polishing-For-Deployment`
 **RFC:** [`docs/rfcs/0010-admin-round8-ledger-corrections-and-slab-manual-only.md`](../../rfcs/0010-admin-round8-ledger-corrections-and-slab-manual-only.md)
 **Task index:** [`README.md`](README.md)
 **Source of the requests:** the owner's `The plan.pdf` (12 items) plus two review comments
 on 2026-08-10 — the money-input report and the PSA/scanner reversal.
 
-## ⚠️ START AT T0 — IT UNBLOCKS THE RFC 0009 MERGE
+## ✅ T0 IS DONE — the RFC 0009 merge blocker is cleared
 
-RFC 0009's T-FINAL is re-opened and blocked on a partial-write money bug in the slab commit
-path. T0 fixes it. Until then **do not merge either branch**.
+The partial-write money bug in the slab commit path is fixed. Measured on the code as it
+stood: a five-row batch with a bad amount on row 3 wrote **2 inventory items and 2 PURCHASE
+transactions** before dying, left the session `draft` with all five rows staged, and the UI
+said *"Nothing was created; the batch is intact"*. It now writes **zero** and returns a 422
+naming the row. **Start at T1.**
 
 ## Status
 
 | # | Task | Status | Commit | Notes |
 |---|---|---|---|---|
-| T0 | Money input + partial write | **NOT STARTED** | — | **MERGE BLOCKER.** Owner requires `1,300` to be *accepted*, which rules out the `type="number"` fix that was previously recommended. `parseFloat` is not the answer either — see Decisions |
-| T1 | `MoneyInput` rollout | **NOT STARTED** | — | Depends on T0's helper existing |
+| T0 | Money input + partial write | **DONE** | `0702346` | Merge blocker cleared. `frontend/lib/money.ts` exports `parseMoney`, `formatMoneyInput` **and `formatMoney`** (grouped display — the doc listed only the first two). `StagedSlab.buy_price` is now a **number**. `confirm_buy_session` is split into a build pass and a write pass; reuse `_build_purchase`, do not re-inline it |
+| T1 | `MoneyInput` rollout | **NOT STARTED** | — | T0's helper exists: `MoneyInput` takes `label` / `value` / `onChange(raw, parsed)` and callers must gate on `parsed === null`, **never falsiness** — `0` is a real cost. Read the three T0 rows in [`follow-ups.md`](follow-ups.md) first: the two `parseFloat` sticker sites become live bugs the moment their `type="number"` goes, and `sales.py`/`trades.py` still have the single-pass write shape T0 fixed only in `purchases.py` |
 | T2 | Consignor row fork | **NOT STARTED** | — | Same defect `put_show` was fixed for in RFC 0008 T7; needs a one-time reconcile for rows already forked in production |
 | T3 | Triage reasons + filter | **NOT STARTED** | — | The query is NOT broken; the 266 rows are import flags. **No sticker reason** (owner decision) |
 | T4 | Triage search | **NOT STARTED** | — | Frontend only; `name` already works on the endpoint |
@@ -72,8 +75,16 @@ that is the mistake that made RFC 0009's T-FINAL sign-off stale.
 
 ## Decisions made during execution
 
-*(empty — nothing has been executed yet. The rows below are PLANNING decisions, recorded
-here because a later task will otherwise re-litigate them.)*
+| Date | Task | Decision | Why |
+|---|---|---|---|
+| 2026-08-10 | T0 | **`parseMoney('0')` is `0`, not `null`** — so every caller must test `=== null` and never falsiness. The task doc's table did not cover zero | `!parseMoney(cost)` would reject a legitimately free card, which is a real thing at a buy table (a throw-in, a bulk lot). This is the one way the new parser could reintroduce a silent wrong answer, so it is a named test |
+| 2026-08-10 | T0 | **`money.ts` exports a third function, `formatMoney`** (`1300` → `$1,300.00`), grouped by hand rather than through `toLocaleString` | The doc's own StagingTable test requires comma-grouped display, which `formatMoneyInput` deliberately does not do (the input value has to round-trip back through `parseMoney`). Hand-grouping keeps the output independent of which ICU data the runtime shipped with. This is the fifth `toFixed(2)` site in the frontend — **T1 should collapse the other four into it** |
+| 2026-08-10 | T0 | **`confirm_buy_session` builds every row before writing any**, rather than only pre-checking numeric fields as the doc described | The doc's stated goal is fixing partial write *as a class*. A numeric-only check does not get there: a bad `condition`, `company` or `location` still failed `InventoryItemAdapter` **inside** the write loop and reproduced the identical half-written batch through a different door. Extracting `_build_purchase` and writing in a second pass is both stronger and shorter than the loop it replaced. Verified with a test that puts a bad `condition` on row 2 |
+| 2026-08-10 | T0 | **The partial write was MEASURED, not inferred** — 2 inventory items, 2 PURCHASE transactions, session still `draft`, all 5 rows still staged | Recorded because the UI's claim ("Nothing was created; the batch is intact") was confidently false, and the same sentence is still in `slabs/page.tsx` for the *other* failure modes it covers. It is accurate there **only because** the backend now writes nothing — if anyone reverts the confirm change, that message starts lying again |
+| 2026-08-10 | T0 | **The doc's file paths were wrong in two places**, corrected as executed: the backend tests are `backend/tests/routers/admin/test_purchases.py`, and the frontend run command must be the `npm test --workspace=frontend` form, not `npx vitest` | `npx vitest` fails with "Vitest failed to find the runner" — already noted in the baseline section of this file, but the task doc contradicted it. Later task docs copy this command; check it before trusting it |
+
+*(rows below are PLANNING decisions, recorded before execution because a later task would
+otherwise re-litigate them.)*
 
 | Date | Task | Decision | Why |
 |---|---|---|---|
@@ -117,6 +128,17 @@ tell a regression from a pre-existing failure:
 | `ruff check backend/src` | — | ~3s | clean |
 | `npm run lint --workspace=frontend` | — | ~5s | clean, exit 0 |
 | `npm run build --workspace=frontend` | — | — | exit 0 |
+
+**Re-measured after T0 at `0702346`** — a suite result is never reused across a later
+feature commit, so this is a fresh run, not the row above carried forward:
+
+| Suite | Count | Time | State |
+|---|---|---|---|
+| Backend | 1515 passed / 0 failed | 2m09s | green |
+| Frontend | 609 tests, **604 passed / 5 failed** | ~35s | **RED — same pre-existing ChatPanel flake** |
+| `ruff check backend/src` | — | ~3s | clean |
+| `npm run lint --workspace=frontend` | — | ~5s | clean (one pre-existing `<img>` warning in `CardDetailModal`) |
+| `npm run build --workspace=frontend` | — | — | exit 0 — **run this one**, `StagedSlab.buy_price` changed type and vitest does not typecheck |
 
 **The frontend failures are `components/inventory/__tests__/ChatPanel.test.tsx` and are
 NOT yours.** That file and its component are untouched by this branch (`git log main..HEAD`
