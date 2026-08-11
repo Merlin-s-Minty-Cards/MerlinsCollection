@@ -14,6 +14,7 @@ Turn a finished branch into a Pull Request description that matches the local re
 - Fill every section the template defines; if one genuinely doesn't apply, write `N/A` with a one-line reason.
 - Every claim is grounded in the actual diff.
 - Check a checkbox only when it's verifiably true — tick "tests pass" only against an observed green run (the `testing` skill covers what makes one trustworthy).
+- When the branch changes a user-facing surface, describe it from **first-hand** evidence of the artifact, not from the green checks alone; where it was never observed, the PR says so. The `first-hand-evidence` skill covers what counts as observed.
 - Wrap the final body in a single fenced codeblock. Since the body itself contains markdown (and possibly triple-backtick fences), use a **quadruple-backtick** fence.
 
 ## Step-by-Step Execution
