@@ -7,27 +7,15 @@ gitignored (`.gitignore:60`), so it is local-only and your edits to it will neve
 appear in `git status` or reach anyone else. It now carries a pointer block sending
 readers here. Record all RFC 0009 status **in this file**.
 
-**Last updated:** 2026-08-10 (**T-FINAL RE-OPENED — DO NOT MERGE YET.** The
-2026-08-09 sign-off below certified commit `6486773`, but **`80deb9c` then landed 479
-lines of `/admin/slabs` UI on top of it** — the verification ran against a tree that no
-longer exists. Re-verified at `80deb9c` on 2026-08-10 and two things came back
-different from the recorded numbers:
-
-1. **The frontend suite is RED, not green.** 580 tests, **6–7 failing** across runs,
-   all in `components/inventory/__tests__/ChatPanel.test.tsx`. **Not a slab
-   regression** — that file and its component are untouched by this branch
-   (`git log main..HEAD` is empty for both) and it passes **12/12 in isolation**. It
-   is pre-existing flakiness that only appears under full-suite parallel load. The
-   recorded "575 passed" and the handed-over "573 passed" are both **pass counts read
-   off a red run**; the fail count was never carried across.
-2. **One real money-path defect, found by reading the commit path** — a non-numeric
-   cost silently becomes `null` and detonates *mid-write* inside `confirm`. Full
-   writeup in the Blocked table below. It is a **partial-write** bug on live
-   inventory, so it blocks merge.
-
-T0/T1/T3/T4/T6/T7/T8 DONE; T2 and T5 remain DEFERRED behind PSA account approval and
-block nothing. Owner actions outstanding: **decide the cost-input fix**, **rotate both
-API keys**, **email `collectors-apis@collectors.com` for PSA public-API approval**)
+**Last updated:** 2026-08-09 (**T-FINAL DONE — RFC 0009 IS COMPLETE.** All three
+suites green together for the first time: **1502 backend / 575 frontend / 98 MCP**,
+lint clean, leak sweep clean, `next build` green. The build caught **one real bug**
+the entire suite missed — the `/admin/slabs` priced filter never reached the backend
+— fixed under the RED gate with owner confirmation. T0/T1/T3/T4/T6/T7/T8 DONE; T2 and
+T5 remain DEFERRED behind PSA account approval and block nothing. **There is no next
+task.** Two owner actions are still outstanding and neither is a code task:
+**rotate both API keys**, and **email `collectors-apis@collectors.com` for PSA
+public-API approval**)
 **Branch:** `Polishing-For-Deployment`
 **RFC:** [`docs/rfcs/0009-slab-intake-and-graded-pricing.md`](../../rfcs/0009-slab-intake-and-graded-pricing.md)
 **Task index:** [`README.md`](README.md)
@@ -69,7 +57,7 @@ and **both tasks are now finished** — see their rows below for shas.
 | T6 | Pricing provider + slab list | **DONE** | `65ecece` | **53 backend + 8 frontend tests pass**; ruff and `next lint` clean. **The owner approved the verified-join rule** (see Decisions) — `attach_price` refuses unless `en:<externalCatalogId>` equals the item's own `card_id`, and an unpriced slab is **NOT** Triage-flagged, it surfaces at `/admin/slabs?priced=false`. **"No coverage" is an ABSENT KEY, confirmed against all 19 fixtures — not one contains a `0`** (T7 depends on this: a missing grade key means "no comps", and must never become `Decimal("0")`). Also: **nothing calls `attach_price` yet — that is T7's job.** `prices(id)` is the exact, non-fuzzy call T7 should use; `resolve()` is the fuzzy one and runs once per card ever. `services/slab/quota.py` was created HERE, not in T2 |
 | T7 | Nightly sync + refresh fix | **DONE** | `fbf1553` | **138 tests pass** in the three named files, **218 more** across the blast radius (`test_dynamodb`, `test_pricing`, `test_catalog_wipe`, the three `scripts/` files); ruff clean. `refresh_graded_prices` walks owned slabs stalest-first (never-priced first), capped at **50 lookups**, deduped by `(card_id, company, grade)`, and a per-run memo means one card is ONE call whatever grades of it we hold — so `resolve()` runs at most once per card per night. **TWO OWNER DECISIONS, 2026-08-09** (see Decisions): the job DOES do first contact, and a hand-typed price is overwritten unless **pinned**. `POST /admin/slabs/refresh-prices` + `PUT /admin/slabs/{id}/price/pin` are new; the Market button now prices slabs too. **T8 must know:** the pin has NO frontend control yet, so nothing is pinned in practice and the provider currently always wins — [`follow-ups.md`](follow-ups.md) T7 row 3 |
 | T8 | Docs + ops | **DONE** | `9afb79d` | **5 tests pass** in `test_config.py` (2 pre-existing + 3 new doc guards); the app boots with both keys **forced empty**; ruff clean on `backend/src`; leak check clean outside `docs/plans/`. **The T8 doc was itself wrong in FIVE places and now carries a correction banner** — the biggest being that it describes a PSA-per-slab flow and a camera that do not exist. **`PSA_API_KEY` is read by NO code** (no `psa_api_key` field on `Settings`; `extra="ignore"` swallows it), so it is documented as inert and `PSA_DAILY_QUOTA` was not added at all — only `PRICING_DAILY_QUOTA` exists. **The slab quota counters touch no DynamoDB table**, so the task role needs nothing new, but the ECS **execution** role needs `secretsmanager:GetSecretValue`. **KEY ROTATION IS STILL NOT DONE** — owner action in two vendor portals, procedure now written in `docs/aws-setup.md` Phase 8 |
-| T-FINAL | Verification + PR | **RE-OPENED — BLOCKED on the cost-input decision** | `6486773`, re-verified at `80deb9c` | **The `6486773` sign-off is STALE: `80deb9c` landed 479 lines of `/admin/slabs` UI after it.** Re-verified 2026-08-10 at the real HEAD — backend and MCP match, **frontend does not**: 580 tests with **6–7 failing** (`ChatPanel.test.tsx`, pre-existing, passes 12/12 alone, untouched by this branch). Re-reading the commit path also surfaced the **partial-write money bug** in the Blocked table. **Lesson for the next reader: never re-use a verification result across a later feature commit** — and a pass count is not a suite result, carry the fail count too. Original 2026-08-09 note follows. **RFC 0009 IS COMPLETE.** Full suite, all three layers, measured 2026-08-09: **backend 1502 passed / 0 failed / 2m13s**, **frontend 575 passed / 78 files / 28s**, **MCP 98 passed / 7 files / 1.0s**. `ruff check backend/src` clean; `next lint` clean; leak sweep clean across all 190 branch commits; app boots with both keys forced empty and `build_pricing_provider()` returns `None`. **`next build` caught a REAL BUG the whole suite missed** — `/admin/slabs` passed `{ params: {…} }` to `api.get`, whose second arg IS the params record, so the request emitted `?params=[object Object]` and **the unpriced worklist filter silently returned every slab**. Fixed under the RED gate with 2 new tests (owner confirmed GREEN). **Vitest does not typecheck — `next build` is the only gate that catches this class; never skip it.** Also fixed this doc's self-matching leak command and its stale PSA/camera smoke checklist |
+| T-FINAL | Verification + PR | **DONE** | `6486773` | **RFC 0009 IS COMPLETE.** Full suite, all three layers, measured 2026-08-09: **backend 1502 passed / 0 failed / 2m13s**, **frontend 575 passed / 78 files / 28s**, **MCP 98 passed / 7 files / 1.0s**. `ruff check backend/src` clean; `next lint` clean; leak sweep clean across all 190 branch commits; app boots with both keys forced empty and `build_pricing_provider()` returns `None`. **`next build` caught a REAL BUG the whole suite missed** — `/admin/slabs` passed `{ params: {…} }` to `api.get`, whose second arg IS the params record, so the request emitted `?params=[object Object]` and **the unpriced worklist filter silently returned every slab**. Fixed under the RED gate with 2 new tests (owner confirmed GREEN). **Vitest does not typecheck — `next build` is the only gate that catches this class; never skip it.** Also fixed this doc's self-matching leak command and its stale PSA/camera smoke checklist |
 
 Statuses: `NOT STARTED` → `RED (awaiting owner confirmation)` → `IN PROGRESS` → `DONE`,
 plus `BLOCKED` for a task that was started and cannot finish without the owner, and
@@ -96,7 +84,6 @@ certs, which unblocked T0. One new blocker replaced them, and it is external.
 
 | Item | Needed from owner | Blocks |
 |---|---|---|
-| **DECIDE THE FIX: a non-numeric slab cost writes half a batch to live inventory, then reports "Nothing was created"** | **Found 2026-08-10 at T-FINAL re-verification by reading the commit path; no test covers it and no machine check can see it.** The Cost field in `SlabEntryForm` is **free text** — `<input aria-label="Cost" inputMode="decimal">`, and `inputMode` only hints the mobile keyboard, it constrains nothing. Validation is `!cost.trim()`, so **`1,200` and `$40` both pass.** Then: `Number("1,200")` → `NaN` → `JSON.stringify` → **`buy_price: null`**; `add_buy_item` only checks `"buy_price" not in body`, so `null` is **accepted with a 200** (`_GRADED_REQUIRED_FIELDS` covers company/grade/cert_number, **not** buy_price — a bad *grade* is correctly 422'd, a bad *cost* is not); then inside `confirm_buy_session` the per-item loop does `Decimal(str(None))` → **`InvalidOperation` → unhandled 500**. **The loop has already called `put_inventory_item` + `put_transaction` + `put_timeline_event` for every earlier row** — there is no rollback and `status` is only set to `confirmed` after the loop. So a 5-slab batch with a comma in row 3 leaves **rows 1–2 as real inventory with real purchase transactions**, the session stuck in `draft`, and the UI showing `"Commit failed before confirming: … Nothing was created; the batch is intact."` — **which is false.** The operator's natural response is to press Commit again, which **duplicates rows 1–2**. Worst input is the most likely one: `StagingTable` renders the raw string (`${r.buy_price}`), so `1,200` displays as a correct-looking **`$1,200`** with no total row to expose the `NaN` — **zero signal before commit**, and four-figure costs are normal for graded slabs. **The convention already exists next door:** `/admin/buy` uses `<input type="number" step="0.01">` and disables submit on an empty price; `/admin/outgoing` and `/admin/show-prep` both `isNaN(price)` guard. Slabs is the one money surface with neither. **Not fixed here** — it is a behavioural change and CLAUDE.md's RED gate binds: tests first, failing output shown, owner confirms, then implement. Three options, cheapest first: **(a)** `type="number" step="0.01"` on Cost + reject `!Number.isFinite` in `submit()` — matches Buy, ~4 lines, frontend only; **(b)** additionally validate `buy_price` is finite in `add_buy_item` so no client can post a null cost — closes it for MCP/curl too; **(c)** make `confirm_buy_session` validate every row **before** writing any, which is the only one that fixes *partial-write* as a class rather than this one trigger. **Recommend (a)+(b) to unblock today, (c) filed as follow-up** | **MERGE** |
 | **Get PSA to approve this account for the public API — email them** | **RE-TESTED 2026-08-10 at the owner's request — STILL 403, nothing has changed.** Checked against PSA's own Swagger this time (`https://api.psacard.com/publicapi/swagger.json`, which confirms `basePath: /publicapi`, the route `/cert/GetByCertNumber/{certNumber}`, and `securityDefinitions: {Bearer: {type: apiKey, name: Authorization, in: header}}`). **The bearer format is now positively CONFIRMED CORRECT by differential**: `Authorization: bearer <token>` and `Authorization: Bearer <token>` both return the entitlement **403**, while the raw token with no scheme falls into the anonymous **429** bucket — i.e. a recognized credential 403s and an unrecognized one does not, so the token IS authenticating and the account is what is refused. Key fingerprint `sha256[:12] = e4e50f8717d2`, **identical to 2026-08-08**, so the key was never rotated either. Original evidence follows. `403 {"Message":"Access to this API is limited to approved customers."}` on **every** call. Tried and ruled out: four auth header formats (§1.2 of spike-findings — `Authorization: Bearer` is correct), the EULA page at **https://www.psacard.com/publicapi/accepteula**, and **a key the owner updated on 2026-08-08 at 13:08**, which still 403s. It is **not endpoint-specific** — `GetByCertNumber` and `GetImagesByCertNumber` both 403 — so it is the **account**, not the call. **Stop retrying; each attempt spends quota and cannot succeed.** The remaining action is to email `collectors-apis@collectors.com` (the address PSA's own error body gives) and ask for public-API approval for the account. Key fingerprint at the last failed attempt, so a future "I updated it" is verifiable: `sha256[:12] = e4e50f8717d2` | **T2**, and the PSA half of T0 |
 | ~~Decide whether **T6 proceeds ahead of PSA**~~ | **ANSWERED 2026-08-09.** Owner approved **verified-join-only** attachment, and chose **"list only, no Triage flag"** for the slabs that fail it. Both are implemented and test-covered in `65ecece` | — |
 | *(optional)* more **Japanese** cert numbers | JP coverage measured 3/3, but on only 3 cards; T0 asked for at least 5 | confidence in T6 |
@@ -185,26 +172,10 @@ The whole system exercised together for the first time. **Everything below is
 green.** A later reader comparing against this can tell a regression from a
 pre-existing failure:
 
-> **SUPERSEDED for the frontend row — re-measured 2026-08-10 at `80deb9c`.** The
-> 2026-08-09 numbers were taken at `6486773`, before the last feature commit. Backend
-> and MCP reproduce exactly; the frontend does not, and was never green:
->
-> | Suite | **Re-measured at `80deb9c` (2026-08-10)** | Verdict |
-> |---|---|---|
-> | Backend | **1502 passed, 0 failed, 3m11s** | matches — runtime is machine load, not a `mock_aws()` regression (that shows as ~10 min) |
-> | Frontend | **574 passed, 6 failed, 580 total** (a second run gave 573/7 across 2 files) | **RED, and flaky.** All failures in `ChatPanel.test.tsx` |
-> | MCP | **98 passed, 7 files** | matches |
->
-> The frontend failures are **not this branch's**: `ChatPanel.tsx` and its test have no
-> commits in `main..HEAD`, and the file passes **12/12 run alone**. They fail only under
-> full-suite parallel load, and the count moves between runs. Treat the suite as
-> **red-but-not-regressed** — do not report it as green, and do not chase it inside
-> RFC 0009.
-
-| Suite | Baseline (2026-08-07) | **Final (2026-08-09, at `6486773` — STALE)** | Delta |
+| Suite | Baseline (2026-08-07) | **Final (2026-08-09)** | Delta |
 |---|---|---|---|
 | Backend | 1369 → 1407 after T1, ~2m21s | **1502 passed, 0 failed, 2m13s** | +95 from T6/T7/T8 |
-| Frontend | 545 / 73 files, ~31s | **575 passed, 78 files, 28s** ← pass count off a red run | +30 = T4's 20, T6's 8, T-FINAL's 2 |
+| Frontend | 545 / 73 files, ~31s | **575 passed, 78 files, 28s** | +30 = T4's 20, T6's 8, T-FINAL's 2 |
 | MCP | 98 / 7 files, ~1s | **98 passed, 7 files, 1.0s** | unchanged |
 | `ruff check backend/src` | pre-existing findings | **All checks passed** | clean |
 | `npm run lint --workspace=frontend` | pre-existing findings | **clean, exit 0** | clean |
