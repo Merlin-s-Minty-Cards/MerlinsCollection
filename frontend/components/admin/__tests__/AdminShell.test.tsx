@@ -1,9 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent, cleanup } from '@testing-library/react'
 import AdminShell from '../AdminShell'
 
+// Mutable so a test can render at a DIFFERENT route — RFC 0010 T13's
+// force-the-active-group-open rule is only observable from inside the group
+// that is supposed to be forced. Every pre-existing test keeps the original
+// value, restored in the file-level beforeEach.
+let mockPathname = '/admin/inventory'
 vi.mock('next/navigation', () => ({
-  usePathname: () => '/admin/inventory',
+  usePathname: () => mockPathname,
 }))
 
 vi.mock('next-auth/react', () => ({
@@ -32,6 +37,7 @@ vi.mock('@/lib/admin-api', async () => {
 // every render, so EVERY test in this file — including the layout ones that
 // predate the badge — needs `get` to return a promise.
 beforeEach(() => {
+  mockPathname = '/admin/inventory'
   getMock.mockReset()
   getMock.mockResolvedValue({ total: 0, reasons: {} })
 })
@@ -146,5 +152,145 @@ describe('AdminShell Shows nav (RFC 0008 T7)', () => {
 
     const link = await screen.findByRole('link', { name: /show prep/i })
     expect(link).toHaveAttribute('href', '/admin/show-prep')
+  })
+})
+
+// ===========================================================================
+// RFC 0010 T13 — sixteen flat tabs become three groups
+// ===========================================================================
+//
+// Owner report: *"Create Larger tabs to hold sub tabs for this. Ex. 'Show'
+// would hold our inventory, buy, sell, trade, slabs tabs"*. Grouped by WHEN
+// you use them, which is why Inventory sits with the transaction tabs rather
+// than with Vault.
+//
+// EVERY ROUTE PATH IS UNCHANGED, `/admin/outgoing` included. Grouping is a
+// sidebar concern; nesting the URLs would break every bookmark to fix a URL
+// nobody types.
+
+const NAV_KEY = 'admin-nav-groups-v1'
+
+/** Every destination, at the href it has always had. */
+const ALL_DESTINATIONS: [string, RegExp][] = [
+  ['/admin', /^dashboard$/i],
+  ['/admin/inventory', /^inventory$/i],
+  ['/admin/sell', /^sell$/i],
+  ['/admin/buy', /^buy$/i],
+  ['/admin/slabs', /^slabs$/i],
+  ['/admin/trade', /^trade$/i],
+  ['/admin/outgoing', /^prep queue$/i],
+  ['/admin/show-prep', /^show prep$/i],
+  ['/admin/shows', /^shows$/i],
+  ['/admin/triage', /^triage$/i],
+  ['/admin/market', /^market$/i],
+  ['/admin/vault', /^vault$/i],
+  ['/admin/analytics', /^show analytics$/i],
+  ['/admin/history', /^history$/i],
+  ['/admin/cosigners', /^cosigners$/i],
+  ['/admin/locations', /^locations$/i],
+]
+
+describe('AdminShell grouped navigation (RFC 0010 T13)', () => {
+  beforeEach(() => {
+    window.localStorage.clear()
+  })
+
+  it('still reaches all sixteen destinations, at their existing hrefs', async () => {
+    renderShell()
+    await waitFor(() => expect(getMock).toHaveBeenCalled())
+
+    for (const [href, name] of ALL_DESTINATIONS) {
+      const links = screen.getAllByRole('link', { name })
+      expect(links.some((l) => l.getAttribute('href') === href),
+        `${href} is unreachable`).toBe(true)
+    }
+  })
+
+  it('renders the three group headers', () => {
+    renderShell()
+    for (const label of ['At the show', 'Back office', 'Data']) {
+      expect(screen.getByRole('button', { name: label })).toBeInTheDocument()
+    }
+  })
+
+  it('toggles a group open and shut, and says so with aria-expanded', () => {
+    renderShell()
+    const header = screen.getByRole('button', { name: 'Data' })
+    expect(header).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('link', { name: /^cosigners$/i })).toBeInTheDocument()
+
+    fireEvent.click(header)
+    expect(header).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('link', { name: /^cosigners$/i })).not.toBeInTheDocument()
+
+    fireEvent.click(header)
+    expect(screen.getByRole('link', { name: /^cosigners$/i })).toBeInTheDocument()
+  })
+
+  it('forces the group containing the current route open, even if it was saved shut', () => {
+    // Landing on a page whose group is collapsed, with no visible indication of
+    // where you are, is worse than the flat list this replaces.
+    window.localStorage.setItem(NAV_KEY, JSON.stringify({ office: false }))
+    mockPathname = '/admin/triage'
+    renderShell()
+
+    expect(screen.getByRole('button', { name: 'Back office' }))
+      .toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('link', { name: /^triage$/i })).toBeInTheDocument()
+  })
+
+  it('rolls the Triage count onto the group header while the group is shut', async () => {
+    getMock.mockResolvedValue({ total: 21, reasons: {} })
+    renderShell()
+    await waitFor(() => expect(getMock).toHaveBeenCalledWith('/triage/counts'))
+    await screen.findByRole('link', { name: /triage/i })
+
+    // Back office holds Triage; `/admin/inventory` is the active route, so it
+    // is shuttable.
+    const header = screen.getByRole('button', { name: 'Back office' })
+    fireEvent.click(header)
+
+    expect(screen.queryByRole('link', { name: /^triage$/i })).not.toBeInTheDocument()
+    // A count nobody can see is the exact failure the badge exists to avoid.
+    expect(header).toHaveTextContent('21')
+  })
+
+  it('rolls no badge onto a shut group when the queue is empty', async () => {
+    renderShell()
+    await waitFor(() => expect(getMock).toHaveBeenCalled())
+    const header = screen.getByRole('button', { name: 'Back office' })
+    fireEvent.click(header)
+    expect(header).not.toHaveTextContent('0')
+  })
+
+  it('round-trips the expansion state through a VERSIONED localStorage key', () => {
+    const first = renderShell()
+    fireEvent.click(screen.getByRole('button', { name: 'Data' }))
+    expect(JSON.parse(window.localStorage.getItem(NAV_KEY) ?? '{}'))
+      .toMatchObject({ data: false })
+
+    cleanup()
+    void first
+    renderShell()
+    expect(screen.getByRole('button', { name: 'Data' }))
+      .toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('shows no truncated group label in the 60px sidebar — a title, not a stub', () => {
+    renderShell()
+    fireEvent.click(screen.getByRole('button', { name: /collapse sidebar/i }))
+
+    const header = screen.getByRole('button', { name: 'Back office' })
+    expect(header).toHaveAttribute('title', 'Back office')
+    expect(header.textContent).not.toMatch(/Back office/)
+  })
+
+  it('gives the mobile nav five EXPLICIT entries, not a slice of the tree', () => {
+    const wrapper = renderShell()
+    const mobile = wrapper.querySelectorAll('nav')[1]
+    const hrefs = Array.from(mobile.querySelectorAll('a')).map((a) => a.getAttribute('href'))
+    expect(hrefs).toEqual([
+      '/admin', '/admin/inventory', '/admin/sell', '/admin/buy', '/admin/slabs',
+    ])
   })
 })

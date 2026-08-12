@@ -100,8 +100,10 @@ every cross-group jump into two clicks, which is worse than the flat list it rep
 8. the collapsed (60px) sidebar renders without truncated group labels;
 9. **the mobile nav renders exactly five explicit entries**, not a slice.
 
+**Command corrected as executed** — the `npx vitest` form is broken in this repo:
+
 ```bash
-cd frontend && npx vitest run components/admin/__tests__/AdminShell --reporter=verbose
+npm test --workspace=frontend -- --run components/admin/__tests__/AdminShell
 ```
 
 ## GREEN — done when
