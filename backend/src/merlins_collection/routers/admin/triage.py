@@ -11,12 +11,16 @@ badge that counts differently from the page it links to is worse than no badge.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
 from merlins_collection.dependencies import get_repo
 from merlins_collection.services.dynamodb import InventoryRepository
-from merlins_collection.services.triage import count_by_reason, needs_triage
+from merlins_collection.services.triage import (
+    count_by_reason,
+    in_triage_scope,
+    needs_triage,
+)
 
 router = APIRouter(prefix="/triage", tags=["admin-triage"])
 
@@ -36,7 +40,10 @@ class TriageCounts(BaseModel):
 
 
 @router.get("/counts", response_model=TriageCounts)
-def triage_counts(repo: InventoryRepository = Depends(get_repo)) -> TriageCounts:
+def triage_counts(
+    include_terminal: bool = Query(False),
+    repo: InventoryRepository = Depends(get_repo),
+) -> TriageCounts:
     """Per-reason counts plus the distinct-item total.
 
     A full inventory read per call, and ``AdminShell`` renders on every admin
@@ -44,8 +51,16 @@ def triage_counts(repo: InventoryRepository = Depends(get_repo)) -> TriageCounts
     caching it would reintroduce the staleness the badge exists to prevent — a
     cleared item still showing in the count. See follow-ups.md (T11) before
     reaching for a cache.
+
+    ``include_terminal`` mirrors the list's own parameter and defaults the same
+    way. It is not a convenience: the badge and the page it links to must scope
+    identically, and the only way to guarantee that is for both to route through
+    ``in_triage_scope``.
     """
-    items = repo.list_inventory()
+    items = [
+        i for i in repo.list_inventory()
+        if in_triage_scope(i, include_terminal=include_terminal)
+    ]
     return TriageCounts(
         total=sum(1 for i in items if needs_triage(i)),
         reasons=count_by_reason(items),

@@ -43,6 +43,10 @@ vi.mock('@/lib/admin-api', async () => {
 
 // --- fixtures -------------------------------------------------------------
 
+// `triage_reasons` is on every fixture because RFC 0010 T3 makes the SERVER the
+// authority on why a row is here — the page renders that array rather than
+// recomputing the rules in TypeScript. A fixture without it is a response shape
+// the endpoint no longer produces.
 const flaggedItem = {
   item_id: 'flagged-1',
   kind: 'raw',
@@ -50,8 +54,11 @@ const flaggedItem = {
   language: 'EN',
   display_name: 'Pikachu #25',
   display_name_override: null,
+  condition: 'NM',
+  condition_modifier: null,
   needs_review: true,
   review_reason: 'back looks trimmed',
+  triage_reasons: ['flagged'],
   card: { card_id: 'en:sv1-25', name: 'Pikachu', set_name: 'Scarlet & Violet', number: '025' },
 }
 
@@ -62,8 +69,11 @@ const unlinkedItem = {
   language: 'EN',
   display_name: 'Charizard #4',
   display_name_override: null,
+  condition: 'LP',
+  condition_modifier: null,
   needs_review: false,
   review_reason: null,
+  triage_reasons: ['missing_card_id'],
   card: null,
 }
 
@@ -74,8 +84,11 @@ const jpItem = {
   language: 'JP',
   display_name: 'ハリマロン #84',
   display_name_override: null,
+  condition: 'NM',
+  condition_modifier: null,
   needs_review: false,
   review_reason: null,
+  triage_reasons: ['missing_english_name'],
   card: { card_id: 'ja:M4-084', name: 'ハリマロン', set_name: 'Mega Brave', number: '084' },
 }
 
@@ -87,8 +100,11 @@ const twoReasonItem = {
   language: 'EN',
   display_name: 'Blastoise #9',
   display_name_override: null,
+  condition: 'NM',
+  condition_modifier: null,
   needs_review: true,
   review_reason: 'manual_entry',
+  triage_reasons: ['flagged', 'missing_card_id'],
   card: null,
 }
 
@@ -165,11 +181,16 @@ describe('Triage list', () => {
 
     const tr = await findRow(/Blastoise/)
     expect(rowsMentioning(/Blastoise/)).toHaveLength(1)
-    expect(within(tr).getByText(/manual_entry/i)).toBeInTheDocument()
+    // T3: the machine key renders as a sentence, not as `manual_entry`.
+    expect(within(tr).getByText(/entered by hand/i)).toBeInTheDocument()
     expect(within(tr).getByText(/no catalog link/i)).toBeInTheDocument()
   })
 
-  it('narrows the list to one reason when the admin filters by it', async () => {
+  it('narrows the list with ONE reason parameter and nothing else', async () => {
+    // T3: was three separate params (`needs_review`, `missing_card_id`,
+    // `missing_english_name`), which meant `flagged` narrowed by the stored
+    // boolean rather than by the predicate that produced the chip — and a new
+    // reason had no param at all.
     mockList([flaggedItem, unlinkedItem, jpItem])
     render(<AdminTriagePage />)
     await screen.findByText(/Pikachu/)
@@ -179,9 +200,13 @@ describe('Triage list', () => {
     await waitFor(() =>
       expect(getMock).toHaveBeenCalledWith(
         '/inventory/search',
-        expect.objectContaining({ triage: 'true', missing_card_id: 'true' }),
+        expect.objectContaining({ triage: 'true', triage_reason: 'missing_card_id' }),
       ),
     )
+    const [, params] = getMock.mock.calls.filter(([p]) => p === '/inventory/search').at(-1)!
+    expect(params).not.toHaveProperty('missing_card_id')
+    expect(params).not.toHaveProperty('needs_review')
+    expect(params).not.toHaveProperty('missing_english_name')
   })
 
   it('shows the effective name — the override outranks the catalog name', async () => {
@@ -198,6 +223,193 @@ describe('Triage list', () => {
     render(<AdminTriagePage />)
 
     expect(await screen.findByText(/nothing needs review/i)).toBeInTheDocument()
+  })
+})
+
+// ===========================================================================
+// RFC 0010 T3 — the server says why, one filter narrows, the queue can drain
+// ===========================================================================
+
+describe('Triage — the server is the authority on why a row is here', () => {
+  it('renders the chips the server sent, not a local recompute', async () => {
+    // The fixture is deliberately one the LOCAL rules would score as clean: it
+    // is linked, English and unflagged, so `reasonsFor()` returns []. If the
+    // page still recomputes, this row shows no chip — which is the owner's
+    // report ("the WHY column reads empty") reproduced in a test.
+    mockList([
+      {
+        ...flaggedItem,
+        needs_review: false,
+        review_reason: null,
+        card_id: 'en:sv1-25',
+        language: 'EN',
+        triage_reasons: ['missing_english_name'],
+      },
+    ])
+    render(<AdminTriagePage />)
+
+    const row = await findRow(/Pikachu/)
+    expect(within(row).getByText(/needs english name/i)).toBeInTheDocument()
+  })
+
+  it('renders a machine reason as a sentence instead of a snake_case key', async () => {
+    mockList([{ ...flaggedItem, review_reason: 'low_match_confidence' }])
+    render(<AdminTriagePage />)
+
+    const row = await findRow(/Pikachu/)
+    expect(within(row).getByText(/matcher wasn't sure/i)).toBeInTheDocument()
+    expect(within(row).queryByText('low_match_confidence')).not.toBeInTheDocument()
+  })
+
+  it('leaves sold and closed cards out until the admin asks for them', async () => {
+    // A sold card's data quality is not a worklist item — it sat in this queue
+    // forever with nothing that could ever remove it.
+    mockList([flaggedItem])
+    render(<AdminTriagePage />)
+    await screen.findByText(/Pikachu/)
+
+    fireEvent.click(screen.getByLabelText(/include sold/i))
+
+    await waitFor(() =>
+      expect(getMock).toHaveBeenCalledWith(
+        '/inventory/search',
+        expect.objectContaining({ triage: 'true', include_terminal: 'true' }),
+      ),
+    )
+  })
+})
+
+describe('Triage — clearing machine flags in bulk', () => {
+  const machineFlagged = {
+    ...flaggedItem,
+    item_id: 'machine-1',
+    review_reason: 'manual_entry',
+    bulk_clearable: true,
+    card: { ...flaggedItem.card, name: 'Machop' },
+  }
+
+  it('names the exact number it is about to clear, never "clear all"', async () => {
+    mockList([
+      machineFlagged,
+      {
+        ...machineFlagged,
+        item_id: 'machine-2',
+        card: { ...flaggedItem.card, name: 'Squirtle' },
+      },
+      // Human note: not clearable, and must not be counted.
+      { ...flaggedItem, bulk_clearable: false },
+    ])
+    render(<AdminTriagePage />)
+    await screen.findByText(/Machop/)
+
+    fireEvent.click(screen.getByRole('button', { name: /clear machine flags/i }))
+
+    const confirm = await screen.findByRole('dialog', { name: /clear machine flags/i })
+    expect(within(confirm).getByText(/\b2\b/)).toBeInTheDocument()
+    // Scoped to the bulk route: `useCardImages` POSTs on every render, so a
+    // bare "post was never called" would fail for an unrelated reason.
+    expect(
+      postMock.mock.calls.filter(([p]) => p === '/inventory/bulk-clear-review'),
+    ).toHaveLength(0)
+  })
+
+  it('sends the filter it is looking at, and refetches once it lands', async () => {
+    mockList([machineFlagged])
+    postMock.mockResolvedValue({ cleared: 1 })
+    render(<AdminTriagePage />)
+    await screen.findByText(/Machop/)
+
+    fireEvent.click(screen.getByRole('button', { name: /clear machine flags/i }))
+    const confirm = await screen.findByRole('dialog', { name: /clear machine flags/i })
+    fireEvent.click(within(confirm).getByRole('button', { name: /^clear \d+/i }))
+
+    await waitFor(() =>
+      expect(postMock).toHaveBeenCalledWith(
+        '/inventory/bulk-clear-review',
+        expect.objectContaining({ include_terminal: false }),
+      ),
+    )
+  })
+
+  it('offers nothing to clear when no row carries a machine flag', async () => {
+    // Measured against the live table 2026-08-11: this is the CURRENT state —
+    // 27 rows, none of them bulk-clearable. A button promising to clear zero
+    // things is worse than no button.
+    //
+    // NOTE: passes before the change, because no such button exists yet. It is
+    // the pin that keeps the new button from rendering unconditionally.
+    mockList([flaggedItem, unlinkedItem])
+    render(<AdminTriagePage />)
+    await screen.findByText(/Pikachu/)
+
+    expect(screen.queryByRole('button', { name: /clear machine flags/i })).toBeNull()
+  })
+})
+
+describe('Triage — setting the condition on a card in hand', () => {
+  it('sends the tier and the modifier as SEPARATE fields', async () => {
+    // Never a combined "LP+" — storage is always two fields, and sending the
+    // combined form is the Round 1 enum-validation bug (CLAUDE.md).
+    mockList([flaggedItem])
+    render(<AdminTriagePage />)
+
+    const row = await findRow(/Pikachu/)
+    fireEvent.change(within(row).getByLabelText(/condition/i), { target: { value: 'LP+' } })
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith('/inventory/flagged-1', {
+        condition: 'LP',
+        condition_modifier: '+',
+      }),
+    )
+  })
+
+  it('offers every condition an admin can grade a card as', async () => {
+    mockList([flaggedItem])
+    render(<AdminTriagePage />)
+
+    const row = await findRow(/Pikachu/)
+    const select = within(row).getByLabelText(/condition/i)
+    expect(
+      Array.from(select.querySelectorAll('option')).map((o) => o.textContent),
+    ).toEqual(['NM', 'LP+', 'LP', 'LP-', 'MP', 'HP', 'DMG'])
+  })
+
+  it('updates the row in place, without refetching the whole queue', async () => {
+    // Same reason as "Priced -> removed" on the Prep Queue: a round-trip here
+    // makes every fix feel like it hung.
+    mockList([flaggedItem])
+    render(<AdminTriagePage />)
+
+    const row = await findRow(/Pikachu/)
+    const searchCalls = getMock.mock.calls.filter(([p]) => p === '/inventory/search').length
+
+    fireEvent.change(within(row).getByLabelText(/condition/i), { target: { value: 'MP' } })
+
+    await waitFor(() => expect(putMock).toHaveBeenCalled())
+    const select = within(await findRow(/Pikachu/)).getByLabelText(
+      /condition/i,
+    ) as HTMLSelectElement
+    expect(select.value).toBe('MP')
+    expect(getMock.mock.calls.filter(([p]) => p === '/inventory/search')).toHaveLength(
+      searchCalls,
+    )
+  })
+
+  it('says so when the condition does not save, instead of showing the new value', async () => {
+    // A silent failure here is a price left wrong on the customer site.
+    mockList([flaggedItem])
+    putMock.mockRejectedValue(new Error('nope'))
+    render(<AdminTriagePage />)
+
+    const row = await findRow(/Pikachu/)
+    fireEvent.change(within(row).getByLabelText(/condition/i), { target: { value: 'MP' } })
+
+    expect(await screen.findByText(/could not update that condition/i)).toBeInTheDocument()
+    const select = within(await findRow(/Pikachu/)).getByLabelText(
+      /condition/i,
+    ) as HTMLSelectElement
+    expect(select.value).toBe('NM')
   })
 })
 

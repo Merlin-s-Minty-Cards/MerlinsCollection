@@ -109,7 +109,8 @@ Triage's reason set stays at the three correctness reasons.
 - **Modify:** `frontend/lib/triage.ts` — labels for machine reasons; demote `reasonsFor`
 - **Modify:** `frontend/app/(admin)/admin/triage/page.tsx` — render server reasons, one filter,
   status toggle, bulk clear
-- **Tests:** `backend/tests/test_admin_inventory.py` (or the triage test file),
+- **Tests:** `backend/tests/routers/admin/test_triage.py` (corrected as executed —
+  `backend/tests/test_admin_inventory.py` does not exist),
   `frontend/app/(admin)/admin/triage/__tests__/page.test.tsx`,
   `frontend/lib/__tests__/triage.test.ts`
 
@@ -265,9 +266,13 @@ success.
 Run:
 
 ```bash
-./.venv/Scripts/python.exe -m pytest backend/tests -q --tb=short -k "triage or admin_inventory"
-cd frontend && npx vitest run "app/(admin)/admin/triage" lib/__tests__/triage --reporter=verbose
+./.venv/Scripts/python.exe -m pytest backend/tests/routers/admin/test_triage.py -q --tb=short
+npm test --workspace=frontend -- --run "app/(admin)/admin/triage" "lib/__tests__/triage"
 ```
+
+*(Both commands corrected as executed. The `npx vitest` form fails with "Vitest
+failed to find the runner" — progress.md has recorded that since T0, and this is
+the fifth task doc to repeat it.)*
 
 ## GREEN — done when
 

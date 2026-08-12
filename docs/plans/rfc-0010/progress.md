@@ -6,18 +6,57 @@
 gitignored (`.gitignore:60`), so it is local-only and your edits to it will never appear in
 `git status` or reach anyone else. Record all RFC 0010 status **in this file**.
 
-**Last updated:** 2026-08-11 (T2 DONE — editing a consignor no longer forks the row)
+**Last updated:** 2026-08-11 (T3 DONE — the server says why, one filter narrows, the queue can drain)
 **Branch:** `Polishing-For-Deployment`
 **RFC:** [`docs/rfcs/0010-admin-round8-ledger-corrections-and-slab-manual-only.md`](../../rfcs/0010-admin-round8-ledger-corrections-and-slab-manual-only.md)
 **Task index:** [`README.md`](README.md)
 **Source of the requests:** the owner's `The plan.pdf` (12 items) plus two review comments
 on 2026-08-10 — the money-input report and the PSA/scanner reversal.
 
-## ✅ T0, T1, T2, T15 AND T17 ARE DONE — start at T3
+## ✅ T0, T1, T2, T3, T15 AND T17 ARE DONE — start at T4
 
 T15 gave all five catalog pickers one shared row carrying name, image AND price;
 T17 built the job that fills those prices in; T2 stopped an admin edit forking a
-consignor into two rows. **Start at T3.**
+consignor into two rows; T3 made the server the authority on why a row is in
+Triage. **Start at T4.**
+
+## 📉 T3 RE-MEASURED THE QUEUE AND THE TASK DOC'S PREMISE IS GONE
+
+**Read this before T4, T5 or T16 — it changes what the remaining Triage work is
+for.** Measured read-only against live `merlins-cards` on 2026-08-11, with the
+same predicates the endpoint uses (the app was not running, so the doc's
+`curl /admin/triage/counts` was computed directly instead):
+
+| | task doc, 2026-08-10 | measured 2026-08-11 |
+|---|---|---|
+| inventory rows | — | 284 |
+| triage rows | **266** | **27** |
+| `flagged` / `missing_card_id` / `missing_english_name` | — | 27 / 17 / **0** |
+| `blank_condition` rows | "hundreds"; the money bug | **0** |
+| bulk-clear candidates | "the load-bearing part" | **0** |
+| statuses | — | available 25 · on_hold 1 · sold 1 |
+| reason combinations | — | `flagged+missing_card_id` 17 · `flagged` 10 |
+| `review_reason` of the 27 | — | **None 21** · `no_catalog_link` 3 · `manual_entry` 1 · 2 human notes |
+
+Four consequences, all of which outlive T3:
+
+1. **The re-point tool is the load-bearing one**, by the task doc's own decision
+   rule — 17 of 27 rows are unlinked.
+2. **The `blank_condition` money queue is EMPTY.** The condition control T3 added
+   is correct and still worth having, but it has no backlog to work through
+   today. The "Blocked / needs the owner" row asking the owner to work that queue
+   is closed below.
+3. **`missing_english_name` is at zero**, so the Assign-English-name tool and the
+   JP half of Triage currently have no rows either.
+4. **21 of the 27 rows carry NO reason at all** — bare flags written before
+   `review_reason` existed. They render the generic chip and are deliberately
+   *not* bulk-clearable (absence of a reason is not a machine reason), so the
+   dominant cohort must be cleared one at a time. **The bulk clear cannot help
+   with them.** Filed in follow-ups.
+
+The bulk clear is **not** dead code: `_review_reason_for_buy` writes
+`manual_entry` / `no_catalog_link` on every manual buy entry, so candidates
+accrue from normal use even though the importer never runs again.
 
 **T2 shipped code plus a script the owner still has to run.** The fork can no
 longer happen, but the two Harrys already in the live table are still there until
@@ -46,7 +85,7 @@ naming the row. **Start at T1.**
 | T0 | Money input + partial write | **DONE** | `0702346` | Merge blocker cleared. `frontend/lib/money.ts` exports `parseMoney`, `formatMoneyInput` **and `formatMoney`** (grouped display — the doc listed only the first two). `StagedSlab.buy_price` is now a **number**. `confirm_buy_session` is split into a build pass and a write pass; reuse `_build_purchase`, do not re-inline it |
 | T1 | `MoneyInput` rollout | **DONE** | `571b3bc` | Shipped on **eight** surfaces — the doc's seven plus **Trade**, which its own "Why" names. `MoneyInput` gained `placeholder` / `onBlur` / `onKeyDown`; `InlineEditCell` gained `type="money"` (option a). Wire format is **unchanged** — where a string went, `String(parsed)` still goes. `MONEY_PARSE_MESSAGE` now lives in `lib/money.ts` so the three surfaces that show it cannot drift. **Percent fields deliberately untouched.** Out of scope and filed: Inventory / Shows / History-filter money inputs, and `sales.py`/`trades.py`'s single-pass write |
 | T2 | Consignor row fork | **DONE** | `0620fba` | `put_consignor` sweeps like `put_show`. `Consignor.active` is **gone** — replaced by `archived`, with a before-validator migrating a stored `active: False`. New repo method **`list_consignor_rows()`** (raw rows with SKs) backs both the sweep and the script; `list_consignors` now delegates to it. Router gained `_save_cosigner`/`_require_cosigner` (mirroring `_save_show`), a 409 name guard, `?include_archived=`, and `POST /admin/cosigners/{id}/unarchive`; **`DELETE` is the archive** and now returns the updated consignor, not `{"status": "deactivated"}`. `StatusBadge` gained **`active`/`archived`** styles — use those for any person or event. `scripts/reconcile_consignors.py` keeps the **unsuffixed** row, not the highest generation (see Decisions) |
-| T3 | Triage reasons + filter | **NOT STARTED** | — | The query is NOT broken; the 266 rows are import flags. **No sticker reason** (owner decision) |
+| T3 | Triage reasons + filter | **DONE** | `PENDING` | The query was never broken and the 266 rows are gone — **27 remain**, see the re-measurement above; read it before T4. `services/triage.py` gained `reasons_for` (and `needs_triage` is now `bool(reasons_for(i))`, so they cannot drift), `TERMINAL_STATUSES` + **`in_triage_scope`** (called by BOTH the list and `/triage/counts`, which is what keeps the badge honest), and `is_bulk_clearable`. Search emits **`triage_reasons` AND `bulk_clearable`** on `triage=true` rows only. **ONE filter param, `triage_reason`**, 422 on an unknown key; the old three stay for compatibility and `/admin/inventory` still uses `needs_review`. New `POST /admin/inventory/bulk-clear-review`. Param is **`include_terminal`**, not the doc's `include_sold` (see Decisions). **No sticker reason** (owner decision) |
 | T4 | Triage search | **NOT STARTED** | — | Frontend only; `name` already works on the endpoint |
 | T5 | Detail modal live updates | **NOT STARTED** | — | Changes `onUpdated`'s signature across six mounting pages; parameter is optional so nothing breaks |
 | T6 | Detail modal layout | **NOT STARTED** | — | Must be checked by a human at 100/150/200% zoom. A test can assert classes, not typeability |
@@ -86,7 +125,8 @@ that is the mistake that made RFC 0009's T-FINAL sign-off stale.
 |---|---|---|
 | **Run `scripts/reprice_catalog.py` overnight once — T17 has LANDED, this is ready now** | It prices all ~31,300 unheld catalog rows in one ~2 h 18 min run, so the weekly cycle starts from full coverage instead of taking ~6 nights to reach it. **Prove it on a slice first:** `--limit 200` dry run, then `--limit 200 --execute --confirm-table merlins-cards`, then the uncapped `--execute --confirm-table merlins-cards`. The dry run prints the candidate count, chunk plan and ETA before anything is written. It is chunked (lock taken/released per chunk) and resumable — Ctrl-C and re-run is safe, and there is no checkpoint file to clean up. **It needs `dynamodb:Scan`** | nothing; the nightly cycle gets there on its own, this just skips the wait |
 | **Run `scripts/reconcile_consignors.py` once — T2 has LANDED, this is ready now** | The sweep stops NEW forks; it does not merge the duplicate Harry already in the live table, because nothing rewrites a consignor until someone edits it. **Prove it with the dry run first:** `../.venv/Scripts/python.exe scripts/reconcile_consignors.py` prints every row it would keep and every row it would remove, and writes nothing. Then `--execute --confirm-table merlins-cards`. It keeps the row carrying the admin's edits (the 85% Harry). **Do not run it during an import** — coexisting generations are load-then-swap's whole point during the load phase. Report the count back into this file | nothing; the page is correct either way, it just still lists the duplicate |
-| **Work the `blank_condition` queue — this is data remediation, not code** | Every card the import found with no condition was stored as **NM**, the most expensive tier, and customer prices scale down from it. Until someone checks each card, those are listed **above** their value (LP → 1.22×, MP → 1.72×). T3 makes them filterable and fixable in place; **only the owner can actually fix them.** Surface the count during T3 so the size of the job is known | nothing in code; real money on the live site |
+| ~~Work the `blank_condition` queue~~ | **CLOSED 2026-08-11 by measurement — the queue is EMPTY.** T3's diagnostic found **zero** rows carrying `blank_condition` (and zero `missing_english_name`) in the live table; the 266-row import cohort the concern was raised against is gone. The condition control T3 built is still on the row and still correct — it just has no backlog. The exclusion from bulk clear stays regardless: it is the rule that stops the defect being re-created, not a reaction to current data | — |
+| **Clear the 21 reasonless flags by hand — T3 cannot do it for you** | 21 of the 27 triage rows carry `needs_review = true` with **no `review_reason` at all** (written before the column existed, and not backfillable — the data no longer distinguishes the cases). They render the generic "Flagged for review" chip and are deliberately excluded from bulk clear, because absence of a reason is not evidence automation set it. Each needs an admin to look at the card and press **Clear review** | nothing; the page does this fine, it is just one row at a time |
 | ~~Should the import stop setting `needs_review` for `blank_condition`?~~ | **CLOSED 2026-08-10.** The importer will never run again, so its flagging is historical — do not edit it. And the reason turns out to be a money defect, so it is emphatically worth reviewing | — |
 | **Does voiding a PURCHASE need to work in the first cut?** | Voiding a sale returns an item to stock. Voiding a purchase should arguably *remove* an item that may since have been sold or traded. Sales-only, with purchases returning a clear 400, is the honest small version | T11 scope |
 | **Rotate both API keys — STILL OUTSTANDING from RFC 0009 T8** | Both were pasted into a chat transcript on 2026-08-07. Owner action in the vendor portal; procedure in `docs/aws-setup.md` Phase 8. Only the pricing key matters now — **the PSA key is read by no code and, per RFC 0010 §H, never will be** | nothing in code; flagged, not done |
@@ -125,6 +165,13 @@ that is the mistake that made RFC 0009's T-FINAL sign-off stale.
 | 2026-08-11 | T2 | **`StatusBadge` gained `active` and `archived` styles** rather than the page growing a private badge | CLAUDE.md's rule is *"an `Archived` badge never reuses inventory-status vocabulary"*, and shows already hand-rolls its own badge span — a second hand-rolled copy here would make three vocabularies for one concept. Two lines in the shared map means the next archivable entity gets it free. `active` is mint (as `available` was) so the row does not visually change for a live consignor |
 | 2026-08-11 | T2 | **One of the four frontend RED tests passed before any change** — the 409 duplicate-name message. Kept as a regression guard, not dressed up as new work | The page's `catch` already renders `err.detail`. The reason the owner saw a useless message is that the **backend never sent a 409**; nothing on the frontend was broken. Same call as T15's 4th backend test. Three backend tests are in the same position and are labelled in the file: the mid-import coexistence test, the "PATCH that does not move the name" test, and the "archiving with linked inventory succeeds" test — each pins a deliberate *absence* (no sweep across generations, no over-broad guard, no in-use guard) |
 | 2026-08-11 | T2 | **The task doc's test paths were wrong for the FOURTH time in this RFC**, and its frontend command was the `npx vitest` form this file records as broken. Both corrected **in the task doc itself** this time, not just here | Following T0's, T15's and T17's rows. Correcting only the progress file has demonstrably not worked — three later docs copied the bad command. Real paths: `backend/tests/routers/admin/test_cosigners.py`, `backend/tests/services/test_dynamodb.py`, `backend/tests/scripts/test_reconcile_consignors.py` |
+| 2026-08-11 | T3 | **The task doc's whole premise was re-measured and does not hold: 27 triage rows, not 266, with `blank_condition` and `missing_english_name` both at ZERO.** The full table is in the re-measurement section above | The doc decides its own priorities off that breakdown (*"if `flagged` accounts for ~all 266, the bulk clear is load-bearing; if `missing_card_id` does, the re-point tool is"*), and it ordered the work as if the import cohort were still there. It is not — the owner has been draining it. Recorded prominently because **T4, T5 and T16 all assume a large Triage queue**, and the honest size of the remaining job is 17 unlinked cards plus 10 hand/legacy flags |
+| 2026-08-11 | T3 | **The scope parameter is `include_terminal`, NOT the doc's `include_sold`** — and `TERMINAL_STATUSES` is `SOLD`, `LOST` and `RETURNED_TO_CONSIGNOR`. UI label: "Include sold and closed" | A lost card and one returned to its consignor are as un-fixable as a sold one — the card is not in the building. A parameter named `include_sold` that also admits those two is a name that lies about what it does, and the next reader would add a *second* flag for the other statuses. Nothing else in the repo referenced `include_sold`, so the rename costs nothing |
+| 2026-08-11 | T3 | **The server also emits a per-row `bulk_clearable` boolean**, beyond the `triage_reasons` the doc specified | The confirm dialog has to name an exact count *before* firing, and the only other way to compute it client-side is to mirror `MACHINE_REVIEW_REASONS` into TypeScript — which is precisely the drift this task exists to remove. One predicate (`is_bulk_clearable`), two consumers: the serializer and the POST route. It also makes the count exact by construction, since the search is unpaginated so the loaded rows *are* the filtered set |
+| 2026-08-11 | T3 | **The bulk clear writes an `edit` timeline event per item**, exactly as the single-item PUT does | `admin_update_item`'s own comment states the invariant: a manual edit is the one mutation path with no built-in transaction record, so without the event the prior value is unrecoverably overwritten with no audit trail. A *bulk* version is the last place to drop that — it is the one that overwrites many rows at once. Costs one extra write per cleared item, on an operation that clears tens of rows at most |
+| 2026-08-11 | T3 | **The task doc states the multi-reason bulk-clear rule two ways and they conflict.** Built: an item with a second reason is left **completely alone** (`cleared == 0`, flag intact, `reviewed_at` untouched) | The doc says both *"clears only items whose ONLY reason is `flagged`"* and *"an item that is also unlinked keeps its other reasons and stays in the list"* — the second implies the flag was cleared. The first is safer and is what shipped: clearing the flag on a row that stays in the queue anyway makes the queue no shorter, destroys the stored `review_reason`, and stamps `reviewed_at` on an item nobody reviewed — which then suppresses the next automated flag. My first draft of the test asserted the other reading and was the one test that failed after GREEN; the *test* was wrong |
+| 2026-08-11 | T3 | **Three pre-existing frontend tests were rewritten, deliberately** — all four page fixtures gained `triage_reasons`, the reason-filter test now asserts `triage_reason=<key>` **and** the absence of the old three params, and the two-reason test asserts "Entered by hand" instead of `manual_entry` | Same shape as T1's `min="0"` and T2's `active` rewrites. The endpoint always sends `triage_reasons` for `triage=true`, so a fixture without it is a response shape that no longer exists — and a page that falls back to the local recompute when the key is missing would reintroduce exactly the drift being removed. **No fallback was added**, on purpose |
+| 2026-08-11 | T3 | **The doc's frontend run command is the `npx vitest` form this file records as broken** — corrected in the task doc itself, following T2's precedent. Its backend test path (`backend/tests/test_admin_inventory.py`) does not exist either; everything went in `backend/tests/routers/admin/test_triage.py` | **Fifth** task doc in this RFC with wrong paths or a wrong command (T0, T15, T17, T2, now T3). Correcting only this file has demonstrably not worked |
 | 2026-08-10 | T0 | **The doc's file paths were wrong in two places**, corrected as executed: the backend tests are `backend/tests/routers/admin/test_purchases.py`, and the frontend run command must be the `npm test --workspace=frontend` form, not `npx vitest` | `npx vitest` fails with "Vitest failed to find the runner" — already noted in the baseline section of this file, but the task doc contradicted it. Later task docs copy this command; check it before trusting it |
 
 *(rows below are PLANNING decisions, recorded before execution because a later task would
@@ -241,6 +288,34 @@ MCP was not re-run: T17 touched no MCP file.
 
 MCP was not re-run: T2 touched no MCP file, and nothing in `mcp-server/` reads a
 consignor.
+
+**Re-measured after T3** — a fresh run, not a row above carried forward:
+
+| Suite | Count | Time | State |
+|---|---|---|---|
+| Backend | **1595 passed / 0 failed** | 3m28s | green — 1574 + 21 new T3 tests |
+| Frontend | **691 passed / 0 failed** (82 files) | ~8s | green — 677 + 14 new T3 tests |
+| Narrow T3 selection (1 backend file) | 57 passed / 0 failed | ~11s | green — 36 of them pre-existing |
+| Narrow T3 selection (2 frontend files) | 36 passed / 0 failed | ~8s | green |
+| `ruff check backend/src` | — | ~3s | clean |
+| `npm run lint --workspace=frontend` | — | ~5s | clean (the one pre-existing `<img>` warning in `CardDetailModal`) |
+| `npm run build --workspace=frontend` | — | ~40s | exit 0 |
+
+MCP was not re-run: T3 touched no MCP file, and nothing in `mcp-server/` reads a
+triage reason.
+
+**`ruff check backend/tests/routers/admin/test_triage.py` reports 2 violations
+(one `I001`, one `E501`) and BOTH pre-date T3** — verified by running ruff
+against the file's `HEAD` contents through `--stdin-filename`, which reports the
+identical two. Same call as T2 and T17: **do not "fix" pre-existing lint inside a
+feature commit.**
+
+**Not verified here, and it needs the owner:** T3's manual check — opening
+Triage and confirming every visible row has a chip, filtering by each reason and
+watching the count change, and setting a real condition on a card in hand and
+confirming the customer-facing price on `/inventory` moves. The last one has
+**no data to test against** — `blank_condition` is at zero — so it is really a
+check that the control writes the two fields correctly on any raw row.
 
 **`ruff check backend/tests` is NOT clean, and it was not clean before T2 either.**
 `test_cosigners.py` carries **6 pre-existing** violations (one `I001`, five `E501`)

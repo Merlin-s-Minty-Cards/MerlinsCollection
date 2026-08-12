@@ -22,7 +22,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 
-from merlins_collection.models.inventory import InventoryItem, Language
+from merlins_collection.models.inventory import (
+    MACHINE_REVIEW_REASONS,
+    InventoryItem,
+    ItemStatus,
+    Language,
+)
 
 
 def is_flagged(item: InventoryItem) -> bool:
@@ -63,6 +68,21 @@ TRIAGE_REASONS: dict[str, Callable[[InventoryItem], bool]] = {
 }
 
 
+def reasons_for(item: InventoryItem) -> list[str]:
+    """Every reason this item is in the queue, in ``TRIAGE_REASONS`` order.
+
+    ``needs_triage(item)`` is exactly ``bool(reasons_for(item))``, and the two are
+    expressed in terms of each other below so they cannot drift: **a row in the
+    list with no reason is the defect this function exists to make impossible**,
+    and it is the owner's own report (a WHY column reading empty).
+
+    This is also what the API emits, rather than the frontend recomputing the
+    same three rules in TypeScript. That mirror was faithful — it was probed, not
+    assumed — which is precisely why the drift would have been silent.
+    """
+    return [name for name, matches in TRIAGE_REASONS.items() if matches(item)]
+
+
 def needs_triage(item: InventoryItem) -> bool:
     """True if ANY reason applies — the union the Triage list is built from.
 
@@ -72,10 +92,68 @@ def needs_triage(item: InventoryItem) -> bool:
     per-reason queues would show the same card repeatedly and get it "fixed"
     twice.
     """
-    return any(matches(item) for matches in TRIAGE_REASONS.values())
+    return bool(reasons_for(item))
 
 
 def count_by_reason(items: Iterable[InventoryItem]) -> dict[str, int]:
     """Per-reason hit counts. Reasons overlap, so these do NOT sum to the total."""
     items = list(items)
     return {name: sum(1 for i in items if matches(i)) for name, matches in TRIAGE_REASONS.items()}
+
+
+# ---------------------------------------------------------------------------
+# Scope — which items are even eligible for the queue
+# ---------------------------------------------------------------------------
+
+#: An item in one of these states will never be corrected, because the card is
+#: gone: it has been sold, lost, or handed back to its consignor. Its data
+#: quality is history, not work, and leaving it in a queue whose stated goal is
+#: to reach zero means the queue can never get there.
+TERMINAL_STATUSES = frozenset({
+    ItemStatus.SOLD,
+    ItemStatus.LOST,
+    ItemStatus.RETURNED_TO_CONSIGNOR,
+})
+
+
+def in_triage_scope(item: InventoryItem, *, include_terminal: bool = False) -> bool:
+    """Whether this item is in scope for the queue at the requested breadth.
+
+    Called by BOTH the list and ``GET /admin/triage/counts``, for the same reason
+    the predicates above are: a badge that counts a different set from the page
+    it links to is worse than no badge. Scoping one of the two and forgetting the
+    other is the easiest possible way to reintroduce that.
+    """
+    return include_terminal or item.status not in TERMINAL_STATUSES
+
+
+# ---------------------------------------------------------------------------
+# Bulk clear — the narrow, safe subset
+# ---------------------------------------------------------------------------
+
+#: ``blank_condition`` is EXCLUDED, and this is a money rule, not tidiness. The
+#: importer stored ``Condition.NM`` — the most expensive tier — for every card
+#: whose condition the sheet left blank, and every customer-facing price scales
+#: down from it (LP x0.82, MP x0.58). So an LP card in that state is listed at
+#: 1.22x what it is worth and an MP card at 1.72x, in the business's favour.
+#: Clearing those flags in bulk silently ratifies that price on every card
+#: nobody has checked. Only someone holding the card can fix it, which is why
+#: the Triage page grows a condition control instead.
+BULK_CLEARABLE_REASONS = frozenset(MACHINE_REVIEW_REASONS - {"blank_condition"})
+
+
+def is_bulk_clearable(item: InventoryItem) -> bool:
+    """Whether a bulk clear may drop this item's ``needs_review`` flag.
+
+    Two conditions, both narrowing:
+
+    1. ``flagged`` is its ONLY reason — an item that is also unlinked or unnamed
+       keeps that problem, so clearing the flag would not remove it from the list
+       anyway and would only destroy information;
+    2. the stored reason is one automation writes. A human's free-text note is
+       the one thing in this queue a person deliberately recorded, and a bulk
+       button that eats it is strictly worse than no bulk button. Absence of a
+       reason is NOT a machine reason: a bare flag carries no evidence of who set
+       it, so it is left alone too.
+    """
+    return reasons_for(item) == ["flagged"] and item.review_reason in BULK_CLEARABLE_REASONS

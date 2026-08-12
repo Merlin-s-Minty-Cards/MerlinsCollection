@@ -95,7 +95,28 @@ One list, with a chip per reason — items routinely qualify under several at on
 
 The list is `GET /admin/inventory/search?triage=true` (the one OR on that
 endpoint), **not** a parallel endpoint; `GET /admin/triage/counts` backs the
-sidebar badge. "Send to Triage" lives in `CardDetailModal`, so it reaches the
+sidebar badge.
+
+**The SERVER decides why a row is there — never recompute it in the client.**
+`services/triage.reasons_for()` is the authority, `needs_triage(i)` is literally
+`bool(reasons_for(i))`, and `?triage=true` rows carry `triage_reasons` (plus
+`bulk_clearable`) in the response. `frontend/lib/triage.ts`'s `reasonsFor()`
+survives **only** as a prediction for optimistic updates before a refetch; its
+docstring says so. Filtering is **one** parameter, `triage_reason`, validated
+against the predicate set (**422** on an unknown key, never a silent no-op); the
+older `needs_review` / `missing_card_id` / `missing_english_name` params still
+work but Triage no longer sends them. Scope comes from `in_triage_scope`, which
+the list **and** the counts endpoint both call — sold, lost and
+returned-to-consignor rows are out unless `include_terminal=true`, and scoping
+one of the two without the other is how the badge starts lying.
+
+`POST /admin/inventory/bulk-clear-review` drops machine flags, and it is
+deliberately narrow: only items whose **only** reason is `flagged` **and** whose
+`review_reason` is in `MACHINE_REVIEW_REASONS` minus **`blank_condition`**. That
+exclusion is a money rule — the importer stored `Condition.NM`, the most
+expensive tier, for every blank condition, so bulk-clearing those would ratify an
+inflated customer price on cards nobody has graded. A human's free-text flag, and
+a bare flag with no reason at all, are never touched. "Send to Triage" lives in `CardDetailModal`, so it reaches the
 six pages that mount it (inventory, outgoing, sell, show-prep, vault, triage).
 The row-level quick action with undo (`TriageRowAction`) is on **Prep Queue
 only**. Buy, Trade, Market, History, Cosigners and `/admin/card/[id]` do not

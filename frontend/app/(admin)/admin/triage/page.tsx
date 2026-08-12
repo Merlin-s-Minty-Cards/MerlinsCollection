@@ -14,9 +14,11 @@ import {
   clearTriageBody,
   effectiveName,
   reasonsFor,
+  reviewReasonLabel,
   type TriageItem,
   type TriageReason,
 } from '@/lib/triage'
+import { CONDITION_OPTIONS, formatCondition, parseCondition } from '@/lib/constants'
 
 /**
  * Triage — one place for everything that might be wrong.
@@ -42,8 +44,13 @@ export default function AdminTriagePage() {
   const [items, setItems] = useState<TriageItem[]>([])
   const [loading, setLoading] = useState(true)
   const [reasonFilter, setReasonFilter] = useState<'' | TriageReason>('')
+  // Sold, lost and returned-to-consignor cards will never be corrected — the
+  // card is gone — so they are out of the queue unless the admin asks. Leaving
+  // them in is what stopped the list ever reaching zero.
+  const [includeTerminal, setIncludeTerminal] = useState(false)
   const [openTool, setOpenTool] = useState<OpenTool>(null)
   const [detailItem, setDetailItem] = useState<TriageItem | null>(null)
+  const [confirmingBulkClear, setConfirmingBulkClear] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   // Art is always on here, unlike the toggle the big inventory tables carry:
@@ -56,12 +63,13 @@ export default function AdminTriagePage() {
     setLoading(true)
     try {
       const params: Record<string, string> = { triage: 'true' }
-      // The reason filters narrow WITHIN the union, exactly like every other
-      // filter on this endpoint. `flagged` reuses the pre-existing
-      // `needs_review` param rather than inventing a synonym for it.
-      if (reasonFilter === 'flagged') params.needs_review = 'true'
-      if (reasonFilter === 'missing_card_id') params.missing_card_id = 'true'
-      if (reasonFilter === 'missing_english_name') params.missing_english_name = 'true'
+      // ONE parameter, narrowing WITHIN the union by the same predicate that
+      // produced the chip. It used to be three — `needs_review`,
+      // `missing_card_id`, `missing_english_name` — which meant `flagged`
+      // filtered on the stored boolean rather than on the reason, and a new
+      // reason had no parameter at all.
+      if (reasonFilter) params.triage_reason = reasonFilter
+      if (includeTerminal) params.include_terminal = 'true'
       const data = await api.get<{ items: TriageItem[] }>('/inventory/search', params)
       setItems(data?.items ?? [])
     } catch {
@@ -69,7 +77,7 @@ export default function AdminTriagePage() {
     } finally {
       setLoading(false)
     }
-  }, [api, reasonFilter])
+  }, [api, reasonFilter, includeTerminal])
 
   useEffect(() => { fetchItems() }, [fetchItems])
 
@@ -92,12 +100,66 @@ export default function AdminTriagePage() {
       return
     }
     // Only leaves the list if the flag was its ONLY reason — an unlinked card
-    // stays put, still carrying its remaining chip.
+    // stays put, still carrying its remaining chip. `reasonsFor` is a PREDICTION
+    // here, not the authority: there is no server answer yet, and the row is
+    // gone either way.
     const remaining = reasonsFor({ ...item, needs_review: false })
     if (remaining.length === 0) dropRow(item.item_id)
     else setItems((rows) => rows.map((r) =>
-      r.item_id === item.item_id ? { ...r, needs_review: false, review_reason: null } : r,
+      r.item_id === item.item_id
+        ? { ...r, needs_review: false, review_reason: null, triage_reasons: remaining }
+        : r,
     ))
+  }
+
+  /**
+   * The third repair tool. A `blank_condition` row's fix is neither a name nor a
+   * re-point — it is a condition, and the admin is holding the card.
+   *
+   * Writes the tier and the modifier as SEPARATE fields. Never a combined
+   * `"LP+"`: storage is always two fields, and sending the combined form is the
+   * Round 1 enum-validation bug (CLAUDE.md, "Condition vocabulary").
+   *
+   * Deliberately does NOT clear `needs_review` — the flag and the data are
+   * separate facts, so the row keeps its chip until an admin clears it.
+   */
+  const setCondition = async (item: TriageItem, value: string) => {
+    setError(null)
+    const { condition, condition_modifier } = parseCondition(value)
+    try {
+      await api.put(`/inventory/${item.item_id}`, { condition, condition_modifier })
+    } catch {
+      // Say so, and leave the old value on screen. A silent failure here is a
+      // customer-facing price left wrong — every price scales from this field.
+      setError('Could not update that condition. The card is unchanged.')
+      return
+    }
+    setItems((rows) => rows.map((r) =>
+      r.item_id === item.item_id ? { ...r, condition, condition_modifier } : r,
+    ))
+  }
+
+  // Counted off the server's own answer, not re-derived here — the confirm
+  // dialog names this number, so it has to be the number the endpoint will act
+  // on. Zero means no button at all: one promising to clear nothing is worse
+  // than none.
+  const clearableCount = items.filter((i) => i.bulk_clearable).length
+
+  const bulkClear = async () => {
+    setConfirmingBulkClear(false)
+    setError(null)
+    try {
+      await api.post('/inventory/bulk-clear-review', {
+        triage_reason: reasonFilter || null,
+        include_terminal: includeTerminal,
+      })
+    } catch {
+      setError('Could not clear those flags. Nothing was changed.')
+      return
+    }
+    // Refetched rather than predicted: this one write touches many rows, and
+    // the server is the only thing that knows which of them it actually took.
+    fetchItems()
   }
 
   const columns: Column<TriageItem>[] = [
@@ -132,9 +194,12 @@ export default function AdminTriagePage() {
     {
       key: 'reasons',
       label: 'Why',
+      // The SERVER's answer, not a local recompute. The rules live in
+      // `services/triage.py`; this page renders what they returned, so a row can
+      // never appear here with an empty WHY column — which was the report.
       render: (item) => (
         <div className="flex flex-wrap gap-1">
-          {reasonsFor(item).map((reason) => (
+          {(item.triage_reasons ?? []).map((reason) => (
             <span
               key={reason}
               className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px]
@@ -143,15 +208,42 @@ export default function AdminTriagePage() {
               {reason === 'flagged' && <AlertTriangle size={9} />}
               {reason === 'missing_card_id' && <Link2 size={9} />}
               {reason === 'missing_english_name' && <Languages size={9} />}
-              {/* A stored flag shows the admin's own note when there is one:
-                  "flagged" alone says nothing about what to fix. */}
-              {reason === 'flagged' && item.review_reason
-                ? item.review_reason
-                : REASON_LABELS[reason]}
+              {/* A stored flag shows WHY it was flagged when it can: an admin's
+                  own note verbatim, a machine key turned into a sentence, and
+                  the generic label only when the row carries neither. */}
+              {(reason === 'flagged' && reviewReasonLabel(item.review_reason)) ||
+                REASON_LABELS[reason]}
             </span>
           ))}
         </div>
       ),
+    },
+    {
+      key: 'condition',
+      label: 'Condition',
+      className: 'w-28',
+      // The third repair tool, inline: a card whose condition the import never
+      // recorded is priced to customers as NM — the most expensive tier — and
+      // only someone holding the card can say otherwise.
+      render: (item) =>
+        item.kind !== 'raw' ? (
+          <span className="text-[11px] text-pine-600">—</span>
+        ) : (
+          <select
+            aria-label={`Condition for ${effectiveName(item)}`}
+            value={formatCondition(
+              String(item.condition ?? 'NM'),
+              item.condition_modifier,
+            )}
+            onChange={(e) => setCondition(item, e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            className="vault-field px-2 py-1 rounded-md text-[11px] appearance-none cursor-pointer"
+          >
+            {CONDITION_OPTIONS.map((value) => (
+              <option key={value} value={value}>{value}</option>
+            ))}
+          </select>
+        ),
     },
     {
       key: '_tools',
@@ -208,7 +300,7 @@ export default function AdminTriagePage() {
         </p>
       </header>
 
-      <div className="mb-4">
+      <div className="mb-4 flex flex-wrap items-center gap-3">
         <select
           aria-label="Reason"
           value={reasonFilter}
@@ -219,6 +311,35 @@ export default function AdminTriagePage() {
             <option key={opt.value} value={opt.value}>{opt.label}</option>
           ))}
         </select>
+
+        <label
+          htmlFor="include-terminal"
+          className="inline-flex items-center gap-2 text-xs text-pine-300 cursor-pointer"
+        >
+          <input
+            id="include-terminal"
+            type="checkbox"
+            checked={includeTerminal}
+            onChange={(e) => setIncludeTerminal(e.target.checked)}
+            className="accent-mint"
+          />
+          Include sold and closed
+        </label>
+
+        {/* Only when there is something to clear. The count is the server's,
+            and it is in the button because a bare "Clear all" on a queue this
+            destructive tells the admin nothing about what is about to happen. */}
+        {clearableCount > 0 && (
+          <button
+            type="button"
+            onClick={() => setConfirmingBulkClear(true)}
+            className="ml-auto px-2.5 py-1.5 rounded-lg text-xs text-pine-300
+                       border border-pine-700/60 hover:text-mint hover:border-mint/40
+                       transition-colors"
+          >
+            Clear machine flags ({clearableCount})
+          </button>
+        )}
       </div>
 
       {error && (
@@ -247,18 +368,54 @@ export default function AdminTriagePage() {
         />
       )}
 
+      {confirmingBulkClear && (
+        <Dialog label="Clear machine flags" onClose={() => setConfirmingBulkClear(false)}>
+          <p className="text-[11px] text-pine-300">
+            This drops the review flag on the cards below, which were flagged by
+            automation and have no other problem. They leave the queue.
+          </p>
+          {/* Says what it will NOT touch, because that is the part an admin has
+              to trust. `blank_condition` is excluded server-side: those cards are
+              priced to customers as NM until a human grades them. */}
+          <p className="mt-2 text-[11px] text-pine-400">
+            A note you typed yourself is left alone, and so is any card flagged
+            for having no recorded condition — those are still listed at NM
+            prices until someone checks them.
+          </p>
+          <div className="mt-4 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setConfirmingBulkClear(false)}
+              className="px-3 py-1.5 rounded-md text-[11px] text-pine-400 hover:text-pine-200"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={bulkClear}
+              className="px-3 py-1.5 rounded-md text-[11px] font-medium bg-mint/15
+                         text-mint border border-mint/30 hover:bg-mint/25"
+            >
+              Clear {clearableCount} flags
+            </button>
+          </div>
+        </Dialog>
+      )}
+
       {openTool?.tool === 'repoint' && (
         <RepointDialog
           item={openTool.item}
           onClose={() => setOpenTool(null)}
           onRepointed={(cardId) => {
             setOpenTool(null)
+            // Predicted, not authoritative — see `reasonsFor`'s docstring.
+            const predicted = reasonsFor({ ...openTool.item, card_id: cardId })
             setItems((rows) => rows.map((r) =>
-              r.item_id === openTool.item.item_id ? { ...r, card_id: cardId } : r,
+              r.item_id === openTool.item.item_id
+                ? { ...r, card_id: cardId, triage_reasons: predicted }
+                : r,
             ))
-            if (reasonsFor({ ...openTool.item, card_id: cardId }).length === 0) {
-              dropRow(openTool.item.item_id)
-            }
+            if (predicted.length === 0) dropRow(openTool.item.item_id)
           }}
         />
       )}
@@ -270,10 +427,13 @@ export default function AdminTriagePage() {
           onNamed={(name) => {
             setOpenTool(null)
             const next = { ...openTool.item, display_name_override: name }
+            const predicted = reasonsFor(next)
             setItems((rows) => rows.map((r) =>
-              r.item_id === openTool.item.item_id ? next : r,
+              r.item_id === openTool.item.item_id
+                ? { ...next, triage_reasons: predicted }
+                : r,
             ))
-            if (reasonsFor(next).length === 0) dropRow(openTool.item.item_id)
+            if (predicted.length === 0) dropRow(openTool.item.item_id)
           }}
         />
       )}

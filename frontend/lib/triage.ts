@@ -20,6 +20,21 @@ export interface TriageItem {
   display_name_override?: string | null
   needs_review?: boolean
   review_reason?: string | null
+  condition?: string | null
+  condition_modifier?: string | null
+  /**
+   * Why the SERVER put this row in the queue — the authority, computed by
+   * `services/triage.reasons_for`. Optional only because the ordinary admin
+   * search does not carry it; `?triage=true` always does.
+   */
+  triage_reasons?: TriageReason[]
+  /**
+   * Whether a bulk clear would drop this row's flag. Sent by the server so the
+   * confirm dialog can name an exact count without the client re-deriving
+   * `MACHINE_REVIEW_REASONS` membership — two copies of that rule is how the
+   * button and the endpoint come to disagree about what is being destroyed.
+   */
+  bulk_clearable?: boolean
   lineage_id?: string | null
   predecessor_item_id?: string | null
   card?: { card_id?: string; name?: string; set_name?: string; number?: string } | null
@@ -46,16 +61,57 @@ export const REASON_FILTER_OPTIONS: { value: '' | TriageReason; label: string }[
   { value: 'missing_english_name', label: REASON_LABELS.missing_english_name },
 ]
 
+/**
+ * Human labels for the machine keys `review_reason` can hold.
+ *
+ * `review_reason` is ONE column carrying two different things — a key from
+ * `MACHINE_REVIEW_REASONS` (models/inventory.py) written by automation, and
+ * free text an admin typed. Rendering the column raw made an imported row read
+ * `low_match_confidence`, which tells the person holding the card nothing.
+ *
+ * Keep this in step with `MACHINE_REVIEW_REASONS`: a key with no entry falls
+ * through to the free-text branch and renders as a snake_case token again.
+ */
+export const MACHINE_REASON_LABELS: Record<string, string> = {
+  low_match_confidence: "The matcher wasn't sure this is the right card",
+  no_catalog_link: 'Imported with no catalog match',
+  blank_condition: 'No condition on the imported row',
+  manual_entry: 'Entered by hand',
+  // Describes a PSA cert flow RFC 0010 §H drops. Old rows may still carry it,
+  // so the label stays; nothing writes it any more.
+  cert_lookup_failed: 'Cert lookup failed',
+}
+
+/**
+ * What to show for a stored `review_reason`, or `null` when there is nothing
+ * to show.
+ *
+ * An admin's own note passes through VERBATIM — it is the one thing in this
+ * queue a person deliberately recorded, and rewriting it is worse than showing
+ * a machine key. Set membership is what separates the two, exactly as it does
+ * on the server, where the same distinction decides what a bulk clear may touch.
+ */
+export function reviewReasonLabel(reason?: string | null): string | null {
+  const trimmed = reason?.trim()
+  if (!trimmed) return null
+  return MACHINE_REASON_LABELS[trimmed] ?? trimmed
+}
+
 /** Only raw and graded items link to a catalog card; sealed and bulk never do. */
 function isCardLinkable(item: TriageItem): boolean {
   return item.kind === 'raw' || item.kind === 'graded'
 }
 
 /**
- * Every reason this item is in the queue — one row, several chips.
+ * A PREDICTION of what the server would say, for optimistic updates only.
  *
- * Parallel per-reason queues would list the same card repeatedly and get it
- * "fixed" twice, which is why this returns a list rather than a single reason.
+ * NOT the display authority any more (RFC 0010 T3): the chips a row renders
+ * come from `item.triage_reasons`, computed by `services/triage.reasons_for`.
+ * This mirror survives solely so the page can predict the next state after a
+ * repair — before the server has been asked — and drop a fixed row without a
+ * refetch round-trip. If it ever drifts from the Python rules, a row briefly
+ * shows the wrong chip and then corrects itself; if it were still the
+ * authority, it would show the wrong chip forever.
  */
 export function reasonsFor(item: TriageItem): TriageReason[] {
   const reasons: TriageReason[] = []

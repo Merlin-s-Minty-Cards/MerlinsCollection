@@ -33,9 +33,13 @@ from merlins_collection.services.condition_pricing import apply_condition_adjust
 from merlins_collection.services.dynamodb import InventoryRepository
 from merlins_collection.services.locations import validate_location
 from merlins_collection.services.triage import (
+    TRIAGE_REASONS,
+    in_triage_scope,
+    is_bulk_clearable,
     is_missing_card_id,
     is_missing_english_name,
     needs_triage,
+    reasons_for,
 )
 
 router = APIRouter(prefix="/inventory", tags=["admin-inventory"])
@@ -101,8 +105,15 @@ def admin_search_inventory(
     needs_review: bool | None = Query(None),
     missing_sticker: bool = Query(False),
     # Triage (T11). `triage` is the one OR on this endpoint — the union of every
-    # reason — while the two below narrow WITHIN it like every other filter here.
+    # reason — while the ones below narrow WITHIN it like every other filter here.
     triage: bool = Query(False),
+    # RFC 0010 T3: ONE parameter, validated against the predicate set that built
+    # the union, so `flagged` narrows by the predicate that produced the chip
+    # rather than by the stored boolean, and a new reason needs no new param.
+    # The three below are kept for backward compatibility; the Triage page has
+    # stopped sending them.
+    triage_reason: str | None = Query(None, max_length=64),
+    include_terminal: bool = Query(False),
     missing_card_id: bool = Query(False),
     missing_english_name: bool = Query(False),
     min_price: Decimal | None = Query(None, ge=0),
@@ -118,6 +129,11 @@ def admin_search_inventory(
     Unlike the customer search, there is no location restriction and
     cost_basis/margin data is included in the response.
     """
+    # Checked before the table read: an unknown reason key is a caller mistake,
+    # and it must be LOUD. Ignoring it silently returns the whole union, which
+    # looks exactly like the "the filter doesn't filter" report this replaced.
+    _validate_triage_reason(triage_reason)
+
     items = repo.list_inventory()
 
     # Apply filters
@@ -173,7 +189,15 @@ def admin_search_inventory(
     # Triage. The predicates live in services.triage so the list and the sidebar
     # badge (`GET /admin/triage/counts`) can never disagree about what counts.
     if triage:
-        items = [i for i in items if needs_triage(i)]
+        items = [
+            i for i in items
+            if needs_triage(i) and in_triage_scope(i, include_terminal=include_terminal)
+        ]
+
+    # Narrows WITHIN the union, using the same predicate that put the item there.
+    if triage_reason is not None:
+        matches_reason = TRIAGE_REASONS[triage_reason]
+        items = [i for i in items if matches_reason(i)]
 
     if missing_card_id:
         items = [i for i in items if is_missing_card_id(i)]
@@ -254,8 +278,89 @@ def admin_search_inventory(
     # cost; the triage cohort is tens of rows, not the whole table.
     if triage:
         _attach_catalog_cards(serialized, repo)
+        _attach_triage_reasons(serialized, items)
 
     return AdminInventorySearchResult(items=serialized, total=len(serialized))
+
+
+# ---------------------------------------------------------------------------
+# Bulk clear of machine review flags
+# ---------------------------------------------------------------------------
+
+class BulkClearReviewRequest(BaseModel):
+    """The filter the admin is currently looking at.
+
+    Mirrors the search's own triage arguments so "clear what I can see" is
+    expressible, rather than offering a bare "clear everything" that nobody can
+    predict the effect of.
+    """
+
+    triage_reason: str | None = None
+    include_terminal: bool = False
+    name: str | None = None
+
+
+class BulkClearReviewResponse(BaseModel):
+    """How many flags were actually dropped — the UI names this number first."""
+
+    cleared: int
+
+
+@router.post("/bulk-clear-review", response_model=BulkClearReviewResponse)
+def admin_bulk_clear_review(
+    body: BulkClearReviewRequest,
+    repo: InventoryRepository = Depends(get_repo),
+) -> BulkClearReviewResponse:
+    """Clear ``needs_review`` on the machine-flagged items matching the filter.
+
+    Deliberately narrow — see ``services.triage.is_bulk_clearable``. A human's
+    free-text flag is never touched, and ``blank_condition`` is excluded because
+    clearing it accepts an NM price on a card nobody has graded.
+
+    ``reviewed_at`` is stamped, so ``_apply_review_transition``'s rule 2 stops
+    automation re-flagging what this just cleared — the bulk path inherits the
+    anti-rot guarantee rather than routing around it.
+    """
+    _validate_triage_reason(body.triage_reason)
+
+    items = [
+        i for i in repo.list_inventory()
+        if needs_triage(i) and in_triage_scope(i, include_terminal=body.include_terminal)
+    ]
+    if body.triage_reason is not None:
+        matches_reason = TRIAGE_REASONS[body.triage_reason]
+        items = [i for i in items if matches_reason(i)]
+    if body.name is not None:
+        name_lower = body.name.lower()
+        items = [i for i in items if _item_matches_name(i, name_lower)]
+
+    now = datetime.now(tz=timezone.utc)
+    cleared = 0
+    for item in items:
+        if not is_bulk_clearable(item):
+            continue
+        before = item.model_dump(mode="python")
+        updated = InventoryItemAdapter.validate_python({
+            **before,
+            "needs_review": False,
+            "review_reason": None,
+            "reviewed_at": now,
+        })
+        repo.put_inventory_item(updated)
+        # Same audit trail a single-item edit gets. A bulk mutation is the last
+        # place to drop it: it is the one that overwrites many rows at once.
+        changed_fields = _diff_fields(before, updated.model_dump(mode="python"))
+        if changed_fields:
+            repo.put_timeline_event(item.item_id, {
+                "item_id": item.item_id,
+                "txn_id": new_ulid(),
+                "type": "edit",
+                "date": date.today().isoformat(),
+                "changed_fields": changed_fields,
+            })
+        cleared += 1
+
+    return BulkClearReviewResponse(cleared=cleared)
 
 
 # ---------------------------------------------------------------------------
@@ -1098,6 +1203,45 @@ def _attach_catalog_cards(
             card = repo.get_catalog_card(card_id)
             cache[card_id] = card.model_dump(mode="json") if card is not None else None
         row["card"] = cache[card_id]
+
+
+def _validate_triage_reason(reason: str | None) -> None:
+    """422 on a reason key that is not one of the predicates.
+
+    Never a silent no-op. A filter that quietly does nothing is indistinguishable
+    from a list that is pulling everything — which is exactly the report this
+    parameter exists to answer.
+    """
+    if reason is not None and reason not in TRIAGE_REASONS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Unknown triage reason {reason!r}. "
+                f"Expected one of: {', '.join(TRIAGE_REASONS)}."
+            ),
+        )
+
+
+def _attach_triage_reasons(
+    rows: list[dict[str, Any]], items: list[InventoryItem],
+) -> None:
+    """Set ``triage_reasons`` and ``bulk_clearable`` on each serialized row.
+
+    ``rows`` is ``[_serialize_item(i) for i in items]``, so the two are parallel.
+
+    Emitted by the SERVER rather than recomputed in the client: the rules live in
+    one module, and a row rendered with no reason is the defect the whole feature
+    is being corrected for. ``bulk_clearable`` rides along so the confirm dialog
+    can name an exact count without the client re-deriving
+    ``MACHINE_REVIEW_REASONS`` membership — a second copy of that rule is how the
+    two would come to disagree about what a bulk clear is about to destroy.
+
+    Scoped to ``triage`` for the same reason the catalog join is: the ordinary
+    admin search keeps its payload and its cost.
+    """
+    for row, item in zip(rows, items, strict=True):
+        row["triage_reasons"] = reasons_for(item)
+        row["bulk_clearable"] = is_bulk_clearable(item)
 
 
 def _apply_review_transition(

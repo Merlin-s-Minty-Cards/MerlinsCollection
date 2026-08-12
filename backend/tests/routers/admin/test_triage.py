@@ -668,6 +668,9 @@ class TestAuthGate:
             ("get", "/admin/inventory/search?missing_card_id=true", None),
             ("get", "/admin/inventory/search?missing_english_name=true", None),
             ("put", "/admin/inventory/item-1", {"needs_review": True}),
+            # T3's bulk mutation. A route that clears flags across the whole
+            # table gets the same gate as everything else here.
+            ("post", "/admin/inventory/bulk-clear-review", {}),
         ],
     )
     def test_non_admin_is_rejected(self, admin_client, method, path, body):
@@ -840,3 +843,422 @@ class TestAutomationStatesItsReason:
         assert _review_reason_for_row(
             card_id="x", confidence="high", blank_condition=False,
         ) is None
+
+
+# ===========================================================================
+# RFC 0010 T3 — the server says WHY, one filter narrows, the queue can drain
+# ===========================================================================
+#
+# The premise, measured against the live table on 2026-08-11 before any of this
+# was written: the query is NOT broken and never was. 27 of 284 rows qualify —
+# 17 flagged-and-unlinked, 10 flagged-only — and `missing_english_name` and
+# `blank_condition` are both at ZERO. What is wrong is that the reason chips are
+# recomputed in TypeScript from a hand-mirrored copy of these rules, that the
+# filter narrows by a stored boolean instead of by the predicate that produced
+# the chip, and that a `sold` card's data quality sits in a worklist forever.
+#
+# The imports are LOCAL to each test on purpose: during RED these symbols do not
+# exist, and a module-level import would collect-error the whole file instead of
+# failing the tests that actually describe the new behaviour.
+
+
+class TestReasonsFor:
+    """`needs_triage` and the chips must be the same answer, not two answers."""
+
+    def test_an_ordinary_linked_english_item_has_no_reasons(self, admin_client):
+        from merlins_collection.services.triage import reasons_for
+
+        assert reasons_for(_raw()) == []
+
+    def test_an_unlinked_japanese_item_carries_both_derived_reasons(self, admin_client):
+        from merlins_collection.services.triage import reasons_for
+
+        item = _raw(card_id=None, language=Language.JP)
+
+        assert set(reasons_for(item)) == {"missing_card_id", "missing_english_name"}
+
+    def test_reasons_come_back_in_triage_reasons_order(self, admin_client):
+        """The chip order is the declared order, not dict-comprehension luck.
+
+        The counts payload and the filter dropdown both restate this order; a
+        row whose chips come back shuffled makes them look like different lists.
+        """
+        from merlins_collection.services.triage import TRIAGE_REASONS, reasons_for
+
+        item = _raw(card_id=None, language=Language.JP, needs_review=True)
+
+        assert reasons_for(item) == list(TRIAGE_REASONS)
+
+    def test_needs_triage_is_exactly_bool_of_reasons_for(self, admin_client):
+        """THE invariant. A row in the list with no chip is the owner's report."""
+        from merlins_collection.services.triage import needs_triage, reasons_for
+
+        probes = [
+            _raw(),                                                   # EN, linked
+            _raw(card_id=None),                                       # unlinked
+            _raw(language=Language.JP, card_id="ja:M4-084"),           # JP, unnamed
+            _raw(language=Language.JP, display_name_override="Chespin"),
+            _raw(needs_review=True),
+            _raw(status=ItemStatus.SOLD),
+            _sealed(),                                                # no card_id attr
+            _graded(),
+            _graded(card_id=None),
+        ]
+
+        for item in probes:
+            assert needs_triage(item) == bool(reasons_for(item)), (
+                f"{item.kind} item disagrees: "
+                f"needs_triage={needs_triage(item)} reasons={reasons_for(item)}"
+            )
+
+
+class TestSearchEmitsTheReasonsItUsed:
+
+    def test_every_triage_row_carries_a_non_empty_triage_reasons(self, admin_client):
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="flagged", needs_review=True))
+        repo.put_inventory_item(_raw(item_id="unlinked", card_id=None))
+        repo.put_inventory_item(_raw(item_id="clean"))
+
+        resp = client.get("/admin/inventory/search?triage=true", headers=_auth(admin))
+
+        assert resp.status_code == 200
+        rows = resp.json()["items"]
+        assert len(rows) == 2
+        for row in rows:
+            assert row["triage_reasons"], (
+                f"{row['item_id']} is in the list with no stated reason — "
+                "the exact defect this field exists to make impossible"
+            )
+
+    def test_an_ordinary_admin_search_does_not_carry_the_key(self, admin_client):
+        """Payload cost. The join beside it is scoped the same way.
+
+        NOTE: passes before the change (the key does not exist yet). Kept as the
+        guard that the new field is scoped rather than sprayed onto every admin
+        search response.
+        """
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="flagged", needs_review=True))
+
+        resp = client.get("/admin/inventory/search", headers=_auth(admin))
+
+        assert resp.status_code == 200
+        for row in resp.json()["items"]:
+            assert "triage_reasons" not in row
+
+    def test_the_array_is_exactly_what_reasons_for_returns(self, admin_client):
+        from merlins_collection.services.triage import reasons_for
+
+        client, repo, admin, _ = admin_client
+        item = _raw(item_id="both", card_id=None, needs_review=True, language=Language.JP)
+        repo.put_inventory_item(item)
+
+        resp = client.get("/admin/inventory/search?triage=true", headers=_auth(admin))
+
+        assert resp.status_code == 200
+        assert resp.json()["items"][0]["triage_reasons"] == reasons_for(item)
+
+
+class TestTriageReasonFilter:
+    """One parameter, validated against the predicate set that built the union."""
+
+    @pytest.fixture
+    def seeded(self, admin_client):
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="flagged-only", needs_review=True))
+        repo.put_inventory_item(_raw(item_id="unlinked-only", card_id=None))
+        repo.put_inventory_item(
+            _raw(item_id="jp-only", language=Language.JP, card_id="ja:M4-084"),
+        )
+        repo.put_inventory_item(_raw(item_id="both", card_id=None, needs_review=True))
+        repo.put_inventory_item(_raw(item_id="clean"))
+        return client, admin
+
+    def test_flagged_returns_only_flagged_items(self, seeded):
+        client, admin = seeded
+
+        resp = client.get(
+            "/admin/inventory/search?triage=true&triage_reason=flagged",
+            headers=_auth(admin),
+        )
+
+        assert resp.status_code == 200
+        assert {i["item_id"] for i in resp.json()["items"]} == {"flagged-only", "both"}
+
+    def test_missing_card_id_returns_only_unlinked_items(self, seeded):
+        client, admin = seeded
+
+        resp = client.get(
+            "/admin/inventory/search?triage=true&triage_reason=missing_card_id",
+            headers=_auth(admin),
+        )
+
+        assert resp.status_code == 200
+        assert {i["item_id"] for i in resp.json()["items"]} == {"unlinked-only", "both"}
+
+    def test_an_item_with_two_reasons_appears_under_both_filters(self, seeded):
+        """It is one card with two problems, not two cards.
+
+        The old dropdown narrowed `flagged` by the stored boolean rather than by
+        the predicate that produced the chip; this is the assertion that pins the
+        two to the same answer.
+        """
+        client, admin = seeded
+
+        # The exclusions are asserted alongside the inclusion on purpose: an
+        # IGNORED `triage_reason` returns the whole union, in which "both" also
+        # appears — so the membership check alone passes without the filter
+        # existing at all.
+        expected = {
+            "flagged": {"flagged-only", "both"},
+            "missing_card_id": {"unlinked-only", "both"},
+        }
+        for reason, ids in expected.items():
+            resp = client.get(
+                f"/admin/inventory/search?triage=true&triage_reason={reason}",
+                headers=_auth(admin),
+            )
+            assert resp.status_code == 200
+            assert {i["item_id"] for i in resp.json()["items"]} == ids, reason
+
+    def test_an_unknown_reason_key_is_rejected(self, seeded):
+        """422, never a silent no-op — a filter that quietly does nothing looks
+        exactly like a list that is pulling everything, which is the report."""
+        client, admin = seeded
+
+        resp = client.get(
+            "/admin/inventory/search?triage=true&triage_reason=needs_sticker",
+            headers=_auth(admin),
+        )
+
+        assert resp.status_code == 422
+        assert "needs_sticker" in resp.json()["detail"]
+
+
+class TestTriageStatusScope:
+    """A sold card's data quality is not a worklist item."""
+
+    def test_a_terminal_item_is_absent_by_default_and_present_with_the_flag(
+        self, admin_client,
+    ):
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="live", needs_review=True))
+        repo.put_inventory_item(
+            _raw(item_id="sold", needs_review=True, status=ItemStatus.SOLD),
+        )
+
+        default = client.get("/admin/inventory/search?triage=true", headers=_auth(admin))
+        assert default.status_code == 200
+        assert {i["item_id"] for i in default.json()["items"]} == {"live"}
+
+        widened = client.get(
+            "/admin/inventory/search?triage=true&include_terminal=true",
+            headers=_auth(admin),
+        )
+        assert widened.status_code == 200
+        assert {i["item_id"] for i in widened.json()["items"]} == {"live", "sold"}
+
+    def test_the_counts_endpoint_agrees_with_the_list_under_the_same_scope(
+        self, admin_client,
+    ):
+        """A badge that counts differently from the page it links to is worse
+        than no badge — and scoping the list without scoping the count is the
+        easiest possible way to reintroduce exactly that.
+
+        NOTE: passes before the change, because nothing is scoped yet and the two
+        trivially agree. It is a pin, not a red-to-green step — it goes red the
+        moment someone narrows one of the two and forgets the other.
+        """
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="live", needs_review=True))
+        repo.put_inventory_item(
+            _raw(item_id="sold", needs_review=True, status=ItemStatus.SOLD),
+        )
+        repo.put_inventory_item(
+            _raw(item_id="lost", card_id=None, status=ItemStatus.LOST),
+        )
+
+        for suffix in ("", "&include_terminal=true"):
+            listed = client.get(
+                f"/admin/inventory/search?triage=true{suffix}", headers=_auth(admin),
+            )
+            counted = client.get(
+                f"/admin/triage/counts?{suffix.lstrip('&')}", headers=_auth(admin),
+            )
+            assert listed.status_code == 200
+            assert counted.status_code == 200
+            assert counted.json()["total"] == len(listed.json()["items"]), suffix
+
+
+class TestBulkClearMachineFlags:
+    """Narrow by construction: only a flag automation set, and never the money one."""
+
+    def test_clears_an_item_whose_only_reason_is_a_machine_flag(self, admin_client):
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(
+            _raw(item_id="machine", needs_review=True, review_reason="manual_entry"),
+        )
+
+        resp = client.post(
+            "/admin/inventory/bulk-clear-review", json={}, headers=_auth(admin),
+        )
+
+        assert resp.status_code == 200
+        stored = repo.get_inventory_item("machine")
+        assert stored.needs_review is False
+        assert stored.review_reason is None
+
+    def test_never_clears_a_flag_a_human_typed(self, admin_client):
+        """The whole safety property. An admin's own note is not machine noise,
+        and a bulk button that eats it destroys the one thing in this queue that
+        a person deliberately recorded."""
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(
+            _raw(item_id="human", needs_review=True, review_reason="back looks trimmed"),
+        )
+        repo.put_inventory_item(
+            _raw(item_id="noteless", needs_review=True, review_reason=None),
+        )
+
+        resp = client.post(
+            "/admin/inventory/bulk-clear-review", json={}, headers=_auth(admin),
+        )
+
+        assert resp.status_code == 200
+        assert repo.get_inventory_item("human").needs_review is True
+        assert repo.get_inventory_item("human").review_reason == "back looks trimmed"
+        # A bare flag carries no evidence it was automation, so it is not
+        # clearable either — absence of a reason is not a machine reason.
+        assert repo.get_inventory_item("noteless").needs_review is True
+
+    def test_never_clears_a_blank_condition_item_because_it_is_a_money_bug(
+        self, admin_client,
+    ):
+        """`blank_condition` means the importer stored NM — the MOST EXPENSIVE
+        tier — for a card whose condition nobody recorded, and every customer
+        price scales down from it (LP is listed at 1.22x, MP at 1.72x). Clearing
+        it in bulk silently ratifies that price on every unchecked card.
+
+        Measured 2026-08-11: zero such rows survive in the live table. The
+        exclusion stays anyway — the importer's flag is historical, but the rule
+        is what stops a future bulk button from re-creating the defect.
+        """
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(
+            _raw(item_id="money", needs_review=True, review_reason="blank_condition"),
+        )
+
+        resp = client.post(
+            "/admin/inventory/bulk-clear-review", json={}, headers=_auth(admin),
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["cleared"] == 0
+        assert repo.get_inventory_item("money").needs_review is True
+
+    def test_an_item_with_another_problem_is_left_completely_alone(self, admin_client):
+        """Clearing a flag on a row that stays in the list anyway is pure loss.
+
+        The task doc states the rule twice and the two readings differ: "clears
+        only items whose ONLY reason is flagged" versus "an item that is also
+        unlinked keeps its other reasons and stays in the list". The first is
+        what is built, and it is the safer one — clearing the flag here would
+        destroy the stored ``review_reason`` while the row remains in the queue
+        (so the queue is no shorter), and would stamp ``reviewed_at`` on an item
+        nobody actually reviewed, suppressing the next automated flag.
+        """
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(
+            _raw(
+                item_id="also-unlinked",
+                card_id=None,
+                needs_review=True,
+                review_reason="no_catalog_link",
+            ),
+        )
+
+        resp = client.post(
+            "/admin/inventory/bulk-clear-review", json={}, headers=_auth(admin),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["cleared"] == 0
+
+        stored = repo.get_inventory_item("also-unlinked")
+        assert stored.needs_review is True
+        assert stored.review_reason == "no_catalog_link"
+        assert stored.reviewed_at is None
+
+        listed = client.get("/admin/inventory/search?triage=true", headers=_auth(admin))
+        row = listed.json()["items"][0]
+        assert row["item_id"] == "also-unlinked"
+        assert row["triage_reasons"] == ["flagged", "missing_card_id"]
+        assert row["bulk_clearable"] is False
+
+    def test_clearing_in_bulk_stamps_reviewed_at(self, admin_client):
+        """The bulk path inherits the anti-rot guarantee rather than bypassing
+        it — without the stamp, automation re-flags what this just cleared."""
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(
+            _raw(item_id="machine", needs_review=True, review_reason="manual_entry"),
+        )
+        before = datetime.now(tz=timezone.utc)
+
+        resp = client.post(
+            "/admin/inventory/bulk-clear-review", json={}, headers=_auth(admin),
+        )
+
+        assert resp.status_code == 200
+        stamped = repo.get_inventory_item("machine").reviewed_at
+        assert stamped is not None
+        assert stamped.tzinfo is not None
+        assert before - timedelta(seconds=5) <= stamped
+
+    def test_returns_the_count_cleared(self, admin_client):
+        """The UI confirms with this exact number before firing — never a bare
+        "Clear all"."""
+        client, repo, admin, _ = admin_client
+        for n in range(3):
+            repo.put_inventory_item(
+                _raw(item_id=f"machine-{n}", needs_review=True,
+                     review_reason="low_match_confidence"),
+            )
+        repo.put_inventory_item(
+            _raw(item_id="human", needs_review=True, review_reason="looks off"),
+        )
+
+        resp = client.post(
+            "/admin/inventory/bulk-clear-review", json={}, headers=_auth(admin),
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["cleared"] == 3
+
+    def test_it_clears_only_what_the_admin_is_looking_at(self, admin_client):
+        """"Clear what I am looking at" is the whole reason it takes the search's
+        own filter arguments rather than a bare "everything"."""
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(
+            _raw(item_id="flagged-only", needs_review=True, review_reason="manual_entry"),
+        )
+        repo.put_inventory_item(
+            _raw(
+                item_id="also-unlinked",
+                card_id=None,
+                needs_review=True,
+                review_reason="manual_entry",
+            ),
+        )
+
+        resp = client.post(
+            "/admin/inventory/bulk-clear-review",
+            json={"triage_reason": "missing_card_id"},
+            headers=_auth(admin),
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["cleared"] == 0, (
+            "an item that is also unlinked is not clearable, so a filter scoped "
+            "to the unlinked queue clears nothing"
+        )
+        assert repo.get_inventory_item("flagged-only").needs_review is True
