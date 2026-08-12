@@ -6,14 +6,14 @@
 gitignored (`.gitignore:60`), so it is local-only and your edits to it will never appear in
 `git status` or reach anyone else. Record all RFC 0010 status **in this file**.
 
-**Last updated:** 2026-08-11 (T16 DONE — a card with no catalog match can be valued by hand)
+**Last updated:** 2026-08-12 (T8, T9 and T10 DONE in one unattended run — dates, signed amounts, grouped transactions)
 **Branch:** `Polishing-For-Deployment`
 **RFC:** [`docs/rfcs/0010-admin-round8-ledger-corrections-and-slab-manual-only.md`](../../rfcs/0010-admin-round8-ledger-corrections-and-slab-manual-only.md)
 **Task index:** [`README.md`](README.md)
 **Source of the requests:** the owner's `The plan.pdf` (12 items) plus two review comments
 on 2026-08-10 — the money-input report and the PSA/scanner reversal.
 
-## ✅ T0, T1, T2, T3, T4, T5, T6, T7, T15, T16 AND T17 ARE DONE — start at T8
+## ✅ T0–T10, T15, T16 AND T17 ARE DONE — start at T11
 
 T15 gave all five catalog pickers one shared row carrying name, image AND price;
 T17 built the job that fills those prices in; T2 stopped an admin edit forking a
@@ -21,9 +21,15 @@ consignor into two rows; T3 made the server the authority on why a row is in
 Triage; T4 made that queue searchable; T5 made an edit in the detail modal show
 up at once and stopped the list jumping; T6 made that same modal survive zoom;
 T7 let the Prep Queue narrow to one location; T16 gave a card the catalog does
-not carry a way to be valued, and stopped two surfaces misreporting it.
-**Start at T8**, which is what T16's task doc names as the next link in the
-chain, and which is now also the next row in the table below.
+not carry a way to be valued, and stopped two surfaces misreporting it; T8
+stopped every admin date reading a day early **and** stopped every evening
+transaction being dated to tomorrow; T9 put a `+`/`−` on the ledger; T10 made a
+five-card buy read as one line.
+
+**Start at T11**, the largest risk in the RFC — and read T10's follow-up rows
+first: `batch_id` is now the key a void selects a whole transaction with, and
+`formatTimestamp` already exists for `voided_at`. Do not invent a second of
+either.
 
 ## 📉 T3 RE-MEASURED THE QUEUE AND THE TASK DOC'S PREMISE IS GONE
 
@@ -95,9 +101,9 @@ naming the row. **Start at T1.**
 | T5 | Detail modal live updates | **DONE** | `febc2eb` | `onUpdated?: (updated?: UpdatedItem) => void` — optional, so a parent that ignores it still refetches. New `frontend/lib/item-update.ts` holds `UpdatedItem` + **`patchRow`** (spread, never replace — the response carries no `triage_reasons`, `bulk_clearable` or joined `card`); seven call sites across the six pages. The modal owns `current` and renders **`shown`**, a synchronous `current.item_id === item.item_id` guard — the effect alone flashes the previous card. **`flagged` is now derived**, so `writeTriage` lost its `nextFlagged` parameter. A response with no string `item_id` is **discarded** (`asItem`) and `onUpdated()` fires with no argument → the parent's refetch fallback. **The task doc's Triage rule cannot work as written** — see Decisions |
 | T6 | Detail modal layout | **DONE** | `4c82d79` | **Still needs the owner's zoom check** — jsdom asserts classes, not typeability. Four class decisions, two of them departures from the task doc: the grid template carries an inner **`min(17rem,100%)`** (a bare `minmax(17rem,1fr)` overflows below 17rem) and the textarea span is **`col-span-full`**, not `sm:col-span-2` (which invents an implicit column on a collapsed grid). Cells are `flex-wrap` with a `min-w-[min(8rem,100%)]` floor on the editor — that pair **is** the stacking mechanism, since Tailwind container queries are not installed (3.4, `plugins: []`). Image column is `shrink-0 md:shrink`, not a bare removal. **The Consignment grid was converted too.** Verified the arbitrary classes are actually EMITTED by grepping the built CSS — vitest asserts strings and would pass on a class Tailwind never generated |
 | T7 | Prep Queue location | **DONE** | `95ca449` | Frontend only, exactly as the doc said — no backend change. The column keys **are** the backend's sort fields (`location`, `cost_basis`, `current_market_value`), because `_sort_admin_results` splits on the LAST underscore; do not rename a `Column.key` on this page without re-checking that split. First header click sorts **ascending**, unlike `/admin/inventory`'s desc-first `handleSort` (see Decisions). `handleStickerSave` **no longer refetches** — it patches and drops, so the toast is now conditional: clearing a price leaves the row and says "Sticker price cleared". Both summary cards are location-scoped (`In queue (Glass)`). The bulk apply still refetches, deliberately — filed |
-| T8 | Local date formatting | **NOT STARTED** | — | Test **must** pin a negative-offset `TZ` or it is theatre |
-| T9 | Signed ledger amounts | **NOT STARTED** | — | Presentation only. Do not invert signs in storage |
-| T10 | `Transaction.batch_id` | **NOT STARTED** | — | No heuristic backfill. Legacy rows render as single-row groups |
+| T8 | Local date formatting | **DONE** | `0b003fc` | New `frontend/lib/dates.ts` — **five** exports, not the doc's four: `formatISODate`, `parseISODateLocal`, `todayLocal`, `formatTimestamp` **and `toLocalISODate`** (the primitive `todayLocal` is built on, needed because the analytics range also formats a *non*-today date). `formatTimestamp` has **no caller yet** — T11's `voided_at` is the one it was written for; use it. Five "today" sites, not four: the dashboard's is `toISOString().slice(0, 10)`, which the doc's grep misses. All three local `formatDate` helpers deleted; `SlabList` deliberately untouched. T16's `localToday` **moved** out of `lib/valuation.ts`. Test-only TZ pin lives in `frontend/lib/__tests__/_timezone.ts` — not collected by vitest, not typechecked by `next build` |
+| T9 | Signed ledger amounts | **DONE** | `d44798b` | Presentation only — no stored sign moved. `SignedAmount` composes `PriceDisplay`; the sign is **text** (U+2212), colour is a redundant second cue. Two seams, not the doc's one: `type` for a transaction and **`fromValue`** for an already-signed net total (Net Sales has no transaction type to key on). An unknown type renders **unsigned**, which is what keeps trade legs and `edit` events honest without a special case. Wired on the analytics archive, both Net Sales tiles, the per-show Net, the period Net Profit **and** History's timeline |
+| T10 | `Transaction.batch_id` | **DONE** | `1f701e8` | `batch_id` optional, `None` default, no key-layout change. Stamped by all three confirm paths; trades stamp **both** `trade_id` and `batch_id`. **No backfill.** A null-batch row groups on its own `txn_id` — one code path, no legacy branch. Grouping is client-side in a new **`TransactionGroups`**, which **replaces `DataTable`** on this table (`DataTable` is flat and has no group/expand seam; it is unchanged and still used everywhere else). A mixed-direction group (a trade) renders a **net** total; a uniform one renders a magnitude signed by its type. Legs show `item_id`, not card names — see follow-ups |
 | T11 | Transaction void | **NOT STARTED** | — | **Largest risk in the RFC.** One countability predicate, every reader named in the task doc |
 | T12 | Slabs: PSA out, price at intake | **NOT STARTED** | — | Keep `CertInput`'s Enter handling. Pricing runs AFTER commit, never inside it |
 | T13 | Grouped navigation | **NOT STARTED** | — | Every route path unchanged |
@@ -211,6 +217,19 @@ that is the mistake that made RFC 0009's T-FINAL sign-off stale.
 | 2026-08-11 | T16 | **The dialog writes a GENERATED `value_note`, never free text** — `Hand-valued 2026-08-11 — $40.00 NM comp × MP (0.58)` | `value_note` is in `_CUSTOMER_ITEM_FIELDS`: it is customer-visible by design (Phase 19), which is what makes it the right home for provenance and the wrong home for a text box. Generating it also means the note and the number cannot disagree. The date is built from `getFullYear/getMonth/getDate`, **not** `toISOString().split('T')[0]` — that is the UTC-date bug **T8** is about to fix everywhere, and T16 was not going to add a fresh instance of it on the way past |
 | 2026-08-11 | T16 | **The tool is gated on the server's `triage_reasons` including `missing_card_id`, not on a local `!item.card_id`** | T3 made `services/triage.reasons_for` the authority on why a row is in the queue and this is not the place to open a second one. It also matters that the tool is **absent** on a linked card rather than merely useless there: the nightly sync owns that figure, so a value typed on a linked card is gone by morning, and an affordance that silently discards work is worse than no affordance |
 | 2026-08-11 | T16 | **The doc's narrow-selection command matched NO coverage test** — `-k "catalog_sync or slab or market_coverage"` never matches `TestAdminMarketCoverage`, and the frontend half was the broken `npx vitest` form again. Both corrected **in the task doc itself** | Ninth of the ten executed docs (T6 remains the one exception), and a new variety: previous errors were wrong *paths*, this one is a `-k` expression that collects and passes while testing none of what the task added. Worse than a wrong path, which at least fails loudly |
+| 2026-08-12 | T8 | **`lib/dates.ts` exports FIVE functions, not the doc's four** — the extra one is `toLocalISODate(date)`, and `todayLocal()` is a no-argument wrapper around it | The analytics default range formats **two** dates, and one of them is three months ago. A single `todayLocal(now = new Date())` would have had the shows range calling `todayLocal(start)`, which reads as "today, of start" — a name that lies at the one call site that is not about today. Splitting the primitive out costs one line and keeps `todayLocal()` unambiguous. T16's `localToday` took the injectable-`now` shape; that seam moved to `toLocalISODate` rather than being dropped |
+| 2026-08-12 | T8 | **There are FIVE "today" call sites, not the doc's four, and its verification grep cannot find the fifth.** The dashboard uses `toISOString().slice(0, 10)`; the doc greps for `toISOString().split`. Both the grep and the Files list are corrected in the task doc itself | Same defect, different spelling, and the dashboard is the landing page — after 5pm Pacific it asked `/analytics/daily` for **tomorrow**, so the owner's "Today" panel was empty every evening. A verification grep that misses a live instance is worse than no grep, because it certifies the sweep complete |
+| 2026-08-12 | T8 | **A full timestamp passed to `formatISODate` is DELEGATED to `Date` parsing and rendered as the calendar day it falls on locally** — not returned as-is, and never `Invalid Date`. The doc says "decide and document it" | Confirmed against the API first: `Transaction.date`, `Show.date` and `acquired_at` are all `datetime.date` on the backend, so every value this function actually receives today is date-only. The timestamp branch is therefore defensive, and the honest reading of a real instant is the local day it happened on — `22:00Z` is still Aug 10 in Pacific, and `02:00Z` genuinely is the day before. Returning it raw would put an ISO string in a column of formatted dates |
+| 2026-08-12 | T8 | **The test-only TZ pin lives in `frontend/lib/__tests__/_timezone.ts`** — a non-test file inside a `__tests__` directory, imported as `@/lib/__tests__/_timezone` by six test files | It has to be invisible to two different collectors: vitest's `include` is `**/__tests__/**/*.test.{ts,tsx}` (so the name must not contain `.test.`) and tsconfig **excludes** `**/__tests__/**` (so `next build` never typechecks it). Anywhere else and it is either collected as an empty suite or compiled into the app; it imports nothing from vitest for the same reason. **Verified empirically that Node re-reads `process.env.TZ` on assignment** — `getTimezoneOffset()` and `Intl…resolvedOptions().timeZone` both flip immediately — which is what makes a runtime pin work at all, since vitest has no per-file TZ config |
+| 2026-08-12 | T8 | **`vi.useFakeTimers({ toFake: ['Date'] })`, never the default** | Six of the ten call-site tests need a pinned clock *and* an async render. Full fake timers deadlock `waitFor`, and advancing them by hand would have meant rewriting the existing async helpers in four files. Faking only `Date` leaves `setTimeout` real, so every page's debounce and every `findBy*` still behaves. The narrow `toFake` list is the whole reason these tests are three lines rather than thirty |
+| 2026-08-12 | T9 | **`SignedAmount` grew a second seam beyond the doc's `value`/`type` — `fromValue`** | The doc requires `Net Sales` to be signed, and `Net Sales` has no transaction type: it is a figure the backend already signed (`-160.00`). Keying off "type absent" instead would have made that case indistinguishable from a caller that simply forgot to pass a type, and silently signed an unknown row. `fromValue` also renders the **magnitude**, so a stored `-160.00` cannot come out as `−$-160.00` |
+| 2026-08-12 | T9 | **Zero renders unsigned even for a known type**, and an absent amount renders `PriceDisplay`'s em-dash with no sign | `+$0.00` claims a direction the number does not have — and it is exactly what a voided row will look like once **T11** lands. Cheaper to get right now than to discover on a void |
+| 2026-08-12 | T9 | **Two sites beyond the doc's list were converted: the per-show `Net` in the shows list and the period `Net Profit` tile** | Both carried direction in **colour alone** (`text-mint` vs `text-red-400`), which is the precise thing this task's own "do not carry meaning in colour alone" rule forbids, and both rendered a raw negative through `PriceDisplay` as `$-160.00` — the sign landing between the `$` and the digits. One line each, inside the reported symptom rather than beside it. `Total Sold`/`Total Bought` were left alone exactly as the doc says |
+| 2026-08-12 | T10 | **`DataTable` was REPLACED on this table, not extended** — a new `TransactionGroups` owns the archive; `DataTable` is untouched and still used by every other admin page | `DataTable` renders one `<tr>` per datum with no seam for a summary row, an expansion, or a row that is not in `data`. Teaching it grouping means a generic API change on a shared component to serve one view's layout — the same reasoning the task doc uses to refuse grouping server-side. The cost is that the archive loses its sortable headers, which is **required** anyway: the doc says grouping must not reorder the archive |
+| 2026-08-12 | T10 | **A group that mixes `sale` and `purchase` legs — a trade — renders a NET total and the type `trade`; a uniform group renders a magnitude signed by its type** | A trade's legs are one SALE and one PURCHASE under a single `batch_id`, so summing magnitudes would report a $50-for-$30 trade as `$80` — a number that exists nowhere. The net is the only honest single figure. `trade` is derived from every leg sharing one `trade_id`; a mixed group without one renders `mixed` rather than guessing, and no writer produces that today |
+| 2026-08-12 | T10 | **`_build_purchase` gained a `batch_id` keyword rather than the confirm loop stamping the transaction after it is built** | The builder is the pure pass T0 split out precisely so a row is fully valid before anything is written. Mutating `txn.batch_id` in the write pass would put one field of a money row outside that guarantee. Defaulted to `None`, so the helper's other callers and tests are untouched |
+| 2026-08-12 | T8/T9/T10 | **All three task docs carried the broken `npx vitest` command, and T10's backend test paths were wrong as well. All corrected IN the task docs**, following T2's precedent | Tenth, eleventh and twelfth of the thirteen executed docs — T6 remains the only clean one. T10's `backend/tests/test_purchases.py` does not exist; it is `backend/tests/routers/admin/test_purchases.py`, the identical error T0 and T17 hit. Running that command verbatim collects **nothing** and reports success on three live money paths |
+| 2026-08-12 | T8/T9/T10 | **This run was executed unattended, with the RED gates SELF-APPROVED rather than owner-confirmed.** Every gate was still run: tests written first, the failing output read one failure at a time, and each failure checked against the defect it claims to pin | Owner instruction, 2026-08-12: *"RUN UNATTENDED… follow its own RED gate but SELF-APPROVE it."* Recorded because the gate's value is in reading **why** each test failed, not in the pause. **No test passed against unfixed code in any of the three tasks** — unlike T16 (3 of 12) and T2 (1 of 4), so there is nothing kept here as a labelled regression guard. All 25 T8 failures were the day-early date, the tomorrow-dated default or the missing module; all 13 T9/T10 failures were a missing component or a missing field |
 | 2026-08-10 | T0 | **The doc's file paths were wrong in two places**, corrected as executed: the backend tests are `backend/tests/routers/admin/test_purchases.py`, and the frontend run command must be the `npm test --workspace=frontend` form, not `npx vitest` | `npx vitest` fails with "Vitest failed to find the runner" — already noted in the baseline section of this file, but the task doc contradicted it. Later task docs copy this command; check it before trusting it |
 
 *(rows below are PLANNING decisions, recorded before execution because a later task would
@@ -420,6 +439,52 @@ second one is a regression, not noise.
 MCP was not re-run: T16 touched no MCP file. Note that `mcp-server/src/condition-pricing.ts`
 is *referenced* by this task's reasoning — it is the duplicate that made a third
 frontend copy unacceptable — but it is unchanged and its multipliers did not move.
+
+**Re-measured after T8, T9 and T10 at `1f701e8`** — a fresh run, not a row above
+carried forward. All three tasks landed in one session, so this is one
+measurement across three feature commits rather than three:
+
+| Suite | Count | Time | State |
+|---|---|---|---|
+| Backend | **1609 passed / 0 failed** | 2m45s | green — 1602 + 7 new T10 tests |
+| Frontend | **778 passed / 0 failed** (86 files) | ~31s | green — 734 + 44 new (25 T8, 13 T9, 6 T10) |
+| Narrow T8 selection (8 files) | 66 passed / 0 failed | ~9s | green — **41 of them pre-existing**, which is what proves five "today" rewrites and three `formatDate` deletions disturbed no money path |
+| Narrow T9 selection (3 files) | 21 passed / 0 failed | ~5s | green |
+| Narrow T10 selection (3 backend files) | 130 passed / 0 failed | ~31s | green — **123 of them pre-existing**, on the three live confirm paths |
+| Narrow T10 selection (1 frontend file) | 13 passed / 0 failed | ~4s | green |
+| `ruff check backend/src` | — | ~3s | clean |
+| `npm run lint --workspace=frontend` | — | ~5s | clean (the one pre-existing `<img>` warning in `CardDetailModal`, and only that one) |
+| `npm run build --workspace=frontend` | — | ~40s | exit 0 |
+
+MCP was not re-run: none of the three touched an MCP file. Note that
+`mcp-server/` has **no date helper of its own** — it returns ISO strings and the
+chat surface never formats a calendar date — so T8's rule has no third
+implementation to keep in sync, unlike condition pricing.
+
+**Do not carry these numbers into T11's sign-off.**
+
+**Not verified here, and it needs the owner: T8's manual check, and it is the
+one that cannot be faked.** jsdom runs on whatever `process.env.TZ` says, so the
+suite proves the *logic* is zone-correct; only a real browser proves the
+deployed page is. On Show Analytics, confirm the heading date, the transaction
+rows and the show list all agree with the date picker beside them. Then —
+**after 5pm Pacific**, which is the only time the second bug is visible — open
+Buy, Sell, Trade and the Dashboard and confirm the default date is **today**,
+not tomorrow. That is the evening the business is actually selling, which is
+why it went unnoticed.
+
+**Not verified here, and it needs the owner: T9's greyscale check.** Open a day
+with both a sale and a purchase and confirm the two are distinguishable **at a
+glance and in greyscale** — screenshot and desaturate if unsure. The sign is
+text precisely so this passes; the check is whether the sign is large enough to
+read on a phone in show lighting, which no test can answer.
+
+**Not verified here, and it needs the owner: T10's grouping check.** Buy three
+cards in one session, then open Show Analytics for that day: it must read as
+**one** purchase line with a total, expandable to three. Then open a day with
+pre-`batch_id` rows and confirm they still list individually and correctly —
+that is the no-backfill decision, and it is the half a test can assert but only
+real data can reassure anyone about.
 
 **Not verified here, and it needs the owner: T16's manual check.** Take a real
 card that is not in the catalog. From Triage, hand-value it with an NM comp and
