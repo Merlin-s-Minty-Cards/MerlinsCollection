@@ -1,7 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest'
 import { render, screen, fireEvent, act, waitFor, within } from '@testing-library/react'
 import AdminTradePage from '../page'
 import { AdminApiError } from '@/lib/admin-api'
+import { pinTimeZone, PACIFIC } from '@/lib/__tests__/_timezone'
 
 const getMock = vi.fn()
 const postMock = vi.fn()
@@ -412,5 +413,33 @@ describe('AdminTradePage incoming catalog picker (RFC 0010 T15)', () => {
       '/trades/trade-1/incoming',
       expect.objectContaining({ card_id: 'en:base1-4', agreed_value: 100 }),
     ))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// RFC 0010 T8 — the trade date defaulted to tomorrow after 5pm Pacific
+// ---------------------------------------------------------------------------
+
+describe('AdminTradePage default trade date', () => {
+  let restoreTz: () => void
+  beforeAll(() => { restoreTz = pinTimeZone(PACIFIC) })
+  afterAll(() => { restoreTz(); vi.useRealTimers() })
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-08-11T01:30:00Z')) // 6:30pm Pacific, Aug 10
+    getMock.mockReset()
+    postMock.mockReset()
+    postMock.mockResolvedValue({ trade_id: 'trade-1', status: 'draft' })
+    getMock.mockResolvedValue({ items: [], total: 0 })
+  })
+  afterEach(() => vi.useRealTimers())
+
+  it('defaults to Aug 10 at 6:30pm Pacific, not Aug 11', async () => {
+    await renderTradePage()
+
+    const date = document.querySelector('input[type="date"]') as HTMLInputElement
+    expect(date).not.toBeNull()
+    expect(date.value).toBe('2026-08-10')
   })
 })

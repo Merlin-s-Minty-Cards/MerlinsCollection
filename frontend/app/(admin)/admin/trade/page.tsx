@@ -14,6 +14,7 @@ import { availableModes, canConfirmBasis, type BasisMode } from '@/lib/trade-bas
 import { buildIncomingLegBody } from '@/lib/trade-incoming-form'
 import MoneyInput from '@/components/admin/shared/MoneyInput'
 import { formatMoneyInput, parseMoney } from '@/lib/money'
+import { todayLocal } from '@/lib/dates'
 import { adminItemName } from '@/lib/admin-item-name'
 
 interface TradeLeg {
@@ -73,10 +74,6 @@ const PAYMENT_METHOD_OPTIONS = [
   { value: 'card', icon: CreditCard, label: 'Card' },
 ] as const
 
-function todayISO() {
-  return new Date().toISOString().split('T')[0]
-}
-
 export default function AdminTradePage() {
   const api = useAdminApi()
 
@@ -91,7 +88,7 @@ export default function AdminTradePage() {
   const [balance, setBalance] = useState<TradeBalance | null>(null)
   const [counterparty, setCounterparty] = useState('')
   const [customerView, setCustomerView] = useState(false)
-  const [tradeDate, setTradeDate] = useState(todayISO())
+  const [tradeDate, setTradeDate] = useState(todayLocal())
 
   // Vendor mode toggle
 
@@ -429,7 +426,7 @@ export default function AdminTradePage() {
     setBalance(null)
     setCounterparty('')
     setConfirmed(false)
-    setTradeDate(todayISO())
+    setTradeDate(todayLocal())
     setBasisMode('transfer')
     setManualBasis('')
     setSelectedIncomingCard(null)

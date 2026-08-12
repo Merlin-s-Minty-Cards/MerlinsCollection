@@ -18,6 +18,7 @@ import {
   Wallet,
 } from 'lucide-react'
 import { useAdminApi } from '@/lib/admin-api'
+import { todayLocal } from '@/lib/dates'
 import { summarizeHoldings, type HoldingsSummary, type HoldingItem } from '@/lib/dashboard-stats'
 
 interface TriageCounts { total: number; reasons: Record<string, number> }
@@ -66,7 +67,7 @@ export default function AdminDashboardPage() {
           })),
           soft(api.get<Coverage>('/market/coverage')),
           soft(api.get<DailyMetrics>('/analytics/daily', {
-            date: new Date().toISOString().slice(0, 10),
+            date: todayLocal(),
           })),
         ])
 

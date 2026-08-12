@@ -1,6 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest'
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
 import AdminSellPage from '../page'
+import { pinTimeZone, PACIFIC } from '@/lib/__tests__/_timezone'
 
 const getMock = vi.fn()
 const postMock = vi.fn()
@@ -144,5 +145,34 @@ describe('AdminSellPage money input', () => {
     const priceInput = await addPikachuToCart()
     fireEvent.change(priceInput, { target: { value: '1,30' } })
     expect(await screen.findByRole('alert')).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// RFC 0010 T8 — the sale date defaulted to tomorrow after 5pm Pacific
+// ---------------------------------------------------------------------------
+
+describe('AdminSellPage default sale date', () => {
+  let restoreTz: () => void
+  beforeAll(() => { restoreTz = pinTimeZone(PACIFIC) })
+  afterAll(() => { restoreTz(); vi.useRealTimers() })
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-08-11T01:30:00Z')) // 6:30pm Pacific, Aug 10
+    getMock.mockReset()
+    postMock.mockReset()
+    postMock.mockResolvedValue({ sell_id: 'sell-1', status: 'draft' })
+    getMock.mockResolvedValue({ items: [], total: 0 })
+  })
+  afterEach(() => vi.useRealTimers())
+
+  it('defaults to Aug 10 at 6:30pm Pacific, not Aug 11', async () => {
+    render(<AdminSellPage />)
+    await act(async () => { await Promise.resolve() })
+
+    const date = document.querySelector('input[type="date"]') as HTMLInputElement
+    expect(date).not.toBeNull()
+    expect(date.value).toBe('2026-08-10')
   })
 })

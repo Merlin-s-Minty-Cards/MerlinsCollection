@@ -60,15 +60,8 @@ export function conditionMultiplierOf(
 }
 
 /**
- * Today, in the LOCAL zone.
- *
- * Not `toISOString().split('T')[0]`, which is the UTC date: measured at 6:30pm
- * Pacific on Aug 10 it yields `2026-08-11`, so an evening show stamps tomorrow.
- * T8 replaces every instance of that across the admin and will own a shared
- * helper; this is the one date T16 writes, and it is not going in wrong first.
+ * T16 wrote a `localToday` here as a stopgap and filed it as T8's to absorb.
+ * T8 has: it now lives in `lib/dates.ts` as `todayLocal`, alongside the rest of
+ * the local-date rules and with the Pacific fallback the owner asked for.
+ * Import it from there — do not re-derive a second copy.
  */
-export function localToday(now: Date = new Date()): string {
-  const month = String(now.getMonth() + 1).padStart(2, '0')
-  const day = String(now.getDate()).padStart(2, '0')
-  return `${now.getFullYear()}-${month}-${day}`
-}

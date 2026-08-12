@@ -1,6 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import AdminDashboardPage from '../page'
+import { pinTimeZone, PACIFIC } from '@/lib/__tests__/_timezone'
 
 /**
  * The dashboard is the landing page, so its job is to answer three questions
@@ -183,5 +184,31 @@ describe('Dashboard quick actions', () => {
     for (const label of ['New Sale', 'New Buy', 'New Trade', 'Vault']) {
       expect(within(nav).getByText(label)).toBeInTheDocument()
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// RFC 0010 T8 — "today" was computed in UTC
+// ---------------------------------------------------------------------------
+
+describe("Dashboard today's date", () => {
+  let restoreTz: () => void
+  beforeAll(() => { restoreTz = pinTimeZone(PACIFIC) })
+  afterAll(() => { restoreTz(); vi.useRealTimers() })
+
+  beforeEach(() => {
+    // 6:30pm Pacific on Aug 10 — 01:30Z on Aug 11.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-08-11T01:30:00Z'))
+  })
+  afterEach(() => vi.useRealTimers())
+
+  it("asks for TODAY's numbers, not tomorrow's, at 6:30pm Pacific", async () => {
+    render(<AdminDashboardPage />)
+
+    await waitFor(() =>
+      expect(getMock).toHaveBeenCalledWith('/analytics/daily', { date: '2026-08-10' }),
+    )
+    expect(getMock).not.toHaveBeenCalledWith('/analytics/daily', { date: '2026-08-11' })
   })
 })

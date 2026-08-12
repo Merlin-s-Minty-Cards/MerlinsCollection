@@ -8,6 +8,7 @@ import { CONDITION_OPTIONS, parseCondition } from '@/lib/constants'
 import { useLocations } from '@/lib/use-locations'
 import { buyFormMode, buildBuyItemBody } from '@/lib/buy-form'
 import { parseMoney } from '@/lib/money'
+import { todayLocal } from '@/lib/dates'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
 import CardImage from '@/components/admin/shared/CardImage'
@@ -43,7 +44,7 @@ export default function AdminBuyPage() {
   const [paymentMethod, setPaymentMethod] = useState('cash')
   const [counterparty, setCounterparty] = useState('')
   const [notes, setNotes] = useState('')
-  const [buyDate, setBuyDate] = useState(new Date().toISOString().split('T')[0])
+  const [buyDate, setBuyDate] = useState(todayLocal())
 
   // Card name search (catalog lookup)
   const [nameSearch, setNameSearch] = useState('')
@@ -290,7 +291,7 @@ export default function AdminBuyPage() {
     setConfirmResult(null)
     setSelectedCard(null)
     setManualMode(false)
-    setBuyDate(new Date().toISOString().split('T')[0])
+    setBuyDate(todayLocal())
   }
 
   // Safe: `addItem` normalises both amounts through parseMoney before an item
@@ -695,7 +696,7 @@ export default function AdminBuyPage() {
       <ConfirmDialog
         open={showConfirm}
         title="Confirm Purchase"
-        description={`Buy ${items.length} card${items.length !== 1 ? 's' : ''} for $${totalCost.toFixed(2)}${buyDate !== new Date().toISOString().split('T')[0] ? ` (dated ${buyDate})` : ''}?`}
+        description={`Buy ${items.length} card${items.length !== 1 ? 's' : ''} for $${totalCost.toFixed(2)}${buyDate !== todayLocal() ? ` (dated ${buyDate})` : ''}?`}
         confirmLabel="Complete Purchase"
         loading={confirming}
         onConfirm={handleConfirm}

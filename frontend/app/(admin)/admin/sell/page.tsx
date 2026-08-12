@@ -14,6 +14,7 @@ import { patchRow } from '@/lib/item-update'
 import OwnershipBadge from '@/components/admin/shared/OwnershipBadge'
 import MoneyInput from '@/components/admin/shared/MoneyInput'
 import { parseMoney } from '@/lib/money'
+import { todayLocal } from '@/lib/dates'
 import { adminItemName } from '@/lib/admin-item-name'
 
 interface SellItem {
@@ -62,7 +63,7 @@ export default function AdminSellPage() {
   const [paymentMethod, setPaymentMethod] = useState('cash')
   const [counterparty, setCounterparty] = useState('')
   const [notes, setNotes] = useState('')
-  const [saleDate, setSaleDate] = useState(new Date().toISOString().split('T')[0])
+  const [saleDate, setSaleDate] = useState(todayLocal())
 
   // Search
   const [search, setSearch] = useState('')
@@ -249,7 +250,7 @@ export default function AdminSellPage() {
     setConfirmResult(null)
     setFeePreview(null)
     setBulkDiscount('')
-    setSaleDate(new Date().toISOString().split('T')[0])
+    setSaleDate(todayLocal())
     setPreviewItem(null)
   }
 

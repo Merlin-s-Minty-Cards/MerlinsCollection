@@ -23,7 +23,8 @@ import {
 import { CONDITION_OPTIONS, formatCondition, parseCondition } from '@/lib/constants'
 import MoneyInput from '@/components/admin/shared/MoneyInput'
 import { formatMoney, parseMoney } from '@/lib/money'
-import { conditionMultiplierOf, localToday } from '@/lib/valuation'
+import { conditionMultiplierOf } from '@/lib/valuation'
+import { todayLocal } from '@/lib/dates'
 
 /**
  * Triage — one place for everything that might be wrong.
@@ -930,7 +931,7 @@ function ValueDialog({
         : ''
     const patch: Record<string, string> = {
       current_market_value: String(parsedValue),
-      value_note: `Hand-valued ${localToday()}${basis}`,
+      value_note: `Hand-valued ${todayLocal()}${basis}`,
     }
     if (stickerTyped && parsedSticker !== null) {
       patch.sticker_price = String(parsedSticker)

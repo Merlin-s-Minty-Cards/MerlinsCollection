@@ -13,6 +13,7 @@ import {
 } from 'chart.js'
 import { Line } from 'react-chartjs-2'
 import { useAdminApi } from '@/lib/admin-api'
+import { formatISODate } from '@/lib/dates'
 
 // Register Chart.js components
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip, Legend, Filler)
@@ -86,10 +87,11 @@ export default function PriceChart({ itemId, costBasis, acquiredAt }: PriceChart
       return { data: null, options: null }
     }
 
-    const labels = chartData.points.map((p) => {
-      const d = new Date(p.date)
-      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-    })
+    // `new Date(p.date)` was UTC midnight rendered locally, so every label
+    // on this axis read a day early west of Greenwich.
+    const labels = chartData.points.map((p) =>
+      formatISODate(p.date, { month: 'short', day: 'numeric' }),
+    )
     const values = chartData.points.map((p) => parseFloat(p.market_value))
 
     // Build datasets

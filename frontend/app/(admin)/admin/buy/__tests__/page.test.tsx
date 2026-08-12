@@ -1,7 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest'
 import { render, screen, fireEvent, act, waitFor, within } from '@testing-library/react'
 import AdminBuyPage from '../page'
 import { AdminApiError } from '@/lib/admin-api'
+import { pinTimeZone, PACIFIC } from '@/lib/__tests__/_timezone'
 
 const getMock = vi.fn()
 const postMock = vi.fn()
@@ -251,5 +252,48 @@ describe('AdminBuyPage catalog picker (RFC 0010 T15)', () => {
       '/purchases/buy-1/items',
       expect.objectContaining({ name: 'Charizard', buy_price: 80 }),
     ))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// RFC 0010 T8 — the transaction date defaulted to tomorrow after 5pm Pacific
+// ---------------------------------------------------------------------------
+
+describe('AdminBuyPage default transaction date', () => {
+  let restoreTz: () => void
+  beforeAll(() => { restoreTz = pinTimeZone(PACIFIC) })
+  afterAll(() => { restoreTz(); vi.useRealTimers() })
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-08-11T01:30:00Z')) // 6:30pm Pacific, Aug 10
+    getMock.mockReset()
+    postMock.mockReset()
+    postMock.mockResolvedValue({ buy_id: 'buy-1' })
+    getMock.mockImplementation((path: string) => {
+      if (path === '/locations') return Promise.resolve([{ value: 'toploader', label: 'Toploader' }])
+      if (path === '/market/search') {
+        return Promise.resolve({ items: [catalogCard('c1', 'Charizard ex')], total: 1 })
+      }
+      return Promise.resolve({})
+    })
+  })
+  afterEach(() => vi.useRealTimers())
+
+  it('defaults to Aug 10 at 6:30pm Pacific, not Aug 11', async () => {
+    // The Transaction Date field only appears once the cart has something in
+    // it, so a card has to be staged first.
+    const input = await renderBuyPage()
+    fireEvent.change(input, { target: { value: 'Charizard' } })
+    await waitFor(() => expect(screen.getByText('Charizard ex')).toBeInTheDocument())
+    fireEvent.click(screen.getByText('Charizard ex'))
+    fireEvent.change(screen.getByLabelText('Buy Price'), { target: { value: '10' } })
+    fireEvent.click(screen.getByRole('button', { name: /add to purchase/i }))
+
+    await waitFor(() =>
+      expect(document.querySelector('input[type="date"]')).not.toBeNull(),
+    )
+    const date = document.querySelector('input[type="date"]') as HTMLInputElement
+    expect(date.value).toBe('2026-08-10')
   })
 })

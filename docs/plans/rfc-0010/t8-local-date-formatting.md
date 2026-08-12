@@ -181,8 +181,13 @@ Plus `PriceChart` and `/admin/card/[id]` axis/label dates under the same pin.
 under a faked 6:30pm-Pacific clock that default is **Aug 10**. Four separate call sites, four
 tests — this is where the money-dating bug actually bites.
 
+**Corrected as executed.** `npx vitest` fails here with *"Vitest failed to find
+the runner"* (progress.md's baseline section records it; this is the ninth task
+doc in the RFC to carry the broken form). The dashboard is a fifth default-date
+call site and its test file was missing from the selection:
+
 ```bash
-cd frontend && npx vitest run lib/__tests__/dates "app/(admin)/admin/analytics" "app/(admin)/admin/card" "app/(admin)/admin/buy" "app/(admin)/admin/sell" "app/(admin)/admin/trade" components/admin/shared/__tests__/PriceChart --reporter=verbose
+npm test --workspace=frontend -- --run "lib/__tests__/dates" "app/(admin)/admin/analytics" "app/(admin)/admin/card" "app/(admin)/admin/buy" "app/(admin)/admin/sell" "app/(admin)/admin/trade" "app/(admin)/admin/__tests__" components/admin/shared/__tests__/PriceChart
 ```
 
 ## GREEN — done when
@@ -192,8 +197,12 @@ clean, and both greps are clear:
 
 ```bash
 grep -rn "new Date(" frontend/app/\(admin\) frontend/components/admin    # no date-only args outside lib/dates.ts
-grep -rn "toISOString().split" frontend/                                  # no remaining "today" computations
+grep -rn "toISOString().split\|toISOString().slice" frontend/             # no remaining "today" computations
 ```
+
+**The second grep as written misses one.** The dashboard's "today" is
+`toISOString().slice(0, 10)`, not `.split('T')[0]` — same defect, different
+spelling. Grep for both.
 
 ## Manual check
 

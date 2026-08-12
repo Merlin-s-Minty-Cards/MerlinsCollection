@@ -17,6 +17,7 @@ import {
 import { useAdminApi } from '@/lib/admin-api'
 import { useCardImages } from '@/lib/use-card-images'
 import { formatCondition } from '@/lib/constants'
+import { formatISODate } from '@/lib/dates'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import PriceChart from '@/components/admin/shared/PriceChart'
 import StatusBadge from '@/components/admin/shared/StatusBadge'
@@ -78,16 +79,6 @@ function buildTcgPlayerUrl(name: string): string {
 function buildEbayUrl(name: string): string {
   const query = encodeURIComponent(name)
   return `https://www.ebay.com/sch/i.html?_nkw=${query}&_sacat=0`
-}
-
-function formatDate(dateStr: string | undefined | null): string {
-  if (!dateStr) return '—'
-  try {
-    const d = new Date(dateStr)
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-  } catch {
-    return dateStr
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -289,7 +280,7 @@ export default function AdminCardDetailPage() {
               <span className="text-sm text-pine-100 capitalize">{item.location || '—'}</span>
             </InfoField>
             <InfoField icon={<Clock size={12} />} label="Acquired">
-              <span className="text-sm text-pine-100">{formatDate(item.acquired_at)}</span>
+              <span className="text-sm text-pine-100">{formatISODate(item.acquired_at) || '—'}</span>
             </InfoField>
           </div>
         </div>
@@ -370,7 +361,7 @@ export default function AdminCardDetailPage() {
                     )}
                   </div>
                   <div className="flex items-center gap-2 mt-0.5 text-[10px] text-pine-500">
-                    <span>{formatDate(event.date)}</span>
+                    <span>{formatISODate(event.date) || '—'}</span>
                     {event.payment_method && <span>• {event.payment_method}</span>}
                     {event.counterparty && <span>• {event.counterparty}</span>}
                   </div>

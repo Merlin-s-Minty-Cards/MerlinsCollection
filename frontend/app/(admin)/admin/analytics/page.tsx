@@ -15,6 +15,7 @@ import {
   Package,
 } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
+import { formatISODate, toLocalISODate } from '@/lib/dates'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import DataTable, { type Column } from '@/components/admin/shared/DataTable'
 import StatusBadge from '@/components/admin/shared/StatusBadge'
@@ -75,22 +76,15 @@ type ShowViewMode = 'list' | 'detail'
 // Helpers
 // ---------------------------------------------------------------------------
 
-function formatDate(dateStr: string): string {
-  try {
-    const d = new Date(dateStr)
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-  } catch {
-    return dateStr
-  }
-}
-
 function getDefaultDateRange(): { start: string; end: string } {
   const end = new Date()
   const start = new Date()
   start.setMonth(start.getMonth() - 3) // Default to last 3 months
+  // Local, never `toISOString()` — that is the UTC date, so after 5pm Pacific
+  // the range ended tomorrow and disagreed with the pickers rendering it.
   return {
-    start: start.toISOString().split('T')[0],
-    end: end.toISOString().split('T')[0],
+    start: toLocalISODate(start),
+    end: toLocalISODate(end),
   }
 }
 
@@ -103,7 +97,7 @@ const txnColumns: Column<TransactionRecord>[] = [
     key: 'date',
     label: 'Date',
     sortable: true,
-    render: (t) => <span className="font-mono text-xs">{formatDate(t.date)}</span>,
+    render: (t) => <span className="font-mono text-xs">{formatISODate(t.date)}</span>,
   },
   {
     key: 'type',
@@ -375,7 +369,7 @@ export default function AdminAnalyticsPage() {
           </span>
           <h1 className="text-xl font-semibold text-pine-100">{selectedShow.name}</h1>
           <p className="text-xs text-pine-400 mt-1">
-            {formatDate(selectedShow.date)} {selectedShow.location && `• ${selectedShow.location}`}
+            {formatISODate(selectedShow.date)} {selectedShow.location && `• ${selectedShow.location}`}
           </p>
         </header>
 
@@ -525,7 +519,7 @@ export default function AdminAnalyticsPage() {
                           : 'text-pine-300 hover:text-pine-100 hover:bg-pine-800/60'
                       }`}
                     >
-                      {formatDate(d)}
+                      {formatISODate(d)}
                     </button>
                   ))}
                 </div>
@@ -684,7 +678,7 @@ export default function AdminAnalyticsPage() {
                         <div className="min-w-0">
                           <div className="text-sm text-pine-100 font-medium truncate">{show.name}</div>
                           <div className="text-[10px] text-pine-500 mt-0.5">
-                            {formatDate(show.date)} {show.location && `• ${show.location}`}
+                            {formatISODate(show.date)} {show.location && `• ${show.location}`}
                           </div>
                         </div>
                       </div>
