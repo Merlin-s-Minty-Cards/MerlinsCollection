@@ -1,12 +1,13 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { AlertTriangle, Link2, Languages, Check } from 'lucide-react'
+import { AlertTriangle, Link2, Languages, Check, SearchX } from 'lucide-react'
 import { useAdminApi } from '@/lib/admin-api'
 import { useCardImages } from '@/lib/use-card-images'
 import CardImage, { TABLE_THUMB_SIZE } from '@/components/admin/shared/CardImage'
 import CardPickerRow, { type PickerCard } from '@/components/admin/shared/CardPickerRow'
 import DataTable, { type Column } from '@/components/admin/shared/DataTable'
+import SearchInput from '@/components/admin/shared/SearchInput'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
 import {
   REASON_FILTER_OPTIONS,
@@ -44,6 +45,7 @@ export default function AdminTriagePage() {
   const [items, setItems] = useState<TriageItem[]>([])
   const [loading, setLoading] = useState(true)
   const [reasonFilter, setReasonFilter] = useState<'' | TriageReason>('')
+  const [search, setSearch] = useState('')
   // Sold, lost and returned-to-consignor cards will never be corrected — the
   // card is gone — so they are out of the queue unless the admin asks. Leaving
   // them in is what stopped the list ever reaching zero.
@@ -58,6 +60,12 @@ export default function AdminTriagePage() {
   // on a row whose name cannot be read.
   const { getImageUrl } = useCardImages(items.map((i) => i.card_id))
 
+  // Trimmed HERE rather than in state, and it is this value the fetch depends
+  // on: trimming into state would make `SearchInput` echo the trimmed string
+  // back into its own box and eat a space the moment it is typed, while
+  // depending on the raw value would refetch for a term that sends no `name`.
+  const searchTerm = search.trim()
+
   const fetchItems = useCallback(async () => {
     if (!api.isAuthenticated) return
     setLoading(true)
@@ -70,6 +78,11 @@ export default function AdminTriagePage() {
       // reason had no parameter at all.
       if (reasonFilter) params.triage_reason = reasonFilter
       if (includeTerminal) params.include_terminal = 'true'
+      // Fed into the SAME record as the reason filter, so the two AND-combine
+      // for free — searching within a reason is the useful combination. An
+      // empty term omits the key rather than sending `name=""`, which is a
+      // request the admin did not make.
+      if (searchTerm) params.name = searchTerm
       const data = await api.get<{ items: TriageItem[] }>('/inventory/search', params)
       setItems(data?.items ?? [])
     } catch {
@@ -77,7 +90,7 @@ export default function AdminTriagePage() {
     } finally {
       setLoading(false)
     }
-  }, [api, reasonFilter, includeTerminal])
+  }, [api, reasonFilter, includeTerminal, searchTerm])
 
   useEffect(() => { fetchItems() }, [fetchItems])
 
@@ -145,6 +158,10 @@ export default function AdminTriagePage() {
   // than none.
   const clearableCount = items.filter((i) => i.bulk_clearable).length
 
+  // Nothing to show — but WHY it is empty decides which panel renders, so the
+  // two questions are kept apart.
+  const isEmpty = !loading && items.length === 0
+
   const bulkClear = async () => {
     setConfirmingBulkClear(false)
     setError(null)
@@ -152,6 +169,12 @@ export default function AdminTriagePage() {
       await api.post('/inventory/bulk-clear-review', {
         triage_reason: reasonFilter || null,
         include_terminal: includeTerminal,
+        // EVERY filter the admin is looking at, the search included. The button
+        // counts the rows on screen, so a POST that ignored the search would
+        // clear flags on cards the admin never saw while naming a smaller
+        // number — the exact "clear everything nobody can predict the effect
+        // of" the endpoint's own request model exists to avoid.
+        name: searchTerm || null,
       })
     } catch {
       setError('Could not clear those flags. Nothing was changed.')
@@ -301,6 +324,19 @@ export default function AdminTriagePage() {
       </header>
 
       <div className="mb-4 flex flex-wrap items-center gap-3">
+        {/* The shared input every other admin list uses — its 300ms debounce IS
+            the debounce here, so there is no timer in this file. Every
+            keystroke is a full `list_inventory` read on the backend.
+            `_matches_name` searches notes as well as names, which is what makes
+            a JP card with no readable name findable on this page. */}
+        <SearchInput
+          ariaLabel="Search by card name"
+          placeholder="Search by card name…"
+          value={search}
+          onChange={setSearch}
+          className="w-full sm:w-64"
+        />
+
         <select
           aria-label="Reason"
           value={reasonFilter}
@@ -348,7 +384,20 @@ export default function AdminTriagePage() {
         </div>
       )}
 
-      {!loading && items.length === 0 ? (
+      {isEmpty && searchTerm ? (
+        // A failed SEARCH is not an empty queue. The panel below reads as
+        // success — "every card is linked, named, and unflagged" — so showing
+        // it here would tell the admin their queue is clean when it is not.
+        <div className="vault-panel rounded-xl border border-pine-700/40 px-6 py-10 text-center">
+          <SearchX size={20} className="mx-auto mb-2 text-pine-400" />
+          <p className="text-sm text-pine-100">
+            No cards match “{searchTerm}”
+          </p>
+          <p className="mt-1 text-xs text-pine-400">
+            Other cards may still need review — clear the search to see them.
+          </p>
+        </div>
+      ) : isEmpty ? (
         // Reads as success, not emptiness — an empty queue is the goal state.
         <div className="vault-panel rounded-xl border border-mint/20 px-6 py-10 text-center">
           <Check size={20} className="mx-auto mb-2 text-mint" />

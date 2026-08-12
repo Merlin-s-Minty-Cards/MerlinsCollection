@@ -767,3 +767,159 @@ describe('AdminTriagePage catalog picker (RFC 0010 T15)', () => {
     expect(putMock.mock.calls[0][1]).not.toHaveProperty('card_id')
   })
 })
+
+// ===========================================================================
+// RFC 0010 T4 — searching the queue by card name
+// ===========================================================================
+
+describe('Triage — searching the queue by card name', () => {
+  /** Every queue request the page has made, oldest first. */
+  const searchCalls = () =>
+    getMock.mock.calls.filter(([p]) => p === '/inventory/search') as [
+      string,
+      Record<string, string>,
+    ][]
+
+  /** The params of the most recent queue request. */
+  const lastParams = () => searchCalls().at(-1)![1]
+
+  const typeSearch = (value: string) =>
+    fireEvent.change(screen.getByLabelText(/search by card name/i), {
+      target: { value },
+    })
+
+  it('sends the typed term as `name` on the queue request', async () => {
+    // No new endpoint and no new parameter: `GET /admin/inventory/search`
+    // already takes `name`, and `_matches_name` already covers display name,
+    // product name, description AND notes — which is what makes a JP card with
+    // no readable name findable on precisely this page.
+    mockList([flaggedItem])
+    render(<AdminTriagePage />)
+    await screen.findByText(/Pikachu/)
+
+    typeSearch('Charizard')
+
+    await waitFor(() =>
+      expect(getMock).toHaveBeenCalledWith(
+        '/inventory/search',
+        expect.objectContaining({ triage: 'true', name: 'Charizard' }),
+      ),
+    )
+  })
+
+  it('makes ONE request for a burst of keystrokes, not one per keystroke', async () => {
+    // Every keystroke here is a full `list_inventory` read on the backend, so
+    // an undebounced input is a real cost, not a nicety.
+    mockList([flaggedItem])
+    render(<AdminTriagePage />)
+    await screen.findByText(/Pikachu/)
+    const before = searchCalls().length
+
+    typeSearch('C')
+    typeSearch('Ch')
+    typeSearch('Cha')
+
+    await waitFor(() => expect(searchCalls().length).toBeGreaterThan(before))
+    expect(searchCalls().slice(before)).toHaveLength(1)
+    expect(lastParams().name).toBe('Cha')
+  })
+
+  it('combines the search with the reason filter instead of replacing it', async () => {
+    // Searching WITHIN a reason is the useful combination, and it comes free
+    // from feeding the same params record the reason filter already feeds.
+    mockList([flaggedItem, unlinkedItem])
+    render(<AdminTriagePage />)
+    await screen.findByText(/Pikachu/)
+
+    fireEvent.change(screen.getByLabelText(/reason/i), {
+      target: { value: 'missing_card_id' },
+    })
+    typeSearch('Charizard')
+
+    await waitFor(() =>
+      expect(lastParams()).toMatchObject({
+        triage: 'true',
+        triage_reason: 'missing_card_id',
+        name: 'Charizard',
+      }),
+    )
+  })
+
+  it('omits `name` entirely for a whitespace-only term, never sending an empty one', async () => {
+    // `name=""` and `name="   "` are both requests the admin did not make; the
+    // honest wire form for "no search" is no key at all.
+    mockList([flaggedItem])
+    render(<AdminTriagePage />)
+    await screen.findByText(/Pikachu/)
+
+    typeSearch('Char')
+    await waitFor(() => expect(lastParams()).toHaveProperty('name', 'Char'))
+
+    typeSearch('   ')
+    await waitFor(() => expect(lastParams()).not.toHaveProperty('name'))
+  })
+
+  it('says nothing matched the search instead of congratulating an empty queue', async () => {
+    // The one real design decision in this task. The empty panel reads as
+    // SUCCESS — "Every card is linked, named, and unflagged" — so rendering it
+    // for a failed search tells the admin their queue is clean when it is not.
+    mockList([flaggedItem])
+    render(<AdminTriagePage />)
+    await screen.findByText(/Pikachu/)
+
+    mockList([])
+    typeSearch('Nosuchcard')
+
+    expect(await screen.findByText(/no cards match/i)).toBeInTheDocument()
+    expect(screen.queryByText(/nothing needs review/i)).toBeNull()
+  })
+
+  it('scopes the bulk clear to the search, so the count it names is what it clears', async () => {
+    // The button counts the rows ON SCREEN, which the search has narrowed. If
+    // the POST is not narrowed too, "Clear machine flags (1)" silently clears
+    // every machine flag in the queue — a destructive operation whose stated
+    // count is false. `BulkClearReviewRequest.name` already exists for exactly
+    // this ("clear what I can see"); nothing was sending it.
+    const machineFlagged = {
+      ...flaggedItem,
+      item_id: 'machine-1',
+      review_reason: 'manual_entry',
+      bulk_clearable: true,
+      card: { ...flaggedItem.card, name: 'Machop' },
+    }
+    mockList([machineFlagged])
+    postMock.mockResolvedValue({ cleared: 1 })
+    render(<AdminTriagePage />)
+    await screen.findByText(/Machop/)
+
+    typeSearch('Machop')
+    await waitFor(() => expect(lastParams()).toHaveProperty('name', 'Machop'))
+
+    fireEvent.click(screen.getByRole('button', { name: /clear machine flags/i }))
+    const confirm = await screen.findByRole('dialog', { name: /clear machine flags/i })
+    fireEvent.click(within(confirm).getByRole('button', { name: /^clear \d+/i }))
+
+    await waitFor(() =>
+      expect(postMock).toHaveBeenCalledWith(
+        '/inventory/bulk-clear-review',
+        expect.objectContaining({ name: 'Machop' }),
+      ),
+    )
+  })
+
+  it('restores the unfiltered queue when the search is cleared', async () => {
+    mockList([flaggedItem])
+    render(<AdminTriagePage />)
+    await screen.findByText(/Pikachu/)
+
+    mockList([])
+    typeSearch('Nosuchcard')
+    await screen.findByText(/no cards match/i)
+
+    mockList([flaggedItem])
+    fireEvent.click(screen.getByRole('button', { name: /clear search/i }))
+
+    expect(await screen.findByText(/Pikachu/)).toBeInTheDocument()
+    await waitFor(() => expect(lastParams()).not.toHaveProperty('name'))
+  })
+})
