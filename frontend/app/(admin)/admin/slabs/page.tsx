@@ -1,8 +1,8 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
-import { Camera, Keyboard, RefreshCw, ScanLine, Wand2 } from 'lucide-react'
-import { useAdminApi } from '@/lib/admin-api'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Keyboard, RefreshCw } from 'lucide-react'
+import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { formatMoney } from '@/lib/money'
 import SlabEntryForm, { type StagedSlab } from '@/components/admin/slabs/SlabEntryForm'
 import StagingTable from '@/components/admin/slabs/StagingTable'
@@ -23,16 +23,24 @@ export default function SlabsPage() {
 
   // Intake affordances. The form is put away by default, matching the other
   // admin tabs — the page's resting state is the shelf, not a blank form.
+  //
+  // Manual entry is the ONLY toggle now. RFC 0010 T12 removed the "Scan cert"
+  // button along with the two PSA-blocked ones: the owner's point is that a
+  // wedge scanner just types the number, so the ordinary cert field already IS
+  // the scanner target. `CertInput` keeps the two things that make that true —
+  // Enter advances rather than submits, and a trailing \r\n is stripped.
   const [entryOpen, setEntryOpen] = useState(false)
-  const [scanArmed, setScanArmed] = useState(false)
   // Bumping this pulls focus to the cert field without remounting the form.
   const [focusToken, setFocusToken] = useState(0)
 
-  const armScan = () => {
-    setEntryOpen(true)
-    setScanArmed(true)
-    setFocusToken((n) => n + 1)
-  }
+  // The pricing run that follows a commit. A SECOND, separate status line: the
+  // commit's success message lands first and unconditionally, because a vendor
+  // 500 or a spent quota must degrade to "committed, not yet priced" — a state
+  // the product already models, at /admin/slabs?priced=false.
+  const [pricing, setPricing] = useState<string | null>(null)
+  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => () => { if (pollRef.current) clearTimeout(pollRef.current) }, [])
 
   const loadSlabs = useCallback(async () => {
     try {
@@ -60,9 +68,74 @@ export default function SlabsPage() {
     loadSlabs()
   }, [loadSlabs])
 
+  /**
+   * Price the batch that was just committed — AFTER the commit, never inside
+   * its write loop.
+   *
+   * T0 exists because a money write blew up mid-loop; putting a metered
+   * third-party HTTP call inside the same loop would rebuild that failure with
+   * a worse trigger. So this runs on its own, reports on its own line, and
+   * cannot fail, obscure or roll back the commit.
+   *
+   * It reuses `POST /slabs/refresh-prices` scoped to the ids the confirm just
+   * created. Not a second pricing path: `refresh_graded_prices` already orders
+   * never-priced slabs first, so a slab committed a second ago is already at
+   * the head of its queue — what was missing was the scope, without which a
+   * 3-slab intake spends the whole day's 50-lookup budget on the shelf.
+   */
+  const priceBatch = useCallback(async (itemIds: string[], attempt = 0) => {
+    if (itemIds.length === 0) return
+    if (attempt === 0) {
+      setPricing('Pricing the batch…')
+      try {
+        await api.post('/slabs/refresh-prices', { item_ids: itemIds })
+      } catch (e) {
+        const conflict = e instanceof AdminApiError && e.status === 409
+        setPricing(
+          conflict
+            ? 'Committed, not yet priced — a price refresh is already running. '
+              + 'These slabs are first in line tonight.'
+            : `Committed, not yet priced — ${(e as Error).message}. `
+              + 'They are listed under "Not priced".',
+        )
+        return
+      }
+    }
+
+    try {
+      const status = await api.get<{
+        state: string; priced?: number | null; failures?: number | null
+        credits_remaining?: number | null; error?: string | null
+      }>('/slabs/refresh-prices/status')
+
+      if (status.state === 'running' && attempt < 20) {
+        pollRef.current = setTimeout(() => priceBatch(itemIds, attempt + 1), 1500)
+        return
+      }
+      if (status.state === 'completed') {
+        // The credit figure is on screen because the ceiling is FIFTY lookups a
+        // day, shared with the nightly job — a 30-slab intake day eats 60% of
+        // it, and that is not something to discover from a log.
+        const credits = status.credits_remaining
+        setPricing(
+          `Priced ${status.priced ?? 0} of ${itemIds.length}`
+          + (credits == null ? '' : ` · ${credits} credits left today`),
+        )
+        loadSlabs()
+        return
+      }
+      setPricing(
+        `Committed, not yet priced — ${status.error ?? 'the pricing run did not finish'}. `
+        + 'They are listed under "Not priced".',
+      )
+    } catch (e) {
+      setPricing(`Committed, not yet priced — ${(e as Error).message}.`)
+    }
+  }, [api, loadSlabs])
+
   const commit = async () => {
     if (rows.length === 0) return
-    setBusy(true); setError(null); setResult(null)
+    setBusy(true); setError(null); setResult(null); setPricing(null)
     try {
       const session = await api.post<{ buy_id: string }>('/purchases', {})
       const buyId = session.buy_id
@@ -89,8 +162,12 @@ export default function SlabsPage() {
         })
       }
 
-      await api.post(`/purchases/${buyId}/confirm`, {})
+      const confirmed = await api.post<{ item_ids?: string[] }>(
+        `/purchases/${buyId}/confirm`, {},
+      )
       const spend = rows.reduce((sum, r) => sum + r.buy_price, 0)
+      // FIRST and UNCONDITIONALLY. Whatever pricing does next, the money write
+      // landed and the operator must be told so without qualification.
       setResult(`Committed ${rows.length} slab(s), ${formatMoney(spend)}`)
       setRows([])
       // Return focus to the cert field so the next slab can go straight in --
@@ -99,6 +176,9 @@ export default function SlabsPage() {
       setFocusToken((n) => n + 1)
       // The batch is now real inventory, so the list below is stale.
       loadSlabs()
+      // Deliberately NOT awaited inside the commit's try: a pricing failure is
+      // not a commit failure and must never reach the catch below.
+      priceBatch(confirmed?.item_ids ?? [])
     } catch (e) {
       // Stop where we are. An unconfirmed draft creates no inventory, so
       // "do nothing" is the safe state -- never half-commit a batch.
@@ -115,72 +195,36 @@ export default function SlabsPage() {
       </header>
 
       {/* ---- Intake: how a slab gets in ------------------------------------
-          Three routes are shown, two of them deliberately dead. PSA's cert API
-          403s at the ACCOUNT ("limited to approved customers") — re-confirmed
-          2026-08-10 against their Swagger with both bearer spellings — so
-          camera capture and cert auto-fill cannot work no matter what we ship.
-          They are rendered disabled, naming the blocker, rather than omitted,
-          so the gap is visible instead of looking like an oversight. */}
+          ONE route, and it is the only one there will be. PSA's cert API became
+          a PAID feature and the owner declined it on 2026-08-10, so camera
+          capture and cert auto-fill moved from deferred to WITHDRAWN (RFC 0009
+          T2/T5) and their disabled buttons are gone — a disabled button implies
+          a roadmap, and there is none.
+
+          The "Scan cert" button is gone for a different reason: a wedge scanner
+          is just a keyboard that types fast and ends with Enter, so the plain
+          cert field below already IS the scan target. `CertInput` keeps the two
+          things that make that true — Enter advances rather than submits, and a
+          trailing 
+ is stripped. */}
       <section className="flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={() => {
-              setEntryOpen((open) => !open)
-              setScanArmed(false)
-            }}
+            onClick={() => setEntryOpen((open) => !open)}
             aria-expanded={entryOpen}
             className="inline-flex items-center gap-1.5 rounded-lg border border-mint/30 bg-mint/15 px-3.5 py-2 text-xs font-medium text-mint transition-colors hover:bg-mint/25"
           >
             <Keyboard size={14} />
             Manual entry
           </button>
-
-          <button
-            type="button"
-            onClick={armScan}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-pine-700/40 px-3.5 py-2 text-xs font-medium text-pine-300 transition-colors hover:border-pine-600 hover:text-pine-100"
-          >
-            <ScanLine size={14} />
-            Scan cert
-          </button>
-
-          <span className="mx-1 h-5 w-px bg-pine-700/40" aria-hidden="true" />
-
-          <button
-            type="button"
-            disabled
-            aria-describedby="psa-blocked"
-            className="inline-flex cursor-not-allowed items-center gap-1.5 rounded-lg border border-pine-700/30 px-3.5 py-2 text-xs font-medium text-pine-500 opacity-60"
-          >
-            <Camera size={14} />
-            Camera scan
-          </button>
-
-          <button
-            type="button"
-            disabled
-            aria-describedby="psa-blocked"
-            className="inline-flex cursor-not-allowed items-center gap-1.5 rounded-lg border border-pine-700/30 px-3.5 py-2 text-xs font-medium text-pine-500 opacity-60"
-          >
-            <Wand2 size={14} />
-            Auto-fill from cert
-          </button>
         </div>
-
-        <p id="psa-blocked" className="text-[11px] text-pine-500">
-          Camera scan and cert auto-fill need PSA API approval — every call returns
-          HTTP 403 at the account, not in our code. Re-checked 2026-08-10. Until
-          then, scan the barcode into the cert field or type it: both are fully
-          supported and nothing else about intake depends on PSA.
-        </p>
 
         {entryOpen && (
           <div className="vault-panel rounded-xl p-4">
             <SlabEntryForm
               onAdd={(row) => setRows((rs) => [...rs, row])}
               focusToken={focusToken}
-              armed={scanArmed}
             />
           </div>
         )}
@@ -197,6 +241,14 @@ export default function SlabsPage() {
         {result && (
           <p role="status" className="rounded-lg border border-spriggatito-400/30 bg-spriggatito-400/10 px-3 py-2 text-xs text-spriggatito-400">
             {result}
+          </p>
+        )}
+        {/* A SECOND, separate line. Pricing is not part of the commit and must
+            never look like it: "committed, not yet priced" is a real, modelled
+            state, not a failure. */}
+        {pricing && (
+          <p role="status" className="rounded-lg border border-pine-700/40 bg-pine-800/30 px-3 py-2 text-xs text-pine-300">
+            {pricing}
           </p>
         )}
         <button

@@ -284,8 +284,14 @@ _REFRESH_STATUS: dict[str, Any] = {
 }
 
 
-def _run_slab_price_refresh(repo: InventoryRepository) -> None:
+def _run_slab_price_refresh(repo: InventoryRepository,
+                            only_item_ids: set[str] | None = None) -> None:
     """Background body: price every owned slab the day's budget reaches.
+
+    ``only_item_ids`` narrows the run to a just-committed batch (RFC 0010
+    T12). It is applied when SELECTING candidates, so a filtered-out slab
+    costs zero provider calls — without it a 3-slab intake would spend the
+    whole day's 50-lookup budget re-checking the shelf.
 
     Wrapped end to end, because a crash that left ``state`` on ``"running"``
     would 409 every future press of the button, permanently.
@@ -303,7 +309,8 @@ def _run_slab_price_refresh(repo: InventoryRepository) -> None:
                 "No pricing provider is configured (POKEMONPRICETRACKER_API_KEY "
                 "is unset), so no slab prices can be fetched."
             )
-        summary = refresh_graded_prices(repo, provider)
+        summary = refresh_graded_prices(repo, provider,
+                                        only_item_ids=only_item_ids)
         _REFRESH_STATUS.update({
             "state": "completed",
             "finished_at": datetime.now(tz=timezone.utc).isoformat(),
@@ -325,9 +332,20 @@ def _run_slab_price_refresh(repo: InventoryRepository) -> None:
         })
 
 
+class RefreshPricesRequest(BaseModel):
+    """Optional scope for a refresh run.
+
+    Empty body means the whole shelf, which is what the Market-style button
+    has always done. Slab intake passes the ids its commit just created.
+    """
+
+    item_ids: list[str] | None = None
+
+
 @router.post("/refresh-prices", status_code=202)
 def trigger_slab_price_refresh(
     background_tasks: BackgroundTasks,
+    body: RefreshPricesRequest | None = None,
     repo: InventoryRepository = Depends(get_repo),
 ) -> dict[str, str]:
     """Kick off a graded price refresh; poll ``/refresh-prices/status``.
@@ -354,7 +372,8 @@ def trigger_slab_price_refresh(
         "credits_remaining": None,
         "error": None,
     })
-    background_tasks.add_task(_run_slab_price_refresh, repo)
+    scope = set(body.item_ids) if body and body.item_ids is not None else None
+    background_tasks.add_task(_run_slab_price_refresh, repo, scope)
     return {"state": "started"}
 
 

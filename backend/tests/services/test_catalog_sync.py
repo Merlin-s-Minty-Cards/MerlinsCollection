@@ -2447,3 +2447,80 @@ class TestCatalogPassWiring:
         assert summary["cards_updated"] == 1        # the depth pass still landed
         assert summary["items_refreshed"] == 1      # and the denormalization ran
         assert summary["catalog_failures"] > 0
+
+
+class TestRefreshGradedPricesScopedToItemIds:
+    """RFC 0010 T12 — price a slab AT INTAKE by scoping the existing refresh.
+
+    Without a scope a 3-slab intake spends the whole day's 50-lookup budget
+    re-checking the shelf, so the batch that was just committed is competing
+    with 80 slabs already priced last night.
+    """
+
+    def test_only_the_named_slabs_are_priced(self, dynamo_repo):
+        from merlins_collection.services.catalog_sync import refresh_graded_prices
+
+        _seed_catalog(dynamo_repo)
+        just_bought = _slab(cert="new", grade="10", price_source_id="253266")
+        on_the_shelf = _slab(cert="old", grade="9", price_source_id="253266")
+        dynamo_repo.put_inventory_item(just_bought)
+        dynamo_repo.put_inventory_item(on_the_shelf)
+        provider = FakePricingProvider(
+            by_id={"253266": _prices(psa10="2479.5", psa9="929.67")})
+
+        summary = refresh_graded_prices(
+            dynamo_repo, provider, only_item_ids={just_bought.item_id})
+
+        assert summary["graded_candidates"] == 1
+        assert summary["graded_priced"] == 1
+        assert dynamo_repo.get_graded_market_value(
+            CARD_ID, GradingCompany.PSA, Decimal("10")) == Decimal("2479.5")
+        assert dynamo_repo.get_graded_market_value(
+            CARD_ID, GradingCompany.PSA, Decimal("9")) is None
+
+    def test_a_filtered_out_slab_costs_ZERO_provider_calls(self, dynamo_repo):
+        """The filter is applied when SELECTING candidates, before a socket
+        opens — otherwise the scope saves nothing, which is the whole point."""
+        from merlins_collection.services.catalog_sync import refresh_graded_prices
+
+        _seed_catalog(dynamo_repo)
+        for i in range(5):
+            dynamo_repo.put_inventory_item(
+                _slab(cert=str(i), grade=str(10 - i), price_source_id="253266"))
+        provider = FakePricingProvider(by_id={"253266": _prices(psa10="2479.5")})
+
+        refresh_graded_prices(dynamo_repo, provider, only_item_ids=set())
+
+        assert provider.calls == []
+        assert provider.quota.spent == 0
+
+    def test_an_unknown_item_id_prices_nothing_and_does_not_raise(self, dynamo_repo):
+        from merlins_collection.services.catalog_sync import refresh_graded_prices
+
+        _seed_catalog(dynamo_repo)
+        dynamo_repo.put_inventory_item(_slab(price_source_id="253266"))
+        provider = FakePricingProvider(by_id={"253266": _prices(psa10="2479.5")})
+
+        summary = refresh_graded_prices(
+            dynamo_repo, provider, only_item_ids={"no-such-item"})
+
+        assert summary["graded_candidates"] == 0
+        assert summary["graded_priced"] == 0
+        assert provider.calls == []
+
+    def test_without_a_scope_it_behaves_exactly_as_before(self, dynamo_repo):
+        """The regression gate. `only_item_ids=None` is the nightly job."""
+        from merlins_collection.services.catalog_sync import refresh_graded_prices
+
+        _seed_catalog(dynamo_repo)
+        dynamo_repo.put_inventory_item(_slab(cert="1", grade="10",
+                                             price_source_id="253266"))
+        dynamo_repo.put_inventory_item(_slab(cert="2", grade="9",
+                                             price_source_id="253266"))
+        provider = FakePricingProvider(
+            by_id={"253266": _prices(psa10="2479.5", psa9="929.67")})
+
+        summary = refresh_graded_prices(dynamo_repo, provider)
+
+        assert summary["graded_candidates"] == 2
+        assert summary["graded_priced"] == 2

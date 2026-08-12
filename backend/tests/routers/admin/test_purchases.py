@@ -804,3 +804,34 @@ class TestPurchaseBatchId:
         rows = resp.json()["items"]
         assert len(rows) == 2
         assert all(r["batch_id"] == buy_id for r in rows)
+
+
+class TestConfirmReturnsCreatedItemIds:
+    """RFC 0010 T12 — the confirm response has to say WHAT it created.
+
+    Slab intake prices the batch immediately after committing, scoped to the
+    items it just made. Without the ids the only alternatives are a second
+    pricing path or an unscoped refresh that spends the whole day's 50-lookup
+    budget re-checking the shelf.
+    """
+
+    def test_confirm_reports_the_ids_it_created(self, admin_client):
+        client, repo, token = admin_client
+        session = client.post("/admin/purchases", json={},
+                              headers=_auth(token)).json()
+        buy_id = session["buy_id"]
+        for cert in ("1001", "1002"):
+            client.post(f"/admin/purchases/{buy_id}/items", json={
+                "kind": "graded", "name": "Gengar VMAX", "company": "PSA",
+                "grade": 9.5, "cert_number": cert, "buy_price": 100,
+                "location": "toploader",
+            }, headers=_auth(token))
+
+        resp = client.post(f"/admin/purchases/{buy_id}/confirm", json={},
+                           headers=_auth(token))
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["items_created"] == 2
+        assert len(body["item_ids"]) == 2
+        for item_id in body["item_ids"]:
+            assert repo.get_inventory_item(item_id) is not None

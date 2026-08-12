@@ -157,9 +157,14 @@ credit cost in the result line.**
 Note the existing test trap: the form renders both `Grade` **and** `Grade label`, so grade queries
 must stay anchored `/^grade$/i`.
 
+**Commands corrected as executed.** The frontend half was the broken `npx vitest` form;
+the backend `-k` expression works but is slow and imprecise (it also collects
+`test_slabs.py`'s neighbours by module name). Real paths — note `routers/admin/` and
+`services/`, and that `confirm` now returns `item_ids` so `test_purchases.py` is in scope:
+
 ```bash
-./.venv/Scripts/python.exe -m pytest backend/tests -q --tb=short -k "slab or catalog_sync"
-cd frontend && npx vitest run components/admin/slabs "app/(admin)/admin/slabs" --reporter=verbose
+./.venv/Scripts/python.exe -m pytest backend/tests/routers/admin/test_slabs.py backend/tests/routers/admin/test_purchases.py backend/tests/services/test_catalog_sync.py -q --tb=short
+npm test --workspace=frontend -- --run "app/(admin)/admin/slabs" "components/admin/slabs"
 ```
 
 ## GREEN — done when

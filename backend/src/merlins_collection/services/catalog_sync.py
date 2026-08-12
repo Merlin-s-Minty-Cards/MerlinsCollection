@@ -189,17 +189,27 @@ class _ProviderMemo:
         return result
 
 
-def _graded_candidates(repo) -> list:
+def _graded_candidates(repo, only_item_ids: set[str] | None = None) -> list:
     """Owned slabs, one per ``(card_id, company, grade)``.
 
     Deduped before anything is spent: two copies of the same slab at the same
     grade share one price row, so the second copy's lookup would buy a number we
     already have. An UNLINKED slab is kept as its own candidate — there is no
     key to dedupe it by, and the loop skips it for free anyway.
+
+    ``only_item_ids`` narrows the walk to a named set, applied HERE — before a
+    socket opens — so a filtered-out slab costs nothing. That is the whole point
+    of the scope: a 3-slab intake must not spend the day's 50 lookups
+    re-checking a shelf that was priced last night. An id that matches nothing
+    simply yields no candidate; it is not an error, because the caller is
+    handing over ids a commit just minted and a raw single among them is a
+    normal thing to hand over.
     """
     seen = set()
     candidates = []
     for item in repo.list_inventory():
+        if only_item_ids is not None and item.item_id not in only_item_ids:
+            continue
         if item.kind != "graded" or item.status not in _OWNED_STATUSES:
             continue
         if item.card_id is not None:
@@ -228,7 +238,8 @@ def _staleness_key(row, item) -> tuple:
 
 
 def refresh_graded_prices(repo, provider, *,
-                          max_consecutive_failures: int = _MAX_CONSECUTIVE_FAILURES
+                          max_consecutive_failures: int = _MAX_CONSECUTIVE_FAILURES,
+                          only_item_ids: set[str] | None = None,
                           ) -> dict:
     """Fetch provider prices for owned slabs, stalest first, within today's budget.
 
@@ -264,7 +275,7 @@ def refresh_graded_prices(repo, provider, *,
         attach_price,
     )
 
-    candidates = _graded_candidates(repo)
+    candidates = _graded_candidates(repo, only_item_ids)
     skipped = pinned = priced = unpriced = failures = 0
 
     plan = []

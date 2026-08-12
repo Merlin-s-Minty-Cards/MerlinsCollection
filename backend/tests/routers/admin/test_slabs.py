@@ -549,3 +549,77 @@ class TestPricePin:
         client, _repo, _token = admin_client
         assert client.put("/admin/slabs/anything/price/pin",
                           json={"pinned": True}).status_code in (401, 403)
+
+
+class TestRefreshPricesScopedToABatch:
+    """RFC 0010 T12 — a just-committed batch is priced without spending the
+    whole day's budget on the shelf it was added to."""
+
+    def test_item_ids_are_passed_through_to_the_refresh(self, admin_client,
+                                                        monkeypatch):
+        from merlins_collection.routers.admin import slabs
+
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([_catalog()])
+        just_bought = _graded(cert_number="10000101", price_source_id="253266")
+        on_the_shelf = _graded(cert_number="10000102", grade=Decimal("9"),
+                               price_source_id="253266")
+        repo.put_inventory_item(just_bought)
+        repo.put_inventory_item(on_the_shelf)
+        monkeypatch.setattr(slabs, "build_pricing_provider",
+                            lambda: _FakeProvider(_priced(psa10="2479.5")))
+
+        resp = client.post("/admin/slabs/refresh-prices",
+                           json={"item_ids": [just_bought.item_id]},
+                           headers=_auth(token))
+        assert resp.status_code == 202
+
+        status = client.get("/admin/slabs/refresh-prices/status",
+                            headers=_auth(token)).json()
+        assert status["state"] == "completed"
+        assert status["candidates"] == 1
+        assert repo.get_graded_market_value(
+            "swsh1-1", GradingCompany.PSA, Decimal("9")) is None
+
+    def test_an_unknown_item_id_completes_rather_than_500ing(self, admin_client,
+                                                             monkeypatch):
+        from merlins_collection.routers.admin import slabs
+
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([_catalog()])
+        repo.put_inventory_item(_graded(cert_number="10000101",
+                                        price_source_id="253266"))
+        monkeypatch.setattr(slabs, "build_pricing_provider",
+                            lambda: _FakeProvider(_priced(psa10="2479.5")))
+
+        resp = client.post("/admin/slabs/refresh-prices",
+                           json={"item_ids": ["no-such-item"]},
+                           headers=_auth(token))
+        assert resp.status_code == 202
+        status = client.get("/admin/slabs/refresh-prices/status",
+                            headers=_auth(token)).json()
+        assert status["state"] == "completed"
+        assert status["candidates"] == 0
+        assert status["error"] is None
+
+    def test_with_no_body_it_still_walks_the_whole_shelf(self, admin_client,
+                                                         monkeypatch):
+        """The regression gate: the nightly-equivalent press is unchanged."""
+        from merlins_collection.routers.admin import slabs
+
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([_catalog()])
+        repo.put_inventory_item(_graded(cert_number="10000101",
+                                        price_source_id="253266"))
+        repo.put_inventory_item(_graded(cert_number="10000102",
+                                        grade=Decimal("9"),
+                                        price_source_id="253266"))
+        monkeypatch.setattr(slabs, "build_pricing_provider",
+                            lambda: _FakeProvider(_priced(psa10="2479.5",
+                                                          psa9="929.67")))
+
+        resp = client.post("/admin/slabs/refresh-prices", headers=_auth(token))
+        assert resp.status_code == 202
+        status = client.get("/admin/slabs/refresh-prices/status",
+                            headers=_auth(token)).json()
+        assert status["candidates"] == 2

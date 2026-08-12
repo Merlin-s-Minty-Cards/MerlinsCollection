@@ -450,6 +450,12 @@ def confirm_buy_session(
         "buy_id": buy_id,
         "status": "confirmed",
         "items_created": items_created,
+        # WHAT was created, not just how many (RFC 0010 T12). Slab intake prices
+        # the batch immediately after committing, scoped to these ids — without
+        # them the only options are a second pricing path or an unscoped refresh
+        # that spends the whole day's 50-lookup budget on the existing shelf.
+        # Additive: every existing caller ignores it.
+        "item_ids": [inv_item.item_id for inv_item, _txn, _event in built],
         "total_cost": str(total_cost),
     }
 

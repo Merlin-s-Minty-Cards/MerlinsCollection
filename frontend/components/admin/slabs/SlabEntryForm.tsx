@@ -46,13 +46,10 @@ const COMPANIES = ['PSA', 'BGS', 'CGC', 'SGC']
 export default function SlabEntryForm({
   onAdd,
   focusToken,
-  armed,
 }: {
   onAdd: (row: StagedSlab) => void
-  /** Bump to pull focus back to the cert field (scan arming, post-commit). */
+  /** Bump to pull focus back to the cert field after a commit. */
   focusToken?: number
-  /** Renders the "waiting for scan" affordance on the cert field. */
-  armed?: boolean
 }) {
   const api = useAdminApi()
   // `options`, not `locations` -- see lib/use-locations.ts:13.
@@ -171,7 +168,6 @@ export default function SlabEntryForm({
         <CertInput
           value={cert}
           inputRef={certRef}
-          armed={armed}
           onChange={(v) => {
             setCert(v)
             setOwned(null)

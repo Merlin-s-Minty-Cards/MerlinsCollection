@@ -34,11 +34,18 @@ export default function StagingTable({ rows, onRemove }: {
               <td className="px-3 py-2 font-mono text-pine-200">{r.cert_number}</td>
               <td className="px-3 py-2 text-pine-100">
                 {r.name}
-                {/* Honest up front: an unlinked slab gets no automatic price and
-                    lands in Triage. Better said here than discovered later. */}
+                {/* Honest up front, and it names the CONSEQUENCE rather than
+                    just the state: a price attaches only on a verified join
+                    (the vendor's `externalCatalogId` must equal this item's
+                    `card_id`), so an unlinked slab is unpriceable by
+                    construction — including every Japanese slab, which carries
+                    no `externalCatalogId` at all. It surfaces afterwards at
+                    /admin/slabs?priced=false. Better said here, while the
+                    operator can still pick a catalog card, than discovered
+                    later. */}
                 {!r.card_id && (
                   <span className="ml-2 rounded border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300">
-                    no catalog link
+                    no catalog link — will not be priced automatically
                   </span>
                 )}
               </td>

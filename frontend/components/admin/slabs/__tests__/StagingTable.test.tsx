@@ -62,4 +62,10 @@ describe('StagingTable', () => {
     )
     expect(screen.getByRole('row', { name: /batch total/i })).toHaveTextContent('$1,340.50')
   })
+
+  // RFC 0010 T12 — the consequence, at the point of decision
+  it('says an unlinked row will not be priced automatically, not just that it is unlinked', () => {
+    render(<StagingTable rows={[row({ card_id: null })]} onRemove={() => {}} />)
+    expect(screen.getByText(/will not be priced automatically/i)).toBeInTheDocument()
+  })
 })

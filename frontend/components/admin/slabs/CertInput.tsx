@@ -11,13 +11,11 @@ interface CertInputProps {
   onBlur?: () => void
   disabled?: boolean
   /**
-   * Lets the page drive focus — "Scan cert" arms this field, and a committed
-   * batch returns to it. `autoFocus` alone only fires on mount, which is why
-   * refocus-after-commit sat unfixed as a T4 follow-up.
+   * Lets the page drive focus — a committed batch returns to this field.
+   * `autoFocus` alone only fires on mount, which is why refocus-after-commit
+   * sat unfixed as a T4 follow-up.
    */
   inputRef?: Ref<HTMLInputElement>
-  /** Shows the armed "waiting for scan" affordance. Purely presentational. */
-  armed?: boolean
 }
 
 /**
@@ -31,6 +29,14 @@ interface CertInputProps {
  *
  * Enter ADVANCES rather than submits -- the scanner's trailing Enter arrives
  * long before card, grade and cost are filled.
+ *
+ * **RFC 0010 T12 removed the "Scan cert" button and the armed affordance, and
+ * deliberately kept everything below.** The owner's reasoning is that a wedge
+ * scanner just types the number, so the ordinary field is the scanner target.
+ * That is only true while `onEnter` advances and the `
+` strip stays: delete
+ * either and wedge scanning breaks while hand-typing keeps working, which is an
+ * invisible failure nobody finds until they are at a table with a scanner.
  */
 export default function CertInput({
   value,
@@ -39,7 +45,6 @@ export default function CertInput({
   onBlur,
   disabled,
   inputRef,
-  armed,
 }: CertInputProps) {
   return (
     <label className="flex flex-col gap-1">
@@ -64,12 +69,6 @@ export default function CertInput({
         }}
         className="vault-field w-full rounded-lg px-3 py-2 font-mono text-sm"
       />
-      {armed && (
-        <span className="flex items-center gap-1.5 text-[11px] text-spriggatito-400">
-          <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-spriggatito-400" />
-          Waiting for scan… scan the barcode or type the cert
-        </span>
-      )}
     </label>
   )
 }
