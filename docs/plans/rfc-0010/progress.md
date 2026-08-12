@@ -409,8 +409,8 @@ second one is a regression, not noise.
 
 | Suite | Count | Time | State |
 |---|---|---|---|
-| Backend | **1602 passed / 0 failed** | 2m15s | green — 1595 + 7 new T16 tests |
-| Frontend | **734 passed / 0 failed** (82 files) | ~29s | green — 715 + 9 new T16 tests + 10 landed with T7 |
+| Backend | **1602 passed / 0 failed** | 2m15s | green — 1595 + 7 new T16 tests (2 `catalog_sync`, 2 `test_inventory`, 2 `test_slabs`, 1 `test_market`) |
+| Frontend | **734 passed / 0 failed** (82 files) | ~29s | green — 715 after T6, **+9 that landed with T7 and were never re-measured into this file**, +10 new T16 tests (5 Triage, 2 `CardDetailModal`, 2 market-coverage, 1 Prep Queue) |
 | Narrow T16 selection (4 backend files) | 245 passed / 0 failed | ~29s | green — **238 of them pre-existing**, which is what proves a derived serializer field, a slab fallback and a coverage split disturbed none of T15's price walk, T17's cycle counts or RFC 0009's slab list |
 | Narrow T16 selection (4 frontend files) | 128 passed / 0 failed | ~11s | green — 119 of them pre-existing |
 | `ruff check backend/src` | — | ~3s | clean |
