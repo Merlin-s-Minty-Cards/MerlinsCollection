@@ -9,6 +9,7 @@ import CardPickerRow, { type PickerCard } from '@/components/admin/shared/CardPi
 import DataTable, { type Column } from '@/components/admin/shared/DataTable'
 import SearchInput from '@/components/admin/shared/SearchInput'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
+import { patchRow } from '@/lib/item-update'
 import {
   REASON_FILTER_OPTIONS,
   REASON_LABELS,
@@ -490,7 +491,31 @@ export default function AdminTriagePage() {
       <CardDetailModal
         item={detailItem as Record<string, unknown> | null}
         onClose={() => setDetailItem(null)}
-        onUpdated={fetchItems}
+        // Patch, then apply this queue's OWN rule — the same patch-then-drop
+        // the three repair tools above already do, so a fix made in the modal
+        // behaves like a fix made anywhere else on this page.
+        //
+        // The reasons are PREDICTED, exactly as in `clearReview`: the update
+        // response is a bare `_serialize_item` and carries no `triage_reasons`
+        // at all (that key is attached by the SEARCH endpoint, on
+        // `?triage=true` rows only). Reading it off `updated` would find
+        // `undefined` and drop every edited row, fixed or not.
+        onUpdated={(updated) => {
+          if (!updated) { fetchItems(); return }
+          const id = String(updated.item_id)
+          setItems((rows) => patchRow(rows, updated).flatMap((r) => {
+            if (r.item_id !== id) return [r]
+            const predicted = reasonsFor(r)
+            if (predicted.length === 0) return []
+            return [{
+              ...r,
+              triage_reasons: predicted,
+              // An unflagged row is never bulk-clearable, and the button names
+              // this count out loud before firing.
+              bulk_clearable: r.needs_review ? r.bulk_clearable : false,
+            }]
+          }))
+        }}
       />
     </div>
   )

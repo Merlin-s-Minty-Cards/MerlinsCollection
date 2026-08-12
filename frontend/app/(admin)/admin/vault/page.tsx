@@ -12,6 +12,7 @@ import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
 import CardImage, { TABLE_THUMB_SIZE, TABLE_THUMB_COLUMN } from '@/components/admin/shared/CardImage'
 import ImageToggle from '@/components/admin/shared/ImageToggle'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
+import { patchRow } from '@/lib/item-update'
 import OwnershipBadge from '@/components/admin/shared/OwnershipBadge'
 import DataTable, { Column } from '@/components/admin/shared/DataTable'
 
@@ -325,7 +326,12 @@ export default function AdminVaultPage() {
       <CardDetailModal
         item={detailItem as Record<string, unknown> | null}
         onClose={() => setDetailItem(null)}
-        onUpdated={fetchVault}
+        // Patch the row, do not refetch (RFC 0010 T5) — this table is sortable
+        // and long, and a refetch resets both the scroll and the sort.
+        onUpdated={(updated) => {
+          if (!updated) { fetchVault(); return }
+          setData((cur) => (cur ? { ...cur, items: patchRow(cur.items, updated) } : cur))
+        }}
       />
     </div>
   )

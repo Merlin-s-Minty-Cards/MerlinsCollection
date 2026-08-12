@@ -115,7 +115,8 @@ typeable at 175% zoom in Chrome. So the tests are a regression lock on the decis
 6. the textarea fields still span the full row.
 
 ```bash
-cd frontend && npx vitest run components/admin/shared/__tests__/CardDetailModal --reporter=verbose
+# `npx vitest` fails with "Vitest failed to find the runner" — use the workspace form.
+npm test --workspace=frontend -- run components/admin/shared/__tests__/CardDetailModal --reporter=verbose
 ```
 
 ## GREEN — done when

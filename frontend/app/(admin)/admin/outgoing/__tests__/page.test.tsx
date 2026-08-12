@@ -225,3 +225,55 @@ describe('AdminPrepQueuePage money input', () => {
     await waitFor(() => expect(putMock).toHaveBeenCalledWith('/inventory/item-1', { sticker_price: '1300' }))
   })
 })
+
+// ===========================================================================
+// RFC 0010 T5 — a modal edit patches the row, and a priced row still leaves
+// ===========================================================================
+
+describe('AdminPrepQueuePage — pricing from the detail modal (RFC 0010 T5)', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    putMock.mockReset()
+    putMock.mockResolvedValue({})
+    getMock.mockImplementation((path: string) => {
+      if (path === '/inventory/search') {
+        return Promise.resolve({
+          items: [{
+            item_id: 'item-1', kind: 'raw', display_name: 'Pikachu',
+            status: 'available', location: 'binder', sticker_price: null,
+          }],
+        })
+      }
+      if (path === '/locations') return Promise.resolve([{ value: 'binder', label: 'Binder' }])
+      // `null` — CardDetailModal's PriceChart reads `chartData.points`.
+      return Promise.resolve(null)
+    })
+  })
+
+  it('removes a row priced through the modal, the same as the inline editor does', async () => {
+    // "Priced → removed" is this queue's documented behaviour and its whole
+    // criterion is "no sticker price yet". The inline cell already does it; an
+    // edit made through the shared modal must not leave a priced card sitting
+    // in a queue of unpriced ones.
+    render(<AdminPrepQueuePage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.click(screen.getByText('Pikachu'))
+    const modal = await screen.findByRole('dialog', { name: /details for/i })
+
+    fireEvent.click(within(modal).getByLabelText('Edit Sticker Price'))
+    fireEvent.change(within(modal).getByRole('spinbutton'), { target: { value: '9.99' } })
+    putMock.mockResolvedValueOnce({
+      item_id: 'item-1', kind: 'raw', display_name: 'Pikachu',
+      status: 'available', location: 'binder', sticker_price: '9.99',
+    })
+    fireEvent.click(within(modal).getByLabelText('Save'))
+
+    // The queue's own empty message, not a row count: a refetch blanks the
+    // table for a tick while `loading` is true, so counting rows can read zero
+    // for the wrong reason and pass against the unfixed code.
+    expect(
+      await screen.findByText(/no items awaiting sticker prices/i),
+    ).toBeInTheDocument()
+  })
+})

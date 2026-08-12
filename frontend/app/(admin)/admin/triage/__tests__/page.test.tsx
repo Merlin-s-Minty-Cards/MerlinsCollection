@@ -923,3 +923,87 @@ describe('Triage — searching the queue by card name', () => {
     await waitFor(() => expect(lastParams()).not.toHaveProperty('name'))
   })
 })
+
+// ===========================================================================
+// RFC 0010 T5 — the detail modal drops a fixed row, like every other repair here
+// ===========================================================================
+
+describe('Triage — a fix made in the detail modal', () => {
+  /**
+   * `mockList`'s catch-all resolves `{}`, which CardDetailModal's PriceChart
+   * reads as `chartData.points` and crashes the whole tree on. These two tests
+   * are the only ones on this page that open the modal, so they need the
+   * `null` "no data yet" shape the other modal-opening suites already use.
+   */
+  function mockListWithDetail(items: unknown[]) {
+    getMock.mockImplementation((path: string) => {
+      if (path === '/inventory/search') return Promise.resolve({ items, total: items.length })
+      if (path === '/market/search') return Promise.resolve({ items: [], total: 0 })
+      if (path === '/locations') return Promise.resolve([])
+      return Promise.resolve(null)
+    })
+  }
+
+  it('drops the row when the modal clears its only reason', async () => {
+    // The page's other three repairs (clear review, re-point, name) already
+    // patch-then-drop with no refetch. An edit made through the shared modal
+    // has to behave the same, or the queue keeps showing a card that is fixed.
+    //
+    // The drop is decided by `reasonsFor()` PREDICTING the next state — NOT by
+    // reading `triage_reasons` off the PUT response, which never carries it:
+    // `_attach_triage_reasons` runs only on `?triage=true` search rows, while
+    // `PUT /admin/inventory/{id}` returns a bare `_serialize_item`. Trusting an
+    // absent key would drop every edited row, fixed or not.
+    mockListWithDetail([flaggedItem])
+    render(<AdminTriagePage />)
+    await screen.findByText(/Pikachu/)
+    const searchCalls = getMock.mock.calls.filter(([p]) => p === '/inventory/search').length
+
+    fireEvent.click(screen.getByText(/Pikachu/))
+    const modal = await screen.findByRole('dialog', { name: /details for/i })
+    putMock.mockResolvedValueOnce({
+      ...flaggedItem,
+      needs_review: false,
+      review_reason: null,
+      triage_reasons: undefined,
+    })
+    fireEvent.click(within(modal).getByRole('button', { name: /in triage/i }))
+    fireEvent.click(within(modal).getByRole('button', { name: /clear review/i }))
+
+    // The queue's own empty panel, not a row count: a refetch blanks the table
+    // for a tick while `loading` is true, so counting rows can read zero for
+    // the wrong reason. This panel needs `!loading && items.length === 0`.
+    expect(await screen.findByText(/nothing needs review/i)).toBeInTheDocument()
+    expect(getMock.mock.calls.filter(([p]) => p === '/inventory/search')).toHaveLength(
+      searchCalls,
+    )
+  })
+
+  it('keeps a row that still has another reason, carrying the remaining chip', async () => {
+    // `twoReasonItem` is flagged AND unlinked. Clearing the flag fixes half of
+    // it; the card is still unlinked, so it stays in the queue. Flattening
+    // Triage's rule into a generic "always patch" would leave it here with no
+    // chip; flattening it into "always drop" would hide a card that is still
+    // broken.
+    mockListWithDetail([twoReasonItem])
+    render(<AdminTriagePage />)
+    await screen.findByText(/Blastoise/)
+
+    fireEvent.click(screen.getByText(/Blastoise/))
+    const modal = await screen.findByRole('dialog', { name: /details for/i })
+    putMock.mockResolvedValueOnce({
+      ...twoReasonItem, needs_review: false, review_reason: null,
+    })
+    fireEvent.click(within(modal).getByRole('button', { name: /in triage/i }))
+    fireEvent.click(within(modal).getByRole('button', { name: /clear review/i }))
+
+    // Scoped to the TABLE: the modal stays open and its header also says
+    // "Blastoise", so `findRow` alone is ambiguous rather than wrong.
+    const tableRow = () =>
+      within(screen.getByRole('table')).getByText(/Blastoise/).closest('tr')!
+    await waitFor(() =>
+      expect(within(tableRow()).queryByText(/entered by hand/i)).not.toBeInTheDocument(),
+    )
+    expect(within(tableRow()).getByText(/no catalog link/i)).toBeInTheDocument()
+  })
+})

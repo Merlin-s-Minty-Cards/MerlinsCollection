@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { AdminApiError } from '@/lib/admin-api'
 import CardDetailModal from '../CardDetailModal'
 
 const getMock = vi.fn()
@@ -411,5 +412,144 @@ describe('CardDetailModal — Send to Triage', () => {
         review_reason: null,
       }),
     )
+  })
+})
+
+// ===========================================================================
+// RFC 0010 T5 — an edit shows up immediately, and the parent is handed the row
+// ===========================================================================
+//
+// The owner's report: *"once you click and edit a label on a card, it doesn't
+// update immediately instead, you have to reload or click out which often
+// resets you to the top of the menu."*
+//
+// Root cause: `saveEdit` DISCARDED the PUT response and re-rendered the `item`
+// PROP, which is an object out of the parent's list state. The parent's refetch
+// replaced the array but not that object, so the edited field kept its old
+// value until the modal was closed and reopened — and the refetch re-mounted
+// the table, which is the "resets you to the top" half.
+//
+// The fix is the server's own answer: `PUT /admin/inventory/{item_id}` returns
+// the full updated item (`_serialize_item`), which is what the modal renders
+// and what it hands the parent. Taking the RESPONSE rather than optimistically
+// merging the payload matters — the server normalises (`_split_combined_
+// condition`, the blank-to-None validators, the server-stamped `reviewed_at`),
+// so a local merge would display a value the database does not hold.
+describe('CardDetailModal — an edit shows up immediately (RFC 0010 T5)', () => {
+  beforeEach(() => {
+    // mockReset, not clearAllMocks: a `mockResolvedValueOnce` left unconsumed
+    // by one test is handed to the next, which then fails on another test's
+    // data (CLAUDE.md, "Running Tests").
+    getMock.mockReset()
+    postMock.mockReset()
+    putMock.mockReset()
+    getMock.mockResolvedValue(null)
+    postMock.mockResolvedValue({})
+    putMock.mockResolvedValue({})
+  })
+
+  /** Open the Notes editor and type `typed`, without saving. */
+  async function typeNote(props: Partial<React.ComponentProps<typeof CardDetailModal>> = {}) {
+    render(<CardDetailModal item={item} onClose={vi.fn()} {...props} />)
+    fireEvent.click(await screen.findByLabelText('Edit Notes'))
+    fireEvent.change(screen.getByRole('textbox'), {
+      target: { value: 'checked at the show' },
+    })
+  }
+
+  it('renders the value the SERVER returned, not an echo of what was typed', async () => {
+    // The response value is deliberately DIFFERENT from the typed one. An
+    // optimistic merge of the payload would show "checked at the show" and pass
+    // a weaker test while still being the wrong design — the server normalises,
+    // so only its answer is what the database actually holds.
+    await typeNote()
+    putMock.mockResolvedValueOnce({ ...item, notes: 'Checked at the show — server' })
+
+    fireEvent.click(screen.getByLabelText('Save'))
+
+    expect(await screen.findByText('Checked at the show — server')).toBeInTheDocument()
+    expect(screen.queryByText('checked at the show')).not.toBeInTheDocument()
+  })
+
+  it('hands the updated item to onUpdated so the parent can patch its row', async () => {
+    // The parameter is what lets a parent patch ONE row instead of refetching
+    // the whole list — which is what stops the table re-mounting and throwing
+    // the admin back to the top.
+    const onUpdated = vi.fn()
+    const updated = { ...item, notes: 'Checked at the show — server' }
+    await typeNote({ onUpdated })
+    putMock.mockResolvedValueOnce(updated)
+
+    fireEvent.click(screen.getByLabelText('Save'))
+
+    await waitFor(() => expect(onUpdated).toHaveBeenCalledWith(updated))
+  })
+
+  it('leaves the displayed value alone and says so when the save fails', async () => {
+    // NOTE: passes before the change — the modal already renders the prop and
+    // already surfaces the error. Kept as the regression guard that stops the
+    // new "render the response" path from displaying a save that did not land.
+    const onUpdated = vi.fn()
+    render(
+      <CardDetailModal item={{ ...item, notes: 'original note' }} onClose={vi.fn()} onUpdated={onUpdated} />,
+    )
+    fireEvent.click(await screen.findByLabelText('Edit Notes'))
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'a new note' } })
+    putMock.mockRejectedValueOnce(new AdminApiError(422, 'Notes are too long'))
+
+    fireEvent.click(screen.getByLabelText('Save'))
+
+    expect(await screen.findByText('Notes are too long')).toBeInTheDocument()
+    expect(onUpdated).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByLabelText('Cancel'))
+    expect(screen.getByText('original note')).toBeInTheDocument()
+  })
+
+  it('re-seeds from the prop when the modal is reopened on a different card', async () => {
+    // The modal owning its own copy must not become a cache: opening card B
+    // after saving card A has to show B. Keying the re-seed on `item_id` is
+    // also what stops a STALE parent prop overwriting the fresh server value
+    // for the card still on screen.
+    const { rerender } = render(
+      <CardDetailModal item={{ ...item, notes: 'first note' }} onClose={vi.fn()} />,
+    )
+    fireEvent.click(await screen.findByLabelText('Edit Notes'))
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'x' } })
+    putMock.mockResolvedValueOnce({ ...item, notes: 'saved on card one' })
+    fireEvent.click(screen.getByLabelText('Save'))
+    await screen.findByText('saved on card one')
+
+    rerender(
+      <CardDetailModal
+        item={{ ...item, item_id: 'item-2', display_name: 'Charizard', notes: 'second note' }}
+        onClose={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByText('second note')).toBeInTheDocument()
+    expect(screen.queryByText('saved on card one')).not.toBeInTheDocument()
+  })
+
+  it('updates from the response on the triage write path too', async () => {
+    // `writeTriage` has the identical shape to `saveEdit` and the identical
+    // defect. The reason shown here comes from the SERVER's copy of the item —
+    // it used to read the prop, which never carried one.
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+    fireEvent.click(await screen.findByRole('button', { name: /send to triage/i }))
+    fireEvent.change(screen.getByLabelText(/why does this need review/i), {
+      target: { value: 'set symbol looks wrong' },
+    })
+    putMock.mockResolvedValueOnce({
+      ...item,
+      needs_review: true,
+      review_reason: 'set symbol looks wrong (recorded)',
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /^send$/i }))
+
+    fireEvent.click(await screen.findByRole('button', { name: /in triage/i }))
+    expect(
+      await screen.findByText(/set symbol looks wrong \(recorded\)/),
+    ).toBeInTheDocument()
   })
 })

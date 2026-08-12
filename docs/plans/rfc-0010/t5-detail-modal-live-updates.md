@@ -132,7 +132,8 @@ the "resets you to the top" fix, and it costs a request per edit less than today
 9. **Prep Queue:** a row that gains a `sticker_price` is removed.
 
 ```bash
-cd frontend && npx vitest run components/admin/shared/__tests__/CardDetailModal "app/(admin)/admin/triage" "app/(admin)/admin/outgoing" "app/(admin)/admin/inventory" --reporter=verbose
+# `npx vitest` fails with "Vitest failed to find the runner" — use the workspace form.
+npm test --workspace=frontend -- run components/admin/shared/__tests__/CardDetailModal "app/(admin)/admin/triage" "app/(admin)/admin/outgoing" "app/(admin)/admin/inventory" --reporter=verbose
 ```
 
 ## GREEN — done when

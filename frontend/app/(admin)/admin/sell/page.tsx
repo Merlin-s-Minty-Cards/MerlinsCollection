@@ -10,6 +10,7 @@ import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
 import CardImage from '@/components/admin/shared/CardImage'
 import ImageToggle from '@/components/admin/shared/ImageToggle'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
+import { patchRow } from '@/lib/item-update'
 import OwnershipBadge from '@/components/admin/shared/OwnershipBadge'
 import MoneyInput from '@/components/admin/shared/MoneyInput'
 import { parseMoney } from '@/lib/money'
@@ -599,7 +600,21 @@ export default function AdminSellPage() {
       <CardDetailModal
         item={detailItem as Record<string, unknown> | null}
         onClose={() => setDetailItem(null)}
-        onUpdated={() => {}}
+        // BOTH lists, not just the visible one (RFC 0010 T5): a card can sit in
+        // the search results AND in the staged cart at once, and patching only
+        // one leaves the other holding a stale copy — this same bug, one level
+        // down. `agreed_price` is the cart's own field and survives the merge,
+        // since the update response has no such key.
+        //
+        // NOTE: nothing on this page opens the modal today — `setDetailItem` is
+        // only ever called with `null`, so `detailItem` is permanently null.
+        // Filed in docs/plans/rfc-0010/follow-ups.md; this handler is here so it
+        // is correct the moment a row click is wired up.
+        onUpdated={(updated) => {
+          if (!updated) return
+          setSearchResults((rows) => patchRow(rows, updated))
+          setItems((rows) => patchRow(rows, updated))
+        }}
       />
     </div>
   )

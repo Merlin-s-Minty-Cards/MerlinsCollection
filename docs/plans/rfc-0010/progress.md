@@ -6,19 +6,20 @@
 gitignored (`.gitignore:60`), so it is local-only and your edits to it will never appear in
 `git status` or reach anyone else. Record all RFC 0010 status **in this file**.
 
-**Last updated:** 2026-08-11 (T4 DONE — the queue is searchable, and the bulk clear honours the search)
+**Last updated:** 2026-08-11 (T5 DONE — an edit shows up at once, and the list stops jumping)
 **Branch:** `Polishing-For-Deployment`
 **RFC:** [`docs/rfcs/0010-admin-round8-ledger-corrections-and-slab-manual-only.md`](../../rfcs/0010-admin-round8-ledger-corrections-and-slab-manual-only.md)
 **Task index:** [`README.md`](README.md)
 **Source of the requests:** the owner's `The plan.pdf` (12 items) plus two review comments
 on 2026-08-10 — the money-input report and the PSA/scanner reversal.
 
-## ✅ T0, T1, T2, T3, T4, T15 AND T17 ARE DONE — start at T5
+## ✅ T0, T1, T2, T3, T4, T5, T15 AND T17 ARE DONE — start at T6
 
 T15 gave all five catalog pickers one shared row carrying name, image AND price;
 T17 built the job that fills those prices in; T2 stopped an admin edit forking a
 consignor into two rows; T3 made the server the authority on why a row is in
-Triage; T4 made that queue searchable. **Start at T5.**
+Triage; T4 made that queue searchable; T5 made an edit in the detail modal show
+up at once and stopped the list jumping. **Start at T6 — same file as T5.**
 
 ## 📉 T3 RE-MEASURED THE QUEUE AND THE TASK DOC'S PREMISE IS GONE
 
@@ -87,7 +88,7 @@ naming the row. **Start at T1.**
 | T2 | Consignor row fork | **DONE** | `0620fba` | `put_consignor` sweeps like `put_show`. `Consignor.active` is **gone** — replaced by `archived`, with a before-validator migrating a stored `active: False`. New repo method **`list_consignor_rows()`** (raw rows with SKs) backs both the sweep and the script; `list_consignors` now delegates to it. Router gained `_save_cosigner`/`_require_cosigner` (mirroring `_save_show`), a 409 name guard, `?include_archived=`, and `POST /admin/cosigners/{id}/unarchive`; **`DELETE` is the archive** and now returns the updated consignor, not `{"status": "deactivated"}`. `StatusBadge` gained **`active`/`archived`** styles — use those for any person or event. `scripts/reconcile_consignors.py` keeps the **unsuffixed** row, not the highest generation (see Decisions) |
 | T3 | Triage reasons + filter | **DONE** | `cbb7b6c` | The query was never broken and the 266 rows are gone — **27 remain**, see the re-measurement above; read it before T4. `services/triage.py` gained `reasons_for` (and `needs_triage` is now `bool(reasons_for(i))`, so they cannot drift), `TERMINAL_STATUSES` + **`in_triage_scope`** (called by BOTH the list and `/triage/counts`, which is what keeps the badge honest), and `is_bulk_clearable`. Search emits **`triage_reasons` AND `bulk_clearable`** on `triage=true` rows only. **ONE filter param, `triage_reason`**, 422 on an unknown key; the old three stay for compatibility and `/admin/inventory` still uses `needs_review`. New `POST /admin/inventory/bulk-clear-review`. Param is **`include_terminal`**, not the doc's `include_sold` (see Decisions). **No sticker reason** (owner decision) |
 | T4 | Triage search | **DONE** | `e6a3bfc` | Frontend only, no backend change — `name` already worked on the endpoint. Shared `SearchInput` (its 300ms debounce **is** the debounce; no timer was written). The term is trimmed **at the `useCallback` dependency**, not in state — see Decisions. Two additions beyond the doc's list: a failed search no longer renders the **success** panel, and **`bulk-clear-review` now sends `name`** — the button counts on-screen rows, so without it the POST cleared flags the admin never saw. `BulkClearReviewRequest.name` already existed and nothing was sending it |
-| T5 | Detail modal live updates | **NOT STARTED** | — | Changes `onUpdated`'s signature across six mounting pages; parameter is optional so nothing breaks |
+| T5 | Detail modal live updates | **DONE** | `PENDING` | `onUpdated?: (updated?: UpdatedItem) => void` — optional, so a parent that ignores it still refetches. New `frontend/lib/item-update.ts` holds `UpdatedItem` + **`patchRow`** (spread, never replace — the response carries no `triage_reasons`, `bulk_clearable` or joined `card`); seven call sites across the six pages. The modal owns `current` and renders **`shown`**, a synchronous `current.item_id === item.item_id` guard — the effect alone flashes the previous card. **`flagged` is now derived**, so `writeTriage` lost its `nextFlagged` parameter. A response with no string `item_id` is **discarded** (`asItem`) and `onUpdated()` fires with no argument → the parent's refetch fallback. **The task doc's Triage rule cannot work as written** — see Decisions |
 | T6 | Detail modal layout | **NOT STARTED** | — | Must be checked by a human at 100/150/200% zoom. A test can assert classes, not typeability |
 | T7 | Prep Queue location | **NOT STARTED** | — | Backend already has everything; pure wiring |
 | T8 | Local date formatting | **NOT STARTED** | — | Test **must** pin a negative-offset `TZ` or it is theatre |
@@ -177,6 +178,13 @@ that is the mistake that made RFC 0009's T-FINAL sign-off stale.
 | 2026-08-11 | T4 | **The empty state was split, and the split is keyed on the SEARCH only — a reason filter that matches nothing still renders the success panel.** Filed, not fixed | The doc's one named design decision is the search case, and `missing_english_name` is at zero live, so the filter case is reachable today. It is a one-line extension (`searchTerm || reasonFilter`) plus its own copy and test, and it is T3's surface — widening T4 to cover it is the kind of scope drift this RFC's task docs exist to prevent. In follow-ups with that fix spelled out |
 | 2026-08-11 | T4 | **No timer was written.** `SearchInput`'s built-in 300ms debounce is the debounce the doc asks for | Recorded because the doc specifies "debounced 300ms" as if it were work, and the shared component's default already is 300. A second debounce layered on top of it would have made the queue lag ~600ms behind the keyboard for no gain. The test asserts the *behaviour* (three keystrokes → one call), so it stays honest if the component ever changes |
 | 2026-08-11 | T4 | **The task doc's run command was the broken `npx vitest` form for the SIXTH time in this RFC** (T0, T15, T17, T2, T3, now T4) — corrected in the task doc itself, following T2's precedent. Its file paths were right, which is the first time | Six for six on the command. Every one of these docs was written before the `npx vitest` failure was recorded and none was revised after; correcting them one at a time as each task runs is the only thing that has actually worked |
+| 2026-08-11 | T5 | **The task doc's Triage rule is unimplementable as written and was replaced.** It says *"the correct test is on the **updated item's** `triage_reasons` being empty"* — but `PUT /admin/inventory/{item_id}` returns a bare `_serialize_item` and **never carries that key**: `_attach_triage_reasons` runs only on `?triage=true` SEARCH rows. Built instead: patch the row, then `reasonsFor()` **predicts** the next state, exactly as `clearReview`, `onRepointed` and `onNamed` on that page already do | Following the doc literally would read `undefined`, treat it as empty and **drop every edited row from the queue whether it was fixed or not** — including a card whose only edit was a note. `patchRow` spreads for the same reason: replacing the row wholesale with the response would strip the reason chips and the joined `card` the list request added. Two tests pin it — one that the row drops when the flag was its only reason, one that a still-unlinked row **stays** and keeps its remaining chip |
+| 2026-08-11 | T5 | **A response that is not recognisably an item is DISCARDED, not displayed** (`asItem` — a non-object, or no string `item_id`). The modal keeps showing what it had and calls `onUpdated()` with **no argument**, which is the parent's refetch fallback | Two reasons, one of them measured: `setCurrent({})` erases `item_id`, and `shown` then fails its own guard and unmounts the modal mid-edit — a 204, a proxy, or an older backend is enough. The second is the task's own premise: a modal that renders a save it cannot see is the defect being fixed, arriving through a different door. Every existing test in the file mocks `put` as `{}`, so without this the change would have taken the whole suite down |
+| 2026-08-11 | T5 | **`shown` is a synchronous guard (`current.item_id === item.item_id`), not just the effect the doc describes** | `useEffect(() => setCurrent(item), [item?.item_id])` alone leaves one render where the prop is card B and `current` is still card A — effects run after that render commits. So opening a second card would flash the first card's saved values. The effect stays (it re-seeds), the guard makes the render correct in the same tick. Named test: "re-seeds from the prop when the modal is reopened on a different card" |
+| 2026-08-11 | T5 | **`flagged` stopped being state and `writeTriage` lost its `nextFlagged` parameter** — three arguments became two | The doc asks for `flagged` to be derived "or the two drift", and once it is, a caller-supplied `nextFlagged` is a second source for the same fact: it would let the header read "In Triage" while the item on screen says otherwise. The honest consequence is recorded here — if a write returns something `asItem` rejects, the header does **not** flip, because nothing confirmed it did |
+| 2026-08-11 | T5 | **A shared `patchRow` helper (`frontend/lib/item-update.ts`) rather than six inline maps**, and `CardDetailModalProps.onUpdated` takes its `UpdatedItem` type | Seven call sites across six pages, and the rule they all depend on — **spread, never replace** — is exactly the kind that gets copied wrong once and then silently strips a triage row's chips. Same call as `CardPickerRow` in T15. The two pages with a drop rule compose (`patchRow(...).filter(...)` / `.flatMap(...)`), so the page-specific rule still reads at the call site |
+| 2026-08-11 | T5 | **Three of my own RED tests initially passed against the UNFIXED code and had to be hardened.** Counting rows to prove a row was dropped reads zero while a refetch has `loading` true; two tests now assert each page's own empty panel, which requires `!loading && items.length === 0`. A third matched "Pikachu" in both the table and the open modal's header | Recorded because a green test against unfixed code is the failure mode the RED gate exists to catch, and it was only caught by reading *why* each test failed rather than counting failures. Same lesson as the ChatPanel entry below: the first failure explains the rest |
+| 2026-08-11 | T5 | **The doc's run command was the broken `npx vitest` form for the SEVENTH time** (T0, T15, T17, T2, T3, T4, now T5) — corrected in the task doc itself. Its file paths were right | Seven for seven. **T6 is the same file and will have the same command** — fix it before running it |
 | 2026-08-10 | T0 | **The doc's file paths were wrong in two places**, corrected as executed: the backend tests are `backend/tests/routers/admin/test_purchases.py`, and the frontend run command must be the `npm test --workspace=frontend` form, not `npx vitest` | `npx vitest` fails with "Vitest failed to find the runner" — already noted in the baseline section of this file, but the task doc contradicted it. Later task docs copy this command; check it before trusting it |
 
 *(rows below are PLANNING decisions, recorded before execution because a later task would
@@ -322,6 +330,31 @@ Backend, MCP and `ruff` were not re-run: T4 is frontend-only and touched **no**
 Python and no MCP file — `git diff --stat` on the feature commit is two files,
 both under `frontend/app/(admin)/admin/triage/`. Do not carry these numbers into
 the next task's sign-off.
+
+**Re-measured after T5** — a fresh run, not a row above carried forward:
+
+| Suite | Count | Time | State |
+|---|---|---|---|
+| Frontend | **708 passed / 0 failed** (82 files) | ~31s | green — 698 + 10 new T5 tests |
+| Narrow T5 selection (4 files) | 109 passed / 0 failed | ~10s | green — **99 of them pre-existing**, which is what proves the six `onUpdated` rewires disturbed nothing |
+| `npm run lint --workspace=frontend` | — | ~5s | clean (the one pre-existing `<img>` warning in `CardDetailModal`) |
+| `npm run build --workspace=frontend` | — | ~11s | exit 0 |
+
+Backend, MCP and `ruff` were not re-run: T5 is frontend-only and touched **no**
+Python and no MCP file. Do not carry these numbers into the next task's sign-off.
+
+**Lint caught a warning this change introduced, and it was fixed rather than
+accepted.** `react-hooks/exhaustive-deps` reports at the `useEffect(` line, not
+at the dependency array — an `eslint-disable-next-line` placed above `}, [...])`
+suppresses nothing. The baseline for this file is **one** `<img>` warning; a
+second one is a regression, not noise.
+
+**Not verified here, and it needs the owner:** T5's manual check — on Inventory,
+scroll well down the list, open a card, edit its location, and confirm the new
+value appears at once **and** that closing the modal leaves you where you were
+rather than at the top. Scroll position is not observable in jsdom, so the tests
+pin its *cause* (the list request must not fire again) and only a human confirms
+the effect.
 
 **Not verified here, and it needs the owner:** T4's manual check — searching a
 card known to be in the queue, then one that is not, and confirming the message

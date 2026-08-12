@@ -608,3 +608,90 @@ describe('AdminInventoryPage — set filter is a combobox over the whole catalog
     expect(setCalls).toHaveLength(1)
   })
 })
+
+// ===========================================================================
+// RFC 0010 T5 — an edit in the detail modal patches the row, it does not refetch
+// ===========================================================================
+//
+// The owner's report has two halves and one cause: the edited value did not
+// appear until the modal was closed and reopened, and closing it "often resets
+// you to the top of the menu". The second half is the whole-list refetch that
+// `onUpdated` triggered — it replaces the array, re-mounts the table, and
+// throws away the scroll position of an admin who had scrolled well down.
+//
+// Scroll position is not observable in jsdom, so the fix is expressed as the
+// thing that CAUSED it: the list request must not fire again.
+describe('AdminInventoryPage — a modal edit patches one row (RFC 0010 T5)', () => {
+  /** Every list request the page has made. */
+  const searchCalls = () => getMock.mock.calls.filter(([p]) => p === '/inventory/search')
+
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    putMock.mockReset()
+    postMock.mockResolvedValue({})
+    putMock.mockResolvedValue({})
+    getMock.mockImplementation((path: string) => {
+      if (path === '/locations') {
+        return Promise.resolve([
+          { value: 'glass', label: 'Glass' },
+          { value: 'custom_shelf', label: 'Custom Shelf' },
+        ])
+      }
+      if (path === '/inventory/search') {
+        return Promise.resolve({
+          items: [{
+            item_id: 'item-1', kind: 'raw', display_name: 'Pikachu',
+            location: 'glass', status: 'available',
+          }],
+          total: 1,
+        })
+      }
+      // `null`, not `{}` — CardDetailModal mounts PriceChart, which reads
+      // `chartData.points` and takes the whole tree down on an object with no
+      // `points` key. `null` is its real "no data yet" shape.
+      return Promise.resolve(null)
+    })
+  })
+
+  /** Open the modal on Pikachu and move its location to Custom Shelf. */
+  async function editLocationInModal() {
+    render(<AdminInventoryPage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.click(screen.getByText('Pikachu'))
+    const modal = await screen.findByRole('dialog', { name: /details for/i })
+
+    fireEvent.click(within(modal).getByLabelText('Edit Location'))
+    fireEvent.change(within(modal).getByRole('combobox'), {
+      target: { value: 'custom_shelf' },
+    })
+    putMock.mockResolvedValueOnce({
+      item_id: 'item-1', kind: 'raw', display_name: 'Pikachu',
+      location: 'custom_shelf', status: 'available',
+    })
+    fireEvent.click(within(modal).getByLabelText('Save'))
+    return modal
+  }
+
+  it('does not refetch the whole list after an edit', async () => {
+    await editLocationInModal()
+
+    await waitFor(() => expect(putMock).toHaveBeenCalled())
+    // Flush anything a refetch would have queued before counting.
+    await act(async () => { await Promise.resolve() })
+    await act(async () => { await Promise.resolve() })
+    expect(searchCalls()).toHaveLength(1)
+  })
+
+  it('shows the new value in the list row without closing the modal', async () => {
+    await editLocationInModal()
+
+    // Scoped to the TABLE: the modal is still open and its header also says
+    // "Pikachu", so an unscoped lookup is ambiguous rather than wrong.
+    await waitFor(() => {
+      const row = within(screen.getByRole('table')).getByText('Pikachu').closest('tr')!
+      expect(within(row).getByText('custom_shelf')).toBeInTheDocument()
+    })
+  })
+})

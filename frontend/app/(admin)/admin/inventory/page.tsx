@@ -13,6 +13,7 @@ import SearchInput from '@/components/admin/shared/SearchInput'
 import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
 import ImageToggle from '@/components/admin/shared/ImageToggle'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
+import { patchRow } from '@/lib/item-update'
 import { adminItemName } from '@/lib/admin-item-name'
 import {
   INVENTORY_FILTERS,
@@ -563,7 +564,15 @@ export default function AdminInventoryPage() {
       <CardDetailModal
         item={detailItem}
         onClose={() => setDetailItem(null)}
-        onUpdated={fetchItems}
+        // Patch the one row rather than refetching (RFC 0010 T5). A refetch
+        // replaces the array, re-mounts the table and throws an admin who had
+        // scrolled well down back to the top — the second half of the owner's
+        // report. `updated` is absent only when the response was not a
+        // recognisable item, where a refetch is the honest answer.
+        onUpdated={(updated) => {
+          if (!updated) { fetchItems(); return }
+          setItems((rows) => patchRow(rows, updated))
+        }}
       />
     </div>
   )

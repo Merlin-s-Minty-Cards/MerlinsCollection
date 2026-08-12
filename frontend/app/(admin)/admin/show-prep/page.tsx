@@ -10,6 +10,7 @@ import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import CardImage, { TABLE_THUMB_SIZE, TABLE_THUMB_COLUMN } from '@/components/admin/shared/CardImage'
 import ImageToggle from '@/components/admin/shared/ImageToggle'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
+import { patchRow } from '@/lib/item-update'
 import InlineEditCell from '@/components/admin/shared/InlineEditCell'
 import MoneyInput from '@/components/admin/shared/MoneyInput'
 import { parseMoney } from '@/lib/money'
@@ -575,7 +576,13 @@ export default function AdminShowPrepPage() {
       <CardDetailModal
         item={detailItem as Record<string, unknown> | null}
         onClose={() => setDetailItem(null)}
-        onUpdated={fetchMispriced}
+        // Patch, do not refetch (RFC 0010 T5). The bulk-move selection is a Set
+        // of ids, not of copies, so there is no staged duplicate to keep in
+        // step — patching the list is the whole job here.
+        onUpdated={(updated) => {
+          if (!updated) { fetchMispriced(); return }
+          setMispriced((rows) => patchRow(rows, updated))
+        }}
       />
     </div>
   )

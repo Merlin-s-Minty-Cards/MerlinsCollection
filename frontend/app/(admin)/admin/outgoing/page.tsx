@@ -13,6 +13,7 @@ import InlineEditCell from '@/components/admin/shared/InlineEditCell'
 import MoneyInput from '@/components/admin/shared/MoneyInput'
 import { parseMoney } from '@/lib/money'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
+import { patchRow } from '@/lib/item-update'
 import TriageRowAction from '@/components/admin/shared/TriageRowAction'
 import type { TriageItem } from '@/lib/triage'
 import { adminItemName } from '@/lib/admin-item-name'
@@ -480,7 +481,21 @@ export default function AdminPrepQueuePage() {
       <CardDetailModal
         item={detailItem as Record<string, unknown> | null}
         onClose={() => setDetailItem(null)}
-        onUpdated={fetchItems}
+        // Patch, then apply this queue's OWN rule: its whole criterion is
+        // "available and no sticker price yet", so a card priced through the
+        // modal has to leave, exactly as one priced through the inline cell
+        // does. Generic patching alone would strand a priced card in a queue
+        // of unpriced ones.
+        onUpdated={(updated) => {
+          if (!updated) { fetchItems(); return }
+          const id = String(updated.item_id)
+          setItems((rows) =>
+            patchRow(rows, updated).filter(
+              (r) => r.item_id !== id || r.sticker_price == null,
+            ),
+          )
+          if (updated.sticker_price != null) setMessage('Priced → removed from queue')
+        }}
       />
     </div>
   )

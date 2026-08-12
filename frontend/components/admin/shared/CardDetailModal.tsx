@@ -10,14 +10,43 @@ import { useLocations } from '@/lib/use-locations'
 import PriceDisplay from './PriceDisplay'
 import PriceChart from './PriceChart'
 import { adminItemName } from '@/lib/admin-item-name'
+import type { UpdatedItem } from '@/lib/item-update'
 
 interface CardDetailModalProps {
   /** The item to display — null means modal is closed */
   item: Record<string, unknown> | null
   /** Close handler */
   onClose: () => void
-  /** Called after a successful edit so the parent can refresh data */
-  onUpdated?: () => void
+  /**
+   * Called after a successful edit, carrying the server's own copy of the item.
+   *
+   * The parameter is OPTIONAL on purpose (RFC 0010 T5): a parent that ignores
+   * it keeps the whole-list refetch it had before and cannot break. It is also
+   * absent when the response was not a recognisable item — see `asItem` — so
+   * `onUpdated()` with no argument means "something changed, but I cannot tell
+   * you what", which is exactly when a refetch is the right answer.
+   */
+  onUpdated?: (updated?: UpdatedItem) => void
+}
+
+/**
+ * The server's copy of the item, or `null` if the response is not one.
+ *
+ * `PUT /admin/inventory/{item_id}` answers with the full updated item, and that
+ * answer — not a local merge of the request payload — is what this modal
+ * displays: the server normalises (`_split_combined_condition`, the
+ * blank-to-None validators, the server-stamped `reviewed_at`), so a merge would
+ * show a value the database does not hold, and the modal could claim a save
+ * that did not land.
+ *
+ * Anything unrecognisable is DISCARDED rather than displayed. A `{}` — a 204, a
+ * proxy, an older backend — assigned over the displayed item would erase
+ * `item_id` and take the modal down with it.
+ */
+function asItem(response: unknown): UpdatedItem | null {
+  if (!response || typeof response !== 'object') return null
+  const record = response as UpdatedItem
+  return typeof record.item_id === 'string' ? record : null
 }
 
 /** The four members of the backend's discriminated item union. */
@@ -136,25 +165,47 @@ export default function CardDetailModal({
   const [triagePanel, setTriagePanel] = useState(false)
   const [triageNote, setTriageNote] = useState('')
   const [triageUndo, setTriageUndo] = useState(false)
-  const [flagged, setFlagged] = useState(false)
+  /**
+   * The item this modal DISPLAYS, which is not always the prop.
+   *
+   * Every parent passes an object out of its own list state, and the refetch
+   * that `onUpdated` used to trigger replaced the array without replacing that
+   * object — so an edited field kept its old value until the modal was closed
+   * and reopened. The modal now owns its copy and replaces it with the server's
+   * answer on every successful write.
+   */
+  const [current, setCurrent] = useState(item)
+  /**
+   * Guarded rather than trusted: the re-seed below is an effect, and effects run
+   * AFTER the render that changed the prop, so without this an admin opening a
+   * second card would see the first one's saved values for a frame.
+   */
+  const shown = current && current.item_id === item?.item_id ? current : item
 
   // Resolve this card's image independently of any page-level toggle —
   // the modal is a detail view, not a lazy list row, so it always wants
   // the real image if one exists (Round 6 audit item 1).
-  const cardId = typeof item?.card_id === 'string' ? item.card_id : null
+  const cardId = typeof shown?.card_id === 'string' ? shown.card_id : null
   const { getImageUrl } = useCardImages(cardId ? [cardId] : [])
   const imageUrl = cardId ? getImageUrl(cardId) : null
 
-  // Reset editing state when item changes
+  // Re-seed on a NEW card, and reset the editing state with it.
+  //
+  // Keyed on `item_id` and nothing else, deliberately: re-seeding on every prop
+  // change would let a stale parent object overwrite the fresh server value the
+  // save just produced — the original bug, arriving through the other door.
   useEffect(() => {
+    setCurrent(item)
     setEditingField(null)
     setEditValue('')
     setError(null)
     setTriagePanel(false)
     setTriageNote('')
     setTriageUndo(false)
-    setFlagged(Boolean(item?.needs_review))
-  }, [item?.item_id, item?.needs_review])
+    // `item` is read to re-seed FROM, but depending on it is precisely what must
+    // not happen — that is the rule this effect exists to enforce.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item?.item_id])
 
   // Close on Escape
   useEffect(() => {
@@ -169,7 +220,7 @@ export default function CardDetailModal({
 
   const startEdit = (field: string) => {
     setEditingField(field)
-    setEditValue(String(item?.[field] ?? ''))
+    setEditValue(String(shown?.[field] ?? ''))
     setError(null)
   }
 
@@ -199,10 +250,11 @@ export default function CardDetailModal({
         payload.condition = condition
         payload.condition_modifier = condition_modifier
       }
-      await api.put(`/inventory/${item.item_id}`, payload)
+      const updated = asItem(await api.put(`/inventory/${item.item_id}`, payload))
+      if (updated) setCurrent(updated)
       setEditingField(null)
       setEditValue('')
-      onUpdated?.()
+      onUpdated?.(updated ?? undefined)
     } catch (err) {
       setError(err instanceof AdminApiError ? (err.detail ?? 'Update failed') : 'Update failed')
     } finally {
@@ -211,17 +263,20 @@ export default function CardDetailModal({
   }, [api, editingField, editValue, item, onUpdated])
 
   const writeTriage = useCallback(
-    async (body: Record<string, unknown>, nextFlagged: boolean, undoable: boolean) => {
+    // No `nextFlagged` parameter any more: `flagged` is DERIVED from the item on
+    // screen, so a caller cannot tell the header one thing while the item says
+    // another. The server's `needs_review` is the single answer.
+    async (body: Record<string, unknown>, undoable: boolean) => {
       if (!item) return
       setSaving(true)
       setError(null)
       try {
-        await api.put(`/inventory/${item.item_id}`, body)
-        setFlagged(nextFlagged)
+        const updated = asItem(await api.put(`/inventory/${item.item_id}`, body))
+        if (updated) setCurrent(updated)
         setTriagePanel(false)
         setTriageNote('')
         setTriageUndo(undoable)
-        onUpdated?.()
+        onUpdated?.(updated ?? undefined)
       } catch (err) {
         setError(err instanceof AdminApiError ? (err.detail ?? 'Update failed') : 'Update failed')
       } finally {
@@ -231,15 +286,20 @@ export default function CardDetailModal({
     [api, item, onUpdated],
   )
 
-  if (!item) return null
+  // `shown` is `item` whenever the two disagree, so the second half of this
+  // guard only ever fires alongside the first — it is here to narrow the type.
+  if (!item || !shown) return null
 
-  const itemId = String(item.item_id ?? '')
+  const itemId = String(shown.item_id ?? '')
   // The override wins in the title too, so the header agrees with every list the
   // modal was opened from. `description` stays as a bulk-only last resort.
   const name =
-    adminItemName(item as Parameters<typeof adminItemName>[0], '') ||
-    String(item.description ?? '(unnamed)')
-  const kind = String(item.kind ?? '')
+    adminItemName(shown as Parameters<typeof adminItemName>[0], '') ||
+    String(shown.description ?? '(unnamed)')
+  const kind = String(shown.kind ?? '')
+  // DERIVED, never separate state: two sources for "is this card flagged" is how
+  // the header comes to disagree with the item it is describing.
+  const flagged = Boolean(shown.needs_review)
 
   // Only the fields this kind actually has, per the backend union.
   const visibleFields = EDITABLE_FIELDS.filter(
@@ -255,8 +315,8 @@ export default function CardDetailModal({
   // edit would silently drop `paid_out` or rewrite `split_percent` — real money
   // on someone else's item. See docs/plans/rfc-0008/follow-ups.md.
   const consignment =
-    item.consignment && typeof item.consignment === 'object'
-      ? (item.consignment as Record<string, unknown>)
+    shown.consignment && typeof shown.consignment === 'object'
+      ? (shown.consignment as Record<string, unknown>)
       : null
 
   return (
@@ -323,13 +383,13 @@ export default function CardDetailModal({
             {flagged ? (
               <div className="flex items-center justify-between gap-3">
                 <p className="text-[11px] text-pine-400">
-                  {item.review_reason
-                    ? `In Triage — ${String(item.review_reason)}`
+                  {shown.review_reason
+                    ? `In Triage — ${String(shown.review_reason)}`
                     : 'In Triage.'}
                 </p>
                 <button
                   type="button"
-                  onClick={() => writeTriage(clearTriageBody(), false, false)}
+                  onClick={() => writeTriage(clearTriageBody(), false)}
                   disabled={saving}
                   className="px-2.5 py-1 rounded-md text-[11px] font-medium text-mint
                              border border-mint/30 hover:bg-mint/10 disabled:opacity-50"
@@ -352,7 +412,7 @@ export default function CardDetailModal({
                     value={triageNote}
                     onChange={(e) => setTriageNote(e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter') writeTriage(sendToTriageBody(triageNote), true, true)
+                      if (e.key === 'Enter') writeTriage(sendToTriageBody(triageNote), true)
                       // Stop the document-level Escape handler from closing the
                       // whole modal and discarding a typed note.
                       if (e.key === 'Escape') { e.stopPropagation(); setTriagePanel(false) }
@@ -366,7 +426,7 @@ export default function CardDetailModal({
                   />
                   <button
                     type="button"
-                    onClick={() => writeTriage(sendToTriageBody(triageNote), true, true)}
+                    onClick={() => writeTriage(sendToTriageBody(triageNote), true)}
                     disabled={saving}
                     className="px-3 py-1 rounded-md text-[11px] font-medium text-mint
                                border border-mint/30 hover:bg-mint/10 disabled:opacity-50"
@@ -391,7 +451,7 @@ export default function CardDetailModal({
             <span>Sent to Triage.</span>
             <button
               type="button"
-              onClick={() => writeTriage(clearTriageBody(), false, false)}
+              onClick={() => writeTriage(clearTriageBody(), false)}
               disabled={saving}
               className="flex items-center gap-1 text-mint hover:text-mint/80 disabled:opacity-50"
             >
@@ -406,7 +466,7 @@ export default function CardDetailModal({
             {imageUrl ? (
               <img
                 src={imageUrl}
-                alt={adminItemName(item as Parameters<typeof adminItemName>[0], 'Card')}
+                alt={adminItemName(shown as Parameters<typeof adminItemName>[0], 'Card')}
                 className="h-64 md:h-full w-auto object-contain rounded-xl shadow-lg"
               />
             ) : (
@@ -452,8 +512,8 @@ export default function CardDetailModal({
             </h3>
             <PriceChart
               itemId={itemId}
-              costBasis={item.cost_basis as string | undefined}
-              acquiredAt={item.acquired_at as string | undefined}
+              costBasis={shown.cost_basis as string | undefined}
+              acquiredAt={shown.acquired_at as string | undefined}
             />
           </section>
 
@@ -465,11 +525,11 @@ export default function CardDetailModal({
               </h3>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {fields.map((field) => {
-                  const value = item[field.key]
+                  const value = shown[field.key]
                   const isEditing = editingField === field.key
                   const displayValue =
-                    field.key === 'condition' && item.condition != null
-                      ? formatCondition(String(item.condition), item.condition_modifier as string | null | undefined)
+                    field.key === 'condition' && shown.condition != null
+                      ? formatCondition(String(shown.condition), shown.condition_modifier as string | null | undefined)
                       : field.type === 'checkbox'
                         ? (value ? 'Yes' : 'No')
                         : value != null && String(value) !== ''
@@ -671,22 +731,22 @@ export default function CardDetailModal({
 
           {/* Quick Info */}
           <section className="flex flex-wrap gap-3 text-[10px] text-pine-500 border-t border-pine-700/30 pt-3">
-            {item.card_id ? (
-              <span>Card: <span className="text-pine-300 font-mono">{String(item.card_id)}</span></span>
+            {shown.card_id ? (
+              <span>Card: <span className="text-pine-300 font-mono">{String(shown.card_id)}</span></span>
             ) : null}
             {/* `acquired_at` and the grading trio used to be repeated here; they
                 now have real, editable rows in the sections above. */}
             <a
               href={
-                item.tcg_url
-                  ? String(item.tcg_url)
+                shown.tcg_url
+                  ? String(shown.tcg_url)
                   : `https://www.tcgplayer.com/search/pokemon/product?q=${encodeURIComponent(name)}&view=grid`
               }
               target="_blank"
               rel="noopener noreferrer"
               className="text-blue-400 hover:text-blue-300"
             >
-              TCGplayer {item.tcg_url ? 'Link' : 'Search'} ↗
+              TCGplayer {shown.tcg_url ? 'Link' : 'Search'} ↗
             </a>
           </section>
           </div>
