@@ -6,14 +6,23 @@
 gitignored (`.gitignore:60`), so it is local-only and your edits to it will never appear in
 `git status` or reach anyone else. Record all RFC 0010 status **in this file**.
 
-**Last updated:** 2026-08-12 (T11, T12 and T13 DONE in one unattended run — transaction void, slabs PSA-out + price-at-intake, grouped navigation)
+**Last updated:** 2026-08-12 (**T14 and T-FINAL DONE — RFC 0010 IS COMPLETE.** Docs
+caught up with the round, then full verification at `d5332bb`: backend 1671/0,
+frontend 810/0, MCP 98/0, build exit 0, both linters clean. **Not merged, not
+pushed.** Three manual checks still need the owner — see the sign-off block at the
+foot of this file)
 **Branch:** `Polishing-For-Deployment`
 **RFC:** [`docs/rfcs/0010-admin-round8-ledger-corrections-and-slab-manual-only.md`](../../rfcs/0010-admin-round8-ledger-corrections-and-slab-manual-only.md)
 **Task index:** [`README.md`](README.md)
 **Source of the requests:** the owner's `The plan.pdf` (12 items) plus two review comments
 on 2026-08-10 — the money-input report and the PSA/scanner reversal.
 
-## ✅ T0–T13, T15, T16 AND T17 ARE DONE — start at T14
+## ✅ EVERY TASK IS DONE — T0–T17 AND T-FINAL. Nothing is left to execute.
+
+**RFC 0010 is complete and verified at `d5332bb`.** The sign-off block is at the
+**foot of this file**; read it before doing anything else with this branch. What
+remains is not code: three manual checks only the owner can run, and four owner
+actions carried in the Blocked table below.
 
 T15 gave all five catalog pickers one shared row carrying name, image AND price;
 T17 built the job that fills those prices in; T2 stopped an admin edit forking a
@@ -31,11 +40,9 @@ countability predicate every aggregate calls; T12 withdrew PSA, removed the
 scanner button and priced a slab at intake; T13 grouped sixteen flat tabs into
 three.
 
-**Start at T14** (docs + ops), then T-FINAL. T14's own note already says the
-RFC 0009 T2/T5 → WON'T DO move is its job — **T12 already did that half**, in
-`docs/plans/rfc-0009/progress.md`. What is left for T14 is `.env.example`,
-CLAUDE.md and the RFC prose, plus the three CLAUDE.md sections T11/T12/T13 make
-stale (see the Notes column).
+T14 caught the docs up with all of it and left behind 24 permanent guards that
+fail if they drift again; T-FINAL verified the whole system green together for
+the first time.
 
 ## 📉 T3 RE-MEASURED THE QUEUE AND THE TASK DOC'S PREMISE IS GONE
 
@@ -118,8 +125,8 @@ naming the row. **Start at T1.**
 | T15 | Card picker: image + price | **DONE** | `b322e03` | One shared `CardPickerRow` with **five** callers (Buy, Trade, Triage ×2, Slabs, Market). Backend: `market_price_and_finish()` in `models/inventory.py` is now the walk and `_market_price` delegates to it — **do not add a second lookup to get a finish**. `display_price` is a **string** (`"12.34"`), `null` when absent. The component is **generic in the card type**, so callers keep their own `CatalogCard`; each one now `extends PickerCard`. Thumb is `TABLE_THUMB_SIZE` (`xs`), **not** the `sm` the task doc named — see Decisions. Fixed on the way: Market's row was a `<button>` nested inside a `<button>` |
 | T17 | Weekly catalog price cycle | **DONE** | `e233fc4` | Shipped as specified, plus one shape change: `refresh_catalog_prices` takes an optional **`card_ids`** so the reprice script selects ONCE per run and feeds it chunks — without it a permanently-404 card leads every chunk (see Decisions). The extraction is **two** helpers, not one: `_refresh_one_card` (the per-card spec the doc named) inside a shared `_refresh_cards` loop, which took `_refresh_held_prices` from 60 lines to a 6-line delegate. New config knob `CATALOG_REFRESH_CARDS_PER_NIGHT` (5500). Summary keys are all `catalog_`-prefixed and **always present**, including `catalog_skipped: None`. Coverage adds `catalog_cards_brief` / `catalog_cards_stale` / `catalog_stale_threshold_days` (8), rendered in the Market banner. **Read the first follow-up row before trusting the exit codes** — production runs `scheduled_sync.py`, not `daily_sync.py` |
 | T16 | Unmatched-card valuation | **DONE** | `93466b6` | The premise held: three of the twelve RED tests **passed before any change** and are kept as named guards — the nightly job really does skip an unlinked item. New: `frontend/lib/valuation.ts` (`isHandValued`, `conditionMultiplierOf`, `localToday`) and `HandValuedBadge`, mounted on Prep Queue rows and in `CardDetailModal`'s **Pricing** section. Triage gains a fourth repair tool, `ValueDialog`, gated on the SERVER's `missing_card_id` reason. **The multiplier is served, not mirrored** — `_serialize_item` now emits `condition_multiplier` (see Decisions); do not add a `frontend/lib` copy of the table. `GET /admin/slabs` reports `price_source: "hand_set"` when there is no price row, and coverage gains `items_market_priced` / `items_hand_valued` / `items_unpriced`, a **partition** of `total_items` |
-| T14 | Docs + ops | **NOT STARTED** | — | RFC 0009 T2/T5 → WON'T DO. Note the two CLAUDE.md rules added during planning (card images, archiving) are already in place — do not re-add them |
-| T-FINAL | Verification + PR | **NOT STARTED** | — | `next build` is not optional |
+| T14 | Docs + ops | **DONE** | `d5332bb` | **`PSA_API_KEY` is REMOVED from `.env.example` as an assignable line and KEPT as prose** (see Decisions). Five CLAUDE.md sections were stale; two more did not exist at all. New `backend/tests/test_docs_round8.py` holds **24 guards**, each checking a doc claim against the **code** that makes it true (the sidebar guard parses `AdminShell.tsx`, the env guard reflects over `Settings`, the countability guard imports `services.ledger`). **The route table was missing `/admin/locations` entirely** — sixteen destinations, fifteen documented. `test_config.py`'s PSA docstring is rewritten from a temporary tripwire into a permanent one. RFC 0009's Blocked table and its "when approval lands, re-run the probe" section were still live — T12 did the T2/T5 status rows only |
+| T-FINAL | Verification + PR | **DONE** | `<this commit>` | Verified at `d5332bb` + this doc commit. **Backend 1671 passed / 0 failed; frontend 810 passed / 0 failed (87 files); MCP 98 passed / 0 failed (7 files); `next build` exit 0; both linters clean.** **The doc's "known pre-existing `ChatPanel` failure" is STALE and was corrected in the doc** — it was fixed 2026-08-11 and passes 12/12 both alone and under full parallel load, so **the bar here is 0 failed, not "6–7 expected"**. Its §5 boot command was also broken two ways (see Decisions). Leak sweep clean across all **232** branch commits; `backend/.env` has never been committed. **Three manual checks still need the owner** — T11's void end-to-end, T12's wedge scan, T13's sidebar |
 
 Statuses: `NOT STARTED` → `RED (awaiting owner confirmation)` → `IN PROGRESS` → `DONE`,
 plus `BLOCKED` for a task that was started and cannot finish without the owner, and
@@ -259,6 +266,15 @@ that is the mistake that made RFC 0009's T-FINAL sign-off stale.
 | 2026-08-12 | T13 | **The `usePathname` mock in `AdminShell.test.tsx` became a mutable `mockPathname`** | The force-the-active-group-open rule is only observable from INSIDE the group being forced, and the file pinned one route for every test. My first draft of that test asserted Back office was forced open while rendering at `/admin/inventory`, which is a different group — it failed, correctly, and the TEST was wrong. Every pre-existing test keeps the original value, restored in the file-level `beforeEach` |
 | 2026-08-12 | T11/T12/T13 | **All three task docs carried a broken command, and T11's were the worst yet: FOUR wrong backend paths plus the `npx vitest` form. All corrected IN the task docs**, following T2's precedent | Thirteenth, fourteenth and fifteenth of the sixteen executed docs — T6 remains the only clean one. T11's `backend/tests/test_analytics.py`, `test_sales.py`, `test_dynamodb.py` and `test_transaction_void.py` are all missing their `routers/admin/` or `services/` segment, so the doc's own verification command collects **nothing** and reports success on the highest-risk change in the RFC. T12's `-k "slab or catalog_sync"` does collect, but misses `test_purchases.py`, which this task changed |
 | 2026-08-12 | T11/T12/T13 | **This run was executed unattended, with the RED gates SELF-APPROVED.** Every gate was run: tests first, failing output read one failure at a time, each failure checked against the defect it claims to pin | Owner instruction, 2026-08-12. Tally, because what the gate CATCHES is the point: **T11** 24 RED, then 6 more for the batch routes — one passed for the wrong reason (hardened) and two failed on defects of mine (fixed, re-run RED); **T12** 7 backend / 8 frontend RED, of which three passed — two labelled regression gates and one hardened; **T13** 9 RED, of which two passed as labelled regression gates (all-sixteen-reachable, and the mobile five, which stays meaningful because a post-grouping slice yields Trade) |
+| 2026-08-12 | T14 | **`PSA_API_KEY` is REMOVED from `.env.example` as an assignable line, but KEPT as a 20-line prose block** explaining the withdrawal. The task doc and RFC 0010 §565 both say only "remove" | Removing the line is right — a blank `PSA_API_KEY=` reads as *"configure me"* for a setting nothing reads, which is the inert-config trap RFC 0009 documented and could not fix. But **the owner's own `backend/.env` still carries a real PSA key**, so a silent deletion trades one confusion for another: a reader finds the var in their env, cannot find it in the template, and has no way to learn it is dead. Prose with no `=` gets both — nothing is assignable, and the decision is discoverable at the exact place someone goes looking. `test_docs_round8.py` asserts **both halves**: no `^PSA_API_KEY=` anywhere, and the string `PSA` still present |
+| 2026-08-12 | T14 | **The RED gate was doc guards that check a doc claim against CODE, never against other prose** — the sidebar guard parses `AdminShell.tsx`, the `.env` guard reflects over `Settings.model_fields`, the countability guard imports `services.ledger`, the void guard greps the router for its 400 | The task doc says outright *"there is no RED phase… inventing a failing test for a docstring produces a fake RED and a test that asserts prose"*, and it is right about prose. The owner's instruction was to gate anyway, and the way to do that honestly is to make the assertion's authority the code. There is repo precedent: `test_config.py` already carries RFC 0009 T8's credit-arithmetic doc guards for the same reason. **18 failed / 6 passed**, and the guards are permanent — the sidebar one now fails the moment a route is added without documenting it |
+| 2026-08-12 | T14 | **The route-table guard PASSED against the unfixed doc for the wrong reason, and was hardened before anything was edited** | It searched the whole of CLAUDE.md, and `/admin/locations` — genuinely missing from the Admin Panel table — matched an unrelated mention of the `GET /admin/locations` **API endpoint** 330 lines below it. Scoped to the table, it failed. Re-proven RED against `git show HEAD:CLAUDE.md` rather than assumed, because a test rewritten after GREEN proves nothing until it has been shown red. **This is the fourth time in this RFC** (T5, T6, T7, now T14) that a test written against an unbuilt surface picked a selector that was only sound by accident |
+| 2026-08-12 | T14 | **CLAUDE.md's admin route table was missing `/admin/locations` — sixteen sidebar destinations, fifteen documented** | Found by the guard, not by reading. The Locations *feature* is documented (its endpoints, `useLocations()`, the 409 in-use guard); only the row in the map was absent, which is the hardest kind of gap to notice by eye because every sentence you read about it is correct |
+| 2026-08-12 | T14 | **The task doc's GREEN gate `grep -rn "PSA_API_KEY" .` returning nothing is UNACHIEVABLE, and should be** — corrected in the task doc itself | The task's whole purpose is to *document* that no such key is read, so `CLAUDE.md`, `backend/README.md`, `docs/aws-setup.md`, `.env.example` and `test_config.py` all name it in order to negate it. A gate that forbids the word forbids the fix. The honest form, now in the doc and in two guards: **no `^PSA_API_KEY=` assignment anywhere tracked, and every remaining mention describes its ABSENCE** |
+| 2026-08-12 | T-FINAL | **The doc's "known pre-existing `ChatPanel` failure — not yours" section is STALE and was corrected IN the doc, prominently** | It instructs the verifier to arrive expecting **6–7 frontend failures** and to report them as pre-existing. That was fixed on 2026-08-11 — two real defects, not flakiness — and the suite has been at 0 failed through four sign-offs since. Following it would mean holding a licence to wave through a real regression on the one task whose entire job is catching one. Measured this run: **12/12 alone AND 810/810 under full parallel load.** The bar is now stated as **0 failed** |
+| 2026-08-12 | T-FINAL | **The doc's §5 boot command was wrong TWO ways, and the second would have faked a pass** | `build_pricing_provider` is in `services/catalog_sync.py`, not `services/slab/pricing.py`, so it died on `ImportError` — loud, and easy to fix. The subtler one: it then read the module-level `settings` **singleton**, which pydantic builds from the developer's real `backend/.env`, so the `POKEMONPRICETRACKER_API_KEY=` prefix is ignored and it prints `pricing key set: True` — certifying "the app boots with the key forced empty" **without ever forcing it empty**. Corrected to `Settings(_env_file=None)`. This is the same class as T16's `-k` expression: a command that runs, passes, and tests nothing |
+| 2026-08-12 | T14/T-FINAL | **Sixteenth and seventeenth of the eighteen executed docs carried a wrong command or a false premise. T6 remains the only clean one.** Both corrected in the task docs, following T2's precedent | The tally is now unambiguous enough to be a rule rather than an observation: **assume every command in a task doc in this RFC is wrong until you have run it.** T14's error was an unachievable grep, T-FINAL's were a stale premise and a command that would have passed while proving nothing — and the latter two are the more dangerous kind, because a wrong *path* fails loudly while a wrong *premise* certifies |
+| 2026-08-12 | T14/T-FINAL | **This run was executed unattended, with the RED gate SELF-APPROVED.** T14's gate was run and read one failure at a time; T-FINAL has no RED gate of its own and says so | Owner instruction, 2026-08-12. T14: **18 failed, 6 passed**; the six are labelled `REGRESSION GUARD` in the file (T2's consignor sweep, T3's triage param, T11's purchase-void 400, T12's deleted buttons, T13's route-path gotcha, and `CertInput`'s Enter+`\r\n` handling — the last being the one whose failure would silently break wedge scanning). A seventh passed for the wrong reason and was hardened, then re-proven RED |
 | 2026-08-10 | T0 | **The doc's file paths were wrong in two places**, corrected as executed: the backend tests are `backend/tests/routers/admin/test_purchases.py`, and the frontend run command must be the `npm test --workspace=frontend` form, not `npx vitest` | `npx vitest` fails with "Vitest failed to find the runner" — already noted in the baseline section of this file, but the task doc contradicted it. Later task docs copy this command; check it before trusting it |
 
 *(rows below are PLANNING decisions, recorded before execution because a later task would
@@ -673,3 +689,70 @@ kind jsdom cannot fake:**
    and confirm the expansion state survived, then check a phone-width viewport.
 
 **Do not carry these numbers into T14's sign-off.**
+
+---
+
+## ✅ T-FINAL SIGN-OFF — measured after T14 at `d5332bb`
+
+**A fresh run, not a row above carried forward.** This is the first time RFC
+0010's changes have been exercised together; every per-task run before this was
+narrow by design.
+
+| Suite | Baseline (after T11–T13) | **This run** | Delta |
+|---|---|---|---|
+| Backend | 1647 passed / 0 failed / 2m38s | **1671 passed / 0 failed** / 3m42s | **+24** — exactly T14's 24 doc guards |
+| Frontend | 810 passed / 0 failed (87 files) / ~33s | **810 passed / 0 failed** (87 files) / 61.6s | **0** — correct; T14 touched no frontend code |
+| MCP | 98 passed (7 files) / 1.0s | **98 passed / 0 failed** (7 files) / 1.01s | **0** — as required |
+| `ruff check backend/src` | clean | **clean** | — |
+| `npm run lint --workspace=frontend` | clean + 1 `<img>` warning | **exit 0, clean** — the one pre-existing `<img>` warning in `CardDetailModal:484`, and only that one | — |
+| `npm run build --workspace=frontend` | exit 0 | **exit 0** — all 16 admin routes emitted, `/admin/locations` included | — |
+
+**Both wall times are inflated because backend and frontend ran CONCURRENTLY**
+(3m42s and 61.6s against ~2m38s and ~33s serial). **The backend canary is not
+tripped:** the threshold that means a per-test `mock_aws()` regression is **~10
+minutes**, and 3m42s under parallel load is comfortably inside it.
+
+**The `ChatPanel` "known pre-existing failure" is GONE, and the task doc that
+still described it has been corrected.** Measured both ways this run: **12/12
+alone** (6.0s) and **810/810 under full parallel load**. There is no
+pre-existing frontend failure to report, and the bar for anyone re-running this
+is **0 failed**.
+
+**Leak sweep: clean.** RFC 0009 T-FINAL's corrected form (excludes
+`docs/plans/`, greps the value shape as well as the variable name), plus a
+value-shaped grep over the diff of **all 232 commits** on the branch, plus a
+history check: **`backend/.env` has never been committed** and is ignored at
+`.gitignore:12`. T14 *removed* key references, which is the safe direction.
+
+**Boot with the pricing key forced empty: confirmed.** `pricing key set: False`,
+`build_pricing_provider()` → `None`, the log line explains why, and the app
+imports cleanly. No `psa` field exists on `Settings`. The task doc's command for
+this was broken two ways — see Decisions.
+
+### Still needs the owner — the three that jsdom and moto cannot fake
+
+These are unchanged from the T11–T13 sign-off and are **not** verified here:
+
+1. **T11's void, end to end.** Sell a card, void it with a reason, and confirm:
+   the card returns to `available`, the day's total drops, History shows it
+   struck through with the reason, and the item's timeline shows **both** the
+   sale and the void. Then open that show's analytics, confirm it says *"out of
+   date"*, regenerate, and confirm the number moved. Then restore and confirm
+   everything goes back. **This is the highest-risk change in the RFC** — it
+   moves money out of aggregates — and moto proves the contract, not the books.
+2. **T12's wedge scanner.** `/admin/slabs` → Manual entry → **scan a real cert
+   into the plain cert field.** Digits land intact, focus advances to Card.
+   **There is no other way to verify this.** T12 deleted the scanner UI on the
+   premise that a wedge scanner is just a fast keyboard; if that premise is
+   wrong, hand-typing still works and the failure is invisible until someone is
+   standing at a table with a scanner.
+3. **T13's sidebar.** All sixteen destinations reachable, the Triage count
+   visible with its group **collapsed**, expansion surviving a reload, and a
+   phone-width viewport showing five entries.
+
+The full 32-row smoke checklist is in
+[`t-final-verification.md`](t-final-verification.md) §6 and covers every one of
+the twelve owner-reported items. The earlier "not verified here" notes for T2,
+T3, T4, T5, T6, T8, T9, T10, T15, T16 and T17 all still stand.
+
+**Sign-off is not merge. Not merged, not pushed.**

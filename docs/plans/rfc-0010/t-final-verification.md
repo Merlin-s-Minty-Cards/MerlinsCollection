@@ -18,13 +18,27 @@ Two rules follow, and they are not optional:
    task re-opens.
 2. **A pass count is not a suite result.** Record passed **and** failed, always, for every suite.
 
-## Known pre-existing failure — not yours
+## ~~Known pre-existing failure — not yours~~ — **STALE. IT WAS FIXED.**
 
-`frontend/components/inventory/__tests__/ChatPanel.test.tsx` fails **6–7 tests under full-suite
-parallel load** and passes **12/12 in isolation**. That file and its component are untouched by this
-branch. Confirm both facts still hold (`git log main..HEAD -- <paths>` is empty; run the file
-alone), then **report it as pre-existing with both counts.** Do not chase it, and do not let it
-block the PR — but do not paper over it either.
+> **CORRECTED 2026-08-12 during execution. Do not follow the paragraph below.**
+>
+> `ChatPanel.test.tsx` was **fixed on 2026-08-11** and the frontend suite has been
+> **green at 0 failures** through every sign-off since. It was never "flakiness":
+> it was two real defects — `vi.clearAllMocks()` does not drain a
+> `mockResolvedValueOnce` queue, so a test that ended early handed its leftovers
+> to its neighbours; and one test typed ~120 characters at `userEvent`'s default
+> per-keystroke delay, burning 3317 ms of a 5000 ms budget. Fixed with
+> `mockReset()` and a shared `userEvent.setup({ delay: null })`.
+>
+> **This matters for THIS task specifically.** Following the original instruction
+> would mean arriving expecting 6–7 frontend failures and a licence to call them
+> pre-existing — which is exactly how a real regression gets waved through. **The
+> bar is 0 failed.** If the frontend suite is red, it is yours.
+>
+> *(Original text, kept as the record:)* `ChatPanel.test.tsx` fails 6–7 tests under
+> full-suite parallel load and passes 12/12 in isolation. That file and its
+> component are untouched by this branch. Confirm both facts still hold, then
+> report it as pre-existing with both counts.
 
 ## The checklist
 
@@ -102,13 +116,25 @@ T14 *removes* key references, which is the safe direction, but the pricing key i
 
 ### 5. Boot with keys forced empty
 
+> **CORRECTED 2026-08-12: the command below was wrong and died on `ImportError`.**
+> `build_pricing_provider` lives in `services/catalog_sync.py`, **not**
+> `services/slab/pricing.py`. The original also read the module-level `settings`
+> singleton, which is built from the developer's real `.env` and therefore ignores
+> the `POKEMONPRICETRACKER_API_KEY=` prefix entirely — so even after fixing the
+> import it would have printed `True` and proved nothing. Use `Settings(_env_file=None)`.
+
 ```bash
 cd backend && POKEMONPRICETRACKER_API_KEY= ../.venv/Scripts/python.exe -c "
-from merlins_collection.services.slab.pricing import *
-from merlins_collection.config import settings
-print('pricing key set:', bool(settings.pokemonpricetracker_api_key))
+from merlins_collection.services.catalog_sync import build_pricing_provider
+from merlins_collection.config import Settings
+print('pricing key set:', bool(Settings(_env_file=None).pokemonpricetracker_api_key))
+print('provider:', build_pricing_provider())
 "
 ```
+
+Verified 2026-08-12: prints `pricing key set: False`, `provider: None`, logs
+*"graded pricing unavailable: no pokemonpricetracker_api_key configured"*, and the
+app imports cleanly.
 
 The app must boot and `build_pricing_provider()` must return `None`, the nightly job must skip
 graded pricing while every other step runs, and **T12's intake-time refresh must degrade to
