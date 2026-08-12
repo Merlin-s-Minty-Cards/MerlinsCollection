@@ -75,7 +75,9 @@ drop the row.
 8. pricing an item with a filter active still removes just that row and does not refetch.
 
 ```bash
-cd frontend && npx vitest run "app/(admin)/admin/outgoing" --reporter=verbose
+# Corrected during execution: `npx vitest` fails with "Vitest failed to find the
+# runner". Use the workspace script — see progress.md's baseline section.
+npm test --workspace=frontend -- "app/(admin)/admin/outgoing" --reporter=verbose
 ```
 
 ## GREEN — done when

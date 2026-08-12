@@ -277,3 +277,202 @@ describe('AdminPrepQueuePage — pricing from the detail modal (RFC 0010 T5)', (
     ).toBeInTheDocument()
   })
 })
+
+// ===========================================================================
+// RFC 0010 T7 — the queue filters and sorts by location
+// ===========================================================================
+//
+// Owner report: "Prep queue is great but have an option to sort by location as
+// we often just price glass in certain cases." The FILTER is the primary
+// control that report is asking for; sorting is the cheap extra.
+//
+// Everything here is frontend wiring — `location`, `sort=location_asc` and the
+// `cost_basis` / `current_market_value` sort fields all already exist on
+// GET /inventory/search.
+
+describe('AdminPrepQueuePage — location filter and sorting (RFC 0010 T7)', () => {
+  const searchCalls = () => getMock.mock.calls.filter((c) => c[0] === '/inventory/search')
+  const lastSearchParams = () =>
+    (searchCalls().at(-1)?.[1] ?? {}) as Record<string, string>
+
+  beforeEach(() => {
+    getMock.mockReset()
+    putMock.mockReset()
+    putMock.mockResolvedValue({})
+    getMock.mockImplementation((path: string, params?: Record<string, string>) => {
+      if (path === '/inventory/search') {
+        // Server-side filtering, mirrored here: the count and the estimated
+        // value are derived from whatever the endpoint returns, so the mock has
+        // to actually narrow or test 6 proves nothing.
+        const all = [
+          {
+            item_id: 'item-1', display_name: 'Pikachu', status: 'available',
+            location: 'glass', cost_basis: '4.00', current_market_value: '10.00',
+          },
+          {
+            item_id: 'item-2', display_name: 'Charizard', status: 'available',
+            location: 'vault_b', cost_basis: '9.00', current_market_value: '25.00',
+          },
+        ]
+        const loc = params?.location
+        return Promise.resolve({ items: loc ? all.filter((i) => i.location === loc) : all })
+      }
+      // `Vault B` is deliberately NOT in lib/constants' LOCATION_OPTIONS
+      // fallback, so a hardcoded list cannot produce it.
+      if (path === '/locations') {
+        return Promise.resolve([
+          { value: 'glass', label: 'Glass' },
+          { value: 'vault_b', label: 'Vault B' },
+        ])
+      }
+      return Promise.resolve(null)
+    })
+  })
+
+  it('sends location=<value> without dropping the queue\'s own criterion', async () => {
+    render(<AdminPrepQueuePage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.change(screen.getByLabelText(/filter by location/i), {
+      target: { value: 'glass' },
+    })
+
+    await waitFor(() =>
+      expect(lastSearchParams()).toMatchObject({
+        location: 'glass',
+        status: 'available',
+        missing_sticker: 'true',
+      }),
+    )
+  })
+
+  it('omits the location param while "All locations" is selected', async () => {
+    render(<AdminPrepQueuePage />)
+    await act(async () => { await Promise.resolve() })
+
+    expect(searchCalls()).toHaveLength(1)
+    expect(lastSearchParams()).not.toHaveProperty('location')
+
+    const select = screen.getByLabelText(/filter by location/i)
+    fireEvent.change(select, { target: { value: 'glass' } })
+    await waitFor(() => expect(lastSearchParams()).toHaveProperty('location', 'glass'))
+
+    // Back to All — the param must go away, not be sent as an empty string,
+    // which the backend would treat as a location literally named "".
+    fireEvent.change(select, { target: { value: '' } })
+    await waitFor(() => expect(lastSearchParams()).not.toHaveProperty('location'))
+  })
+
+  it('takes its location options from useLocations(), not a hardcoded list', async () => {
+    render(<AdminPrepQueuePage />)
+    await act(async () => { await Promise.resolve() })
+
+    const select = screen.getByLabelText(/filter by location/i)
+    expect(within(select).getByRole('option', { name: /all locations/i })).toBeInTheDocument()
+    expect(within(select).getByRole('option', { name: 'Vault B' })).toBeInTheDocument()
+  })
+
+  it('sorts by location ascending on the first header click and descending on the second', async () => {
+    render(<AdminPrepQueuePage />)
+    await act(async () => { await Promise.resolve() })
+
+    const header = screen.getByRole('columnheader', { name: /location/i })
+
+    fireEvent.click(header)
+    await waitFor(() => expect(lastSearchParams()).toHaveProperty('sort', 'location_asc'))
+
+    fireEvent.click(header)
+    await waitFor(() => expect(lastSearchParams()).toHaveProperty('sort', 'location_desc'))
+  })
+
+  it('sorts by cost and market using the backend\'s own field names', async () => {
+    // A table with exactly one sortable column reads as broken, and the backend
+    // already supports both — but only under these exact names, because
+    // _sort_admin_results splits on the LAST underscore.
+    render(<AdminPrepQueuePage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.click(screen.getByRole('columnheader', { name: /^cost$/i }))
+    await waitFor(() => expect(lastSearchParams()).toHaveProperty('sort', 'cost_basis_asc'))
+
+    fireEvent.click(screen.getByRole('columnheader', { name: /^market$/i }))
+    await waitFor(() =>
+      expect(lastSearchParams()).toHaveProperty('sort', 'current_market_value_asc'),
+    )
+  })
+
+  it('shows the sort indicator on the active column only', async () => {
+    render(<AdminPrepQueuePage />)
+    await act(async () => { await Promise.resolve() })
+
+    const locationHeader = screen.getByRole('columnheader', { name: /location/i })
+    const costHeader = screen.getByRole('columnheader', { name: /^cost$/i })
+
+    fireEvent.click(locationHeader)
+
+    await waitFor(() =>
+      expect(locationHeader.querySelector('.lucide-chevron-up')).not.toBeNull(),
+    )
+    expect(costHeader.querySelector('.lucide-chevron-up')).toBeNull()
+    expect(costHeader.querySelector('.lucide-chevrons-up-down')).not.toBeNull()
+
+    fireEvent.click(locationHeader)
+    await waitFor(() =>
+      expect(locationHeader.querySelector('.lucide-chevron-down')).not.toBeNull(),
+    )
+  })
+
+  it('names the active location in the header counts, so a filtered count cannot be read as the whole queue', async () => {
+    // Both figures are scoped to their own summary card. A bare
+    // getByText('$10.00') matches the Est. value card AND the surviving row's
+    // Market cell once the filter narrows to one item.
+    const panelFor = (label: RegExp) => screen.getByText(label).parentElement as HTMLElement
+
+    render(<AdminPrepQueuePage />)
+    await act(async () => { await Promise.resolve() })
+
+    expect(within(panelFor(/^in queue$/i)).getByText('2')).toBeInTheDocument()
+    expect(within(panelFor(/^est\. value$/i)).getByText('$35.00')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText(/filter by location/i), {
+      target: { value: 'glass' },
+    })
+
+    expect(await screen.findByText(/^in queue \(glass\)$/i)).toBeInTheDocument()
+    expect(within(panelFor(/^in queue \(glass\)$/i)).getByText('1')).toBeInTheDocument()
+    expect(within(panelFor(/^est\. value \(glass\)$/i)).getByText('$10.00')).toBeInTheDocument()
+  })
+
+  it('renders the location filter with vault-field', async () => {
+    // The admin theme is dark with light-green text, so an unstyled <select>
+    // renders light-green-on-white (CLAUDE.md).
+    render(<AdminPrepQueuePage />)
+    await act(async () => { await Promise.resolve() })
+
+    expect(screen.getByLabelText(/filter by location/i).className).toContain('vault-field')
+  })
+
+  it('removes just the priced row without refetching, so the active filter is not reset', async () => {
+    render(<AdminPrepQueuePage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.change(screen.getByLabelText(/filter by location/i), {
+      target: { value: 'glass' },
+    })
+    await waitFor(() => expect(lastSearchParams()).toHaveProperty('location', 'glass'))
+    const callsBeforePricing = searchCalls().length
+
+    fireEvent.click(screen.getByLabelText(/edit sticker price for pikachu/i))
+    const input = screen.getByRole('textbox')
+    fireEvent.change(input, { target: { value: '9.99' } })
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }) })
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith('/inventory/item-1', { sticker_price: '9.99' }),
+    )
+    expect(
+      await screen.findByText(/no items awaiting sticker prices/i),
+    ).toBeInTheDocument()
+    expect(searchCalls()).toHaveLength(callsBeforePricing)
+  })
+})

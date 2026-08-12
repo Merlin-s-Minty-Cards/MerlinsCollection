@@ -50,6 +50,13 @@ export default function AdminPrepQueuePage() {
   const [items, setItems] = useState<PrepQueueItem[]>([])
   const [loading, setLoading] = useState(true)
 
+  // Narrowing the queue (RFC 0010 T7). Both are SERVER-side — `location` and
+  // `sort` already exist on /inventory/search, so the rows this page holds are
+  // always exactly the filtered set and the header counts need no second pass.
+  const [locationFilter, setLocationFilter] = useState('')
+  const [sortKey, setSortKey] = useState<string | null>(null)
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
+
   // Inline location editing (select — not handled by InlineEditCell)
   const [editingLocation, setEditingLocation] = useState<string | null>(null)
   const [editLocationValue, setEditLocationValue] = useState('')
@@ -80,10 +87,16 @@ export default function AdminPrepQueuePage() {
     if (!api.isAuthenticated) return
     setLoading(true)
     try {
+      // This queue IS "available and unstickered" — location and sort narrow
+      // within that, they never replace it.
       const params: Record<string, string> = {
         status: 'available',
         missing_sticker: 'true',
       }
+      // Omitted entirely when empty: an empty string is a location literally
+      // named "", not "all locations".
+      if (locationFilter) params.location = locationFilter
+      if (sortKey) params.sort = `${sortKey}_${sortDir}`
       const res = await api.get<{ items: PrepQueueItem[] }>('/inventory/search', params)
       setItems(res.items ?? [])
     } catch {
@@ -91,11 +104,24 @@ export default function AdminPrepQueuePage() {
     } finally {
       setLoading(false)
     }
-  }, [api])
+  }, [api, locationFilter, sortKey, sortDir])
 
   useEffect(() => {
     fetchItems()
   }, [fetchItems])
+
+  // First click sorts ASCENDING — deliberately unlike /admin/inventory, which
+  // opens descending. Every sortable column here reads naturally low-to-high:
+  // locations alphabetically, and "cheapest first" is how you find the cards
+  // still worth pricing by hand.
+  const handleSort = (key: string) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setSortKey(key)
+      setSortDir('asc')
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // Inline sticker price editing (via InlineEditCell)
@@ -105,10 +131,33 @@ export default function AdminPrepQueuePage() {
     async (itemId: string, newValue: string) => {
       const price = newValue.trim() === '' ? null : newValue.trim()
       await api.put(`/inventory/${itemId}`, { sticker_price: price })
+      // Patch and drop, never refetch (RFC 0010 T7). A refetch flashes the whole
+      // queue through `loading` and, with a location filter active, throws away
+      // the list the admin is working through. The rule is this queue's own
+      // criterion — "available and no sticker price yet" — so a priced row
+      // leaves and a CLEARED one stays, which is why the toast is not
+      // unconditional: the old refetch used to quietly put a cleared row back
+      // while the message still claimed it had been removed.
+      setItems((rows) =>
+        rows
+          .map((r) => (r.item_id === itemId ? { ...r, sticker_price: price } : r))
+          .filter((r) => r.item_id !== itemId || price == null),
+      )
+      if (price == null) {
+        setMessage('Sticker price cleared')
+        return
+      }
+      // A row that has left the table must leave the selection with it, or the
+      // bulk bar counts a card nobody can see.
+      setSelectedIds((prev) => {
+        if (!prev.has(itemId)) return prev
+        const next = new Set(prev)
+        next.delete(itemId)
+        return next
+      })
       setMessage('Priced → removed from queue')
-      fetchItems()
     },
-    [api, fetchItems],
+    [api],
   )
 
   const handleStickerError = useCallback(
@@ -298,6 +347,10 @@ export default function AdminPrepQueuePage() {
     {
       key: 'location',
       label: 'Location',
+      // The column keys ARE the backend's sort fields — `_sort_admin_results`
+      // splits on the last underscore, so `cost_basis` + `_asc` resolves. Do
+      // not rename a key here without checking that split.
+      sortable: true,
       className: 'w-36',
       render: (item) => {
         if (editingLocation === item.item_id) {
@@ -355,12 +408,14 @@ export default function AdminPrepQueuePage() {
     {
       key: 'cost_basis',
       label: 'Cost',
+      sortable: true,
       className: 'text-right w-20',
       render: (item) => <PriceDisplay value={item.cost_basis} className="text-xs text-pine-400" />,
     },
     {
       key: 'current_market_value',
       label: 'Market',
+      sortable: true,
       className: 'text-right w-20',
       render: (item) => <PriceDisplay value={item.current_market_value} className="text-xs text-pine-400" />,
     },
@@ -381,6 +436,14 @@ export default function AdminPrepQueuePage() {
   // ---------------------------------------------------------------------------
 
   const queueCount = items.length
+
+  // Both counts describe the FILTERED set, so both say which set that is. An
+  // unqualified "In queue: 3" while the glass case is selected reads as "three
+  // cards left to price" when there are two hundred.
+  const activeLocationLabel = locationFilter
+    ? (locationOptions.find((o) => o.value === locationFilter)?.label ?? locationFilter)
+    : null
+  const scopeSuffix = activeLocationLabel ? ` (${activeLocationLabel})` : ''
 
   const estValue = useMemo(() => {
     return items.reduce((sum, item) => {
@@ -413,19 +476,38 @@ export default function AdminPrepQueuePage() {
       {/* Summary cards */}
       <div className="grid grid-cols-2 gap-3 mb-6">
         <div className="vault-panel rounded-xl px-4 py-3 border border-pine-700/30">
-          <div className="text-[10px] text-pine-500 uppercase tracking-wider mb-1">In queue</div>
+          <div className="text-[10px] text-pine-500 uppercase tracking-wider mb-1">
+            In queue{scopeSuffix}
+          </div>
           <div className="text-lg font-mono text-pine-100">{queueCount}</div>
         </div>
         <div className="vault-panel rounded-xl px-4 py-3 border border-pine-700/30">
-          <div className="text-[10px] text-pine-500 uppercase tracking-wider mb-1">Est. value</div>
+          <div className="text-[10px] text-pine-500 uppercase tracking-wider mb-1">
+            Est. value{scopeSuffix}
+          </div>
           <div className="text-lg font-mono text-amber-400">
             ${estValue.toFixed(2)}
           </div>
         </div>
       </div>
 
-      {/* Image toggle */}
-      <div className="flex items-center justify-end mb-4">
+      {/* Controls — the location filter is the primary one: "we often just
+          price glass". Options come from useLocations(), never a hardcoded
+          list, and `vault-field` is mandatory on an admin control (CLAUDE.md). */}
+      <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
+        <select
+          aria-label="Filter by location"
+          value={locationFilter}
+          onChange={(e) => setLocationFilter(e.target.value)}
+          className="vault-field px-3 py-1.5 rounded-lg text-xs"
+        >
+          <option value="">All locations</option>
+          {locationOptions.map((loc) => (
+            <option key={loc.value} value={loc.value}>
+              {loc.label}
+            </option>
+          ))}
+        </select>
         <ImageToggle showImages={showImages} onToggle={() => setShowImages(!showImages)} label="Images" />
       </div>
 
@@ -470,6 +552,9 @@ export default function AdminPrepQueuePage() {
         data={items}
         keyField="item_id"
         loading={loading}
+        sortKey={sortKey}
+        sortDir={sortDir}
+        onSort={handleSort}
         emptyMessage="No items awaiting sticker prices"
         onRowClick={(item) => setDetailItem(item)}
         selectedIds={selectedIds}
