@@ -6,20 +6,21 @@
 gitignored (`.gitignore:60`), so it is local-only and your edits to it will never appear in
 `git status` or reach anyone else. Record all RFC 0010 status **in this file**.
 
-**Last updated:** 2026-08-11 (T5 DONE — an edit shows up at once, and the list stops jumping)
+**Last updated:** 2026-08-11 (T6 DONE — the detail modal stays usable when you zoom)
 **Branch:** `Polishing-For-Deployment`
 **RFC:** [`docs/rfcs/0010-admin-round8-ledger-corrections-and-slab-manual-only.md`](../../rfcs/0010-admin-round8-ledger-corrections-and-slab-manual-only.md)
 **Task index:** [`README.md`](README.md)
 **Source of the requests:** the owner's `The plan.pdf` (12 items) plus two review comments
 on 2026-08-10 — the money-input report and the PSA/scanner reversal.
 
-## ✅ T0, T1, T2, T3, T4, T5, T15 AND T17 ARE DONE — start at T6
+## ✅ T0, T1, T2, T3, T4, T5, T6, T15 AND T17 ARE DONE — start at T7
 
 T15 gave all five catalog pickers one shared row carrying name, image AND price;
 T17 built the job that fills those prices in; T2 stopped an admin edit forking a
 consignor into two rows; T3 made the server the authority on why a row is in
 Triage; T4 made that queue searchable; T5 made an edit in the detail modal show
-up at once and stopped the list jumping. **Start at T6 — same file as T5.**
+up at once and stopped the list jumping; T6 made that same modal survive zoom.
+**Start at T7 — a different file, and the modal work is finished.**
 
 ## 📉 T3 RE-MEASURED THE QUEUE AND THE TASK DOC'S PREMISE IS GONE
 
@@ -89,7 +90,7 @@ naming the row. **Start at T1.**
 | T3 | Triage reasons + filter | **DONE** | `cbb7b6c` | The query was never broken and the 266 rows are gone — **27 remain**, see the re-measurement above; read it before T4. `services/triage.py` gained `reasons_for` (and `needs_triage` is now `bool(reasons_for(i))`, so they cannot drift), `TERMINAL_STATUSES` + **`in_triage_scope`** (called by BOTH the list and `/triage/counts`, which is what keeps the badge honest), and `is_bulk_clearable`. Search emits **`triage_reasons` AND `bulk_clearable`** on `triage=true` rows only. **ONE filter param, `triage_reason`**, 422 on an unknown key; the old three stay for compatibility and `/admin/inventory` still uses `needs_review`. New `POST /admin/inventory/bulk-clear-review`. Param is **`include_terminal`**, not the doc's `include_sold` (see Decisions). **No sticker reason** (owner decision) |
 | T4 | Triage search | **DONE** | `e6a3bfc` | Frontend only, no backend change — `name` already worked on the endpoint. Shared `SearchInput` (its 300ms debounce **is** the debounce; no timer was written). The term is trimmed **at the `useCallback` dependency**, not in state — see Decisions. Two additions beyond the doc's list: a failed search no longer renders the **success** panel, and **`bulk-clear-review` now sends `name`** — the button counts on-screen rows, so without it the POST cleared flags the admin never saw. `BulkClearReviewRequest.name` already existed and nothing was sending it |
 | T5 | Detail modal live updates | **DONE** | `febc2eb` | `onUpdated?: (updated?: UpdatedItem) => void` — optional, so a parent that ignores it still refetches. New `frontend/lib/item-update.ts` holds `UpdatedItem` + **`patchRow`** (spread, never replace — the response carries no `triage_reasons`, `bulk_clearable` or joined `card`); seven call sites across the six pages. The modal owns `current` and renders **`shown`**, a synchronous `current.item_id === item.item_id` guard — the effect alone flashes the previous card. **`flagged` is now derived**, so `writeTriage` lost its `nextFlagged` parameter. A response with no string `item_id` is **discarded** (`asItem`) and `onUpdated()` fires with no argument → the parent's refetch fallback. **The task doc's Triage rule cannot work as written** — see Decisions |
-| T6 | Detail modal layout | **NOT STARTED** | — | Must be checked by a human at 100/150/200% zoom. A test can assert classes, not typeability |
+| T6 | Detail modal layout | **DONE** | `4c82d79` | **Still needs the owner's zoom check** — jsdom asserts classes, not typeability. Four class decisions, two of them departures from the task doc: the grid template carries an inner **`min(17rem,100%)`** (a bare `minmax(17rem,1fr)` overflows below 17rem) and the textarea span is **`col-span-full`**, not `sm:col-span-2` (which invents an implicit column on a collapsed grid). Cells are `flex-wrap` with a `min-w-[min(8rem,100%)]` floor on the editor — that pair **is** the stacking mechanism, since Tailwind container queries are not installed (3.4, `plugins: []`). Image column is `shrink-0 md:shrink`, not a bare removal. **The Consignment grid was converted too.** Verified the arbitrary classes are actually EMITTED by grepping the built CSS — vitest asserts strings and would pass on a class Tailwind never generated |
 | T7 | Prep Queue location | **NOT STARTED** | — | Backend already has everything; pure wiring |
 | T8 | Local date formatting | **NOT STARTED** | — | Test **must** pin a negative-offset `TZ` or it is theatre |
 | T9 | Signed ledger amounts | **NOT STARTED** | — | Presentation only. Do not invert signs in storage |
@@ -185,6 +186,14 @@ that is the mistake that made RFC 0009's T-FINAL sign-off stale.
 | 2026-08-11 | T5 | **A shared `patchRow` helper (`frontend/lib/item-update.ts`) rather than six inline maps**, and `CardDetailModalProps.onUpdated` takes its `UpdatedItem` type | Seven call sites across six pages, and the rule they all depend on — **spread, never replace** — is exactly the kind that gets copied wrong once and then silently strips a triage row's chips. Same call as `CardPickerRow` in T15. The two pages with a drop rule compose (`patchRow(...).filter(...)` / `.flatMap(...)`), so the page-specific rule still reads at the call site |
 | 2026-08-11 | T5 | **Three of my own RED tests initially passed against the UNFIXED code and had to be hardened.** Counting rows to prove a row was dropped reads zero while a refetch has `loading` true; two tests now assert each page's own empty panel, which requires `!loading && items.length === 0`. A third matched "Pikachu" in both the table and the open modal's header | Recorded because a green test against unfixed code is the failure mode the RED gate exists to catch, and it was only caught by reading *why* each test failed rather than counting failures. Same lesson as the ChatPanel entry below: the first failure explains the rest |
 | 2026-08-11 | T5 | **The doc's run command was the broken `npx vitest` form for the SEVENTH time** (T0, T15, T17, T2, T3, T4, now T5) — corrected in the task doc itself. Its file paths were right | Seven for seven. **T6 is the same file and will have the same command** — fix it before running it |
+| 2026-08-11 | T6 | **The grid template carries an inner `min()`: `minmax(min(17rem,100%),1fr)`, not the doc's `minmax(17rem,1fr)`** | A bare `minmax` forces a 17rem track even when the container is *narrower* than 17rem, so the grid overflows horizontally — which at 200% zoom in a narrow window is strictly worse than the squeeze being fixed, because the content leaves the modal instead of merely being cramped. The tests assert `auto-fit` + `minmax` rather than the exact string, so the safer form is not locked out. Same `min()` reasoning as the image column's cap, which the doc *does* specify — the doc applied the idea in one place and not the other |
+| 2026-08-11 | T6 | **The textarea span is `col-span-full`, NOT the existing `sm:col-span-2`** | Wrong twice over on the new grid. It is viewport-keyed exactly as the grid was, and — the real defect — on a grid that has collapsed to ONE column, `span 2` makes the browser create an **implicit second column**, breaking precisely the narrow case this task exists to fix. `col-span-full` (`grid-column: 1/-1`) spans whatever tracks actually exist. Confirmed emitted as `grid-column:1/-1` in the built CSS |
+| 2026-08-11 | T6 | **Tailwind container queries are genuinely unavailable, so the stacking is `flex-wrap` on the cell plus `min-w-[min(8rem,100%)]` on the editor** | The doc offers `@container`/`@lg:` as the cleaner expression "if available" — it is not: tailwind 3.4 with `plugins: []` and no `@tailwindcss/container-queries`. Wrapping is the honest substitute and is genuinely container-driven: the editor drops below the label exactly when it no longer fits beside it, with no breakpoint to tune. The floor is the load-bearing half — `min-w-0` (what was there) is what let the input be crushed to near-zero width, which **is** the owner's "characters go into the factory sealed label" symptom. The input never moved; it was squeezed until it rendered beside the neighbouring label |
+| 2026-08-11 | T6 | **The image column is `shrink-0 md:shrink`, not a bare removal of `flex-shrink-0`** | Below `md` the content area is `flex-col`, where shrinking squashes the art *vertically* on a short viewport — a layout that was never the bug. The doc says "replace `flex-shrink-0`" without distinguishing the two axes. The RED test was hardened to assert `md:shrink` alongside the absence of `flex-shrink-0`, so it pins the intent ("yields in the side-by-side layout") rather than the letter; it still fails against the original code. Also added **`max-w-full`** to the `img`, which the doc omits — without it a `w-auto` image sized off `h-full` overflows the very cap being added, so `max-h-full` alone does not hold |
+| 2026-08-11 | T6 | **The arbitrary-value classes were verified against the BUILT CSS, not just the DOM** — `auto-fit`, `min-width:min(8rem`, `max-width:min(34%`, `aspect-ratio:5/7` and `grid-column:1/-1` all confirmed present | The whole test strategy here is class-string assertions, and a class Tailwind's JIT never emits produces an identical green suite with a silently broken layout — the grid would fall back to one implicit column. This is the one failure mode jsdom cannot see *and* the change is entirely made of unusual arbitrary values, three of them with nested `min()`. **Worth repeating for any future arbitrary-value Tailwind class**: `npm run build --workspace=frontend`, then grep `frontend/.next/static/css/*.css` |
+| 2026-08-11 | T6 | **The Consignment grid was converted too, though the task doc's Files/Design sections name only the field sections** | It is the same `grid-cols-1 sm:grid-cols-2` defect, in the same modal, one section below — leaving it would mean a consigned card's terms stay two-up-and-squeezed at the exact zoom the rest of the modal was just fixed for. One class, no behaviour change, and it is inside the reported symptom ("the fields don't have room to show the data") rather than beside it |
+| 2026-08-11 | T6 | **One of my seven RED tests failed for a defect in the TEST, and was fixed rather than accepted** — the regression gate matched `Notes`, which is both a section `<h3>` and a field label, so it died on "Found multiple elements" | It is the gate that proves no field vanished, and a gate must pass *before* the change or it proves nothing. Switched to the unambiguous `Sticker Notes`. Recorded because it is the mirror of T5's lesson: **read why each test failed, do not count failures** — six failed on class strings (correct) and the seventh on a selector (mine), which is invisible in a "7 failed" summary |
+| 2026-08-11 | T6 | **The task doc's run command was CORRECT — the first in this RFC.** Its file paths were right too | Ends a run of seven (T0, T15, T17, T2, T3, T4, T5) where the doc carried the broken `npx vitest` form. T5's note *"T6 is the same file and will have the same command — fix it before running it"* turned out to be unnecessary: T6's doc already carries the `npm test --workspace=frontend` form and the correction-in-the-doc practice T2 started has caught up with the chain |
 | 2026-08-10 | T0 | **The doc's file paths were wrong in two places**, corrected as executed: the backend tests are `backend/tests/routers/admin/test_purchases.py`, and the frontend run command must be the `npm test --workspace=frontend` form, not `npx vitest` | `npx vitest` fails with "Vitest failed to find the runner" — already noted in the baseline section of this file, but the task doc contradicted it. Later task docs copy this command; check it before trusting it |
 
 *(rows below are PLANNING decisions, recorded before execution because a later task would
@@ -343,11 +352,54 @@ the next task's sign-off.
 Backend, MCP and `ruff` were not re-run: T5 is frontend-only and touched **no**
 Python and no MCP file. Do not carry these numbers into the next task's sign-off.
 
+**Re-measured after T6** — a fresh run, not a row above carried forward:
+
+| Suite | Count | Time | State |
+|---|---|---|---|
+| Frontend | **715 passed / 0 failed** (82 files) | ~30s | green — 708 + 7 new T6 tests |
+| Narrow T6 selection (1 file) | 38 passed / 0 failed | ~6s | green — **31 of them pre-existing**, which is what proves a pure layout change disturbed none of T5's live-update work, the triage write path or the field registry |
+| `npm run lint --workspace=frontend` | — | ~5s | clean (the one pre-existing `<img>` warning in `CardDetailModal`, and **only** that one) |
+| `npm run build --workspace=frontend` | — | ~40s | exit 0 |
+| Built-CSS grep | 5 of 5 utilities emitted | — | green — see below |
+
+Backend, MCP and `ruff` were not re-run: T6 is frontend-only, one component file
+plus its test. Do not carry these numbers into the next task's sign-off.
+
+**The build did a second job here, and it is the one that matters.** vitest
+asserts class *strings*; a class Tailwind's JIT never emits gives an identical
+green suite over a silently broken layout. Every one of T6's decisions is an
+unusual arbitrary value, three with a nested `min()`, so the built CSS was
+grepped directly:
+
+| Grepped | Found |
+|---|---|
+| `grid-template-columns:repeat(auto-fit,minmax(min(17rem,100%),1fr))` | ✅ verbatim, `min()` intact |
+| `min-width:min(8rem,100%)` | ✅ |
+| `max-width:min(34%,20rem)` | ✅ |
+| `aspect-ratio:5/7` | ✅ |
+| `grid-column:1/-1` | ✅ |
+
+Repeat this for any future arbitrary-value Tailwind class: `npm run build
+--workspace=frontend`, then grep `frontend/.next/static/css/*.css`.
+
 **Lint caught a warning this change introduced, and it was fixed rather than
 accepted.** `react-hooks/exhaustive-deps` reports at the `useEffect(` line, not
 at the dependency array — an `eslint-disable-next-line` placed above `}, [...])`
 suppresses nothing. The baseline for this file is **one** `<img>` warning; a
 second one is a regression, not noise.
+
+**Not verified here, and it needs the owner: T6's manual check IS the acceptance
+criterion, not the suite.** jsdom does no layout — `getBoundingClientRect()` is
+all zeros — so the six new tests pin the class *decisions* and cannot tell you
+whether the Finish field is typeable at 175% zoom in Chrome. On `/admin/triage`,
+`/admin/show-prep` **and** `/admin/inventory`, at 100%, 150% and 200%: open a
+card, click **Finish** and type, and confirm the characters land in the Finish
+input and it is wide enough to read (the owner's own case: Hydreigon ex #240).
+Then check that the image never takes more than about a third, that the fields
+collapse to one column instead of staying two-up, that `item_id`/`tcg_url`
+truncate rather than widening the column, and that a card with **no** art lays
+out the same. A **graded** item is the densest section — three extra Identity
+fields — so check one of those too.
 
 **Not verified here, and it needs the owner:** T5's manual check — on Inventory,
 scroll well down the list, open a card, edit its location, and confirm the new
