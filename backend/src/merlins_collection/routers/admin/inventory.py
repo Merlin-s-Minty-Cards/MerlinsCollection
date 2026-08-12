@@ -582,6 +582,16 @@ def admin_item_timeline(
             "counterpart_item_id": e.get("counterpart_item_id"),
             "show_id": e.get("show_id"),
             "changed_fields": e.get("changed_fields"),
+            # RFC 0010 T11. A `voided` / `void_restored` event carries the id of
+            # the transaction it withdrew, so the History page can strike
+            # through the original sale rather than merely appending a note
+            # nobody connects to it. The original sale event is untouched — the
+            # timeline is a history, and history includes the mistake.
+            "voided_txn_id": e.get("voided_txn_id"),
+            "void_reason": e.get("void_reason"),
+            "voided_at": e.get("voided_at"),
+            "voided_by": e.get("voided_by"),
+            "restored_at": e.get("restored_at"),
         })
 
     return {"item_id": item_id, "events": clean_events}

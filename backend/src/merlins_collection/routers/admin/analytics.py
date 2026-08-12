@@ -20,16 +20,21 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from merlins_collection.dependencies import get_repo
+from merlins_collection.dependencies import get_repo, require_admin
+from merlins_collection.models.auth import AuthenticatedUser
 from merlins_collection.models.business import (
     Show,
     ShowAnalyticsSnapshot,
     Transaction,
     TransactionType,
 )
-from merlins_collection.services.dynamodb import InventoryRepository
+from merlins_collection.services.dynamodb import (
+    InventoryRepository,
+    LedgerReversalConflictError,
+)
+from merlins_collection.services.ledger import countable
 
 router = APIRouter(tags=["admin-analytics"])
 
@@ -67,7 +72,11 @@ def summarize_transactions(txns: list[Transaction]) -> dict[str, Any]:
 
     Card legs (priced at ``agreed_value``) stay in, per spec §9: totals include
     trade valuations.
+
+    **Voided rows count toward nothing** — filtered through the one predicate in
+    ``services.ledger``, never an inlined ``voided_at is None``.
     """
+    txns = countable(txns)
     total_sold = Decimal("0")
     total_bought = Decimal("0")
     items_sold_count = 0
@@ -110,9 +119,12 @@ def starting_inventory(
     Item value = ``current_market_value`` when set, else ``cost_basis``.
     """
     horizon = max(day, date.today())
+    # A voided sale did not sell anything, so an item whose only sale was voided
+    # was NOT on hand at the start of the day — it was already gone by other
+    # means, or its `sold` status is about to be reversed.
     sold_on_or_after = {
         t.item_id
-        for t in repo.list_transactions(day, horizon)
+        for t in countable(repo.list_transactions(day, horizon))
         if t.type == TransactionType.SALE
     }
 
@@ -135,10 +147,16 @@ def sell_through_rate(
     sale_txns_on_day: list[Transaction], starting_ids: set[str]
 ) -> Decimal | None:
     """Fraction of the starting inventory that sold on the day. ``None`` when
-    there was no starting inventory to sell through."""
+    there was no starting inventory to sell through.
+
+    Filters through ``services.ledger`` itself rather than trusting its callers
+    to have done it — this is an aggregate, and the invariant is that every
+    aggregate applies the predicate.
+    """
     if not starting_ids:
         return None
-    sold = len({t.item_id for t in sale_txns_on_day if t.item_id in starting_ids})
+    sold = len({t.item_id for t in countable(sale_txns_on_day)
+                if t.item_id in starting_ids})
     rate = Decimal(sold) / Decimal(len(starting_ids))
     # Cap the repeating-decimal tail, then drop trailing zeros so an exact half
     # reads "0.5" rather than "0.5000".
@@ -260,7 +278,8 @@ def generate_show_analytics(
     if show is None:
         raise HTTPException(status_code=404, detail="Show not found")
 
-    txns = repo.list_transactions_for_show(show_id)
+    # Voided rows are dropped once, here, so every figure below inherits it.
+    txns = countable(repo.list_transactions_for_show(show_id))
     totals = summarize_transactions(txns)
 
     starting_ids, starting_value = starting_inventory(repo, show.date)
@@ -344,7 +363,9 @@ def list_analytics_dates(
     start, end = _default_range(start, end)
     if start > end:
         raise HTTPException(status_code=422, detail="start must be <= end")
-    dates = {t.date for t in repo.list_transactions(start, end)}
+    # A day whose only sale was voided has no activity to show, so it is not
+    # offered as a date — the picker would otherwise lead to an empty dashboard.
+    dates = {t.date for t in countable(repo.list_transactions(start, end))}
     return {"dates": [d.isoformat() for d in sorted(dates, reverse=True)]}
 
 
@@ -358,7 +379,9 @@ def daily_analytics(
     Decimals are serialized as strings; ``sell_through_rate`` is a 0–1 string
     or ``null`` when there was no inventory on hand at the start of the day.
     """
-    txns = repo.list_transactions(date_, date_)
+    # Dropped once, here: the dashboard's Today tile reads this endpoint too, so
+    # this is also what keeps the landing page and this page agreeing.
+    txns = countable(repo.list_transactions(date_, date_))
     totals = summarize_transactions(txns)
 
     starting_ids, starting_value = starting_inventory(repo, date_)
@@ -397,6 +420,12 @@ def list_transactions_archive(
     Unlike the dashboard metrics this is an *archive*: nothing is filtered out,
     trade cash legs included, because the point is to see what was actually
     written. ``total`` is the full match count; ``items`` is capped at 500.
+
+    **This is the one reader that deliberately does NOT call
+    ``services.ledger.is_countable``.** A voided row stays visible here, carrying
+    its ``voided_at`` / ``voided_by`` / ``void_reason``, because a void is a
+    thing that was written — hiding it would make the correction untraceable and
+    would leave the operator no way to restore it.
     """
     start, end = _default_range(start, end)
     if start > end:
@@ -410,4 +439,297 @@ def list_transactions_archive(
     return {
         "items": [t.model_dump(mode="json") for t in txns[:_ARCHIVE_LIMIT]],
         "total": len(txns),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Transaction void / restore (RFC 0010 T11)
+#
+# A void, never a delete — the owner's choice from three options, matching the
+# precedent already in this codebase (a Show "delete" is an archive precisely so
+# analytics can never dangle). A deleted sale would leave no trace it existed
+# while silently disagreeing with every snapshot already generated.
+#
+# SCOPE: sales only in the first cut. Voiding a sale returns an item to stock;
+# voiding a PURCHASE should arguably remove an item that may since have been
+# sold, traded or re-priced, and a void that leaves a phantom item in stock is
+# worse than no void. A purchase gets a clear 400 rather than half a feature.
+# ---------------------------------------------------------------------------
+
+_PURCHASE_VOID_MESSAGE = (
+    "A purchase cannot be voided yet — remove the item from inventory instead"
+)
+
+
+class VoidRequest(BaseModel):
+    """The body of a void. ``voided_by`` is deliberately absent: it is stamped
+    from the authenticated principal, and an extra key here is IGNORED rather
+    than honoured."""
+
+    reason: str = Field(max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def _must_say_something(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            # The reason is the whole point of choosing void over delete.
+            raise ValueError("A void needs a reason")
+        return stripped
+
+
+def _actor(user: AuthenticatedUser) -> str:
+    """Who to record as having done this.
+
+    ONE stored value, not two: the email when Cognito supplied one (an audit
+    line is read by a human), falling back to the username and finally to the
+    opaque-but-always-present ``sub`` so the field is never null.
+    """
+    return user.email or user.username or user.sub
+
+
+def _require_transaction(repo: InventoryRepository, txn_id: str) -> Transaction:
+    txn = repo.get_transaction(txn_id)
+    if txn is None:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    return txn
+
+
+def _mark_snapshots_stale(repo: InventoryRepository, txn: Transaction) -> None:
+    """Flag every stored snapshot the reversal just invalidated.
+
+    Snapshots are point-in-time records, so a void leaves them wrong by
+    construction. Never silently rewrite one (that would erase what the show
+    actually reported at the time) and never silently serve one.
+
+    Both the transaction's own show AND every show held on its date, because a
+    sale entered without a ``show_id`` still lands in that show's day.
+    """
+    show_ids = {txn.show_id} if txn.show_id else set()
+    show_ids |= {s.show_id for s in repo.list_shows() if s.date == txn.date}
+    for show_id in show_ids:
+        snapshot = repo.get_show_analytics(show_id)
+        if snapshot is not None and not snapshot.stale:
+            repo.put_show_analytics(snapshot.model_copy(update={"stale": True}))
+
+
+def _void_timeline_event(txn: Transaction, *, restored: bool) -> dict[str, Any]:
+    """The one timeline event describing this row's void state.
+
+    ``txn_id`` carries a ``#void`` suffix so the event lands on its own sort key:
+    the original sale event is keyed ``TIMELINE#<date>#<txn_id>``, and a void on
+    the same day would otherwise OVERWRITE it. The timeline is a history, and
+    history includes the mistake.
+
+    Re-put in place on a restore rather than accompanied by a second event, so
+    there is exactly one row per voided transaction and it always states the
+    CURRENT state — two events would need an ordering the sort key cannot give
+    (both fall on the same date, and ``#restore`` sorts *before* ``#void``).
+    """
+    event: dict[str, Any] = {
+        "item_id": txn.item_id,
+        "txn_id": f"{txn.txn_id}#void",
+        "type": "void_restored" if restored else "voided",
+        "date": date.today().isoformat(),
+        "amount": str(txn.amount),
+        "voided_txn_id": txn.txn_id,
+    }
+    if restored:
+        event["restored_at"] = datetime.now(tz=timezone.utc).isoformat()
+    else:
+        event["void_reason"] = txn.void_reason
+        event["voided_at"] = (
+            txn.voided_at.isoformat()
+            if isinstance(txn.voided_at, datetime) else str(txn.voided_at)
+        )
+        event["voided_by"] = txn.voided_by
+    return event
+
+
+def _require_item_status(repo: InventoryRepository, txn: Transaction,
+                         expected: str, explanation: str) -> None:
+    item = repo.get_inventory_item(txn.item_id)
+    if item is None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Item {txn.item_id} no longer exists — {explanation}",
+        )
+    if str(item.status) != expected:
+        # Fail loudly rather than resurrect a card somebody else now owns.
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Item {txn.item_id} is {item.status}, not {expected} — "
+                    f"{explanation}"),
+        )
+
+
+def _guard_voidable(repo: InventoryRepository, txn: Transaction) -> None:
+    """Everything that must be true before a sale can be withdrawn."""
+    if txn.voided_at is not None:
+        raise HTTPException(status_code=409, detail="Transaction is already voided")
+    if txn.type != TransactionType.SALE:
+        raise HTTPException(status_code=400, detail=_PURCHASE_VOID_MESSAGE)
+    _require_item_status(
+        repo, txn, "sold",
+        "it has moved on since this sale and cannot be returned to stock",
+    )
+
+
+def _guard_restorable(repo: InventoryRepository, txn: Transaction) -> None:
+    if txn.voided_at is None:
+        raise HTTPException(status_code=409, detail="Transaction is not voided")
+    _require_item_status(
+        repo, txn, "available",
+        "restoring this sale would claim a card that is no longer in stock",
+    )
+
+
+def _apply_reversal(repo: InventoryRepository, rows: list[Transaction], *,
+                    restore: bool) -> None:
+    """Write the reversal, then its timeline events and snapshot flags.
+
+    The write is one atomic call for the whole list, so a five-card sale cannot
+    end up three-fifths voided. The bookkeeping that follows is best-effort by
+    nature (a timeline event is not money) and is deliberately AFTER it.
+    """
+    try:
+        repo.reverse_sales(
+            rows,
+            to_status="sold" if restore else "available",
+            from_status="available" if restore else "sold",
+            expect_voided=restore,
+        )
+    except LedgerReversalConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=("The transaction or its item changed while writing — "
+                    "nothing was written"),
+        ) from exc
+
+    for row in rows:
+        repo.put_timeline_event(row.item_id, _void_timeline_event(row, restored=restore))
+        _mark_snapshots_stale(repo, row)
+
+
+def _void_rows(rows: list[Transaction], *, reason: str,
+               actor: str) -> list[Transaction]:
+    stamped_at = datetime.now(tz=timezone.utc)
+    return [r.model_copy(update={
+        "voided_at": stamped_at, "voided_by": actor, "void_reason": reason,
+    }) for r in rows]
+
+
+def _restored_rows(rows: list[Transaction]) -> list[Transaction]:
+    return [r.model_copy(update={
+        "voided_at": None, "voided_by": None, "void_reason": None,
+    }) for r in rows]
+
+
+def _require_batch(repo: InventoryRepository, batch_id: str) -> list[Transaction]:
+    """Every leg of one real transaction, refusing a batch too big to be atomic.
+
+    Chunking a huge batch would reintroduce the partial write the atomic write
+    exists to prevent, so an oversized one is refused with an instruction the
+    operator can act on rather than quietly split.
+    """
+    rows = repo.list_transactions_by_batch(batch_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    if len(rows) > InventoryRepository.MAX_REVERSAL_LEGS:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"This transaction has {len(rows)} cards, more than the "
+                    f"{InventoryRepository.MAX_REVERSAL_LEGS} that can be reversed "
+                    "in one atomic write. Void them one at a time."),
+        )
+    return rows
+
+
+@router.post("/transactions/{txn_id}/void")
+def void_transaction(
+    txn_id: str,
+    body: VoidRequest,
+    repo: InventoryRepository = Depends(get_repo),
+    user: AuthenticatedUser = Depends(require_admin),
+) -> dict[str, Any]:
+    """Withdraw ONE sale leg: stamp the ledger row, return the card to stock.
+
+    The partial correction. For the whole transaction — which is what an
+    operator who rang up the wrong customer actually wants — see the batch
+    route below.
+    """
+    txn = _require_transaction(repo, txn_id)
+    _guard_voidable(repo, txn)
+    [voided] = _void_rows([txn], reason=body.reason, actor=_actor(user))
+    _apply_reversal(repo, [voided], restore=False)
+    return voided.model_dump(mode="json")
+
+
+@router.post("/transactions/{txn_id}/restore")
+def restore_transaction(
+    txn_id: str,
+    repo: InventoryRepository = Depends(get_repo),
+    user: AuthenticatedUser = Depends(require_admin),
+) -> dict[str, Any]:
+    """Undo a void: clear the three fields and re-apply the original sale.
+
+    "Archiving that cannot be undone is just a slower delete" is already the
+    phrasing ``unarchive_show`` uses, and the same logic applies here.
+    """
+    txn = _require_transaction(repo, txn_id)
+    _guard_restorable(repo, txn)
+    [restored] = _restored_rows([txn])
+    _apply_reversal(repo, [restored], restore=True)
+    return restored.model_dump(mode="json")
+
+
+# --- the whole transaction, keyed on T10's ``batch_id`` --------------------
+#
+# A five-card sale is ONE thing the operator did, so undoing it is one thing
+# too. ``batch_id`` is the key that says which rows belong to it — deliberately
+# reusing T10's field rather than inventing a second grouping key, and
+# deliberately NOT a (date, payment_method, type) heuristic, which cannot tell
+# two separate cash sales on one show day from a single two-card sale.
+
+@router.post("/transactions/batch/{batch_id}/void")
+def void_transaction_batch(
+    batch_id: str,
+    body: VoidRequest,
+    repo: InventoryRepository = Depends(get_repo),
+    user: AuthenticatedUser = Depends(require_admin),
+) -> dict[str, Any]:
+    """Withdraw every leg of one real transaction, atomically.
+
+    Every leg is guarded BEFORE anything is written, and the write itself is one
+    transaction — so a batch containing one card that has moved on since voids
+    nothing at all, rather than leaving the ledger half-corrected.
+    """
+    rows = _require_batch(repo, batch_id)
+    for row in rows:
+        _guard_voidable(repo, row)
+    voided = _void_rows(rows, reason=body.reason, actor=_actor(user))
+    _apply_reversal(repo, voided, restore=False)
+    return {
+        "batch_id": batch_id,
+        "voided": len(voided),
+        "items": [r.model_dump(mode="json") for r in voided],
+    }
+
+
+@router.post("/transactions/batch/{batch_id}/restore")
+def restore_transaction_batch(
+    batch_id: str,
+    repo: InventoryRepository = Depends(get_repo),
+    user: AuthenticatedUser = Depends(require_admin),
+) -> dict[str, Any]:
+    """Undo a whole-transaction void, on the same all-or-nothing terms."""
+    rows = _require_batch(repo, batch_id)
+    for row in rows:
+        _guard_restorable(repo, row)
+    restored = _restored_rows(rows)
+    _apply_reversal(repo, restored, restore=True)
+    return {
+        "batch_id": batch_id,
+        "restored": len(restored),
+        "items": [r.model_dump(mode="json") for r in restored],
     }

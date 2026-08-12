@@ -113,6 +113,17 @@ class ItemAlreadySoldError(Exception):
     """The sale's target item is already sold (or doesn't exist)."""
 
 
+class LedgerReversalConflictError(Exception):
+    """A void/restore lost its condition check and wrote NOTHING.
+
+    Raised when the atomic reversal is cancelled — the row was voided by a
+    concurrent request, or the item's status moved between the route's
+    pre-check and the write. Distinct from ``ItemAlreadySoldError`` because the
+    caller's answer is different: a sale collision is a 409 about the item, this
+    one is a 409 about the reversal itself.
+    """
+
+
 class ImportInProgressError(Exception):
     """Another import already holds the single-flight import lock.
 
@@ -1170,6 +1181,153 @@ class InventoryRepository:
         """All ledger records with start <= date <= end (month-partition walk)."""
         return [Transaction.model_validate(i)
                 for i in self._query_month_partitions("TXN", start, end)]
+
+    # How far back ``get_transaction`` will walk looking for a row. The ledger
+    # is keyed by month partition (``TXN#<YYYY-MM>``) and a txn_id alone does
+    # not name one, so the lookup walks months NEWEST FIRST and stops at the
+    # first hit: voiding a mistake made an hour ago costs one Query, and the
+    # bound stops an unknown id walking to the beginning of time.
+    _TXN_LOOKUP_YEARS = 3
+
+    def _walk_txn_months_newest_first(self, match):
+        """Yield ``(month_rows_matching)`` walking TXN partitions newest first.
+
+        Stops at the bounded horizon above. Shared by the two by-id lookups so
+        neither invents its own window.
+        """
+        today = date.today()
+        # One month ahead, because a backdated-forward row is possible.
+        probe = (today.year + 1, 1) if today.month == 12 else (today.year, today.month + 1)
+        oldest = (today.year - self._TXN_LOOKUP_YEARS, today.month)
+
+        while probe >= oldest:
+            rows = self._query_all(
+                KeyConditionExpression=Key("PK").eq(f"TXN#{probe[0]:04d}-{probe[1]:02d}"),
+            )
+            hits = [r for r in rows if match(r)]
+            if hits:
+                yield hits
+            probe = (probe[0] - 1, 12) if probe[1] == 1 else (probe[0], probe[1] - 1)
+
+    def get_transaction(self, txn_id: str) -> Transaction | None:
+        """Find one ledger row by id, or ``None``.
+
+        Deliberately not a point read: the SK embeds the transaction's DATE,
+        which the caller of a void does not have to know. Walking newest-first
+        makes the common case (a correction made minutes later) one query, and
+        the worst case bounded at ~37.
+        """
+        for hits in self._walk_txn_months_newest_first(
+                lambda r: r.get("txn_id") == txn_id):
+            return Transaction.model_validate(hits[0])
+        return None
+
+    def list_transactions_by_batch(self, batch_id: str) -> list[Transaction]:
+        """Every leg of one real transaction (T10's ``batch_id``), or ``[]``.
+
+        Stops at the first month that has any leg: one confirm writes one
+        ``txn_date`` for every row it creates, so a batch cannot straddle a
+        month boundary. That is what keeps the whole-transaction void one query
+        in the ordinary case.
+        """
+        if not batch_id:
+            return []
+        for hits in self._walk_txn_months_newest_first(
+                lambda r: r.get("batch_id") == batch_id):
+            return [Transaction.model_validate(r) for r in hits]
+        return []
+
+    # DynamoDB caps a transaction at 100 actions and a reversal spends two per
+    # leg. Chunking past that would reintroduce the partial write this whole
+    # method exists to prevent, so the caller refuses instead.
+    MAX_REVERSAL_LEGS = 50
+
+    def reverse_sales(self, txns: list[Transaction], *, to_status: str,
+                      from_status: str, expect_voided: bool):
+        """Reverse EVERY leg of one real transaction, or none of them.
+
+        One ``transact_write_items`` covering all legs, so a five-card sale
+        cannot end up three-fifths voided — the same failure class RFC 0010 T0
+        fixed in the buy confirm, arriving through a different door.
+        """
+        if not txns:
+            return
+        if len(txns) > self.MAX_REVERSAL_LEGS:
+            raise ValueError(
+                f"{len(txns)} legs exceeds the {self.MAX_REVERSAL_LEGS}-leg "
+                "atomic limit"
+            )
+        actions = []
+        for txn in txns:
+            actions.extend(self._reversal_actions(
+                txn, to_status=to_status, from_status=from_status,
+                expect_voided=expect_voided,
+            ))
+        try:
+            self._resource.meta.client.transact_write_items(TransactItems=actions)
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "TransactionCanceledException":
+                raise LedgerReversalConflictError(
+                    ", ".join(t.txn_id for t in txns)) from exc
+            raise
+
+    def reverse_sale(self, txn: Transaction, *, to_status: str, from_status: str,
+                     expect_voided: bool):
+        """One leg. Delegates, so there is a single reversal implementation."""
+        self.reverse_sales([txn], to_status=to_status, from_status=from_status,
+                           expect_voided=expect_voided)
+
+    def _reversal_actions(self, txn: Transaction, *, to_status: str,
+                          from_status: str, expect_voided: bool) -> list[dict]:
+        """The two guarded writes that reverse one sale.
+
+        The mirror of :meth:`record_sale`, and the same shape on purpose: a void
+        is two things happening (the row is stamped, the card comes back), and
+        the two must never disagree. Both halves are condition-guarded —
+
+        * the ledger row must still be in the void state the caller read
+          (``expect_voided``), so a concurrent second void writes nothing;
+        * the item must still be ``from_status``, so a card that has moved on
+          since is never resurrected under its new owner.
+
+        ``txn`` is the row AS IT SHOULD BE STORED — the caller stamps or clears
+        the three void fields before handing it over, so this method has no
+        opinion about who voided what.
+        """
+        # ``attribute_not_exists`` alone is NOT the "not voided yet" test: a row
+        # written since the field existed carries ``voided_at`` as a DynamoDB
+        # NULL, which exists. Both spellings have to be accepted, and the voided
+        # side has to check for a STRING rather than mere presence.
+        if expect_voided:
+            void_guard = "attribute_exists(PK) AND attribute_type(voided_at, :vt)"
+            guard_values = {":vt": "S"}
+        else:
+            void_guard = ("attribute_exists(PK) AND (attribute_not_exists(voided_at) "
+                          "OR attribute_type(voided_at, :vt))")
+            guard_values = {":vt": "NULL"}
+        txn_item = {**self._txn_keys(txn), "entity": "transaction", **self._gen(),
+                    **_serialize(txn.model_dump(mode="python"))}
+        return [
+            {"Put": {
+                "TableName": self._table_name,
+                "Item": txn_item,
+                "ConditionExpression": void_guard,
+                "ExpressionAttributeValues": guard_values,
+            }},
+            {"Update": {
+                "TableName": self._table_name,
+                "Key": {
+                    "PK": f"INV#{_bucket(txn.item_id)}",
+                    "SK": f"ITEM#{txn.item_id}",
+                },
+                "UpdateExpression": "SET #status = :to",
+                "ConditionExpression":
+                    "attribute_exists(PK) AND #status = :from",
+                "ExpressionAttributeNames": {"#status": "status"},
+                "ExpressionAttributeValues": {":to": to_status,
+                                              ":from": from_status},
+            }},
+        ]
 
     def record_sale(self, txn: Transaction):
         """Atomically append the sale txn and flip its item to ``sold``.

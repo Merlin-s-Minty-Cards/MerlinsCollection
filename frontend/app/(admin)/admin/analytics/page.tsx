@@ -18,7 +18,10 @@ import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { formatISODate, toLocalISODate } from '@/lib/dates'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import SignedAmount from '@/components/admin/shared/SignedAmount'
-import TransactionGroups, { type ArchiveTransaction } from '@/components/admin/shared/TransactionGroups'
+import TransactionGroups, {
+  type ArchiveTransaction,
+  type VoidTarget,
+} from '@/components/admin/shared/TransactionGroups'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -43,6 +46,13 @@ interface ShowAnalytics {
   trades_count: number
   sell_through_rate?: number | null
   inventory_value_at_start?: string | null
+  /**
+   * RFC 0010 T11. A snapshot is a stored point-in-time record, so voiding a
+   * transaction behind it leaves it wrong by construction. It is never
+   * rewritten silently and never served silently — regenerating is the only
+   * thing that clears this.
+   */
+  stale?: boolean
   [key: string]: unknown
 }
 
@@ -235,6 +245,31 @@ export default function AdminAnalyticsPage() {
     }
   }
 
+  // RFC 0010 T11. `batch_id` is the key that selects a WHOLE transaction, so a
+  // five-card sale is undone by one all-or-nothing call rather than five that
+  // can half-succeed. The errors are deliberately re-thrown: `TransactionGroups`
+  // keeps its dialog open with the message, and the row unchanged.
+  const voidPath = (target: VoidTarget, action: 'void' | 'restore') =>
+    target.scope === 'batch'
+      ? `/transactions/batch/${target.id}/${action}`
+      : `/transactions/${target.id}/${action}`
+
+  const refetchDay = async () => {
+    if (selectedDate) await fetchDailyData(selectedDate)
+  }
+
+  const handleVoid = async (target: VoidTarget, reason: string) => {
+    await api.post(voidPath(target, 'void'), { reason })
+    // The day's metrics move with the void — refetching both together is what
+    // keeps the tiles and the archive from disagreeing on screen.
+    await refetchDay()
+  }
+
+  const handleRestore = async (target: VoidTarget) => {
+    await api.post(voidPath(target, 'restore'))
+    await refetchDay()
+  }
+
   const openShowDetail = (show: Show) => {
     setSelectedShow(show)
     setShowViewMode('detail')
@@ -319,6 +354,16 @@ export default function AdminAnalyticsPage() {
             {generatingId === selectedShow.show_id ? 'Generating…' : 'Generate / Refresh Analytics'}
           </button>
         </div>
+
+        {showDetail?.stale && (
+          <div
+            role="alert"
+            className="mb-4 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300"
+          >
+            These numbers are out of date — a transaction behind them was voided
+            or restored. Regenerate to bring them back in line.
+          </div>
+        )}
 
         {loadingDetail ? (
           <div className="vault-panel rounded-xl p-8 text-center text-xs text-pine-400">
@@ -500,6 +545,8 @@ export default function AdminAnalyticsPage() {
                     transactions={transactions}
                     loading={loadingTxns}
                     emptyMessage="No transactions for this date"
+                    onVoid={handleVoid}
+                    onRestore={handleRestore}
                   />
                 </section>
               </>
@@ -607,6 +654,11 @@ export default function AdminAnalyticsPage() {
                           <div className="text-[10px] text-pine-500 mt-0.5">
                             {formatISODate(show.date)} {show.location && `• ${show.location}`}
                           </div>
+                          {showAnalytic?.stale && (
+                            <div className="mt-1 inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium border border-amber-500/30 bg-amber-500/10 text-amber-300">
+                              Out of date — regenerate
+                            </div>
+                          )}
                         </div>
                       </div>
 

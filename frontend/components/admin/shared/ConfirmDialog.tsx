@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, type ReactNode } from 'react'
 import { AlertTriangle, X } from 'lucide-react'
 
 interface ConfirmDialogProps {
@@ -11,6 +11,15 @@ interface ConfirmDialogProps {
   cancelLabel?: string
   variant?: 'danger' | 'default'
   loading?: boolean
+  /**
+   * Extra content between the description and the buttons — a required reason
+   * field, a warning, a preview. Added for RFC 0010 T11's void, where the
+   * reason is the whole point of choosing void over delete, and where a second
+   * bespoke dialog would have been the third confirm pattern in the admin.
+   */
+  children?: ReactNode
+  /** Gate the confirm on something the child collects (e.g. a non-empty reason). */
+  confirmDisabled?: boolean
   onConfirm: () => void
   onCancel: () => void
 }
@@ -23,6 +32,8 @@ export default function ConfirmDialog({
   cancelLabel = 'Cancel',
   variant = 'default',
   loading = false,
+  children,
+  confirmDisabled = false,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -78,6 +89,8 @@ export default function ConfirmDialog({
           </p>
         )}
 
+        {children && <div className="mb-4">{children}</div>}
+
         <div className="flex items-center justify-end gap-2">
           <button
             type="button"
@@ -90,7 +103,7 @@ export default function ConfirmDialog({
           <button
             type="button"
             onClick={onConfirm}
-            disabled={loading}
+            disabled={loading || confirmDisabled}
             className={`
               px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors disabled:opacity-50
               ${variant === 'danger'

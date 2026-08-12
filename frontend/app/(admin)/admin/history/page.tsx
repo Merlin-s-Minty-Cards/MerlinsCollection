@@ -14,8 +14,12 @@ import {
   ExternalLink,
   AlertTriangle,
   Pencil,
+  Undo2,
+  RotateCcw,
 } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
+import { formatTimestamp } from '@/lib/dates'
+import VoidDialog from '@/components/admin/shared/VoidDialog'
 import { useCardImages } from '@/lib/use-card-images'
 import CardImage, { TABLE_THUMB_SIZE } from '@/components/admin/shared/CardImage'
 import SearchInput from '@/components/admin/shared/SearchInput'
@@ -38,6 +42,25 @@ interface TimelineEvent {
   counterpart_item_id?: string | null
   show_id?: string | null
   changed_fields?: Record<string, { old: string | null; new: string | null }> | null
+  /** RFC 0010 T11 — set on a `voided` / `void_restored` event only. */
+  voided_txn_id?: string | null
+  void_reason?: string | null
+  voided_at?: string | null
+  voided_by?: string | null
+  restored_at?: string | null
+}
+
+/** Transactions this item's timeline says are currently withdrawn.
+ *
+ * There is exactly ONE `voided` event per transaction — a restore re-puts it in
+ * place as `void_restored` rather than appending a second event, so the current
+ * state is readable without an ordering the sort key cannot give. */
+function voidedTxnIds(events: TimelineEvent[]): Set<string> {
+  return new Set(
+    events
+      .filter((e) => e.type === 'voided' && e.voided_txn_id)
+      .map((e) => e.voided_txn_id as string),
+  )
 }
 
 interface LineageNode {
@@ -95,6 +118,11 @@ export default function AdminHistoryPage() {
   // Active tab
   const [activeTab, setActiveTab] = useState<'timeline' | 'lineage'>('timeline')
 
+  // Void / restore (RFC 0010 T11)
+  const [pendingVoid, setPendingVoid] = useState<string | null>(null)
+  const [voidBusy, setVoidBusy] = useState(false)
+  const [voidError, setVoidError] = useState<string | null>(null)
+
   // Art for every card on screen — the search hits, the chain, and the
   // selected item's header — resolved in one batch by the shared hook.
   const { getImageUrl } = useCardImages([
@@ -139,17 +167,12 @@ export default function AdminHistoryPage() {
   // Fetch timeline + lineage for selected item
   // ---------------------------------------------------------------------------
 
-  const selectItem = useCallback(
-    async (item: InventorySearchResult) => {
-      setSelectedItem(item)
-      setSearchResults([])
-      setSearchQuery('')
-
-      // Fetch timeline
+  const fetchTimeline = useCallback(
+    async (itemId: string) => {
       setLoadingTimeline(true)
       try {
         const res = await api.get<{ item_id: string; events: TimelineEvent[] }>(
-          `/inventory/${item.item_id}/timeline`,
+          `/inventory/${itemId}/timeline`,
         )
         setTimeline(res.events ?? [])
       } catch {
@@ -157,6 +180,17 @@ export default function AdminHistoryPage() {
       } finally {
         setLoadingTimeline(false)
       }
+    },
+    [api],
+  )
+
+  const selectItem = useCallback(
+    async (item: InventorySearchResult) => {
+      setSelectedItem(item)
+      setSearchResults([])
+      setSearchQuery('')
+
+      await fetchTimeline(item.item_id)
 
       // Fetch lineage
       setLoadingLineage(true)
@@ -175,8 +209,45 @@ export default function AdminHistoryPage() {
         setLoadingLineage(false)
       }
     },
-    [api],
+    [api, fetchTimeline],
   )
+
+  // ---------------------------------------------------------------------------
+  // Void / restore a sale from this item's own history (RFC 0010 T11)
+  // ---------------------------------------------------------------------------
+
+  const voidedIds = voidedTxnIds(timeline)
+
+  const voidMessage = (err: unknown) =>
+    err instanceof AdminApiError ? (err.detail ?? 'Void failed') : 'Void failed'
+
+  const confirmVoid = async (reason: string) => {
+    if (!pendingVoid || !selectedItem) return
+    setVoidBusy(true)
+    setVoidError(null)
+    try {
+      await api.post(`/transactions/${pendingVoid}/void`, { reason })
+      setPendingVoid(null)
+      await fetchTimeline(selectedItem.item_id)
+    } catch (err) {
+      // The dialog stays open with the server's message. A void that silently
+      // did not happen is worse than one that loudly did not.
+      setVoidError(voidMessage(err))
+    } finally {
+      setVoidBusy(false)
+    }
+  }
+
+  const restoreTxn = async (txnId: string) => {
+    if (!selectedItem) return
+    setVoidError(null)
+    try {
+      await api.post(`/transactions/${txnId}/restore`)
+      await fetchTimeline(selectedItem.item_id)
+    } catch (err) {
+      setVoidError(voidMessage(err))
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // Render helpers
@@ -196,6 +267,10 @@ export default function AdminHistoryPage() {
         return <ArrowRightLeft size={14} className="text-blue-400" />
       case 'edit':
         return <Pencil size={14} className="text-amber-400" />
+      case 'voided':
+        return <Undo2 size={14} className="text-red-400" />
+      case 'void_restored':
+        return <RotateCcw size={14} className="text-mint" />
       default:
         return <Clock size={14} className="text-pine-400" />
     }
@@ -217,6 +292,10 @@ export default function AdminHistoryPage() {
         return 'Trade'
       case 'edit':
         return 'Edited'
+      case 'voided':
+        return 'Voided'
+      case 'void_restored':
+        return 'Void undone'
       default:
         return type.replace(/_/g, ' ')
     }
@@ -462,13 +541,24 @@ export default function AdminHistoryPage() {
                   {/* Vertical line */}
                   <div className="absolute left-[11px] top-2 bottom-2 w-px bg-pine-700/50" />
 
-                  {timeline.map((event, idx) => (
+                  {timeline.map((event, idx) => {
+                    // The sale this event records was withdrawn — struck
+                    // through, but never removed: the timeline is a history,
+                    // and history includes the mistake.
+                    const isVoided = voidedIds.has(event.txn_id ?? '')
+                    const canVoid =
+                      (event.type === 'sale' || event.type === 'sell') && !!event.txn_id
+                    return (
                     <div key={event.txn_id || idx} className="relative pb-4 last:pb-0">
                       {/* Dot */}
                       <div className="absolute left-[-16px] top-1 w-[9px] h-[9px] rounded-full bg-pine-800 border-2 border-mint/60" />
 
                       {/* Event card */}
-                      <div className="vault-panel rounded-lg px-4 py-3 ml-2">
+                      <div
+                        className={`vault-panel rounded-lg px-4 py-3 ml-2 ${
+                          isVoided ? 'line-through opacity-60' : ''
+                        }`}
+                      >
                         <div className="flex items-center justify-between mb-1">
                           <div className="flex items-center gap-2">
                             {getEventIcon(event.type)}
@@ -476,10 +566,42 @@ export default function AdminHistoryPage() {
                               {getEventLabel(event.type)}
                             </span>
                           </div>
-                          <span className="text-[10px] text-pine-500 font-mono">
-                            {event.date || '—'}
-                          </span>
+                          <div className="flex items-center gap-2 no-underline">
+                            <span className="text-[10px] text-pine-500 font-mono">
+                              {event.date || '—'}
+                            </span>
+                            {canVoid && (isVoided ? (
+                              <button
+                                type="button"
+                                onClick={() => restoreTxn(event.txn_id!)}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium text-mint hover:bg-mint/10 transition-colors"
+                              >
+                                <RotateCcw size={11} /> Restore
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setVoidError(null)
+                                  setPendingVoid(event.txn_id!)
+                                }}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium text-red-400 hover:bg-red-500/10 transition-colors"
+                              >
+                                <Undo2 size={11} /> Void
+                              </button>
+                            ))}
+                          </div>
                         </div>
+                        {(event.type === 'voided' || event.type === 'void_restored') && (
+                          <p className="text-[11px] text-red-300/80">
+                            {event.void_reason ? `“${event.void_reason}” · ` : ''}
+                            {formatTimestamp(event.voided_at)}
+                            {event.voided_by ? ` · ${event.voided_by}` : ''}
+                            {event.restored_at
+                              ? ` · restored ${formatTimestamp(event.restored_at)}`
+                              : ''}
+                          </p>
+                        )}
                         <div className="flex items-center gap-4 text-[11px] text-pine-300 mt-1 flex-wrap">
                           {event.amount && (
                             <span className="flex items-center gap-1">
@@ -525,8 +647,12 @@ export default function AdminHistoryPage() {
                         )}
                       </div>
                     </div>
-                  ))}
+                    )
+                  })}
                 </div>
+              )}
+              {voidError && !pendingVoid && (
+                <p role="alert" className="mt-3 text-xs text-red-400">{voidError}</p>
               )}
             </div>
           )}
@@ -696,6 +822,20 @@ export default function AdminHistoryPage() {
           )}
         </div>
       )}
+
+      <VoidDialog
+        open={pendingVoid !== null}
+        title="Void this sale?"
+        description={
+          'The sale stays on this timeline marked voided, stops counting toward '
+          + 'every total, and the card goes back into inventory as available. It '
+          + 'can be restored.'
+        }
+        loading={voidBusy}
+        error={voidError}
+        onConfirm={confirmVoid}
+        onCancel={() => { setPendingVoid(null); setVoidError(null) }}
+      />
 
       {/* Empty state when nothing selected */}
       {!selectedItem && (

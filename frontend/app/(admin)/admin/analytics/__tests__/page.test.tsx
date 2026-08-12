@@ -313,7 +313,16 @@ describe('Show Analytics transaction grouping (RFC 0010 T10)', () => {
     await openTheDay()
     const legacy = screen.getAllByTestId('txn-group')[1]
     expect(within(legacy).getByText(/1 card/)).toBeInTheDocument()
-    expect(within(legacy).queryByRole('button')).not.toBeInTheDocument()
+    // Rewritten for T11, deliberately: the row now carries a Void button, so a
+    // bare "no buttons" assertion no longer expresses this test's intent. What
+    // it guards is that a group of ONE renders no DISCLOSURE control — a twisty
+    // that reveals the same row is noise.
+    expect(
+      within(legacy).queryByRole('button', { expanded: false }),
+    ).not.toBeInTheDocument()
+    expect(
+      within(legacy).queryByRole('button', { expanded: true }),
+    ).not.toBeInTheDocument()
   })
 
   it('keeps the endpoint order — grouping does not reorder the archive', async () => {
@@ -321,5 +330,135 @@ describe('Show Analytics transaction grouping (RFC 0010 T10)', () => {
     const groups = screen.getAllByTestId('txn-group')
     expect(within(groups[0]).getByText('Aug 10, 2026')).toBeInTheDocument()
     expect(within(groups[1]).getByText('Aug 9, 2026')).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// RFC 0010 T11 — an accidental sale can be undone, and a voided one is visible
+// ---------------------------------------------------------------------------
+
+/** Three cards sold in ONE session, so the void targets the whole transaction. */
+const SALE_BATCH = Array.from({ length: 3 }, (_, i) => ({
+  txn_id: `txn-s${i}`,
+  type: 'sale',
+  item_id: `item-s${i}`,
+  date: '2026-08-10',
+  amount: '40.00',
+  payment_method: 'cash',
+  batch_id: 'sell-1',
+}))
+
+const VOIDED_ROW = {
+  txn_id: 'txn-void',
+  type: 'sale',
+  item_id: 'item-void',
+  date: '2026-08-10',
+  amount: '95.00',
+  payment_method: 'venmo',
+  batch_id: null,
+  voided_at: '2026-08-11T18:30:00Z',
+  voided_by: 'merlin',
+  void_reason: 'Rang up the wrong card',
+}
+
+describe('Show Analytics transaction void (RFC 0010 T11)', () => {
+  beforeEach(() => {
+    getMock.mockImplementation((path: string) => {
+      if (path === '/analytics/dates') return Promise.resolve({ dates: ['2026-08-10'] })
+      if (path === '/analytics/daily') {
+        return Promise.resolve({
+          date: '2026-08-10', total_sold: '120.00', total_bought: '0.00',
+          net_sales: '120.00', items_sold_count: 3, items_bought_count: 0,
+          trades_count: 0, inventory_value_at_start: '5000.00',
+          sell_through_rate: null,
+        })
+      }
+      if (path === '/transactions') {
+        return Promise.resolve({ items: [...SALE_BATCH, VOIDED_ROW] })
+      }
+      if (path === '/shows') return Promise.resolve({ shows: [SHOW] })
+      if (path === '/analytics/by-date') return Promise.resolve({ analytics: [] })
+      return Promise.resolve({})
+    })
+    postMock.mockResolvedValue({})
+  })
+
+  async function openTheDay() {
+    await renderPage()
+    const picker = document.querySelector('input[type="date"]') as HTMLInputElement
+    fireEvent.change(picker, { target: { value: '2026-08-10' } })
+    await waitFor(() => expect(screen.getAllByTestId('txn-group').length).toBeGreaterThan(0))
+  }
+
+  it('renders a voided row as voided, with its reason, on the archive too', async () => {
+    await openTheDay()
+    const voided = screen.getAllByTestId('txn-group')[1]
+    expect(voided.className).toMatch(/line-through/)
+    expect(within(voided).getByTestId('voided-note')).toHaveTextContent(
+      /Rang up the wrong card/,
+    )
+  })
+
+  it('voids the WHOLE transaction through the batch endpoint', async () => {
+    await openTheDay()
+    const group = screen.getAllByTestId('txn-group')[0]
+    fireEvent.click(within(group).getByRole('button', { name: /void this transaction/i }))
+
+    expect(screen.getByText(/void this whole transaction \(3 cards\)/i)).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText(/reason/i), { target: { value: 'wrong customer' } })
+    fireEvent.click(screen.getAllByRole('button', { name: /^void$/i }).at(-1)!)
+
+    await waitFor(() => {
+      expect(postMock).toHaveBeenCalledWith(
+        '/transactions/batch/sell-1/void', { reason: 'wrong customer' },
+      )
+    })
+  })
+
+  it('restores a voided row through the single-row endpoint', async () => {
+    await openTheDay()
+    const voided = screen.getAllByTestId('txn-group')[1]
+    fireEvent.click(within(voided).getByRole('button', { name: /restore/i }))
+
+    await waitFor(() => {
+      expect(postMock).toHaveBeenCalledWith('/transactions/txn-void/restore')
+    })
+  })
+})
+
+describe('Show Analytics stale snapshots (RFC 0010 T11)', () => {
+  const STALE_SNAPSHOT = {
+    show_id: 'show-1', date: '2026-08-10', total_sold: '80.00',
+    total_bought: '20.00', net_sales: '60.00', items_sold_count: 2,
+    items_bought_count: 1, trades_count: 0, stale: true,
+  }
+
+  beforeEach(() => {
+    getMock.mockImplementation((path: string) => {
+      if (path === '/analytics/dates') return Promise.resolve({ dates: [] })
+      if (path === '/shows') return Promise.resolve({ shows: [SHOW] })
+      if (path === '/analytics/by-date') {
+        return Promise.resolve({ analytics: [STALE_SNAPSHOT] })
+      }
+      if (path === '/shows/show-1/analytics') return Promise.resolve(STALE_SNAPSHOT)
+      return Promise.resolve({})
+    })
+  })
+
+  it('never serves a stale snapshot silently — the list row says so', async () => {
+    await renderPage()
+    fireEvent.click(screen.getByRole('button', { name: 'Shows' }))
+
+    const name = await screen.findByText('Portland Card Show')
+    const card = name.closest('[role="button"]') as HTMLElement
+    expect(within(card).getByText(/out of date/i)).toBeInTheDocument()
+  })
+
+  it('says so on the detail view too, next to the regenerate button', async () => {
+    await renderPage()
+    fireEvent.click(screen.getByRole('button', { name: 'Shows' }))
+    fireEvent.click(await screen.findByText('Portland Card Show'))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/out of date/i)
   })
 })

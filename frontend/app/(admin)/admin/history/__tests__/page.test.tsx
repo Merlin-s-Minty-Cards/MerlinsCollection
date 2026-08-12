@@ -189,3 +189,82 @@ describe('History timeline signed amounts (RFC 0010 T9)', () => {
     expect(within(sale).getByTestId('signed-amount')).toHaveTextContent('+$40.00')
   })
 })
+
+// ---------------------------------------------------------------------------
+// RFC 0010 T11 — a void is visible on the item's own history
+// ---------------------------------------------------------------------------
+
+describe('History timeline void state (RFC 0010 T11)', () => {
+  function withEvents(events: unknown[]) {
+    getMock.mockImplementation((path: string) => {
+      if (path === '/inventory/search') return Promise.resolve({ items: [searchHit], total: 1 })
+      if (path.endsWith('/timeline')) return Promise.resolve({ item_id: 'item-1', events })
+      if (path.endsWith('/lineage')) {
+        return Promise.resolve({ lineage_id: 'item-0', chain, chain_complete: false })
+      }
+      return Promise.resolve({})
+    })
+  }
+
+  const SALE = {
+    txn_id: 't2', type: 'sale', date: '2026-08-10',
+    amount: '40.00', payment_method: 'cash',
+  }
+  const VOID_EVENT = {
+    txn_id: 't2#void', type: 'voided', date: '2026-08-11',
+    voided_txn_id: 't2', void_reason: 'Rang up the wrong card',
+    voided_at: '2026-08-11T18:30:00Z', voided_by: 'merlin',
+  }
+
+  it('renders a voided event with its reason and a formatted timestamp', async () => {
+    withEvents([SALE, VOID_EVENT])
+    await searchAndSelect()
+
+    const voided = (await screen.findByText('Voided')).closest('.vault-panel') as HTMLElement
+    expect(voided).toHaveTextContent(/Rang up the wrong card/)
+    expect(voided).toHaveTextContent(/merlin/)
+    // formatTimestamp, not the raw ISO instant.
+    expect(voided.textContent ?? '').not.toMatch(/2026-08-11T18:30:00Z/)
+  })
+
+  it('strikes through the sale the void withdrew, and offers Restore on it', async () => {
+    withEvents([SALE, VOID_EVENT])
+    await searchAndSelect()
+
+    const sale = (await screen.findByText('Sold')).closest('.vault-panel') as HTMLElement
+    expect(sale.className).toMatch(/line-through/)
+    expect(within(sale).getByRole('button', { name: /restore/i })).toBeInTheDocument()
+    expect(within(sale).queryByRole('button', { name: /^void$/i })).not.toBeInTheDocument()
+  })
+
+  it('offers Void on a live sale, and it needs a reason', async () => {
+    withEvents([SALE])
+    await searchAndSelect()
+
+    const sale = (await screen.findByText('Sold')).closest('.vault-panel') as HTMLElement
+    expect(sale.className).not.toMatch(/line-through/)
+    fireEvent.click(within(sale).getByRole('button', { name: /^void$/i }))
+
+    // Two buttons are now named "Void" — the row's and the dialog's confirm.
+    // The confirm is the last one in the document.
+    const confirm = screen.getAllByRole('button', { name: /^void$/i }).at(-1)!
+    expect(screen.getByLabelText(/reason/i)).toBeInTheDocument()
+    expect(confirm).toBeDisabled()
+  })
+
+  it('posts the void and refetches the timeline', async () => {
+    withEvents([SALE])
+    await searchAndSelect()
+
+    const sale = (await screen.findByText('Sold')).closest('.vault-panel') as HTMLElement
+    fireEvent.click(within(sale).getByRole('button', { name: /^void$/i }))
+    fireEvent.change(screen.getByLabelText(/reason/i), { target: { value: 'wrong card' } })
+    fireEvent.click(screen.getAllByRole('button', { name: /^void$/i }).at(-1)!)
+
+    await waitFor(() => {
+      expect(postMock).toHaveBeenCalledWith(
+        '/transactions/t2/void', { reason: 'wrong card' },
+      )
+    })
+  })
+})

@@ -59,6 +59,25 @@ class Transaction(BaseModel):
     consignor_payout: Decimal | None = None
     notes: str | None = None
 
+    # A void, never a delete (RFC 0010 T11). The row stays readable in the
+    # archive and on the item's timeline, and it counts toward NOTHING.
+    #
+    # Every aggregate MUST exclude a voided row through
+    # ``services.ledger.is_countable`` — see that module's docstring. A reader
+    # that inlines ``voided_at is None`` is a second definition of countability,
+    # and the failure mode is two sets of books disagreeing by exactly one sale.
+    #
+    # All three optional with a None default, so every row written before they
+    # existed still validates.
+    voided_at: datetime | None = None
+    # SERVER-stamped from the authenticated principal. A client's claim about
+    # who voided a sale is not evidence, and this is the one field in the model
+    # whose whole purpose is accountability.
+    voided_by: str | None = None
+    # Bounded like ``review_reason``, for the same reason: free text riding
+    # into a DynamoDB item with a 400 KB ceiling.
+    void_reason: str | None = Field(default=None, max_length=500)
+
 
 class ExpenseCategory(StrEnum):
     """Which expense tab a cost came from (all six share one ``Expense`` shape)."""
@@ -124,6 +143,12 @@ class ShowAnalyticsSnapshot(BaseModel):
     trades_count: int = 0
     cash_at_start: Decimal | None = None
     snapshot_generated_at: datetime | None = None
+    # A snapshot is a stored point-in-time record, so voiding a transaction
+    # behind it leaves it wrong BY CONSTRUCTION. Never silently rewrite one and
+    # never silently serve one: the void marks it stale and the UI says so
+    # until an admin regenerates it (which mints a fresh snapshot, defaulting
+    # this back to False).
+    stale: bool = False
 
 
 class DebtDirection(StrEnum):

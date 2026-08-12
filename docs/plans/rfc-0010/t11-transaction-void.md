@@ -188,9 +188,13 @@ reason; Restore is offered on a voided row only; the batch-aware confirm names t
 failed void surfaces the error and leaves the row unchanged; voided rows show as voided on the
 analytics archive too.
 
+**Paths corrected as executed** — the doc's four backend paths were all wrong (no
+`routers/admin/` or `services/` segment, the pattern T0, T15, T17 and T10 all hit), and the
+frontend command was the broken `npx vitest` form. Real commands:
+
 ```bash
-./.venv/Scripts/python.exe -m pytest backend/tests/test_transaction_void.py backend/tests/test_analytics.py backend/tests/test_sales.py backend/tests/test_dynamodb.py -q --tb=short
-cd frontend && npx vitest run "app/(admin)/admin/history" "app/(admin)/admin/analytics" --reporter=verbose
+./.venv/Scripts/python.exe -m pytest backend/tests/routers/admin/test_transaction_void.py backend/tests/routers/admin/test_analytics.py backend/tests/routers/admin/test_sales.py backend/tests/routers/admin/test_timeline.py backend/tests/services/test_dynamodb.py backend/tests/services/test_sales.py -q --tb=short
+npm test --workspace=frontend -- --run "app/(admin)/admin/history" "app/(admin)/admin/analytics" "components/admin/shared/__tests__/TransactionGroups"
 ```
 
 ## GREEN — done when
