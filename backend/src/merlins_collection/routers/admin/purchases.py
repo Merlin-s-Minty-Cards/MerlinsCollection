@@ -110,6 +110,7 @@ def _build_purchase(
     txn_date: date,
     payment_method: str,
     show_id: str | None,
+    batch_id: str | None = None,
 ) -> tuple[Any, Transaction, dict[str, Any]]:
     """Build the inventory item, transaction and timeline event for one row.
 
@@ -178,6 +179,7 @@ def _build_purchase(
         amount=buy_price,
         payment_method=payment_method,
         show_id=show_id,
+        batch_id=batch_id,
     )
     event = {
         "item_id": new_item_id, "txn_id": txn.txn_id, "type": "purchase",
@@ -416,6 +418,9 @@ def confirm_buy_session(
                 txn_date=txn_date,
                 payment_method=payment_method,
                 show_id=show_id,
+                # Every row of this batch carries the session that produced it,
+                # so a five-card buy reads as one transaction.
+                batch_id=buy_id,
             ))
         except ValueError as exc:
             # ValueError covers pydantic's ValidationError, which subclasses it.

@@ -219,3 +219,107 @@ describe('Show Analytics signed amounts (RFC 0010 T9)', () => {
     expect(within(tile).getByTestId('signed-amount')).toHaveTextContent('−$160.00')
   })
 })
+
+// ---------------------------------------------------------------------------
+// RFC 0010 T10 — one real transaction renders as one line
+// ---------------------------------------------------------------------------
+
+/** Five cards bought in ONE session — five ledger rows, one transaction. */
+const BATCH = Array.from({ length: 5 }, (_, i) => ({
+  txn_id: `txn-b${i}`,
+  type: 'purchase',
+  item_id: `item-b${i}`,
+  date: '2026-08-10',
+  amount: '40.00',
+  payment_method: 'cash',
+  batch_id: 'buy-1',
+}))
+
+/** Written before `batch_id` existed. Deliberately never backfilled. */
+const LEGACY = {
+  txn_id: 'txn-legacy',
+  type: 'sale',
+  item_id: 'item-legacy',
+  date: '2026-08-09',
+  amount: '75.00',
+  payment_method: 'venmo',
+  batch_id: null,
+}
+
+describe('Show Analytics transaction grouping (RFC 0010 T10)', () => {
+  beforeEach(() => {
+    getMock.mockImplementation((path: string) => {
+      if (path === '/analytics/dates') return Promise.resolve({ dates: ['2026-08-10'] })
+      if (path === '/analytics/daily') {
+        return Promise.resolve({
+          date: '2026-08-10',
+          total_sold: '75.00',
+          total_bought: '200.00',
+          net_sales: '-125.00',
+          items_sold_count: 1,
+          items_bought_count: 5,
+          trades_count: 0,
+          inventory_value_at_start: '5000.00',
+          sell_through_rate: null,
+        })
+      }
+      // The endpoint's own order: `(date, txn_id)` descending.
+      if (path === '/transactions') return Promise.resolve({ items: [...BATCH, LEGACY] })
+      if (path === '/shows') return Promise.resolve({ shows: [SHOW] })
+      if (path === '/analytics/by-date') return Promise.resolve({ analytics: [] })
+      return Promise.resolve({})
+    })
+  })
+
+  async function openTheDay() {
+    await renderPage()
+    const picker = document.querySelector('input[type="date"]') as HTMLInputElement
+    fireEvent.change(picker, { target: { value: '2026-08-10' } })
+    await waitFor(() => expect(screen.getAllByTestId('txn-group').length).toBeGreaterThan(0))
+  }
+
+  it('renders five rows sharing a batch_id as ONE summary row', async () => {
+    await openTheDay()
+    // Six ledger rows in, two groups out: the five-card buy and the legacy sale.
+    expect(screen.getAllByTestId('txn-group')).toHaveLength(2)
+  })
+
+  it('totals the group from its legs, signed', async () => {
+    await openTheDay()
+    const group = screen.getAllByTestId('txn-group')[0]
+    expect(within(group).getByTestId('signed-amount')).toHaveTextContent('−$200.00')
+  })
+
+  it('shows how many cards the transaction covered', async () => {
+    await openTheDay()
+    const group = screen.getAllByTestId('txn-group')[0]
+    expect(within(group).getByText(/5 cards/)).toBeInTheDocument()
+  })
+
+  it('reveals all five legs when expanded', async () => {
+    await openTheDay()
+    expect(screen.queryAllByTestId('txn-leg')).toHaveLength(0)
+
+    const group = screen.getAllByTestId('txn-group')[0]
+    fireEvent.click(within(group).getByRole('button', { expanded: false }))
+
+    expect(await screen.findAllByTestId('txn-leg')).toHaveLength(5)
+  })
+
+  it('renders a legacy row with no batch_id as its own group, with no twisty', async () => {
+    // No backfill: a (date, payment_method, type) heuristic would merge two
+    // separate cash sales on one show day into a transaction that never
+    // happened. A one-item group is a truthful rendering of what is known.
+    await openTheDay()
+    const legacy = screen.getAllByTestId('txn-group')[1]
+    expect(within(legacy).getByText(/1 card/)).toBeInTheDocument()
+    expect(within(legacy).queryByRole('button')).not.toBeInTheDocument()
+  })
+
+  it('keeps the endpoint order — grouping does not reorder the archive', async () => {
+    await openTheDay()
+    const groups = screen.getAllByTestId('txn-group')
+    expect(within(groups[0]).getByText('Aug 10, 2026')).toBeInTheDocument()
+    expect(within(groups[1]).getByText('Aug 9, 2026')).toBeInTheDocument()
+  })
+})

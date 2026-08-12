@@ -1406,3 +1406,44 @@ class TestTradeBalanceBasisMode:
             "This trade uses the retired percent-based margin split; "
             "choose a basis mode"
         )
+
+
+# ===========================================================================
+# RFC 0010 T10 — one real transaction renders as one line
+# ===========================================================================
+
+class TestTradeBatchId:
+    def test_every_leg_carries_batch_id_equal_to_the_trade_id(self, admin_client):
+        """For a trade the trade IS the transaction, so ``batch_id ==
+        trade_id`` — the grouping then works without the frontend having to
+        know trades are special."""
+        client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="20.00",
+                                     current_market_value="50.00"))
+
+        trade_id = client.post("/admin/trades", json={}, headers=_auth(token)).json()["trade_id"]
+        client.patch(f"/admin/trades/{trade_id}", json={
+            "basis_mode": "manual", "manual_basis": "20.00",
+        }, headers=_auth(token))
+        client.post(f"/admin/trades/{trade_id}/outgoing", json={
+            "item_id": "our-1", "agreed_value": "50.00",
+        }, headers=_auth(token))
+        client.post(f"/admin/trades/{trade_id}/incoming", json={
+            "name": "Their card", "agreed_value": "30.00",
+        }, headers=_auth(token))
+        client.put(f"/admin/trades/{trade_id}/cash", json={
+            "cash_components": [
+                {"direction": "they_pay", "amount": "20.00", "payment_method": "venmo"},
+            ]
+        }, headers=_auth(token))
+
+        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
+        assert resp.status_code == 200
+        # 1 outgoing sale + 1 incoming purchase + 1 cash leg.
+        assert resp.json()["transactions_created"] == 3
+
+        txns = repo.list_transactions(date(2000, 1, 1), date(2100, 1, 1))
+        assert len(txns) == 3
+        assert {t.batch_id for t in txns} == {trade_id}
+        # The pre-existing trade_id stays put; batch_id does not replace it.
+        assert {t.trade_id for t in txns} == {trade_id}

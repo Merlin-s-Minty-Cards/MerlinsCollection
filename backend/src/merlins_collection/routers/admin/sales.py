@@ -286,6 +286,7 @@ def confirm_sell_session(
             payment_method=payment_method,
             fee=fee / len(items) if fee else Decimal("0"),  # Split fee across items
             show_id=show_id,
+            batch_id=sell_id,
         )
 
         try:

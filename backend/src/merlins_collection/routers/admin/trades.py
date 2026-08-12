@@ -757,6 +757,9 @@ def confirm_trade_session(
             payment_method="trade",
             show_id=show_id,
             trade_id=trade_id,
+            # For a trade the trade IS the transaction. Stamping both means the
+            # grouping works without the frontend knowing trades are special.
+            batch_id=trade_id,
         )
         try:
             repo.record_sale(txn)
@@ -816,6 +819,9 @@ def confirm_trade_session(
             payment_method="trade",
             show_id=show_id,
             trade_id=trade_id,
+            # For a trade the trade IS the transaction. Stamping both means the
+            # grouping works without the frontend knowing trades are special.
+            batch_id=trade_id,
         )
         repo.put_transaction(txn)
         txns_created += 1
@@ -856,6 +862,7 @@ def confirm_trade_session(
                 payment_method=comp.get("payment_method", "cash"),
                 show_id=show_id,
                 trade_id=trade_id,
+                batch_id=trade_id,
                 notes=(
                     f"Cash component: {comp.get('direction')} "
                     f"via {comp.get('payment_method', 'cash')}"
@@ -882,6 +889,7 @@ def confirm_trade_session(
                 payment_method=cash.get("payment_method", "cash"),
                 show_id=show_id,
                 trade_id=trade_id,
+                batch_id=trade_id,
                 notes=f"Cash component: {cash.get('direction')}",
             )
             repo.put_transaction(cash_txn)

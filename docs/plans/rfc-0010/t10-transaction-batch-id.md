@@ -126,9 +126,14 @@ The UI should not pretend otherwise. Legacy rows simply appear as single-line gr
 12. **a row with `batch_id: null` renders as its own single group** and has no disclosure control;
 13. groups are ordered by date descending, unchanged from the endpoint's order.
 
+**Both corrected as executed.** The backend paths are wrong — those three files
+live under `backend/tests/routers/admin/`, not `backend/tests/` (the same class
+of error as T0, T15, T17, T2, T3 and T16) — and `npx vitest` fails here with
+*"Vitest failed to find the runner"*:
+
 ```bash
-./.venv/Scripts/python.exe -m pytest backend/tests/test_purchases.py backend/tests/test_sales.py backend/tests/test_trades.py -q --tb=short
-cd frontend && npx vitest run "app/(admin)/admin/analytics" --reporter=verbose
+./.venv/Scripts/python.exe -m pytest backend/tests/routers/admin/test_purchases.py backend/tests/routers/admin/test_sales.py backend/tests/routers/admin/test_trades.py -q --tb=short
+npm test --workspace=frontend -- --run "app/(admin)/admin/analytics"
 ```
 
 ## GREEN — done when

@@ -727,3 +727,80 @@ class TestConfirmNeverHalfWrites:
 
         assert resp.status_code == 422
         assert repo.list_inventory() == []
+
+
+# ===========================================================================
+# RFC 0010 T10 — one real transaction renders as one line
+# ===========================================================================
+
+class TestPurchaseBatchId:
+    """A five-card purchase is five ledger rows sharing only a date and a
+    payment method. ``batch_id`` is the key that makes them one transaction."""
+
+    def _buy_two(self, client, token):
+        buy_id = client.post(
+            "/admin/purchases", json={"payment_method": "cash"}, headers=_auth(token)
+        ).json()["buy_id"]
+        for name, price in (("Pikachu #25", "15.00"), ("Charizard #4", "80.00")):
+            client.post(f"/admin/purchases/{buy_id}/items", json={
+                "name": name, "buy_price": price, "condition": "NM",
+            }, headers=_auth(token))
+        client.post(f"/admin/purchases/{buy_id}/confirm", headers=_auth(token))
+        return buy_id
+
+    def test_confirm_stamps_every_row_with_the_buy_id(self, admin_client):
+        client, repo, token = admin_client
+        buy_id = self._buy_two(client, token)
+
+        txns = repo.list_transactions(date(2000, 1, 1), date(2100, 1, 1))
+        assert len(txns) == 2
+        assert {t.batch_id for t in txns} == {buy_id}
+
+    def test_two_sessions_produce_different_batch_ids(self, admin_client):
+        client, repo, token = admin_client
+        first = self._buy_two(client, token)
+        second = self._buy_two(client, token)
+        assert first != second
+
+        txns = repo.list_transactions(date(2000, 1, 1), date(2100, 1, 1))
+        assert len(txns) == 4
+        assert {t.batch_id for t in txns} == {first, second}
+
+    def test_batch_id_survives_the_dynamodb_round_trip(self, admin_client):
+        # These routers persist raw request JSON in places, and `_serialize` is
+        # the only thing that coerces a type DynamoDB rejects. A plain string is
+        # safe, but "it will be fine" is what the float landmine was too.
+        client, repo, token = admin_client
+        buy_id = self._buy_two(client, token)
+
+        reloaded = repo.list_transactions(date(2000, 1, 1), date(2100, 1, 1))
+        assert all(isinstance(t.batch_id, str) for t in reloaded)
+        assert all(t.batch_id == buy_id for t in reloaded)
+
+    def test_a_transaction_with_no_batch_id_still_validates(self):
+        # The backward-compatibility gate. Every historical row predates this
+        # field and is deliberately NOT backfilled.
+        from merlins_collection.models.business import Transaction
+
+        txn = Transaction.model_validate({
+            "txn_id": "txn-legacy",
+            "type": "sale",
+            "item_id": "item-1",
+            "category": "raw",
+            "date": "2026-01-01",
+            "amount": "40.00",
+            "payment_method": "cash",
+        })
+        assert txn.batch_id is None
+
+    def test_transactions_archive_exposes_batch_id(self, admin_client):
+        client, repo, token = admin_client
+        buy_id = self._buy_two(client, token)
+
+        resp = client.get("/admin/transactions", params={
+            "start": "2000-01-01", "end": "2100-01-01",
+        }, headers=_auth(token))
+        assert resp.status_code == 200
+        rows = resp.json()["items"]
+        assert len(rows) == 2
+        assert all(r["batch_id"] == buy_id for r in rows)

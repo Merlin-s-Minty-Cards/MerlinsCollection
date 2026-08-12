@@ -262,3 +262,27 @@ class TestSellSessionCancel:
 
         resp = client.post(f"/admin/sales/{sell_id}/cancel", headers=_auth(token))
         assert resp.status_code == 409
+
+
+# ===========================================================================
+# RFC 0010 T10 — one real transaction renders as one line
+# ===========================================================================
+
+class TestSaleBatchId:
+    def test_confirm_stamps_every_row_with_the_sell_id(self, admin_client):
+        client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="card-1"))
+        repo.put_inventory_item(_raw(item_id="card-2", card_id="sv1-2"))
+
+        sell_id = client.post(
+            "/admin/sales", json={"payment_method": "cash"}, headers=_auth(token)
+        ).json()["sell_id"]
+        for item_id, price in (("card-1", "45.00"), ("card-2", "30.00")):
+            client.post(f"/admin/sales/{sell_id}/items", json={
+                "item_id": item_id, "agreed_price": price,
+            }, headers=_auth(token))
+        client.post(f"/admin/sales/{sell_id}/confirm", headers=_auth(token))
+
+        txns = repo.list_transactions(date(2000, 1, 1), date(2100, 1, 1))
+        assert len(txns) == 2
+        assert {t.batch_id for t in txns} == {sell_id}

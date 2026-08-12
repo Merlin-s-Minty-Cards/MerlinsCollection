@@ -18,8 +18,7 @@ import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { formatISODate, toLocalISODate } from '@/lib/dates'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import SignedAmount from '@/components/admin/shared/SignedAmount'
-import DataTable, { type Column } from '@/components/admin/shared/DataTable'
-import StatusBadge from '@/components/admin/shared/StatusBadge'
+import TransactionGroups, { type ArchiveTransaction } from '@/components/admin/shared/TransactionGroups'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -59,17 +58,6 @@ interface DailyAnalytics {
   sell_through_rate: string | null
 }
 
-interface TransactionRecord {
-  txn_id: string
-  type: string
-  item_id: string
-  date: string
-  amount: string
-  payment_method: string
-  trade_id?: string | null
-  [key: string]: unknown
-}
-
 type Tab = 'daily' | 'shows'
 type ShowViewMode = 'list' | 'detail'
 
@@ -90,61 +78,6 @@ function getDefaultDateRange(): { start: string; end: string } {
 }
 
 // ---------------------------------------------------------------------------
-// Transaction table columns
-// ---------------------------------------------------------------------------
-
-const txnColumns: Column<TransactionRecord>[] = [
-  {
-    key: 'date',
-    label: 'Date',
-    sortable: true,
-    render: (t) => <span className="font-mono text-xs">{formatISODate(t.date)}</span>,
-  },
-  {
-    key: 'type',
-    label: 'Type',
-    sortable: true,
-    render: (t) => {
-      const style = t.type === 'sale'
-        ? 'bg-mint/15 text-mint border-mint/30'
-        : t.type === 'purchase'
-          ? 'bg-blue-400/15 text-blue-300 border-blue-400/30'
-          : undefined
-      return style ? (
-        <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-medium uppercase tracking-wider border ${style}`}>
-          {t.type}
-        </span>
-      ) : (
-        <StatusBadge status={t.type} />
-      )
-    },
-  },
-  {
-    key: 'amount',
-    label: 'Amount',
-    sortable: true,
-    className: 'text-right',
-    render: (t) => <SignedAmount value={t.amount} type={t.type} className="text-xs" />,
-  },
-  {
-    key: 'payment_method',
-    label: 'Payment Method',
-    sortable: true,
-    render: (t) => <span className="text-xs text-pine-300">{t.payment_method}</span>,
-  },
-  {
-    key: 'trade_id',
-    label: 'Trade',
-    render: (t) =>
-      t.trade_id ? (
-        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-purple-500/15 text-purple-300 border border-purple-500/30">
-          {t.trade_id.slice(0, 8)}
-        </span>
-      ) : null,
-  },
-]
-
-// ---------------------------------------------------------------------------
 // Main Page
 // ---------------------------------------------------------------------------
 
@@ -158,7 +91,7 @@ export default function AdminAnalyticsPage() {
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
   const [dailyData, setDailyData] = useState<DailyAnalytics | null>(null)
   const [loadingDaily, setLoadingDaily] = useState(false)
-  const [transactions, setTransactions] = useState<TransactionRecord[]>([])
+  const [transactions, setTransactions] = useState<ArchiveTransaction[]>([])
   const [loadingTxns, setLoadingTxns] = useState(false)
 
   // === Shows view state ===
@@ -202,7 +135,7 @@ export default function AdminAnalyticsPage() {
     try {
       const [daily, txns] = await Promise.all([
         api.get<DailyAnalytics>('/analytics/daily', { date }),
-        api.get<{ items: TransactionRecord[] }>('/transactions', { start: date, end: date }),
+        api.get<{ items: ArchiveTransaction[] }>('/transactions', { start: date, end: date }),
       ])
       setDailyData(daily)
       setTransactions(txns.items ?? [])
@@ -563,18 +496,11 @@ export default function AdminAnalyticsPage() {
                   <h2 className="text-xs font-semibold text-pine-200 uppercase tracking-wider mb-3">
                     Transaction Archive
                   </h2>
-                  {loadingTxns ? (
-                    <div className="vault-panel rounded-xl p-6 text-center text-xs text-pine-400">
-                      Loading…
-                    </div>
-                  ) : (
-                    <DataTable
-                      columns={txnColumns}
-                      data={transactions}
-                      keyField="txn_id"
-                      emptyMessage="No transactions for this date"
-                    />
-                  )}
+                  <TransactionGroups
+                    transactions={transactions}
+                    loading={loadingTxns}
+                    emptyMessage="No transactions for this date"
+                  />
                 </section>
               </>
             ) : (

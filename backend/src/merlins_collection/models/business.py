@@ -44,6 +44,18 @@ class Transaction(BaseModel):
     fee: Decimal = Decimal("0")
     show_id: str | None = None
     trade_id: str | None = None
+    # The session that produced this row: buy_id, sell_id or trade_id. Lets a
+    # five-card purchase render as ONE line instead of five unrelated ones.
+    #
+    # Optional with a None default, so every row written before this field
+    # existed still validates. Deliberately NOT backfilled: a
+    # (date, payment_method, type) heuristic cannot tell two separate cash sales
+    # on one show day from a single two-card sale, so it would fabricate
+    # transactions that never happened in the one view where being wrong costs
+    # money. Legacy rows render as single-row groups instead.
+    #
+    # No key layout change — it rides on the existing TXN#<YYYY-MM> rows.
+    batch_id: str | None = None
     consignor_payout: Decimal | None = None
     notes: str | None = None
 
