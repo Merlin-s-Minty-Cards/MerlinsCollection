@@ -21,6 +21,9 @@ import {
   type TriageReason,
 } from '@/lib/triage'
 import { CONDITION_OPTIONS, formatCondition, parseCondition } from '@/lib/constants'
+import MoneyInput from '@/components/admin/shared/MoneyInput'
+import { formatMoney, parseMoney } from '@/lib/money'
+import { conditionMultiplierOf, localToday } from '@/lib/valuation'
 
 /**
  * Triage — one place for everything that might be wrong.
@@ -39,7 +42,7 @@ import { CONDITION_OPTIONS, formatCondition, parseCondition } from '@/lib/consta
 type CatalogCard = PickerCard
 
 /** Which repair tool is open, and on which item. */
-type OpenTool = { item: TriageItem; tool: 'repoint' | 'name' } | null
+type OpenTool = { item: TriageItem; tool: 'repoint' | 'name' | 'value' } | null
 
 export default function AdminTriagePage() {
   const api = useAdminApi()
@@ -272,12 +275,28 @@ export default function AdminTriagePage() {
     {
       key: '_tools',
       label: '',
-      className: 'text-right w-64',
+      className: 'text-right w-80',
       render: (item) => (
         <div
-          className="flex items-center gap-1.5 justify-end"
+          className="flex flex-wrap items-center gap-1.5 justify-end"
           onClick={(e) => e.stopPropagation()}
         >
+          {/* The fourth repair tool, and only where it applies. Gated on the
+              SERVER's reason, not a local `!item.card_id` — T3 made
+              `services/triage.reasons_for` the authority and this is not the
+              place to open a second one. On a LINKED card the tool would be
+              actively wrong: the nightly sync owns that figure and would
+              overwrite a hand-typed one by morning. */}
+          {(item.triage_reasons ?? []).includes('missing_card_id') && (
+            <button
+              type="button"
+              onClick={() => setOpenTool({ item, tool: 'value' })}
+              className="px-2 py-1 rounded-md text-[11px] text-pine-300 border border-pine-700/60
+                         hover:text-sky-300 hover:border-sky-400/40 transition-colors"
+            >
+              Set a value by hand
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setOpenTool({ item, tool: 'name' })}
@@ -484,6 +503,24 @@ export default function AdminTriagePage() {
                 : r,
             ))
             if (predicted.length === 0) dropRow(openTool.item.item_id)
+          }}
+        />
+      )}
+
+      {openTool?.tool === 'value' && (
+        <ValueDialog
+          item={openTool.item}
+          onClose={() => setOpenTool(null)}
+          // Patch only. NO reason recompute and NO drop, unlike the three tools
+          // above: valuing a card changes none of its reasons. The card is still
+          // unlinked, so `missing_card_id` still holds, and a stored flag is a
+          // human's judgement this tool has no view on.
+          onValued={(patch) => {
+            const itemId = openTool.item.item_id
+            setOpenTool(null)
+            setItems((rows) => rows.map((r) =>
+              r.item_id === itemId ? { ...r, ...patch } : r,
+            ))
           }}
         />
       )}
@@ -813,6 +850,209 @@ function NameDialog({
           </button>
         </div>
       )}
+    </Dialog>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Repair tool 4 — set a value by hand (RFC 0010 T16)
+// ---------------------------------------------------------------------------
+
+/**
+ * The tool for a card the catalog does not carry.
+ *
+ * *Assign English name* and *Re-point* both assume a catalog card exists to
+ * point at. For a JP-exclusive print or a promo TCGdex never carried, neither
+ * applies and the row is undrainable by construction — which is exactly the
+ * owner's question. This does not build a second pricing system: it surfaces
+ * the one the codebase already has, where an unlinked item's
+ * `current_market_value` is skipped by the nightly job and therefore survives.
+ *
+ * Two things it deliberately does NOT do:
+ *
+ * - **write `card_id`.** Same rule as the name dialog. Valuing a card says
+ *   nothing about which card it is.
+ * - **clear `needs_review`.** The identity problem and the price problem are
+ *   separate, and the row's derived `missing_card_id` reason stays until the
+ *   card is actually linked. The dialog says so, or the admin reads a tool that
+ *   left the row where it was as a broken one.
+ */
+function ValueDialog({
+  item,
+  onClose,
+  onValued,
+}: {
+  item: TriageItem
+  onClose: () => void
+  onValued: (patch: Record<string, string>) => void
+}) {
+  const api = useAdminApi()
+  const [comp, setComp] = useState('')
+  const [value, setValue] = useState(
+    item.current_market_value != null ? String(item.current_market_value) : '',
+  )
+  const [sticker, setSticker] = useState(
+    item.sticker_price != null ? String(item.sticker_price) : '',
+  )
+  const [saving, setSaving] = useState(false)
+  const [failed, setFailed] = useState(false)
+
+  // The SERVER's multiplier, not a table restated in TypeScript — see
+  // `lib/valuation.ts`. `null` for a kind with no condition, which is the
+  // graded/sealed/bulk case and simply hides the helper.
+  const multiplier = conditionMultiplierOf(item)
+  const conditionLabel = item.condition
+    ? formatCondition(String(item.condition), item.condition_modifier as string | null)
+    : null
+  const compParsed = parseMoney(comp)
+  const adjusted =
+    multiplier != null && compParsed != null
+      ? Math.round(compParsed * multiplier * 100) / 100
+      : null
+
+  // `parseMoney('0')` is 0, not null — a free card is a real thing at a buy
+  // table — so every gate here tests `=== null` and never falsiness.
+  const parsedValue = parseMoney(value)
+  const stickerTyped = sticker.trim() !== ''
+  const parsedSticker = stickerTyped ? parseMoney(sticker) : null
+  const canSave = parsedValue !== null && !(stickerTyped && parsedSticker === null)
+
+  const save = async () => {
+    if (!canSave || parsedValue === null) return
+    setSaving(true)
+    setFailed(false)
+    // Provenance, in the field that already carries it: `value_note` is where
+    // `apply_condition_adjustment` records its own multiplier, and it is
+    // customer-visible by design, so it is generated rather than free text.
+    const basis =
+      adjusted !== null && conditionLabel
+        ? ` — ${formatMoney(compParsed!)} NM comp × ${conditionLabel} (${multiplier})`
+        : ''
+    const patch: Record<string, string> = {
+      current_market_value: String(parsedValue),
+      value_note: `Hand-valued ${localToday()}${basis}`,
+    }
+    if (stickerTyped && parsedSticker !== null) {
+      patch.sticker_price = String(parsedSticker)
+    }
+    try {
+      // `card_id` is not in this body and must never be.
+      await api.put(`/inventory/${item.item_id}`, patch)
+      onValued(patch)
+    } catch {
+      setFailed(true)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Dialog label="Set a value by hand" onClose={onClose}>
+      <p className="text-[11px] text-sky-300">
+        This card is not in the catalog, so no sync will ever price it. What you
+        type here is the price until someone changes it.
+      </p>
+      <p className="mt-1 text-[11px] text-pine-400">
+        Valuing: <span className="text-pine-200">{effectiveName(item)}</span>
+      </p>
+
+      {/* Trap B, made visible. The condition multiplier is baked into a LINKED
+          item's stored figure by the nightly job; nothing runs for an unlinked
+          one, so whatever is typed is used verbatim. An admin reading a $40 NM
+          comp off eBay and typing it on an MP card overprices it ~1.7×, in the
+          business's favour — the same failure the condition-pricing work exists
+          to prevent. */}
+      {multiplier != null && conditionLabel && (
+        <div className="mt-3 rounded-lg border border-pine-700/40 p-3">
+          <p className="text-[10px] uppercase tracking-wider text-pine-500 mb-2">
+            Work it out from a Near Mint comp
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="w-32">
+              <MoneyInput
+                label="Near Mint comp"
+                value={comp}
+                onChange={(raw) => setComp(raw)}
+                placeholder="0.00"
+                className="vault-field w-full rounded-lg px-2 py-1 font-mono text-xs"
+              />
+            </div>
+            {adjusted !== null && (
+              <>
+                <span className="text-[11px] text-pine-300 font-mono">
+                  {formatMoney(compParsed!)} × {conditionLabel} ({multiplier}) ={' '}
+                  {formatMoney(adjusted)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setValue(String(adjusted))}
+                  className="px-2 py-1 rounded-md text-[11px] text-mint border border-mint/30
+                             hover:bg-mint/10"
+                >
+                  Use this figure
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <div>
+          <label className="block text-[10px] uppercase tracking-wider text-pine-500 mb-1">
+            Market value
+          </label>
+          <MoneyInput
+            label="Market value"
+            value={value}
+            onChange={(raw) => setValue(raw)}
+            placeholder="0.00"
+            className="vault-field w-full rounded-lg px-2 py-1 font-mono text-xs"
+          />
+        </div>
+        <div>
+          <label className="block text-[10px] uppercase tracking-wider text-pine-500 mb-1">
+            Sticker price (optional)
+          </label>
+          <MoneyInput
+            label="Sticker price"
+            value={sticker}
+            onChange={(raw) => setSticker(raw)}
+            placeholder="0.00"
+            className="vault-field w-full rounded-lg px-2 py-1 font-mono text-xs"
+          />
+        </div>
+      </div>
+
+      <p className="mt-3 text-[11px] text-pine-400">
+        This does not clear the review flag. The card is still unlinked, so it
+        stays in this queue until it is pointed at a catalog card.
+      </p>
+
+      {failed && (
+        <p className="mt-2 text-[11px] text-red-400">
+          That did not save. The card still has its previous value.
+        </p>
+      )}
+
+      <div className="mt-4 flex justify-end gap-2">
+        <button
+          type="button"
+          onClick={onClose}
+          className="px-3 py-1.5 rounded-md text-[11px] text-pine-400 hover:text-pine-200"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          onClick={save}
+          disabled={saving || !canSave}
+          className="px-3 py-1.5 rounded-md text-[11px] font-medium bg-mint/15
+                     text-mint border border-mint/30 hover:bg-mint/25 disabled:opacity-50"
+        >
+          Save value
+        </button>
+      </div>
     </Dialog>
   )
 }

@@ -424,7 +424,8 @@ def market_coverage(repo: InventoryRepository = Depends(get_repo)) -> dict[str, 
     Makes the pricing gap visible: the pipeline can be fully wired and still
     leave every item unpriced if it has never run, or if items don't resolve
     to a catalog card. ``unmatched_sample`` is capped at 50 to keep the
-    payload bounded.
+    payload bounded, and it samples ``items_unpriced`` — a hand-valued card is
+    not in it, because there is nothing left for anyone to do about it.
 
     ``catalog_cards_brief`` and ``catalog_cards_stale`` are DIFFERENT facts and
     are deliberately not summed: a ``brief`` row has never had a price fetched
@@ -440,6 +441,22 @@ def market_coverage(repo: InventoryRepository = Depends(get_repo)) -> dict[str, 
     items_with_market_value = sum(
         1 for i in items if i.current_market_value is not None
     )
+    # RFC 0010 T16 — three categories, and they are a PARTITION of the table:
+    # market-priced + hand-valued + unpriced == total_items, by construction
+    # rather than by three independent sums that happen to agree.
+    #
+    # A hand-valued item is one that carries a figure with no catalog link, which
+    # is exactly the set ``refresh_inventory_market_values`` skips. It is not a
+    # coverage gap — nothing will ever sync it, so the gap can never be closed —
+    # and it is not market coverage either, because no provider stands behind the
+    # number. Folding it into either one answers neither question, and a worklist
+    # that keeps nagging about finished work stops being read.
+    items_hand_valued = sum(
+        1 for i in items
+        if i.current_market_value is not None and not getattr(i, "card_id", None)
+    )
+    items_market_priced = items_with_market_value - items_hand_valued
+    items_unpriced = total_items - items_with_market_value
 
     cards = _scan_catalog(repo)
     catalog_cards = len(cards)
@@ -474,6 +491,9 @@ def market_coverage(repo: InventoryRepository = Depends(get_repo)) -> dict[str, 
         "total_items": total_items,
         "items_with_card_id": items_with_card_id,
         "items_with_market_value": items_with_market_value,
+        "items_market_priced": items_market_priced,
+        "items_hand_valued": items_hand_valued,
+        "items_unpriced": items_unpriced,
         "catalog_cards": catalog_cards,
         "catalog_cards_with_prices": catalog_cards_with_prices,
         "catalog_cards_brief": catalog_cards_brief,

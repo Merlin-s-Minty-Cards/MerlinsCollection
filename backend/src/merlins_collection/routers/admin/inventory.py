@@ -29,7 +29,10 @@ from merlins_collection.models.inventory import (
     normalize_condition,
 )
 from merlins_collection.services.card_text import admin_item_name
-from merlins_collection.services.condition_pricing import apply_condition_adjustment
+from merlins_collection.services.condition_pricing import (
+    apply_condition_adjustment,
+    condition_multiplier,
+)
 from merlins_collection.services.dynamodb import InventoryRepository
 from merlins_collection.services.locations import validate_location
 from merlins_collection.services.triage import (
@@ -1293,6 +1296,21 @@ def _serialize_item(item: InventoryItem) -> dict[str, Any]:
     """Serialize an inventory item to dict with all fields (admin view).
 
     Converts Decimal/date/enum to JSON-safe types.
+
+    ``condition_multiplier`` is DERIVED, not stored — the figure
+    ``services/condition_pricing.py`` would scale a Near Mint price by for this
+    card, or ``None`` for a kind that has no condition (graded, sealed, bulk).
+    It rides on the row so the hand-valuation helper (RFC 0010 T16) can show an
+    admin the arithmetic without a third copy of the multiplier table: the
+    authority is Python and there is already one duplicate in
+    ``mcp-server/src/condition-pricing.ts``, which is one more than the codebase
+    should be maintaining.
     """
     data = item.model_dump(mode="json")
+    condition = getattr(item, "condition", None)
+    data["condition_multiplier"] = (
+        str(condition_multiplier(condition, getattr(item, "condition_modifier", None)))
+        if condition is not None
+        else None
+    )
     return data

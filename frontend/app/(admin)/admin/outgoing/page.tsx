@@ -15,6 +15,8 @@ import { parseMoney } from '@/lib/money'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
 import { patchRow } from '@/lib/item-update'
 import TriageRowAction from '@/components/admin/shared/TriageRowAction'
+import HandValuedBadge from '@/components/admin/shared/HandValuedBadge'
+import { isHandValued } from '@/lib/valuation'
 import type { TriageItem } from '@/lib/triage'
 import { adminItemName } from '@/lib/admin-item-name'
 
@@ -310,6 +312,12 @@ export default function AdminPrepQueuePage() {
               {item.set_name}
             </span>
           )}
+          {/* RFC 0010 T16. This is the sticker screen, and an unlinked row has
+              no market figure to price against — and never will, because no
+              sync reaches it. Left unsaid, an empty Market cell reads as "the
+              price hasn't come through yet", which is the one wrong conclusion
+              available here. */}
+          {isHandValued(item) && <HandValuedBadge />}
         </div>
       ),
     },

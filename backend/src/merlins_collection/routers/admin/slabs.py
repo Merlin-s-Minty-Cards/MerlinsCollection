@@ -191,6 +191,17 @@ def _slab_row(item, repo: InventoryRepository, price_cache: dict,
     card in T0's sample lacked the ``externalCatalogId`` the join needs), so
     dropping these would drop most of the JP shelf from the one page that exists
     to show it.
+
+    RFC 0010 T16: when there is no graded price row, the item's own
+    ``current_market_value`` is the value, reported with source ``hand_set``.
+    Graded prices are keyed ``CARD#<card_id>`` / ``GRADEDPRICE#...``, so a slab
+    with no price row has nowhere else a figure could live — which is exactly
+    why ``PUT /admin/slabs/{id}/price/pin`` 404s for one. The fallback keys on
+    the absence of the ROW, not on ``card_id``: a linked slab no provider covers
+    is in the identical position, and anything it carries was typed by a human.
+    Reporting it as ``manual`` or ``provider`` would claim a price row it does
+    not have; leaving it null would keep a card somebody has already valued on
+    the ``priced=false`` worklist for good.
     """
     price_row = None
     if item.card_id:
@@ -202,6 +213,10 @@ def _slab_row(item, repo: InventoryRepository, price_cache: dict,
         price_row = price_cache[key]
 
     market_value = price_row.get("market_value") if price_row else None
+    price_source = price_row.get("source") if price_row else None
+    if market_value is None and item.current_market_value is not None:
+        market_value = item.current_market_value
+        price_source = "hand_set"
 
     return {
         "item_id": item.item_id,
@@ -220,7 +235,7 @@ def _slab_row(item, repo: InventoryRepository, price_cache: dict,
         # on the admin surface is a string.
         "market_value": str(market_value) if market_value is not None else None,
         "value_as_of": price_row.get("updated_at") if price_row else None,
-        "price_source": price_row.get("source") if price_row else None,
+        "price_source": price_source,
         "value_confidence": price_row.get("confidence") if price_row else None,
         "price_source_id": item.price_source_id,
         # The list is where an operator decides what to protect, so it has to

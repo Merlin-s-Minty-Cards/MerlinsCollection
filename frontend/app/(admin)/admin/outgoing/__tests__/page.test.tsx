@@ -476,3 +476,50 @@ describe('AdminPrepQueuePage — location filter and sorting (RFC 0010 T7)', () 
     expect(searchCalls()).toHaveLength(callsBeforePricing)
   })
 })
+
+// ===========================================================================
+// RFC 0010 T16 — a card the catalog does not carry, on the sticker screen
+// ===========================================================================
+//
+// Prep Queue is where a shelf gets priced, and after T7 it can be narrowed to
+// one location. An unlinked row has no market figure to compare a sticker
+// against and never will — no sync reaches it — so the row has to say so.
+// Silence here reads as "the price just hasn't synced yet", which is the one
+// wrong conclusion available.
+
+describe('AdminPrepQueuePage hand-valued rows', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    putMock.mockReset()
+    putMock.mockResolvedValue({})
+    getMock.mockImplementation((path: string) => {
+      if (path === '/inventory/search') {
+        return Promise.resolve({
+          items: [
+            {
+              item_id: 'linked-1', card_id: 'sv1-25', display_name: 'Pikachu',
+              status: 'available', location: 'glass',
+              current_market_value: '10.00',
+            },
+            {
+              item_id: 'unlinked-1', card_id: null, display_name: 'Mega Brave promo',
+              status: 'available', location: 'glass',
+              current_market_value: '23.20',
+            },
+          ],
+        })
+      }
+      if (path === '/locations') return Promise.resolve([{ value: 'glass', label: 'Glass' }])
+      return Promise.resolve({})
+    })
+  })
+
+  it('marks a row with no catalog link as hand-valued, and leaves a linked one alone', async () => {
+    render(<AdminPrepQueuePage />)
+    await act(async () => { await Promise.resolve() })
+
+    const rowFor = (name: RegExp) => screen.getByText(name).closest('tr')!
+    expect(within(rowFor(/Mega Brave promo/)).getByText(/hand-valued/i)).toBeInTheDocument()
+    expect(within(rowFor(/Pikachu/)).queryByText(/hand-valued/i)).not.toBeInTheDocument()
+  })
+})

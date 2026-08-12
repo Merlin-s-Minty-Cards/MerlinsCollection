@@ -74,6 +74,30 @@ describe('getCoverageBannerState', () => {
     expect(state.showUnmatched).toBe(false)
   })
 
+  // -- RFC 0010 T16: hand-valued is a third answer -------------------------
+  //
+  // "80/100 items priced" is one number meaning two things: some of those 80
+  // are provider figures a sync maintains, and some are hand-typed values on
+  // cards the catalog does not carry, which no sync will ever touch. The gap is
+  // not 20 cards of pending work if half of them can never be closed.
+
+  it('breaks the priced items into market-derived and hand-valued', () => {
+    const state = getCoverageBannerState({
+      ...base,
+      items_market_priced: 70,
+      items_hand_valued: 10,
+      items_unpriced: 20,
+    })
+    expect(state.valuation).toBe('70 market-priced · 10 hand-valued · 20 unpriced')
+  })
+
+  it('says nothing at all when the API did not send the breakdown', () => {
+    // Same rule as T17's cycle line: a response from before this change does not
+    // carry the keys, and defaulting them to 0 would render "0 hand-valued" —
+    // a confident claim on an API that made none.
+    expect(getCoverageBannerState(base).valuation).toBeNull()
+  })
+
   // RFC 0010 T17 — the weekly cycle promises every catalog card is re-priced by
   // Friday. That needs a number the owner can check, not a cadence that should
   // produce it, and the two counts are different facts: `brief` has never been

@@ -6,23 +6,24 @@
 gitignored (`.gitignore:60`), so it is local-only and your edits to it will never appear in
 `git status` or reach anyone else. Record all RFC 0010 status **in this file**.
 
-**Last updated:** 2026-08-11 (T7 DONE — the Prep Queue filters and sorts by location)
+**Last updated:** 2026-08-11 (T16 DONE — a card with no catalog match can be valued by hand)
 **Branch:** `Polishing-For-Deployment`
 **RFC:** [`docs/rfcs/0010-admin-round8-ledger-corrections-and-slab-manual-only.md`](../../rfcs/0010-admin-round8-ledger-corrections-and-slab-manual-only.md)
 **Task index:** [`README.md`](README.md)
 **Source of the requests:** the owner's `The plan.pdf` (12 items) plus two review comments
 on 2026-08-10 — the money-input report and the PSA/scanner reversal.
 
-## ✅ T0, T1, T2, T3, T4, T5, T6, T7, T15 AND T17 ARE DONE — start at T16
+## ✅ T0, T1, T2, T3, T4, T5, T6, T7, T15, T16 AND T17 ARE DONE — start at T8
 
 T15 gave all five catalog pickers one shared row carrying name, image AND price;
 T17 built the job that fills those prices in; T2 stopped an admin edit forking a
 consignor into two rows; T3 made the server the authority on why a row is in
 Triage; T4 made that queue searchable; T5 made an edit in the detail modal show
 up at once and stopped the list jumping; T6 made that same modal survive zoom;
-T7 let the Prep Queue narrow to one location. **Start at T16**, which is what
-T7's task doc names as the next link in the chain — not T8, despite the row
-order in the table below.
+T7 let the Prep Queue narrow to one location; T16 gave a card the catalog does
+not carry a way to be valued, and stopped two surfaces misreporting it.
+**Start at T8**, which is what T16's task doc names as the next link in the
+chain, and which is now also the next row in the table below.
 
 ## 📉 T3 RE-MEASURED THE QUEUE AND THE TASK DOC'S PREMISE IS GONE
 
@@ -102,7 +103,7 @@ naming the row. **Start at T1.**
 | T13 | Grouped navigation | **NOT STARTED** | — | Every route path unchanged |
 | T15 | Card picker: image + price | **DONE** | `b322e03` | One shared `CardPickerRow` with **five** callers (Buy, Trade, Triage ×2, Slabs, Market). Backend: `market_price_and_finish()` in `models/inventory.py` is now the walk and `_market_price` delegates to it — **do not add a second lookup to get a finish**. `display_price` is a **string** (`"12.34"`), `null` when absent. The component is **generic in the card type**, so callers keep their own `CatalogCard`; each one now `extends PickerCard`. Thumb is `TABLE_THUMB_SIZE` (`xs`), **not** the `sm` the task doc named — see Decisions. Fixed on the way: Market's row was a `<button>` nested inside a `<button>` |
 | T17 | Weekly catalog price cycle | **DONE** | `e233fc4` | Shipped as specified, plus one shape change: `refresh_catalog_prices` takes an optional **`card_ids`** so the reprice script selects ONCE per run and feeds it chunks — without it a permanently-404 card leads every chunk (see Decisions). The extraction is **two** helpers, not one: `_refresh_one_card` (the per-card spec the doc named) inside a shared `_refresh_cards` loop, which took `_refresh_held_prices` from 60 lines to a 6-line delegate. New config knob `CATALOG_REFRESH_CARDS_PER_NIGHT` (5500). Summary keys are all `catalog_`-prefixed and **always present**, including `catalog_skipped: None`. Coverage adds `catalog_cards_brief` / `catalog_cards_stale` / `catalog_stale_threshold_days` (8), rendered in the Market banner. **Read the first follow-up row before trusting the exit codes** — production runs `scheduled_sync.py`, not `daily_sync.py` |
-| T16 | Unmatched-card valuation | **NOT STARTED** | — | Answers "how do we price a card with no catalog match". Mostly surfacing a capability that already works: the nightly job skips unlinked items |
+| T16 | Unmatched-card valuation | **DONE** | `PENDING` | The premise held: three of the twelve RED tests **passed before any change** and are kept as named guards — the nightly job really does skip an unlinked item. New: `frontend/lib/valuation.ts` (`isHandValued`, `conditionMultiplierOf`, `localToday`) and `HandValuedBadge`, mounted on Prep Queue rows and in `CardDetailModal`'s **Pricing** section. Triage gains a fourth repair tool, `ValueDialog`, gated on the SERVER's `missing_card_id` reason. **The multiplier is served, not mirrored** — `_serialize_item` now emits `condition_multiplier` (see Decisions); do not add a `frontend/lib` copy of the table. `GET /admin/slabs` reports `price_source: "hand_set"` when there is no price row, and coverage gains `items_market_priced` / `items_hand_valued` / `items_unpriced`, a **partition** of `total_items` |
 | T14 | Docs + ops | **NOT STARTED** | — | RFC 0009 T2/T5 → WON'T DO. Note the two CLAUDE.md rules added during planning (card images, archiving) are already in place — do not re-add them |
 | T-FINAL | Verification + PR | **NOT STARTED** | — | `next build` is not optional |
 
@@ -201,6 +202,15 @@ that is the mistake that made RFC 0009's T-FINAL sign-off stale.
 | 2026-08-11 | T7 | **The header counts were already correct; only the LABELS were missing.** Both `In queue` and `Est. value` are derived from `items`, which is the server-filtered set, so the doc's "reflect the filtered set" requirement held before any change | Recorded because it changes what that RED test actually gates. The honest new behaviour is the scope suffix — `In queue (Glass)` / `Est. value (Glass)` — and the test's count assertions passed before the change, dying only on the missing `<select>`. Both cards are labelled, not just the count: an unqualified `$10.00` beside a scoped `1` is the same misread through a different card |
 | 2026-08-11 | T7 | **One of my nine RED tests had to be re-scoped AFTER green and re-proven RED** — `getByText('$10.00')` matched both the Est. value card and the surviving row's Market cell once the filter narrowed to one item | Third time in this RFC (T5's row-count tests, T6's `Notes` collision): a test written against the *unbuilt* UI can pick a selector that only becomes ambiguous once the UI exists. Fixed by scoping each figure to its own summary panel, then re-run against a `git checkout`-reverted `page.tsx` to confirm it still fails — a test rewritten after GREEN proves nothing until it has been shown RED. **The scoped assertions are also the ones that survive** if a future row happens to be worth $35.00 |
 | 2026-08-11 | T7 | **The doc's run command was the broken `npx vitest` form again** (T0, T15, T17, T2, T3, T4, T5 — T6 was the one exception) — corrected in the task doc itself. Its file paths were right | Eight of the nine executed docs. The correction-in-the-doc practice T2 started is what stops the next reader re-hitting it; correcting only this file has demonstrably never worked |
+| 2026-08-11 | T16 | **The condition multiplier is SERVED, not mirrored: `_serialize_item` now emits `condition_multiplier` on every admin row** (`"0.58"`, `null` for a kind with no condition). No table was added to `frontend/lib` | The task doc says both *"add the mirror"* and, in its Do-not list, *"do not hardcode a second copy of the condition multiplier table"* — those conflict, and the second is the one worth keeping. `services/condition_pricing.py` is the authority and it already has one duplicate (`mcp-server/src/condition-pricing.ts`, whose own docstring calls it "a known seam"); a `frontend/lib` copy would be the third place a re-tuned tier has to be changed in step. The dialog needs the number live as the admin types, so a round-trip per keystroke is out — but the number is a property of the ROW, and the row is already being fetched. `lib/valuation.ts`'s `conditionMultiplierOf` just reads it |
+| 2026-08-11 | T16 | **Three of the twelve RED tests PASSED before any change**, and are kept as named guards rather than dressed up as new work — the two `refresh_inventory_market_values` invariants and the `PUT` accepting a hand-set value | This is the task doc's own premise (*"it already works, and nothing tells you so"*) verified rather than assumed, and the doc asks for the first by name: *"the invariant everything else rests on. Name the test for it"*. Recorded because the RED gate exists to catch a green test against unfixed code, and the honest answer here is that 3 of 12 were exactly that **by design**. The 9 that failed are the whole of the actual work. Same call as T15's 4th backend test and T2's four |
+| 2026-08-11 | T16 | **A slab's `hand_set` source keys on the absence of a PRICE ROW, not on `card_id`** | The doc frames it as an unlinked-slab problem, but a *linked* slab that no provider covers is in the identical position: `get_graded_price_row` returns nothing, so any figure the item carries was typed by a human. Gating on `card_id` would have reported that case as unpriced forever while the value sat on the row. Keying on the row also makes the rule read as what it is — "there is no provider figure, so this one is yours" — and it cannot disagree with `PUT /admin/slabs/{id}/price/pin`, which 404s for exactly the same reason |
+| 2026-08-11 | T16 | **`isHandValued` is `!card_id` alone — NOT the doc's "has a value AND no `card_id`"** | The row that most needs the marker is the one that is **still blank**: on Prep Queue an empty Market cell with no explanation reads as *"the price hasn't synced yet"*, and waiting is the one wrong response available. Keyed on the link alone it matches `refresh_inventory_market_values`' skip condition exactly (`kind not in (raw, graded) or card_id is None`), which is what makes the marker true rather than merely plausible — and it correctly covers sealed and bulk, whose values have always been hand-set |
+| 2026-08-11 | T16 | **The coverage split is computed as a PARTITION (`market_priced = with_value − hand_valued`, `unpriced = total − with_value`), not as three independent sums** | The doc's requirement is that the three sum to the total, and three separate `sum(...)` comprehensions satisfy that only until somebody edits one predicate. Deriving two of them makes the invariant structural — the test asserts the sum, and the code cannot fail it. `unmatched_sample` now samples `items_unpriced`, so a hand-valued card is not in it: there is nothing left for anyone to do about it |
+| 2026-08-11 | T16 | **The `/admin/market` panel renders the split, though the doc's RED list is backend-only** — as `70 market-priced · 10 hand-valued · 20 unpriced`, with the three fields **optional** and the line absent (not zeroed) when the API did not send them | Straight repeat of T17's call: its Design section says *"report manually-valued items as a third category"* on that page, and a number no panel shows is not auditable. Optional for T17's reason too — a pre-T16 response carries no keys, and defaulting to 0 would render *"0 hand-valued"*, a confident claim the API never made |
+| 2026-08-11 | T16 | **The dialog writes a GENERATED `value_note`, never free text** — `Hand-valued 2026-08-11 — $40.00 NM comp × MP (0.58)` | `value_note` is in `_CUSTOMER_ITEM_FIELDS`: it is customer-visible by design (Phase 19), which is what makes it the right home for provenance and the wrong home for a text box. Generating it also means the note and the number cannot disagree. The date is built from `getFullYear/getMonth/getDate`, **not** `toISOString().split('T')[0]` — that is the UTC-date bug **T8** is about to fix everywhere, and T16 was not going to add a fresh instance of it on the way past |
+| 2026-08-11 | T16 | **The tool is gated on the server's `triage_reasons` including `missing_card_id`, not on a local `!item.card_id`** | T3 made `services/triage.reasons_for` the authority on why a row is in the queue and this is not the place to open a second one. It also matters that the tool is **absent** on a linked card rather than merely useless there: the nightly sync owns that figure, so a value typed on a linked card is gone by morning, and an affordance that silently discards work is worse than no affordance |
+| 2026-08-11 | T16 | **The doc's narrow-selection command matched NO coverage test** — `-k "catalog_sync or slab or market_coverage"` never matches `TestAdminMarketCoverage`, and the frontend half was the broken `npx vitest` form again. Both corrected **in the task doc itself** | Ninth of the ten executed docs (T6 remains the one exception), and a new variety: previous errors were wrong *paths*, this one is a `-k` expression that collects and passes while testing none of what the task added. Worse than a wrong path, which at least fails loudly |
 | 2026-08-10 | T0 | **The doc's file paths were wrong in two places**, corrected as executed: the backend tests are `backend/tests/routers/admin/test_purchases.py`, and the frontend run command must be the `npm test --workspace=frontend` form, not `npx vitest` | `npx vitest` fails with "Vitest failed to find the runner" — already noted in the baseline section of this file, but the task doc contradicted it. Later task docs copy this command; check it before trusting it |
 
 *(rows below are PLANNING decisions, recorded before execution because a later task would
@@ -394,6 +404,30 @@ accepted.** `react-hooks/exhaustive-deps` reports at the `useEffect(` line, not
 at the dependency array — an `eslint-disable-next-line` placed above `}, [...])`
 suppresses nothing. The baseline for this file is **one** `<img>` warning; a
 second one is a regression, not noise.
+
+**Re-measured after T16** — a fresh run, not a row above carried forward:
+
+| Suite | Count | Time | State |
+|---|---|---|---|
+| Backend | **1602 passed / 0 failed** | 2m15s | green — 1595 + 7 new T16 tests |
+| Frontend | **734 passed / 0 failed** (82 files) | ~29s | green — 715 + 9 new T16 tests + 10 landed with T7 |
+| Narrow T16 selection (4 backend files) | 245 passed / 0 failed | ~29s | green — **238 of them pre-existing**, which is what proves a derived serializer field, a slab fallback and a coverage split disturbed none of T15's price walk, T17's cycle counts or RFC 0009's slab list |
+| Narrow T16 selection (4 frontend files) | 128 passed / 0 failed | ~11s | green — 119 of them pre-existing |
+| `ruff check backend/src` | — | ~3s | clean |
+| `npm run lint --workspace=frontend` | — | ~5s | clean (the one pre-existing `<img>` warning in `CardDetailModal`, and only that one) |
+| `npm run build --workspace=frontend` | — | ~40s | exit 0 |
+
+MCP was not re-run: T16 touched no MCP file. Note that `mcp-server/src/condition-pricing.ts`
+is *referenced* by this task's reasoning — it is the duplicate that made a third
+frontend copy unacceptable — but it is unchanged and its multipliers did not move.
+
+**Not verified here, and it needs the owner: T16's manual check.** Take a real
+card that is not in the catalog. From Triage, hand-value it with an NM comp and
+the condition helper, then confirm it shows that price on `/inventory` as a
+customer, that it can be sold through `/admin/sell`, that its sticker can be set
+from Prep Queue, and — the whole point — **that the value is still there after
+`POST /admin/market/sync`**. The suite pins the invariant against moto; only a
+live run pins it against the real nightly job and real data.
 
 **Not verified here, and it needs the owner: T6's manual check IS the acceptance
 criterion, not the suite.** jsdom does no layout — `getBoundingClientRect()` is

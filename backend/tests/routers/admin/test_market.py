@@ -419,6 +419,57 @@ class TestAdminMarketCoverage:
         assert data["total_items"] == 0
         assert data["item_coverage_pct"] == "0"
 
+    # -- RFC 0010 T16: hand-valued is a THIRD answer, not a rounding error --
+    #
+    # "What still needs a price?" and "how much of this is market-derived?" are
+    # two questions, and folding a hand-typed value into either one answers
+    # neither. A hand-valued card is not a coverage gap — nothing will ever sync
+    # it, so it can never be closed — and it is not market coverage either,
+    # because no provider stands behind the number.
+
+    def test_coverage_reports_hand_valued_items_as_their_own_category(
+        self, admin_client
+    ):
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([
+            _catalog_card(
+                card_id="en:sv1-1",
+                prices={"holofoil": FinishPrice(market=Decimal("10.00"),
+                                                source="tcgplayer")},
+            ),
+        ])
+        # Linked and priced: real, market-derived coverage.
+        repo.put_inventory_item(RawInventoryItem(
+            card_id="en:sv1-1", cost_basis=Decimal("4"),
+            acquired_at=date(2026, 1, 1), finish="holofoil",
+            condition=Condition.NM, current_market_value=Decimal("10.00"),
+        ))
+        # Unlinked but valued by hand: priced, and permanently un-syncable.
+        repo.put_inventory_item(RawInventoryItem(
+            card_id=None, cost_basis=Decimal("4"),
+            acquired_at=date(2026, 1, 1), finish="holofoil",
+            condition=Condition.MP, current_market_value=Decimal("23.20"),
+        ))
+        # Neither: the only row that genuinely still needs work.
+        repo.put_inventory_item(SealedInventoryItem(
+            product_name="Booster Box",
+            product_type=SealedProductType.BOOSTER_BOX,
+            cost_basis=Decimal("100"), acquired_at=date(2026, 1, 1),
+        ))
+
+        data = client.get("/admin/market/coverage", headers=_auth(token)).json()
+
+        assert data["items_market_priced"] == 1
+        assert data["items_hand_valued"] == 1
+        assert data["items_unpriced"] == 1
+        # The three ARE the whole population — a partition, not three overlapping
+        # counts that happen to look right on this fixture.
+        assert (
+            data["items_market_priced"]
+            + data["items_hand_valued"]
+            + data["items_unpriced"]
+        ) == data["total_items"]
+
     # -- RFC 0010 T17: the weekly cycle's promise, made auditable --------
     #
     # "Every catalog card re-priced by Friday" needs a number that can be

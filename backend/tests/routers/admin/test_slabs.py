@@ -218,6 +218,48 @@ class TestSlabList:
         rows = client.get("/admin/slabs?priced=true", headers=_auth(token)).json()["items"]
         assert [r["item_id"] for r in rows] == [priced.item_id]
 
+    # -- RFC 0010 T16: a slab the catalog does not carry is still valuable ---
+    #
+    # Graded prices live in ``CARD#<card_id>`` / ``GRADEDPRICE#...`` rows, so an
+    # unlinked slab has NO price row it could ever occupy — which is why
+    # ``PUT /admin/slabs/{id}/price/pin`` 404s for one. The only home a value has
+    # is the item's own ``current_market_value``. Once a human has typed one, the
+    # slab IS priced, and leaving it on the ``priced=false`` worklist forever is
+    # the list nagging about work that is already done.
+
+    def test_an_unlinked_slab_with_a_hand_set_value_is_priced_and_says_so(
+        self, admin_client
+    ):
+        client, repo, token = admin_client
+        repo.put_inventory_item(_graded(
+            cert_number="10000020", card_id=None,
+            current_market_value=Decimal("450"),
+        ))
+
+        row = client.get("/admin/slabs", headers=_auth(token)).json()["items"][0]
+        assert Decimal(row["market_value"]) == Decimal("450")
+        # Extends the existing `manual` / `provider` vocabulary rather than
+        # inventing a parallel one — and never claims a provider it never had.
+        assert row["price_source"] == "hand_set"
+        assert row["value_as_of"] is None
+
+    def test_a_hand_valued_slab_leaves_the_unpriced_worklist(self, admin_client):
+        client, repo, token = admin_client
+        hand_valued = _graded(cert_number="10000021", card_id=None,
+                              current_market_value=Decimal("450"))
+        still_unpriced = _graded(cert_number="10000022", card_id=None,
+                                 current_market_value=None)
+        repo.put_inventory_item(hand_valued)
+        repo.put_inventory_item(still_unpriced)
+
+        unpriced = client.get("/admin/slabs?priced=false",
+                              headers=_auth(token)).json()["items"]
+        assert [r["item_id"] for r in unpriced] == [still_unpriced.item_id]
+
+        priced = client.get("/admin/slabs?priced=true",
+                            headers=_auth(token)).json()["items"]
+        assert [r["item_id"] for r in priced] == [hand_valued.item_id]
+
     def test_company_and_grade_filter_together(self, admin_client):
         """RED 14."""
         client, repo, token = admin_client

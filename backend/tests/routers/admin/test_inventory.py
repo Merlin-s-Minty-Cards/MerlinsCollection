@@ -1567,3 +1567,73 @@ class TestAdminRefreshPrices:
         assert resp.status_code == 200
         assert resp.json()["updated"] == 0
         assert repo.get_inventory_item("slab-1").current_market_value == Decimal("500.00")
+
+
+# ===========================================================================
+# RFC 0010 T16 — valuing a card the catalog does not carry
+# ===========================================================================
+
+class TestAdminHandValuation:
+    """A card with no catalog match still needs a price, and a way to type it.
+
+    The nightly denormalizer skips an unlinked item (see
+    ``tests/services/test_catalog_sync.py``), so the ordinary partial update IS
+    the hand-valuation write path — there is no second endpoint and there must
+    not be one.
+    """
+
+    def test_put_accepts_a_hand_set_value_and_note_on_an_unlinked_item(
+        self, admin_client
+    ):
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(
+            item_id="unlinked-1", card_id=None, condition=Condition.MP,
+            current_market_value=None,
+        ))
+
+        resp = client.put(
+            "/admin/inventory/unlinked-1",
+            json={
+                "current_market_value": "23.20",
+                "value_note": "Hand-valued 2026-08-11 - NM comp $40.00 x MP (0.58)",
+            },
+            headers=_auth_header(admin_token),
+        )
+
+        assert resp.status_code == 200
+        stored = repo.get_inventory_item("unlinked-1")
+        assert stored.current_market_value == Decimal("23.20")
+        assert "Hand-valued" in stored.value_note
+        # The one rule that must not be broken: valuing never links the card.
+        assert stored.card_id is None
+
+    def test_a_raw_row_carries_the_condition_multiplier_the_server_computed(
+        self, admin_client
+    ):
+        """The hand-valuation helper needs the multiplier, not a copy of the table.
+
+        ``services/condition_pricing.py`` is the authority and it already has one
+        duplicate (``mcp-server/src/condition-pricing.ts``). A third copy in
+        ``frontend/lib`` is what the task doc's "do not hardcode a second copy of
+        the condition multiplier table" rules out, so the number rides on the row.
+        """
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(
+            item_id="mp-1", card_id=None, condition=Condition.MP,
+        ))
+        repo.put_inventory_item(_raw(
+            item_id="lp-plus-1", card_id=None, condition=Condition.LP,
+            condition_modifier=ConditionModifier.PLUS,
+        ))
+        # A kind with no condition at all must not invent one.
+        repo.put_inventory_item(_sealed(item_id="sealed-1"))
+
+        rows = client.get(
+            "/admin/inventory/search", headers=_auth_header(admin_token)
+        ).json()["items"]
+        by_id = {r["item_id"]: r for r in rows}
+
+        assert Decimal(by_id["mp-1"]["condition_multiplier"]) == Decimal("0.58")
+        # LP+ is the midpoint of LP (0.82) and NM (1.00).
+        assert Decimal(by_id["lp-plus-1"]["condition_multiplier"]) == Decimal("0.91")
+        assert by_id["sealed-1"]["condition_multiplier"] is None

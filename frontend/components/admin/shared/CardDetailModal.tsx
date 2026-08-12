@@ -9,6 +9,8 @@ import { useCardImages } from '@/lib/use-card-images'
 import { useLocations } from '@/lib/use-locations'
 import PriceDisplay from './PriceDisplay'
 import PriceChart from './PriceChart'
+import HandValuedBadge from './HandValuedBadge'
+import { isHandValued } from '@/lib/valuation'
 import { adminItemName } from '@/lib/admin-item-name'
 import type { UpdatedItem } from '@/lib/item-update'
 
@@ -543,9 +545,20 @@ export default function CardDetailModal({
           {/* Editable Fields, grouped — the flat list is ~30 rows long */}
           {sections.map(({ name, fields }) => (
             <section key={name}>
-              <h3 className="text-[11px] font-semibold uppercase tracking-wider text-pine-400 mb-2">
-                {name}
-              </h3>
+              {/* RFC 0010 T16 — the marker sits with the Pricing rows, not in
+                  the header, because it is a claim about THESE numbers: on an
+                  unlinked item they are a person's judgement no sync will
+                  revisit, on a linked one they are a provider figure the next
+                  sync overwrites. Identical-looking numbers meaning opposite
+                  things is what makes an admin stop trusting the panel. */}
+              <div className="flex flex-wrap items-center gap-2 mb-2">
+                <h3 className="text-[11px] font-semibold uppercase tracking-wider text-pine-400">
+                  {name}
+                </h3>
+                {name === 'Pricing' && isHandValued(shown) && (
+                  <HandValuedBadge explain />
+                )}
+              </div>
               {/* CONTAINER-driven, not viewport-driven (RFC 0010 T6).
                   `sm:grid-cols-2` keyed off the viewport, so the grid stayed
                   two-up however narrow this COLUMN was squeezed — and zoom

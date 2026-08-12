@@ -1007,3 +1007,148 @@ describe('Triage — a fix made in the detail modal', () => {
     expect(within(tableRow()).getByText(/no catalog link/i)).toBeInTheDocument()
   })
 })
+
+// ===========================================================================
+// RFC 0010 T16 — the fourth repair tool: set a value by hand
+// ===========================================================================
+//
+// The owner's question: *"what do we do when we have a card that doesn't have a
+// matching catalog card? We still are selling it and we need a price for it as
+// well as updating the sticker."*
+//
+// Assign-English-name and Re-point both assume a catalog card exists to point
+// at. For a card genuinely absent from the catalog — a JP-exclusive print, a
+// promo TCGdex never carried — neither applies and the row is undrainable by
+// construction. Hand valuation already WORKS (the nightly denormalizer skips an
+// unlinked item, so a typed figure is never overwritten); nothing surfaced it.
+
+describe('Set a value by hand', () => {
+  /** Unlinked, Moderately Played — the multiplier the server computed rides along. */
+  const unlinkedMpItem = {
+    item_id: 'unlinked-mp',
+    kind: 'raw',
+    card_id: null,
+    language: 'EN',
+    display_name: 'Snorlax #143',
+    display_name_override: null,
+    condition: 'MP',
+    condition_modifier: null,
+    condition_multiplier: '0.58',
+    current_market_value: null,
+    needs_review: false,
+    review_reason: null,
+    triage_reasons: ['missing_card_id'],
+    card: null,
+  }
+
+  async function openTool(name: RegExp) {
+    fireEvent.click(within(await findRow(name)).getByRole('button', {
+      name: /set a value by hand/i,
+    }))
+    return screen.findByRole('dialog', { name: /set a value by hand/i })
+  }
+
+  it('offers the tool on an unlinked row and NOT on a linked one', async () => {
+    // The gate is the SERVER's reason (`missing_card_id`), not a local guess —
+    // T3 made `services/triage.reasons_for` the authority and this row is no
+    // exception. On a linked card the tool would be wrong: the sync owns that
+    // number and a hand-typed one is overwritten overnight.
+    mockList([unlinkedItem, flaggedItem])
+    render(<AdminTriagePage />)
+
+    const unlinked = await findRow(/Charizard/)
+    expect(
+      within(unlinked).getByRole('button', { name: /set a value by hand/i }),
+    ).toBeInTheDocument()
+
+    const linked = await findRow(/Pikachu/)
+    expect(
+      within(linked).queryByRole('button', { name: /set a value by hand/i }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('writes the value and a provenance note, and NEVER card_id', async () => {
+    // Same rule as the name dialog: this tool sets a value and nothing else.
+    // `value_note` is the existing provenance field — the one
+    // `apply_condition_adjustment` already writes its multiplier into — so the
+    // number on screen can always say where it came from.
+    mockList([unlinkedItem])
+    render(<AdminTriagePage />)
+    const dialog = await openTool(/Charizard/)
+
+    fireEvent.change(within(dialog).getByLabelText(/market value/i), {
+      target: { value: '25' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: /save value/i }))
+
+    await waitFor(() => expect(putMock).toHaveBeenCalled())
+    const [path, body] = putMock.mock.calls[0]
+    expect(path).toBe('/inventory/unlinked-1')
+    expect(body.current_market_value).toBe('25')
+    expect(String(body.value_note)).toMatch(/hand-valued/i)
+    expect(body).not.toHaveProperty('card_id')
+  })
+
+  it('computes the condition-adjusted figure from a Near Mint comp', async () => {
+    // Trap B, and the reason this tool needs a helper at all: the condition
+    // multiplier is NOT applied to a hand-typed value. The nightly job bakes it
+    // into a LINKED item's stored figure; nothing runs for an unlinked one. So
+    // an admin reading a $40 NM comp off eBay and typing it on an MP card
+    // overprices it ~1.7x — the same failure mode as the `blank_condition`
+    // finding, in the business's favour.
+    mockList([unlinkedMpItem])
+    render(<AdminTriagePage />)
+    const dialog = await openTool(/Snorlax/)
+
+    fireEvent.change(within(dialog).getByLabelText(/near mint comp/i), {
+      target: { value: '40' },
+    })
+
+    // The multiplier is stated, not just applied — an admin who cannot see the
+    // arithmetic cannot check it against the card in their hand.
+    expect(within(dialog).getByText(/0\.58/)).toBeInTheDocument()
+    expect(within(dialog).getByText(/MP/)).toBeInTheDocument()
+    expect(within(dialog).getByText(/23\.20/)).toBeInTheDocument()
+  })
+
+  it('accepts a comma-grouped amount', async () => {
+    // T0's `MoneyInput`, not a native number field: `1,300` is what the owner
+    // actually types for a four-figure card, and `parseFloat('1,300')` is 1.
+    mockList([unlinkedItem])
+    render(<AdminTriagePage />)
+    const dialog = await openTool(/Charizard/)
+
+    fireEvent.change(within(dialog).getByLabelText(/market value/i), {
+      target: { value: '1,300' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: /save value/i }))
+
+    await waitFor(() => expect(putMock).toHaveBeenCalled())
+    expect(putMock.mock.calls[0][1].current_market_value).toBe('1300')
+  })
+
+  it('does not clear the review flag, and the row stays in the queue', async () => {
+    // Valuing a card is not the same as confirming its identity. The row's
+    // `missing_card_id` reason is derived and stays until the card is actually
+    // linked, and a stored flag is a human's judgement this tool has no view on.
+    mockList([twoReasonItem])
+    render(<AdminTriagePage />)
+    const dialog = await openTool(/Blastoise/)
+
+    fireEvent.change(within(dialog).getByLabelText(/market value/i), {
+      target: { value: '12' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: /save value/i }))
+
+    await waitFor(() => expect(putMock).toHaveBeenCalled())
+    const body = putMock.mock.calls[0][1]
+    expect(body).not.toHaveProperty('needs_review')
+    expect(body).not.toHaveProperty('review_reason')
+
+    // Still here, still carrying both chips.
+    const tableRow = () =>
+      within(screen.getByRole('table')).getByText(/Blastoise/).closest('tr')!
+    expect(within(tableRow()).getByText(/no catalog link/i)).toBeInTheDocument()
+    expect(within(tableRow()).getByText(/entered by hand/i)).toBeInTheDocument()
+  })
+})

@@ -198,6 +198,55 @@ def test_refresh_nm_gets_no_condition_note(dynamo_repo):
     assert stored.value_note is None
 
 
+# ---------------------------------------------------------------------------
+# RFC 0010 T16 — hand-valued items: the invariant the whole feature rests on
+# ---------------------------------------------------------------------------
+#
+# The owner's question was "what do we do when we have a card that doesn't have a
+# matching catalog card? We still are selling it and we need a price for it."
+# The answer is that a hand-typed value is SAFE, because this job skips an
+# unlinked item entirely. That is load-bearing: if the nightly pass ever started
+# writing over an unlinked item, hand valuation would silently be a lie and every
+# UI T16 adds would be pointing at a number that disappears overnight.
+
+
+def test_hand_set_value_on_an_unlinked_item_is_never_overwritten(dynamo_repo):
+    """The invariant. An item with no ``card_id`` keeps whatever a human typed."""
+    _seed_catalog(dynamo_repo)
+    item = RawInventoryItem(
+        card_id=None, cost_basis=Decimal("4"), acquired_at=date(2026, 1, 1),
+        finish="holofoil", condition=Condition.MP,
+        current_market_value=Decimal("23.20"),
+        value_note="Hand-valued 2026-08-11 - NM comp $40.00 x MP (0.58)",
+    )
+    dynamo_repo.put_inventory_item(item)
+
+    refresh_inventory_market_values(dynamo_repo)
+
+    stored = dynamo_repo.get_inventory_item(item.item_id)
+    assert stored.current_market_value == Decimal("23.20")
+    assert stored.value_note == "Hand-valued 2026-08-11 - NM comp $40.00 x MP (0.58)"
+
+
+def test_a_linked_item_beside_it_is_still_refreshed(dynamo_repo):
+    """The regression gate: skipping the unlinked one must not skip the rest."""
+    _seed_catalog(dynamo_repo)
+    unlinked = RawInventoryItem(
+        card_id=None, cost_basis=Decimal("4"), acquired_at=date(2026, 1, 1),
+        finish="holofoil", condition=Condition.NM,
+        current_market_value=Decimal("99.99"),
+    )
+    linked = _raw_item()
+    dynamo_repo.put_inventory_item(unlinked)
+    dynamo_repo.put_inventory_item(linked)
+
+    updated = refresh_inventory_market_values(dynamo_repo)
+
+    assert updated == 1
+    assert dynamo_repo.get_inventory_item(linked.item_id).current_market_value == Decimal("9.25")
+    assert dynamo_repo.get_inventory_item(unlinked.item_id).current_market_value == Decimal("99.99")
+
+
 def test_snapshot_graded_prices_writes_history_for_owned_slabs(dynamo_repo):
     dynamo_repo.set_graded_market_value(
         CARD_ID, GradingCompany.PSA, Decimal("10"), Decimal("500")

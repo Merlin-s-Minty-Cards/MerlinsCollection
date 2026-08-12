@@ -153,9 +153,16 @@ render the "manually valued" marker too, so the number's provenance is visible n
 11. Prep Queue marks a no-catalog row as hand-valued;
 12. `CardDetailModal` renders the hand-valued marker beside the value.
 
+Corrected as executed — the original `-k "catalog_sync or slab or market_coverage"`
+matched no coverage test (the class is `TestAdminMarketCoverage`, and `-k` is
+case-sensitive), and `npx vitest` fails with "Vitest failed to find the runner":
+
 ```bash
-./.venv/Scripts/python.exe -m pytest backend/tests -q --tb=short -k "catalog_sync or slab or market_coverage"
-cd frontend && npx vitest run "app/(admin)/admin/triage" "app/(admin)/admin/outgoing" components/admin/shared/__tests__/CardDetailModal --reporter=verbose
+./.venv/Scripts/python.exe -m pytest backend/tests/services/test_catalog_sync.py \
+  backend/tests/routers/admin/test_slabs.py backend/tests/routers/admin/test_market.py \
+  backend/tests/routers/admin/test_inventory.py -q --tb=short
+npm test --workspace=frontend -- --run "app/(admin)/admin/triage" "app/(admin)/admin/outgoing" \
+  "app/(admin)/admin/market" components/admin/shared/__tests__/CardDetailModal
 ```
 
 ## GREEN — done when

@@ -386,6 +386,14 @@ export default function AdminMarketPage() {
               Prices refresh values for cards you hold. New Sets adds newly released cards to the catalog.
             </p>
 
+            {/* The summary line above says "80/100 items priced", which is one
+                number meaning two things. This splits it: a hand-valued card is
+                priced and can never be synced, so counting it as a gap makes the
+                worklist permanently unfinishable. */}
+            {banner.valuation && (
+              <p className="text-pine-500 text-[10px]">{banner.valuation}</p>
+            )}
+
             {banner.cycle && (
               <p className={banner.cycleBehind ? 'text-amber-400' : 'text-pine-500'}>
                 {banner.cycle}

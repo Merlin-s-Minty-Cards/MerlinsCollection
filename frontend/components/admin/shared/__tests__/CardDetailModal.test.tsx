@@ -715,3 +715,49 @@ describe('CardDetailModal — layout survives zoom (RFC 0010 T6)', () => {
     }
   })
 })
+
+// ===========================================================================
+// RFC 0010 T16 — the number's provenance, beside the number
+// ===========================================================================
+//
+// The modal already exposes `current_market_value`, `listed_price`,
+// `sticker_price` and `value_note` as editable rows (RFC 0008 T5), so it needs
+// no new field. What it needs is the marker: on an unlinked item that figure is
+// a human's judgement that no sync will ever revisit, and on a linked one it is
+// a provider figure that the next sync will overwrite. Identical-looking numbers
+// meaning opposite things is what makes an admin distrust the whole panel.
+
+describe('CardDetailModal hand-valued marker', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    putMock.mockReset()
+    getMock.mockResolvedValue(null)
+    postMock.mockResolvedValue({})
+  })
+
+  it('marks an unlinked item as hand-valued', async () => {
+    render(
+      <CardDetailModal
+        item={{ ...item, card_id: null, current_market_value: '23.20' }}
+        onClose={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByText(/hand-valued/i)).toBeInTheDocument()
+    // Says WHY, not just what: an unlinked card is not waiting on a sync.
+    expect(screen.getByText(/no sync will/i)).toBeInTheDocument()
+  })
+
+  it('does not mark a catalog-linked item', async () => {
+    render(
+      <CardDetailModal
+        item={{ ...item, current_market_value: '10.00' }}
+        onClose={vi.fn()}
+      />,
+    )
+
+    await waitFor(() => expect(postMock).toHaveBeenCalled())
+    expect(screen.queryByText(/hand-valued/i)).not.toBeInTheDocument()
+  })
+})
