@@ -6,19 +6,19 @@
 gitignored (`.gitignore:60`), so it is local-only and your edits to it will never appear in
 `git status` or reach anyone else. Record all RFC 0010 status **in this file**.
 
-**Last updated:** 2026-08-11 (T3 DONE — the server says why, one filter narrows, the queue can drain)
+**Last updated:** 2026-08-11 (T4 DONE — the queue is searchable, and the bulk clear honours the search)
 **Branch:** `Polishing-For-Deployment`
 **RFC:** [`docs/rfcs/0010-admin-round8-ledger-corrections-and-slab-manual-only.md`](../../rfcs/0010-admin-round8-ledger-corrections-and-slab-manual-only.md)
 **Task index:** [`README.md`](README.md)
 **Source of the requests:** the owner's `The plan.pdf` (12 items) plus two review comments
 on 2026-08-10 — the money-input report and the PSA/scanner reversal.
 
-## ✅ T0, T1, T2, T3, T15 AND T17 ARE DONE — start at T4
+## ✅ T0, T1, T2, T3, T4, T15 AND T17 ARE DONE — start at T5
 
 T15 gave all five catalog pickers one shared row carrying name, image AND price;
 T17 built the job that fills those prices in; T2 stopped an admin edit forking a
 consignor into two rows; T3 made the server the authority on why a row is in
-Triage. **Start at T4.**
+Triage; T4 made that queue searchable. **Start at T5.**
 
 ## 📉 T3 RE-MEASURED THE QUEUE AND THE TASK DOC'S PREMISE IS GONE
 
@@ -86,7 +86,7 @@ naming the row. **Start at T1.**
 | T1 | `MoneyInput` rollout | **DONE** | `571b3bc` | Shipped on **eight** surfaces — the doc's seven plus **Trade**, which its own "Why" names. `MoneyInput` gained `placeholder` / `onBlur` / `onKeyDown`; `InlineEditCell` gained `type="money"` (option a). Wire format is **unchanged** — where a string went, `String(parsed)` still goes. `MONEY_PARSE_MESSAGE` now lives in `lib/money.ts` so the three surfaces that show it cannot drift. **Percent fields deliberately untouched.** Out of scope and filed: Inventory / Shows / History-filter money inputs, and `sales.py`/`trades.py`'s single-pass write |
 | T2 | Consignor row fork | **DONE** | `0620fba` | `put_consignor` sweeps like `put_show`. `Consignor.active` is **gone** — replaced by `archived`, with a before-validator migrating a stored `active: False`. New repo method **`list_consignor_rows()`** (raw rows with SKs) backs both the sweep and the script; `list_consignors` now delegates to it. Router gained `_save_cosigner`/`_require_cosigner` (mirroring `_save_show`), a 409 name guard, `?include_archived=`, and `POST /admin/cosigners/{id}/unarchive`; **`DELETE` is the archive** and now returns the updated consignor, not `{"status": "deactivated"}`. `StatusBadge` gained **`active`/`archived`** styles — use those for any person or event. `scripts/reconcile_consignors.py` keeps the **unsuffixed** row, not the highest generation (see Decisions) |
 | T3 | Triage reasons + filter | **DONE** | `cbb7b6c` | The query was never broken and the 266 rows are gone — **27 remain**, see the re-measurement above; read it before T4. `services/triage.py` gained `reasons_for` (and `needs_triage` is now `bool(reasons_for(i))`, so they cannot drift), `TERMINAL_STATUSES` + **`in_triage_scope`** (called by BOTH the list and `/triage/counts`, which is what keeps the badge honest), and `is_bulk_clearable`. Search emits **`triage_reasons` AND `bulk_clearable`** on `triage=true` rows only. **ONE filter param, `triage_reason`**, 422 on an unknown key; the old three stay for compatibility and `/admin/inventory` still uses `needs_review`. New `POST /admin/inventory/bulk-clear-review`. Param is **`include_terminal`**, not the doc's `include_sold` (see Decisions). **No sticker reason** (owner decision) |
-| T4 | Triage search | **NOT STARTED** | — | Frontend only; `name` already works on the endpoint |
+| T4 | Triage search | **DONE** | `e6a3bfc` | Frontend only, no backend change — `name` already worked on the endpoint. Shared `SearchInput` (its 300ms debounce **is** the debounce; no timer was written). The term is trimmed **at the `useCallback` dependency**, not in state — see Decisions. Two additions beyond the doc's list: a failed search no longer renders the **success** panel, and **`bulk-clear-review` now sends `name`** — the button counts on-screen rows, so without it the POST cleared flags the admin never saw. `BulkClearReviewRequest.name` already existed and nothing was sending it |
 | T5 | Detail modal live updates | **NOT STARTED** | — | Changes `onUpdated`'s signature across six mounting pages; parameter is optional so nothing breaks |
 | T6 | Detail modal layout | **NOT STARTED** | — | Must be checked by a human at 100/150/200% zoom. A test can assert classes, not typeability |
 | T7 | Prep Queue location | **NOT STARTED** | — | Backend already has everything; pure wiring |
@@ -172,6 +172,11 @@ that is the mistake that made RFC 0009's T-FINAL sign-off stale.
 | 2026-08-11 | T3 | **The task doc states the multi-reason bulk-clear rule two ways and they conflict.** Built: an item with a second reason is left **completely alone** (`cleared == 0`, flag intact, `reviewed_at` untouched) | The doc says both *"clears only items whose ONLY reason is `flagged`"* and *"an item that is also unlinked keeps its other reasons and stays in the list"* — the second implies the flag was cleared. The first is safer and is what shipped: clearing the flag on a row that stays in the queue anyway makes the queue no shorter, destroys the stored `review_reason`, and stamps `reviewed_at` on an item nobody reviewed — which then suppresses the next automated flag. My first draft of the test asserted the other reading and was the one test that failed after GREEN; the *test* was wrong |
 | 2026-08-11 | T3 | **Three pre-existing frontend tests were rewritten, deliberately** — all four page fixtures gained `triage_reasons`, the reason-filter test now asserts `triage_reason=<key>` **and** the absence of the old three params, and the two-reason test asserts "Entered by hand" instead of `manual_entry` | Same shape as T1's `min="0"` and T2's `active` rewrites. The endpoint always sends `triage_reasons` for `triage=true`, so a fixture without it is a response shape that no longer exists — and a page that falls back to the local recompute when the key is missing would reintroduce exactly the drift being removed. **No fallback was added**, on purpose |
 | 2026-08-11 | T3 | **The doc's frontend run command is the `npx vitest` form this file records as broken** — corrected in the task doc itself, following T2's precedent. Its backend test path (`backend/tests/test_admin_inventory.py`) does not exist either; everything went in `backend/tests/routers/admin/test_triage.py` | **Fifth** task doc in this RFC with wrong paths or a wrong command (T0, T15, T17, T2, now T3). Correcting only this file has demonstrably not worked |
+| 2026-08-11 | T4 | **The bulk clear was made to send the search term — a defect T4 itself introduced, fixed inside T4 rather than filed.** With a search active the button counted the rows on screen while the POST ignored the search, so *"Clear machine flags (1)"* would have cleared **every** machine flag in the queue | Adding the search is precisely what makes the count and the operation diverge, so it is not a pre-existing issue to hand onward. It also needed **no backend change**: `BulkClearReviewRequest.name` already exists and the endpoint already filters on it — its docstring says the filter mirrors the search so *"clear what I can see"* is expressible. Nothing was sending it. Found in the post-change adversarial pass, written RED first, and it is now the 7th test in the block |
+| 2026-08-11 | T4 | **The term is trimmed at the `useCallback` DEPENDENCY (`const searchTerm = search.trim()`), not in state** | Both alternatives are wrong in a way that shows up on the keyboard. Trimming into state makes `SearchInput`'s `value → local` sync echo the trimmed string back into its own box, so a space is eaten the instant it is typed — the admin cannot type `"Mega Brave"`. Depending on the raw `search` refetches the whole queue for `"   "`, a request that sends no `name` and therefore returns exactly what is already on screen. The trimmed derivation gets both: spaces are typeable, and a whitespace-only term fires **no request at all** |
+| 2026-08-11 | T4 | **The empty state was split, and the split is keyed on the SEARCH only — a reason filter that matches nothing still renders the success panel.** Filed, not fixed | The doc's one named design decision is the search case, and `missing_english_name` is at zero live, so the filter case is reachable today. It is a one-line extension (`searchTerm || reasonFilter`) plus its own copy and test, and it is T3's surface — widening T4 to cover it is the kind of scope drift this RFC's task docs exist to prevent. In follow-ups with that fix spelled out |
+| 2026-08-11 | T4 | **No timer was written.** `SearchInput`'s built-in 300ms debounce is the debounce the doc asks for | Recorded because the doc specifies "debounced 300ms" as if it were work, and the shared component's default already is 300. A second debounce layered on top of it would have made the queue lag ~600ms behind the keyboard for no gain. The test asserts the *behaviour* (three keystrokes → one call), so it stays honest if the component ever changes |
+| 2026-08-11 | T4 | **The task doc's run command was the broken `npx vitest` form for the SIXTH time in this RFC** (T0, T15, T17, T2, T3, now T4) — corrected in the task doc itself, following T2's precedent. Its file paths were right, which is the first time | Six for six on the command. Every one of these docs was written before the `npx vitest` failure was recorded and none was revised after; correcting them one at a time as each task runs is the only thing that has actually worked |
 | 2026-08-10 | T0 | **The doc's file paths were wrong in two places**, corrected as executed: the backend tests are `backend/tests/routers/admin/test_purchases.py`, and the frontend run command must be the `npm test --workspace=frontend` form, not `npx vitest` | `npx vitest` fails with "Vitest failed to find the runner" — already noted in the baseline section of this file, but the task doc contradicted it. Later task docs copy this command; check it before trusting it |
 
 *(rows below are PLANNING decisions, recorded before execution because a later task would
@@ -303,6 +308,25 @@ consignor.
 
 MCP was not re-run: T3 touched no MCP file, and nothing in `mcp-server/` reads a
 triage reason.
+
+**Re-measured after T4** — a fresh run, not a row above carried forward:
+
+| Suite | Count | Time | State |
+|---|---|---|---|
+| Frontend | **698 passed / 0 failed** (82 files) | ~30s | green — 691 + 7 new T4 tests |
+| Narrow T4 selection (1 file) | 38 passed / 0 failed | ~9s | green — **31 of them pre-existing**, which is what proves the search did not disturb T3's queue, either repair tool, or the T15 pickers |
+| `npm run lint --workspace=frontend` | — | ~5s | clean (the one pre-existing `<img>` warning in `CardDetailModal`) |
+| `npm run build --workspace=frontend` | — | ~11s | exit 0 |
+
+Backend, MCP and `ruff` were not re-run: T4 is frontend-only and touched **no**
+Python and no MCP file — `git diff --stat` on the feature commit is two files,
+both under `frontend/app/(admin)/admin/triage/`. Do not carry these numbers into
+the next task's sign-off.
+
+**Not verified here, and it needs the owner:** T4's manual check — searching a
+card known to be in the queue, then one that is not, and confirming the message
+does not congratulate you. Tests pin the panel that renders; only a human
+confirms it reads right beside a real 27-row queue.
 
 **`ruff check backend/tests/routers/admin/test_triage.py` reports 2 violations
 (one `I001`, one `E501`) and BOTH pre-date T3** — verified by running ruff

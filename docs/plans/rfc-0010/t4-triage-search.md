@@ -55,8 +55,13 @@ already solved there.
    panel**;
 6. clearing the search restores the unfiltered queue.
 
+7. **added during execution:** the bulk clear sends the search term too, so the
+   count on the button is what the POST actually clears. See the Decisions row.
+
 ```bash
-cd frontend && npx vitest run "app/(admin)/admin/triage" --reporter=verbose
+# NOT `npx vitest` — that fails with "Vitest failed to find the runner".
+# Corrected in this doc rather than only in progress.md, per T2's precedent.
+npm test --workspace=frontend -- "app/(admin)/admin/triage" --reporter=verbose
 ```
 
 ## GREEN — done when
