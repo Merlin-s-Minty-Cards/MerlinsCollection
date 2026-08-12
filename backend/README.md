@@ -71,9 +71,12 @@ credentials are normally supplied by the ambient credential chain (IAM role,
 | Graded-pricing API key | `POKEMONPRICETRACKER_API_KEY` | `""` (disables graded pricing) |
 | Graded-pricing daily budget, in **credits** | `PRICING_DAILY_QUOTA` | `100` (= **50** lookups, at 2 credits each) |
 
-`PSA_API_KEY` appears in `.env.example` but is **not** a `Settings` field — the
-cert lookup (RFC 0009 T2) is deferred while PSA approves the account, and
-`extra="ignore"` means setting it today has no effect anywhere.
+**There is no `PSA_API_KEY`, and there will not be one.** It was removed from
+`.env.example` by RFC 0010 T14: it is not a `Settings` field, `extra="ignore"`
+swallows the env var, and the cert lookup (RFC 0009 T2) is **WON'T DO** — PSA's
+API became paid and the owner declined it on 2026-08-10 (RFC 0010 §H). A blank
+placeholder for a setting nothing reads is how an operator comes to believe cert
+lookup is configured.
 
 ## Authentication
 
@@ -250,14 +253,16 @@ stable regardless of how a grade was spelled, `_grade_key` normalizes them
   so JP slabs are unpriceable by construction. Missing key → `None` from
   `build_pricing_provider()`, which the nightly job treats as "skip", never a
   raise.
-- **PSA cert API** — **not built, and never successfully called.** Every
-  authenticated request returns `403 "Access to this API is limited to approved
-  customers"`; the key is valid, the account is not entitled, and no code change
-  reaches it (remedy: an approval email to `collectors-apis@collectors.com`). So
-  slab intake is hand-entered, `PSA_API_KEY` is read by nothing, and the mapper is
-  deferred rather than written against a guessed shape. When approved it supplies
-  identity only — `TotalPopulation`/`PopulationHigher` are always `null` on the
-  public API.
+- **PSA cert API** — **WITHDRAWN 2026-08-10. Never built, never successfully
+  called, and never will be.** The API became a **paid** feature and the owner
+  declined it, so RFC 0009 T2 (lookup) and T5 (camera) are **WON'T DO** and RFC
+  0010 §H is the authority. Every authenticated request ever made returned `403
+  "Access to this API is limited to approved customers"` — the key was valid, the
+  **account** was never entitled, and no code change reaches it. **Do not retry
+  it and do not email `collectors-apis@collectors.com`.** Slab intake is
+  hand-entered by design, not as a stopgap; `PSA_API_KEY` is read by nothing and
+  is gone from `.env.example`; the mapper was never written against a guessed
+  shape, which is why the withdrawal cost nothing to absorb.
 
 ## Daily sync
 

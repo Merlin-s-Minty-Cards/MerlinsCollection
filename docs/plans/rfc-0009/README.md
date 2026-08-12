@@ -61,10 +61,10 @@ prices are manual) or **after T7** (intake + automated pricing; only docs remain
 |---|---|---|---|---|
 | T0 | [t0-provider-spike.md](t0-provider-spike.md) | Verify both APIs against real data; record fixtures; **coverage gate** | spike | — |
 | T1 | [t1-slab-model-and-cert-index.md](t1-slab-model-and-cert-index.md) | Slab fields + `CERT#` pointer row + duplicate-check endpoint | backend | — |
-| T2 | [t2-psa-lookup-and-quota.md](t2-psa-lookup-and-quota.md) | **DEFERRED** — PSA is 403-blocked at the account. Not startable, and **blocks nothing in flight** | backend | PSA approval |
+| T2 | [t2-psa-lookup-and-quota.md](t2-psa-lookup-and-quota.md) | **WON'T DO (2026-08-10)** — PSA's cert API became a **paid** feature and the owner declined it. Previously `DEFERRED` pending free-tier approval; **that approval is no longer being sought.** See RFC 0010 §H | backend | — (withdrawn) |
 | T3 | ~~[t3-buy-session-graded.md](t3-buy-session-graded.md)~~ → **[manual-entry plan](../../superpowers/plans/2026-08-08-slab-manual-entry.md) Tasks 1–2** | **DONE** (`b9a9798`, `170eb09`) — buy session creates graded items; the `kind: "raw"` hardcode is gone | backend | T1 |
 | T4 | ~~[t4-slabs-tab-scan-to-commit.md](t4-slabs-tab-scan-to-commit.md)~~ → **[manual-entry plan](../../superpowers/plans/2026-08-08-slab-manual-entry.md) Tasks 3–6** | **DONE** (`c5b5a00`, `164d3b0`, `cb0b59f`, `ec56727`) — **the milestone.** Manual entry with catalog autocomplete → staging table → commit | frontend | **T3 only** |
-| T5 | [t5-camera-scan.md](t5-camera-scan.md) | **DEFERRED** behind T2 — a camera yields a cert number, which without PSA resolves to nothing | frontend | T2 |
+| T5 | [t5-camera-scan.md](t5-camera-scan.md) | **WON'T DO (2026-08-10)** — follows T2: a camera yields a cert number, and without PSA a cert number resolves to nothing. RFC 0010 T12 **removed** the disabled "Camera scan" button | frontend | — (withdrawn) |
 | T6 | [t6-pricing-provider-and-slab-list.md](t6-pricing-provider-and-slab-list.md) | Pricing client + `graded_price` writes + slab list with values. **← the next task; both dependencies are now met** | full-stack | T0, T4 |
 | T7 | [t7-nightly-sync-and-refresh-fix.md](t7-nightly-sync-and-refresh-fix.md) | Nightly refresh with stalest-first rotation; fixes the graded-skip bug | backend | T6 |
 | T8 | [t8-docs-and-ops.md](t8-docs-and-ops.md) | CLAUDE.md corrections, `.env.example`, ECS secrets, README | docs/ops | T7 |
@@ -74,7 +74,7 @@ prices are manual) or **after T7** (intake + automated pricing; only docs remain
 
 | Question | Decision |
 |---|---|
-| Cert entry | **Three co-equal methods** — keyboard-wedge scanner and **hand-typed cert numbers** both in T4, camera in T5. One shared pipeline |
+| Cert entry | ~~Three co-equal methods~~ → **TWO, and they are the same field** (2026-08-10). Keyboard-wedge scanner and hand-typed cert numbers, both in T4, through one `CertInput`; **the camera is WON'T DO** with T5. RFC 0010 T12 also removed the "Scan cert" button — a wedge scanner is a fast keyboard, so the ordinary field is the scan target |
 | What a scan creates | **A staged intake batch**, committed as a unit |
 | Commit path | **Through the existing buy session** — accepted consequence: every scanned slab appears in purchase history and show analytics as a buy |
 | Tab scope | **Intake + slab list + pricing controls** |
@@ -99,6 +99,9 @@ prices are manual) or **after T7** (intake + automated pricing; only docs remain
 - Do not combine RED and GREEN phases (CLAUDE.md).
 - Do not use bare `python` — always `./.venv/Scripts/python.exe` (CLAUDE.md).
 - Do not commit either API key, or any file containing one. `.env` only.
+- **Do not build anything on PSA, do not retry the cert endpoint, and do not email
+  `collectors-apis@collectors.com`.** T2 and T5 are **WON'T DO** as of 2026-08-10 —
+  the API is paid and the owner declined it. Do not add a `psa_api_key` setting.
 - Do not add a `population` field. PSA's public API always returns `null` for it.
 - Do not build a parallel slab-intake router that duplicates purchase transactions.
   Extend the buy session (T3).

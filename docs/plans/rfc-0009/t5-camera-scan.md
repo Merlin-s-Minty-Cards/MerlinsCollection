@@ -1,5 +1,19 @@
 # T5 — Camera barcode fallback
 
+> # ⛔ WON'T DO (2026-08-10)
+>
+> **Follows [T2](t2-psa-lookup-and-quota.md), which is withdrawn.** A camera yields
+> a cert *number*, and without PSA's cert API a cert number resolves to nothing —
+> so this would have delivered a slower way to type digits the operator can already
+> type. PSA's API became **paid** and the owner declined it; see RFC 0010 §H.
+>
+> **RFC 0010 T12 deleted the disabled "Camera scan" button** from `/admin/slabs`. It
+> had been rendered disabled on purpose so the gap read as known rather than
+> forgotten — but with the gap now permanent, a disabled button implies a roadmap
+> that does not exist. **Do not re-add it.**
+>
+> Never built, never started. This document is kept as the record of the decision.
+
 **RFC:** 0009 §8 · **Layer:** frontend · **Depends on:** T4 · **Blocks:** nothing
 
 **Droppable.** T4 already delivers a working intake flow. This adds show-floor

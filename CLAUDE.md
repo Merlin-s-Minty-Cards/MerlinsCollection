@@ -49,34 +49,71 @@ Merlin's Minty Cards — a Pokemon card business website.
 
 # Admin Panel
 
-`/admin` (gated by admin Cognito group) covers inventory ops end to end. Sidebar
-order (`frontend/components/admin/AdminShell.tsx`):
+`/admin` (gated by admin Cognito group) covers inventory ops end to end.
 
-| Route                  | Label          | Purpose                              |
-|------------------------|----------------|---------------------------------------|
-| `/admin`               | Dashboard      | Quick actions, needs-attention queues, position, today, coverage |
-| `/admin/inventory`     | Inventory      | Inventory CRUD, granular filters, ownership column |
-| `/admin/sell`          | Sell           | Sale flow, large image preview        |
-| `/admin/buy`           | Buy            | Purchase flow, catalog-linked autocomplete, manual-entry mode |
-| `/admin/slabs`         | Slabs          | Graded intake (manual/wedge-scan cert → staged batch → commit) + the slab list. See "Slabs" below |
-| `/admin/trade`         | Trade          | Trade flow — Coming In / Going Out, basis modes (see below) |
-| `/admin/vault`         | Vault          | Sortable inventory table, ownership column |
-| `/admin/market`        | Market         | Prices, sync trigger, coverage/confidence, "check for new sets" |
-| `/admin/show-prep`     | Show Prep      | Bulk-move to a show location, inline sticker/TCG-link editing |
-| `/admin/shows`         | Shows          | Show CRUD — see "Shows" below         |
-| `/admin/outgoing`      | **Prep Queue** | See "Prep Queue" below — route path is unchanged, the UI/purpose is not |
-| `/admin/triage`        | Triage         | See "Triage" below — the `needs_review` queue + the two repair tools |
-| `/admin/analytics`     | Show Analytics | Tabbed Daily / Shows dashboard (see below) |
-| `/admin/history`       | History        | Transaction history with profit visibility (see below) |
-| `/admin/cosigners`     | Cosigners      | Cosigner CRUD + payout link tool     |
-| `/admin/card/[id]`     | (card detail)  | Single-item detail, price chart, timeline — not in sidebar, reached via links |
+**The sidebar is THREE GROUPS, not a flat list** (RFC 0010 T13,
+`frontend/components/admin/AdminShell.tsx`). Sixteen flat tabs had outgrown the
+viewport; they are now Dashboard on its own plus three collapsible groups named
+for *when* you are using them. **Every route path is unchanged** —
+`/admin/outgoing` included — because grouping is a sidebar concern and renaming
+would break every bookmark to fix a URL nobody types.
+
+| Group | Route | Label | Purpose |
+|---|---|---|---|
+| — | `/admin` | Dashboard | Quick actions, needs-attention queues, position, today, coverage |
+| **At the show** | `/admin/inventory` | Inventory | Inventory CRUD, granular filters, ownership column |
+| | `/admin/sell` | Sell | Sale flow, large image preview |
+| | `/admin/buy` | Buy | Purchase flow, catalog-linked autocomplete, manual-entry mode |
+| | `/admin/trade` | Trade | Trade flow — Coming In / Going Out, basis modes (see below) |
+| | `/admin/slabs` | Slabs | Graded intake (cert → staged batch → commit → priced) + the slab list. See "Slabs" below |
+| **Back office** | `/admin/outgoing` | **Prep Queue** | See "Prep Queue" below — route path is unchanged, the UI/purpose is not |
+| | `/admin/show-prep` | Show Prep | Bulk-move to a show location, inline sticker/TCG-link editing, location filter + sort |
+| | `/admin/shows` | Shows | Show CRUD — see "Shows" below |
+| | `/admin/triage` | Triage | See "Triage" below — the `needs_review` queue + the four repair tools |
+| | `/admin/market` | Market | Prices, sync trigger, coverage/confidence, "check for new sets" |
+| | `/admin/vault` | Vault | Sortable inventory table, ownership column |
+| **Data** | `/admin/analytics` | Show Analytics | Tabbed Daily / Shows dashboard (see below) |
+| | `/admin/history` | History | Transaction history with profit visibility (see below) |
+| | `/admin/cosigners` | Cosigners | Cosigner CRUD + payout link tool |
+| | `/admin/locations` | Locations | Admin-managed location list — see "Locations" below |
+| — | `/admin/card/[id]` | (card detail) | Single-item detail, price chart, timeline — not in sidebar, reached via links |
+
+Three rules the grouping carries, all of which have a test in
+`AdminShell.test.tsx`:
+
+- **Groups default to OPEN**, and the group holding the active route is forced
+  open regardless of what was saved. Shut-by-default makes every destination
+  unreachable on a first visit.
+- **The Triage badge rolls onto its group header only while that group is
+  SHUT.** With the group open the count is on the Triage row itself, and the
+  same number twice trains the eye to stop reading it.
+- **The mobile bar is an explicit `mobileItems` list, never a `.slice()` of the
+  groups.** Flattening the three groups and taking five yields *Trade* where
+  Slabs used to be.
 
 **Prep Queue gotcha:** the route path is still `/admin/outgoing` (unchanged
 since before Round 3) but the page itself was repurposed in Task 3.4 from a
 sold/shipment tracker into a queue of unstickered available inventory
 (`GET` filtered to `status=available, missing_sticker=true`). Reading the URL
-alone will mislead — it no longer tracks outgoing shipments. Pricing an item
-inline removes it from the queue immediately ("Priced → removed" toast).
+alone will mislead — it no longer tracks outgoing shipments.
+
+**Pricing an item inline PATCHES the row and drops it — it does not refetch**
+(RFC 0010 T7), which is what stops the list jumping under the cursor. Two
+consequences follow and both are deliberate: the toast is **conditional**
+(setting a price says "Priced → removed"; *clearing* one says "Sticker price
+cleared" and the row stays, because a cleared row still meets this queue's
+`missing_sticker=true` criterion), and the priced id is pruned from
+`selectedIds` so the bulk bar cannot count a card nobody can see. The page also
+filters and sorts **by location**, and both summary cards carry the scope in
+their label (`In queue (Glass)`) — an unqualified total beside a scoped count is
+the same misread through a different card.
+
+**First header click sorts ASCENDING here, unlike `/admin/inventory`, whose
+`handleSort` opens `desc`.** The two pages genuinely disagree; this is a
+page-level default, not a `DataTable` change. And the column keys **are** the
+backend's sort fields, because `_sort_admin_results` splits on the LAST
+underscore — do not rename a `Column.key` on this page without re-checking that
+split.
 
 **Triage** (`/admin/triage`) — the one place to correct data the automation got
 wrong. It **is** the `needs_review` queue, not a second flag: "Send to Triage"
@@ -133,9 +170,9 @@ writes `display_name_override` and **never** `card_id`. Re-pointing a card is a
 separate, confirmed action with a before/after diff and warnings for trade
 lineage and cross-language links.
 
-**Slabs** (`/admin/slabs`, sidebar position: **between Buy and Trade**) — graded
-intake and the slab list, from RFC 0009. Intake is one cert field serving both a
-keyboard-wedge scanner and the keyboard (Enter *advances*, never submits), a
+**Slabs** (`/admin/slabs`, sidebar position: **last in "At the show", after
+Trade**) — graded intake and the slab list, from RFC 0009. Intake is one cert
+field serving both a keyboard-wedge scanner and the keyboard, a
 catalog-autocomplete card picker with a free-text fallback, a client-side staging
 batch, then a commit that runs the ordinary buy session's create → items →
 confirm. `GET /admin/slabs/certs/{cert}` warns on a cert already owned — a
@@ -143,16 +180,38 @@ confirm. `GET /admin/slabs/certs/{cert}` warns on a cert already owned — a
 legitimate re-entry. `/admin/slabs?priced=false` is the unpriced worklist. The
 per-grade pricing behind it is documented under "Third-Party APIs" below.
 
-**The intake toolbar has four buttons, and two of them are deliberately dead.**
-"Manual entry" is a disclosure — the form is **put away by default**, like the
-other admin tabs, and stays open across adds because intake is a batch workflow.
-"Scan cert" is **real**: it opens the form, focuses the cert field and shows a
-"waiting for scan" state, which is all a wedge scanner needs (it is just a fast
-keyboard). "Camera scan" and "Auto-fill from cert" are rendered **disabled with
-`aria-describedby` naming PSA approval as the blocker** — they are placeholders on
-purpose, so the gap reads as known rather than forgotten. Do not try to implement
-either: PSA 403s at the **account**, re-confirmed 2026-08-10 against their Swagger
-with both bearer spellings (see "Third-Party APIs").
+**The intake toolbar has ONE button: "Manual entry".** It is a disclosure — the
+form is **put away by default**, like the other admin tabs, and stays open across
+adds because intake is a batch workflow. RFC 0010 T12 deleted the other three.
+"Camera scan" and "Auto-fill from cert" went because PSA's cert API became a
+**paid** feature the owner declined, so the gap they marked is now permanent and
+a disabled button implies a roadmap that does not exist. "Scan cert" went for a
+different reason, and it is the one that matters:
+
+> **A wedge scanner is just a fast keyboard, so the ordinary cert field already
+> IS the scan target.** That is true **only** while `CertInput`
+> (`frontend/components/admin/slabs/CertInput.tsx`) keeps two things: `onEnter`
+> **advances** focus rather than submitting (the scanner's trailing Enter arrives
+> long before card, grade and cost are filled), and the input strips the
+> scanner's trailing `\r\n` on the way in (`replace(/[\r\n]/g, '')`). **Delete
+> either and wedge scanning breaks while hand-typing keeps working** — an
+> invisible failure nobody finds until they are standing at a table with a
+> scanner. There is deliberately **no timing logic**: a cert typed slowly over
+> ten seconds is exactly as valid as one scanned in 40 ms.
+
+**A slab is priced AFTER the commit, never inside its loop.** The commit returns
+`item_ids` and the page then fires `POST /admin/slabs/refresh-prices` scoped to
+them, un-awaited, on its own status line — a metered third-party HTTP call inside
+the write loop would rebuild the partial-write bug T0 fixed, on the same money
+path. The commit's success message is set *before* that call, so it lands first
+and unconditionally; a pricing failure must never reach the commit's `catch`,
+which says "Nothing was created". **An unmatched (free-text) slab is unpriceable
+by construction** — pricing needs a verified `card_id` join — so it commits, says
+so, and appears under `?priced=false`.
+
+`SlabEntryForm` takes cost through `MoneyInput`, so `1,300` stages as
+`$1,300.00` (see "Money input" below) — and `StagedSlab.buy_price` is a
+**number**, not a string.
 
 The page uses the **vault design system** (`vault-panel`, `vault-field`,
 `text-pine-*`, `bg-mint/15`) like every other admin tab. It previously used none
@@ -233,6 +292,75 @@ against a $0 cost-basis overstating profit on consigned items) and a rolled-up
 "Chain Profit" summary when a chain has more than one hop; lineage nodes are
 clickable to navigate the chain.
 
+## THE LEDGER HAS A CORRECTION PATH — a VOID, never a delete
+
+RFC 0010 T11. A mistaken sale used to be uncorrectable. It is now voidable, and
+**void is the only shape allowed**: a deleted sale leaves no trace it existed and
+silently disagrees with every analytics snapshot already generated. Same
+precedent as archiving a show.
+
+**ONE countability predicate: `services/ledger.is_countable`, and every
+aggregate calls it.** `countable(rows)` is the sugar over it that readers
+actually use, so nobody can spell the filter differently. Its module docstring
+lists every reader exhaustively, and each has a named test.
+
+> **Never let an aggregate inline its own `txn.voided_at is None` check.** That
+> is a second definition of countability, and the failure mode is two sets of
+> books disagreeing by exactly one sale — which nobody notices until a month-end
+> number is wrong.
+
+**Two readers deliberately do NOT filter, and say so at the call site:**
+`GET /admin/transactions` (the archive) and the item timeline. The point of an
+archive is to show what was actually written, and a void is a thing that was
+written. A voided row renders struck through, with its reason. **Do not "fix"
+them into filtering** — that is how the archive stops being one.
+
+**SALES ONLY.** `POST /admin/transactions/{id}/void` refuses a **purchase** with
+a `400`, and the UI does not offer the action there rather than offering one that
+always fails. A **trade cannot be voided at all**, because its legs share a
+`batch_id` and one of them is a purchase. Consequence, recorded because it is
+real: **a mistaken buy still has no correction path.** Voiding a purchase means
+removing an item that may since have been sold, traded, re-priced or consigned,
+and a void that leaves a phantom item in stock is worse than no void at all.
+
+Four routes, not two — `/transactions/{id}/void|restore` and
+`/transactions/batch/{batch_id}/void|restore`. The batch pair exists because a
+five-card sale must void as one action: `reverse_sales` issues **one**
+`transact_write_items` for every leg and guards every leg before writing
+anything, so a batch containing one card that has moved on since voids nothing at
+all. Five separate POSTs could half-succeed, which is the partial-write class T0
+was created to eliminate. **A batch over 50 legs is refused with a 422** telling
+the operator to void one at a time — DynamoDB caps a transaction at 100 actions
+and a reversal spends two per leg, and chunking would silently reintroduce
+partial write.
+
+`Transaction` gains `voided_at` / `voided_by` / `void_reason`, and
+`ShowAnalyticsSnapshot` gains `stale` (rendered on `/admin/analytics`, because a
+flag no page shows is a silent serve). `voided_by` stores `email or username or
+sub` — one value with a fallback chain, never client-supplied.
+
+**`attribute_not_exists(voided_at)` is NOT the "not voided yet" guard.**
+`put_transaction` writes every model field including the `None`s, so a row
+carries `voided_at` as a DynamoDB **NULL, which exists**. The guard is
+`attribute_not_exists(voided_at) OR attribute_type(voided_at, "NULL")`; the
+restore side checks `attribute_type(voided_at, "S")`.
+
+**One timeline event per transaction, keyed `<txn_id>#void`**, re-put as
+`void_restored` on restore rather than appended. The original sale event is keyed
+`TIMELINE#<date>#<txn_id>`, so a void on the same day — the common case — would
+otherwise **overwrite the sale itself**.
+
+**`Transaction.batch_id`** (T10) is what makes a five-card buy read as one line.
+It is optional, defaults to `None`, and **nothing is backfilled** — a null-batch
+row groups on its own `txn_id`, one code path with no legacy branch. No
+`(date, payment_method, type)` heuristic is allowed: two separate cash sales on
+one show day are indistinguishable from one two-card sale, and inventing
+transactions is not acceptable in the one view where being wrong costs money.
+Grouping is **client-side** in `TransactionGroups`, which replaces `DataTable` on
+that table only. A mixed-direction group (a trade) renders a **net** total —
+summing magnitudes would report a $50-for-$30 trade as `$80`, a number that
+exists nowhere.
+
 **Cosigners** (`/admin/cosigners`) — CRUD + payout-link tool for consignors;
 card assignment is still raw item-ID entry (no picker UI, deliberately out of
 scope). "Delete" is an **archive** on the six-part contract above, and
@@ -257,6 +385,68 @@ are **not** fixed — no UI can trigger them yet; see
 Consignor names carry a **409 duplicate guard** (case- and
 whitespace-insensitive, scoped to *another* consignor, and an archived consignor
 still collides — otherwise unarchiving resurrects a duplicate).
+
+## MONEY INPUT — one parser, and `parseFloat` is banned
+
+RFC 0010 T0/T1. Every admin money field goes through `MoneyInput`
+(`frontend/components/admin/shared/MoneyInput.tsx`) or `InlineEditCell`'s
+`type="money"`, both backed by **`parseMoney`** in `frontend/lib/money.ts`. The
+owner types `1,300`; that has to be accepted.
+
+> **Never use `parseFloat` on money.** Measured: `parseFloat("1,300")` is **1**,
+> `parseFloat("1,300.50")` is **1**, and **neither is `NaN`** — so it sails
+> through every `isNaN` guard in the codebase and converts a loud 500 into a
+> silent $1,299 loss. A wrong number that passes validation is strictly worse
+> than a crash.
+
+> **Never put `type="number"` on a money field.** A native number input does not
+> accept a comma, so it makes the owner's input un-typeable rather than correct
+> — it satisfies the machine and fails the person. Rejecting negatives is
+> `parseMoney`'s job, not `min="0"`'s.
+
+Two more rules that are easy to get wrong:
+
+- **`parseMoney('0')` is `0`, not `null`.** Test `=== null`, never falsiness —
+  `!parseMoney(cost)` rejects a legitimately free card, which is a real thing at
+  a buy table (a throw-in, a bulk lot).
+- **The wire format did not change.** Where a string went, `String(parsed)` still
+  goes (`sticker_price`, `manual_basis`, `minimum_price`); Buy and Trade already
+  sent JSON numbers and still do. `MONEY_PARSE_MESSAGE` lives in `lib/money.ts`
+  so the surfaces that render it cannot drift. Percent fields are deliberately
+  untouched.
+
+`formatMoney` (`1300` → `$1,300.00`) groups by hand rather than through
+`toLocaleString`, so output does not depend on which ICU data the runtime shipped
+with.
+
+## DATES — `frontend/lib/dates.ts`, and never `new Date()` on a date-only string
+
+RFC 0010 T8. If a date is rendered or defaulted anywhere, it goes through
+`lib/dates.ts`: `formatISODate`, `parseISODateLocal`, `todayLocal`,
+`toLocalISODate`, `formatTimestamp`.
+
+> **Never pass a date-only string to `new Date()`.** `new Date('2026-08-10')`
+> parses as **UTC midnight**, so it renders as **Aug 9** in every US timezone —
+> every admin date read a day early.
+
+> **Never derive "today" with `toISOString()`.** Both `.split('T')[0]` and
+> `.slice(0, 10)` give the **UTC** date, so after 5pm Pacific every new
+> transaction defaulted to **tomorrow** — on Buy, Sell, Trade and the dashboard.
+> The business sells at evening shows, which is exactly when it was wrong. Use
+> `todayLocal()`.
+
+Local zone first, `America/Los_Angeles` (`BUSINESS_TIME_ZONE`) as the fallback —
+an **IANA name, never a fixed `-08:00`**: Pacific is PDT (−7) in August and PST
+(−8) in January, so a hardcoded offset is wrong from March to November. For
+date-only values no zone is involved at all once you stop routing them through
+`new Date()`.
+
+**Tests that render a date must pin a negative-offset TZ** via
+`frontend/lib/__tests__/_timezone.ts` — a non-test file inside `__tests__` so
+vitest does not collect it and `next build` does not typecheck it. Use
+`vi.useFakeTimers({ toFake: ['Date'] })`, never the default: full fake timers
+deadlock `waitFor`. `mcp-server/` has no date helper and needs none — it returns
+ISO strings and never formats a calendar date.
 
 **Customer prices are CONDITION-ADJUSTED.** The catalog relays one market
 figure per finish and that figure is a **Near Mint** price. Every
@@ -630,17 +820,30 @@ case any more.
   billed on `limit` **even when the search matches zero cards**, which is why
   `limit=1` is pinned. Key: `POKEMONPRICETRACKER_API_KEY`; budget knob:
   `PRICING_DAILY_QUOTA` (credits, default 100).
-- **PSA cert API — has NEVER been called successfully. Do not build on it.**
-  Every authenticated call returns `403 {"Message":"Access to this API is limited
-  to approved customers."}`: the key is valid, the **account is not entitled**,
-  and no code change reaches it. The remedy is an approval email to
-  `collectors-apis@collectors.com`. Nothing about its response shape has ever
-  been observed, so the mapper (RFC 0009 T2) is deferred whole rather than
-  guessed at, and **`PSA_API_KEY` is read by no code** — there is no `psa_api_key`
-  field on `Settings`, so setting it today does nothing. When approval lands, PSA
-  returns as a **pre-fill** for the manual form, never a prerequisite. It will
-  supply identity only: **`TotalPopulation`/`PopulationHigher` are always `null`**
-  on the public API, so there is no population feature and no field for one.
+- **PSA cert API — WITHDRAWN on 2026-08-10. This is a closed decision, not a
+  gap.** The cert API became a **paid** feature and the owner declined it, so
+  approval is **not coming** and nothing is waiting on it. RFC 0009 T2 (the
+  lookup) and T5 (camera scan) are **WON'T DO**; RFC 0010 §H is the authority.
+  - **Do not call it, do not email `collectors-apis@collectors.com`, and do not
+    add a `psa_api_key` setting.** Every authenticated call ever made returned
+    `403 {"Message":"Access to this API is limited to approved customers."}` —
+    the key was valid, the **account was never entitled**, and no code change
+    reaches it. Re-confirmed 2026-08-10 against their Swagger with both bearer
+    spellings.
+  - **`PSA_API_KEY` is read by no code and never will be.** There is no
+    `psa_api_key` field on `Settings` and `model_config`'s `extra="ignore"`
+    swallows the env var, so setting it does nothing at all. It was removed from
+    `backend/.env.example` by RFC 0010 T14 for exactly that reason — a blank
+    placeholder reads as *"configure me"* and cannot work.
+    `test_config.py::test_there_is_still_no_psa_setting_to_configure` is a
+    **permanent** tripwire on that absence, not a temporary one.
+  - Nothing about its response shape was ever observed, so the mapper was never
+    guessed at. Had it landed it would have supplied identity only:
+    **`TotalPopulation`/`PopulationHigher` are always `null`** on the public API,
+    so there is no population feature and no field for one.
+  - The historical evidence — the 403 fixture, the key fingerprint, the Swagger
+    findings — stays in `docs/plans/rfc-0009/`. It is the record of a decision
+    made properly; deleting it would make the decision look casual.
 
 **How a slab gets priced** (`services/slab/pricing.py`, wired by
 `services/catalog_sync.py`):

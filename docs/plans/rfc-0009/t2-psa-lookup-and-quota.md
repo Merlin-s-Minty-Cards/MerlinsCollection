@@ -1,5 +1,23 @@
 # T2 — PSA cert lookup, behind a Protocol, with an outbound quota guard
 
+> # ⛔ WON'T DO (2026-08-10)
+>
+> **PSA's cert API became a PAID feature and the owner declined it.** This was
+> previously `DEFERRED` pending free-tier account approval; **that approval is no
+> longer being sought.** See RFC 0010 §H, and RFC 0010 T12 for the code removal.
+>
+> **Do not email `collectors-apis@collectors.com`** and **do not retry the
+> endpoint** — every attempt costs quota and cannot succeed. Do not add a
+> `psa_api_key` field to `Settings`;
+> `test_config.py::test_there_is_still_no_psa_setting_to_configure` is a permanent
+> tripwire on its absence, and RFC 0010 T14 removed `PSA_API_KEY` from
+> `backend/.env.example`.
+>
+> **This document is kept, not deleted.** The 403 evidence, the key fingerprint and
+> the Swagger findings below are the record of *why* this was investigated properly
+> rather than abandoned on a guess. A decision recorded beats a gap nobody can
+> explain.
+
 **RFC:** 0009 §5.1, §7, §9 · **Layer:** backend · **Depends on:** T0 (fixtures), T1
 (model + router) · **Blocks:** T4
 

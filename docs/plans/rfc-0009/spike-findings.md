@@ -108,6 +108,14 @@ whether `grade` is a number or a string, and what names the grading company.
 
 **T2 stays blocked.** It is a mapper, and there is still nothing to map.
 
+> **CLOSED 2026-08-10 — these questions will never be answered, and that is fine.**
+> PSA's cert API became a **paid** feature and the owner declined it, so **T2 and T5
+> are WON'T DO** (RFC 0010 §H). The mapper was never written because its input shape
+> was never observed — which, in hindsight, is the reason nothing has to be unwound
+> now: refusing to guess a schema is what kept the withdrawal cheap.
+>
+> **Do not re-run the `psa` probe.** The findings below stay as evidence.
+
 ## 2. Pricing — verified, and the coverage question is answered
 
 19 cards, one query each, `limit=1`, `includeEbay=true`. Every one returned
@@ -367,5 +375,8 @@ cd backend
 override exists because of §3.3 — the query that finds a card and the owner's name for
 it are different strings often enough that conflating them would hide the problem.
 
-**Re-run `psa` first thing once the account is approved.** It is the whole of §1.5,
-and it costs 21 of the 100 daily calls.
+~~**Re-run `psa` first thing once the account is approved.** It is the whole of §1.5,
+and it costs 21 of the 100 daily calls.~~ **WITHDRAWN 2026-08-10 — the account will
+not be approved, because approval is no longer being sought.** The cert API is paid
+and the owner declined it (RFC 0010 §H). **Do not re-run the `psa` probe**; it costs
+quota and cannot succeed. The `pricing` probe is unaffected and still valid.

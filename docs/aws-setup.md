@@ -597,13 +597,20 @@ which makes it **50 slab lookups a night**. You are billed on the query `limit`
 even when the search matches zero cards. Above 50 owned slabs the job refreshes
 the 50 stalest and the rest wait for a later night — by design, not a failure.
 
-**Rotation:** both this key and the (currently unused) PSA key were pasted into a
-chat transcript during planning on 2026-08-07 and **must be rotated in their own
-vendor portals** — this is an owner action in two external web UIs that no AWS
-command performs. Rotating means: issue a new key in the vendor portal, update
-`backend/.env` locally, update the Secrets Manager secret, then force a new ECS
-deployment so tasks pick it up (secrets resolve at task start, unlike task-role
-permissions which are read per request).
+**Rotation — STILL OUTSTANDING, and this procedure is why the section stays.**
+Both this key and the PSA key were pasted into a chat transcript during planning
+on 2026-08-07. Rotating is an owner action in an external vendor web UI that no
+AWS command performs: issue a new key in the vendor portal, update `backend/.env`
+locally, update the Secrets Manager secret, then force a new ECS deployment so
+tasks pick it up (secrets resolve at task start, unlike task-role permissions
+which are read per request).
+
+**Only the PokemonPriceTracker key still matters.** The PSA key is **moot** as of
+2026-08-10: PSA's cert API became a paid feature, the owner declined it, and RFC
+0010 §H made the withdrawal permanent — no code reads the key, no code ever will,
+and RFC 0010 T14 removed it from `backend/.env.example`. Revoke it in the PSA
+portal if that is convenient, but there is nothing to re-issue and nothing to
+redeploy. **Do the pricing key.**
 
 ### One-time catalog bootstrap (NOT scheduled)
 
@@ -632,10 +639,13 @@ Phase 1 (`aws configure` / an IAM role in production). In production the two
 bearer tokens (`POKEMONPRICETRACKER_API_KEY`, `ADMIN_API_KEY`) are ECS **secrets**,
 not `environment` entries — see Phase 8.
 
-`PSA_API_KEY` appears in `backend/.env.example` but **no code reads it**: there is
-no `psa_api_key` field on `Settings` while the cert lookup (RFC 0009 T2) is
-deferred behind PSA account approval, and `Settings` ignores unknown env vars. Do
-not add it to a task definition expecting an effect.
+**`PSA_API_KEY` is gone from `backend/.env.example` (RFC 0010 T14) and must not
+come back.** No code reads it — there is no `psa_api_key` field on `Settings` and
+`Settings` ignores unknown env vars — and none ever will: the cert lookup (RFC
+0009 T2) and camera scan (T5) are **WON'T DO** as of 2026-08-10, because PSA's
+API became paid and the owner declined it (RFC 0010 §H). **Do not add it to a
+task definition, an ECS secret, or a Settings field expecting an effect.** An
+existing `PSA_API_KEY` in your local `backend/.env` is harmless and inert.
 
 Frontend (`frontend/.env.local`): `NEXT_PUBLIC_API_URL` (backend base URL),
 `AUTH_URL`/`AUTH_SECRET` (NextAuth), `AWS_COGNITO_*` (provider),

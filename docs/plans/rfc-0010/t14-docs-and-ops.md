@@ -134,12 +134,40 @@ number in the docs is wrong — fix the doc, not the test.
 
 ## GREEN — done when
 
-- `test_config.py` passes (2 pre-existing + the RFC 0009 doc guards).
+> **CORRECTED DURING EXECUTION, 2026-08-12.** Two items below were unachievable as
+> written and one command was wrong. See progress.md's Decisions table.
+
+- `test_config.py` passes (2 pre-existing + the RFC 0009 doc guards). **Run the new
+  doc guards with it** — RFC 0010 T14 added `backend/tests/test_docs_round8.py`:
+
+  ```bash
+  ./.venv/Scripts/python.exe -m pytest backend/tests/test_docs_round8.py backend/tests/test_config.py -q --tb=short
+  ```
+
 - `grep -ri "psa" CLAUDE.md docs/ backend/.env.example README.md` returns only text that describes
   PSA as **withdrawn**, plus the historical evidence in RFC 0009's spike findings.
-- `grep -rn "PSA_API_KEY" .` returns nothing outside RFC 0009's historical docs.
+- ~~`grep -rn "PSA_API_KEY" .` returns nothing outside RFC 0009's historical docs.~~
+  **Not achievable, and it should not be:** the whole point of this task is to
+  *document* that no such key is read, so `CLAUDE.md`, `backend/README.md`,
+  `docs/aws-setup.md`, `backend/.env.example` and `test_config.py` all name it in
+  order to negate it. The honest gate is: **no `^PSA_API_KEY=` assignment anywhere
+  tracked, and every remaining mention describes its ABSENCE.** That is asserted by
+  `test_docs_round8.py::test_env_example_advertises_no_setting_that_nothing_reads`
+  and `::test_env_example_still_explains_why_there_is_no_psa_key`.
 - The app still boots with the pricing key forced empty and `build_pricing_provider()` returns
   `None` — unchanged behaviour, worth confirming since you edited `.env.example`.
+  **`build_pricing_provider` lives in `services/catalog_sync.py`, NOT
+  `services/slab/pricing.py`** — T-FINAL §5's command imports the wrong module and
+  dies on `ImportError`. The working form:
+
+  ```bash
+  cd backend && POKEMONPRICETRACKER_API_KEY= ../.venv/Scripts/python.exe -c "
+  from merlins_collection.services.catalog_sync import build_pricing_provider
+  from merlins_collection.config import Settings
+  print('pricing key set:', bool(Settings(_env_file=None).pokemonpricetracker_api_key))
+  print('provider:', build_pricing_provider())
+  "
+  ```
 - `ruff check backend/src` clean.
 
 ## Do not

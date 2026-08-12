@@ -49,15 +49,22 @@ def test_pricing_daily_quota_reads_from_the_environment(monkeypatch):
 
 
 def test_there_is_still_no_psa_setting_to_configure():
-    """`PSA_API_KEY` is documented but INERT, and the docs say so.
+    """There is no PSA client, and there will not be one. PERMANENT tripwire.
 
-    `Settings` has no PSA field while the cert lookup (T2) is deferred behind PSA
-    account approval, and `model_config` uses `extra="ignore"` — so setting
-    `PSA_API_KEY` today does nothing at all. `.env.example`, `backend/README.md`
-    and `docs/aws-setup.md` all state that explicitly.
+    This guard was written by RFC 0009 T8 as a *temporary* one — the reason then
+    was "the field belongs with the client that reads it (T2)". That reason is
+    gone: PSA's cert API became a **paid** feature and the owner declined it on
+    2026-08-10, so RFC 0009 T2 (lookup) and T5 (camera scan) are **WON'T DO**,
+    not deferred. See RFC 0010 §H.
 
-    **When T2 lands and adds the field, this test SHOULD fail.** Delete it and
-    correct those three files in the same commit — that is the whole point of it.
+    So the assertion is unchanged and the reason it exists is not. `Settings`
+    has no PSA field, `model_config` uses `extra="ignore"`, and RFC 0010 T14
+    removed the blank `PSA_API_KEY=` line from `.env.example` entirely — a
+    placeholder for a setting nothing reads is how an operator comes to believe
+    cert lookup is configured.
+
+    **Do not delete this test, and do not "fix" it by adding the field.** If it
+    ever fails, someone has added a PSA setting that no code can use.
     """
     from merlins_collection.config import Settings
 

@@ -1,7 +1,25 @@
 # RFC 0009 — Slab intake by barcode, and free graded pricing
 
-**Status:** accepted; **amended 2026-08-08 to manual-first intake** · **Date:** 2026-08-07
-· **Owner decisions:** see §2 · **Plan:** [`docs/plans/rfc-0009/`](../plans/rfc-0009/README.md)
+**Status:** accepted; **amended 2026-08-08 to manual-first intake**; **PSA withdrawn
+2026-08-10** · **Date:** 2026-08-07 · **Owner decisions:** see §2 · **Plan:**
+[`docs/plans/rfc-0009/`](../plans/rfc-0009/README.md)
+
+> **AMENDMENT, 2026-08-10 — PSA IS WITHDRAWN, NOT DEFERRED.** PSA's cert API became
+> a **paid** feature and the owner declined it, so the 2026-08-08 amendment's
+> *"PSA lookup returning later as a pre-fill"* **is no longer the plan**. Tasks
+> **T2** (cert lookup) and **T5** (camera scan) are **WON'T DO**. Manual-first
+> intake is not a stopgap — it is the shipped and final design, and every grading
+> company goes down the same manual path.
+>
+> RFC 0010 §H is the authority and RFC 0010 T12 removed the code: the "Camera
+> scan", "Auto-fill from cert" and "Scan cert" buttons are gone from `/admin/slabs`,
+> which now has exactly one intake toggle. **A wedge scanner is a fast keyboard, so
+> the ordinary cert field is the scan target** — that holds only while `CertInput`
+> advances on Enter and strips the trailing `\r\n`, so do not remove either.
+>
+> §5.1's PSA flow and §8's camera flow are **dead sections**, retained as the record
+> of a decision. **Do not implement them, do not retry the endpoint, and do not
+> email `collectors-apis@collectors.com`.**
 
 > **AMENDMENT, 2026-08-08.** PSA's cert API returns `403 "Access to this API is
 > limited to approved customers"` — the account is not entitled and no code change
