@@ -553,3 +553,165 @@ describe('CardDetailModal — an edit shows up immediately (RFC 0010 T5)', () =>
     ).toBeInTheDocument()
   })
 })
+
+// ===========================================================================
+// RFC 0010 T6 — the modal stays usable when you zoom
+// ===========================================================================
+//
+// The owner's report (plan doc items 5 and 7): *"it forces the size of the
+// image so when you zoom in or out it just keeps the same size of the image and
+// shoves the text to the side … when i try to edit the finish field it puts
+// characters into the factory sealed label and the box to add text is very
+// small"*, and separately that opening a card from Prepare for Shows gives the
+// picture an even higher percentage of the screen.
+//
+// Item 7 is NOT a second bug: /admin/show-prep mounts this same component.
+//
+// Three compounding layout decisions cause it:
+//   1. the shell is capped at `max-w-4xl` and never grows;
+//   2. the image column is `flex-shrink-0`, so at `md:h-full` a 5:7 card claims
+//      ~0.71 x 90vh of width and never gives any of it back;
+//   3. the field grid is VIEWPORT-driven (`sm:grid-cols-2`), so it stays two-up
+//      however narrow the details COLUMN becomes, and each cell's fixed `w-24`
+//      label then owns most of what is left.
+//
+// Zoom is the trigger precisely because it changes the container without
+// changing the breakpoint the way you would expect — so none of this is fixable
+// with another `sm:`/`md:` variant.
+//
+// WHAT THESE TESTS ARE. jsdom does no layout: it cannot tell you whether the
+// Finish field is typeable at 175% zoom in Chrome. These assert the class
+// CONTRACT — the decisions above, locked so a later edit cannot quietly undo
+// them. The manual check in the task doc is the actual acceptance criterion and
+// these do not substitute for it.
+describe('CardDetailModal — layout survives zoom (RFC 0010 T6)', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    putMock.mockReset()
+    getMock.mockResolvedValue(null)
+    postMock.mockResolvedValue({})
+    putMock.mockResolvedValue({})
+  })
+
+  /** The modal shell — the sized box inside the full-screen backdrop. */
+  const shell = () => screen.getByRole('dialog').firstElementChild as HTMLElement
+
+  /** The cell wrapping a field, found by its label; its parent is the grid. */
+  const cellFor = (label: string) => screen.getByText(label).parentElement as HTMLElement
+
+  it('gives the shell room to grow instead of capping it at max-w-4xl', async () => {
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+    await screen.findByText('Condition')
+
+    expect(shell().className).toContain('max-w-6xl')
+    expect(shell().className).not.toContain('max-w-4xl')
+  })
+
+  it('lets the image column yield, and caps how much of the modal it can claim', async () => {
+    // `flex-shrink-0` is the whole of "shoves the text to the side": the image
+    // takes its width first and never gives any back, so the details column
+    // gets only the remainder however little that is.
+    postMock.mockResolvedValueOnce({ 'sv1-25': 'https://images.example.com/sv1-25.png' })
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+
+    const column = (await screen.findByAltText('Pikachu')).parentElement as HTMLElement
+
+    expect(column.className).not.toContain('flex-shrink-0')
+    // Specifically in the side-by-side layout. It stays rigid in the stacked one
+    // below `md`, where shrinking would squash the art instead of freeing width.
+    expect(column.className).toContain('md:shrink')
+    expect(column.className).toMatch(/max-w-\[/)
+  })
+
+  it('drives the field grid off the container, not the viewport breakpoint', async () => {
+    // `sm:grid-cols-2` keys off the VIEWPORT, so the grid stays two-up while the
+    // column it lives in is squeezed to nothing. An auto-fit template collapses
+    // to one column whenever a cell would be too narrow — at any zoom, with no
+    // breakpoint to tune. This is the change that actually fixes the report.
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+    await screen.findByText('Finish')
+
+    const grid = cellFor('Finish').parentElement as HTMLElement
+
+    expect(grid.className).toContain('auto-fit')
+    expect(grid.className).toContain('minmax')
+    expect(grid.className).not.toContain('sm:grid-cols-2')
+  })
+
+  it('makes the no-image placeholder shrink like the real image does', async () => {
+    // Otherwise the layout is correct only for cards that HAVE art — and the
+    // unlinked/Japanese cards most likely to be opened for repair are exactly
+    // the ones that do not.
+    postMock.mockResolvedValueOnce({ 'sv1-25': null })
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+
+    const placeholder = await screen.findByLabelText('No image')
+
+    expect(placeholder.className).not.toContain('flex-shrink-0')
+    expect(placeholder.className).not.toMatch(/(^|\s)w-72(\s|$)/)
+  })
+
+  it('lets a cramped field row stack its value under its label instead of crushing it', async () => {
+    // The symptom the owner described — characters landing in the neighbouring
+    // label — is an input squeezed to near-zero width beside a fixed `w-24`
+    // label, not an input that moved. Tailwind container queries are not
+    // installed in this project, so the stack is done with wrapping plus a floor
+    // on the value: it drops below the label exactly when it no longer fits.
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+    fireEvent.click(await screen.findByLabelText('Edit Finish'))
+
+    const cell = cellFor('Finish')
+    const editor = screen.getByDisplayValue('').parentElement as HTMLElement
+
+    expect(cell.className).toContain('flex-wrap')
+    expect(editor.className).toMatch(/min-w-\[/)
+  })
+
+  it('spans a textarea row across the whole grid without inventing a second column', async () => {
+    // `sm:col-span-2` is wrong twice over here: it is viewport-keyed like the
+    // grid was, and on a grid that has collapsed to ONE column a span of 2
+    // creates an implicit second column — breaking the exact narrow case this
+    // task exists to fix. `col-span-full` spans whatever tracks exist.
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+    await screen.findByText('Value Note')
+
+    expect(cellFor('Value Note').className).toContain('col-span-full')
+    expect(cellFor('Value Note').className).not.toContain('sm:col-span-2')
+  })
+
+  it('still renders every field label beside its value', async () => {
+    // The regression gate. A layout change is exactly where a field quietly
+    // disappears, and every one of these was added deliberately in RFC 0008 T5.
+    // A graded item is the densest section in the component.
+    render(
+      <CardDetailModal
+        item={{
+          ...item,
+          kind: 'graded',
+          company: 'PSA',
+          grade: '9',
+          cert_number: '12345678',
+          location: 'glass',
+          sticker_notes: 'seen at $40',
+        }}
+        onClose={vi.fn()}
+      />,
+    )
+
+    // `Notes` is deliberately not in this list: it is BOTH a section heading and
+    // a field label, so it matches two elements. `Sticker Notes` covers the same
+    // ground unambiguously.
+    for (const [label, value] of [
+      ['Item ID', 'item-1'],
+      ['Grading Company', 'PSA'],
+      ['Grade', '9'],
+      ['Cert Number', '12345678'],
+      ['Location', 'glass'],
+      ['Sticker Notes', 'seen at $40'],
+    ]) {
+      expect(await screen.findByText(label)).toBeInTheDocument()
+      expect(screen.getByText(value)).toBeInTheDocument()
+    }
+  })
+})

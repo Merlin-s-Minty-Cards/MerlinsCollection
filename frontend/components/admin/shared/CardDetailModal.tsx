@@ -328,7 +328,11 @@ export default function CardDetailModal({
       aria-label={`Details for ${name}`}
     >
       <div
-        className="relative w-full max-w-4xl h-[90vh] vault-panel rounded-2xl flex flex-col overflow-hidden border border-pine-700/50 shadow-2xl mx-4"
+        // Wider than it was, and wider again on a large display (RFC 0010 T6).
+        // `max-w-4xl` was 896px however big the screen, so zooming in shrank the
+        // available CSS pixels without the modal ever getting proportionally
+        // more room to give back.
+        className="relative w-full max-w-6xl xl:max-w-7xl h-[92vh] vault-panel rounded-2xl flex flex-col overflow-hidden border border-pine-700/50 shadow-2xl mx-4"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -461,13 +465,27 @@ export default function CardDetailModal({
         )}
 
         <div className="flex-1 min-h-0 p-5 flex flex-col md:flex-row gap-6">
-          {/* Left: Large Card Image */}
-          <div className="flex-shrink-0 flex items-center justify-center md:h-full">
+          {/* Left: Large Card Image
+              Bounded and SHRINKABLE (RFC 0010 T6). It was `flex-shrink-0` at
+              `md:h-full`, so a 5:7 card claimed ~0.71 x 90vh of width and never
+              yielded any of it — the details column got whatever was left, which
+              is the owner's "shoves the text to the side".
+              The `min()` is what behaves at both extremes: a percentage alone
+              lets the image grow without limit on a wide display, a rem cap
+              alone lets it dominate a narrow one. */}
+          {/* `shrink-0 md:shrink` and not a bare removal: below `md` this is a
+              COLUMN, where shrinking squashes the art vertically on a short
+              viewport — a layout that was never the bug. It yields only in the
+              side-by-side layout, which is the one being fixed. */}
+          <div className="shrink-0 md:shrink flex items-center justify-center min-w-0 md:h-full md:max-w-[min(34%,20rem)]">
             {imageUrl ? (
               <img
                 src={imageUrl}
                 alt={adminItemName(shown as Parameters<typeof adminItemName>[0], 'Card')}
-                className="h-64 md:h-full w-auto object-contain rounded-xl shadow-lg"
+                // `max-w-full` is what makes the column's cap actually bite —
+                // `w-auto` off `h-full` would otherwise overflow it. `max-h-full`
+                // stops a tall image defeating the cap the other way.
+                className="h-64 md:h-full w-auto max-w-full max-h-full object-contain rounded-xl shadow-lg"
               />
             ) : (
               // Not <CardImage alt="No image" />: that component always labels
@@ -475,8 +493,13 @@ export default function CardDetailModal({
               // that need to say which card is missing an image. The detail
               // modal already names the card in its header, so its own fallback
               // is labeled exactly "No image".
+              // Sized exactly like the real image rather than pinned at a fixed
+              // w-72 (RFC 0010 T6): a placeholder that cannot shrink makes the
+              // layout correct only for cards that HAVE art — and the unlinked
+              // cards most likely to be opened for repair are the ones that
+              // don't. `aspect-[5/7]` keeps real card proportions off the height.
               <div
-                className="w-72 h-[25.75rem] rounded-xl bg-pine-800/60 border border-pine-700/40 flex items-center justify-center flex-shrink-0"
+                className="h-64 md:h-full w-auto aspect-[5/7] max-w-full max-h-full rounded-xl bg-pine-800/60 border border-pine-700/40 flex items-center justify-center"
                 aria-label="No image"
               >
                 <svg
@@ -523,7 +546,20 @@ export default function CardDetailModal({
               <h3 className="text-[11px] font-semibold uppercase tracking-wider text-pine-400 mb-2">
                 {name}
               </h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {/* CONTAINER-driven, not viewport-driven (RFC 0010 T6).
+                  `sm:grid-cols-2` keyed off the viewport, so the grid stayed
+                  two-up however narrow this COLUMN was squeezed — and zoom
+                  changes the container without changing the breakpoint the way
+                  you would expect, so no `sm:`/`md:` variant can fix it.
+                  auto-fit collapses to one column whenever a cell would be
+                  under 17rem, at any zoom, with nothing to tune.
+                  The inner `min()` is load-bearing: a bare `minmax(17rem,1fr)`
+                  forces a 17rem track even when the container is narrower than
+                  17rem, which overflows horizontally — worse than the squeeze
+                  this replaces. Tailwind container queries would express this
+                  more directly but the plugin is not installed (tailwind 3.4,
+                  `plugins: []`). */}
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(min(17rem,100%),1fr))] gap-2">
                 {fields.map((field) => {
                   const value = shown[field.key]
                   const isEditing = editingField === field.key
@@ -537,11 +573,23 @@ export default function CardDetailModal({
                           : '—'
 
                   return (
+                    // `flex-wrap` is how the value STACKS under its label in a
+                    // cramped cell without a container query: paired with the
+                    // editor's `min-w-[…]` floor below, it drops to its own line
+                    // exactly when it no longer fits beside the label — which is
+                    // the difference between a usable input and the owner's
+                    // "characters go into the factory sealed label" (the input
+                    // never moved; it was crushed to near-zero width).
+                    //
+                    // `col-span-full`, NOT `sm:col-span-2`: viewport-keyed like
+                    // the grid was, and on a grid that has collapsed to one
+                    // column a span of 2 creates an IMPLICIT second column —
+                    // breaking the exact narrow case this task exists to fix.
                     <div
                       key={field.key}
-                      className={`flex gap-2 px-3 py-2 rounded-lg bg-pine-800/30 border border-pine-700/20 ${
+                      className={`flex flex-wrap gap-2 px-3 py-2 rounded-lg bg-pine-800/30 border border-pine-700/20 ${
                         field.type === 'textarea'
-                          ? 'sm:col-span-2 flex-col items-stretch'
+                          ? 'col-span-full flex-col items-stretch'
                           : 'items-center'
                       }`}
                     >
@@ -551,7 +599,13 @@ export default function CardDetailModal({
                         {field.label}
                       </span>
                       {isEditing ? (
-                        <div className={`flex gap-1 flex-1 min-w-0 ${
+                        // A FLOOR, not `min-w-0`: an editor allowed to shrink to
+                        // nothing is the reported bug. At 8rem the input is
+                        // still readable, and the cell's `flex-wrap` turns that
+                        // floor into a stack rather than an overflow. The inner
+                        // `min()` keeps it honest if the cell itself is under
+                        // 8rem, for the same reason the grid template has one.
+                        <div className={`flex gap-1 flex-1 min-w-[min(8rem,100%)] ${
                           field.type === 'textarea' ? 'items-start' : 'items-center'
                         }`}>
                           {field.type === 'select' && field.key === 'location' ? (
@@ -694,7 +748,10 @@ export default function CardDetailModal({
               <h3 className="text-[11px] font-semibold uppercase tracking-wider text-pine-400 mb-2">
                 Consignment
               </h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {/* Same container-driven template as the field sections above —
+                  this grid had the identical viewport-keyed squeeze, and a
+                  consigned card is someone else's money to read accurately. */}
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(min(17rem,100%),1fr))] gap-2">
                 {[
                   { label: 'Consignor', value: String(consignment.consignor_id ?? '—') },
                   {
