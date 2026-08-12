@@ -17,6 +17,7 @@ import {
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { formatISODate, toLocalISODate } from '@/lib/dates'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
+import SignedAmount from '@/components/admin/shared/SignedAmount'
 import DataTable, { type Column } from '@/components/admin/shared/DataTable'
 import StatusBadge from '@/components/admin/shared/StatusBadge'
 
@@ -123,7 +124,7 @@ const txnColumns: Column<TransactionRecord>[] = [
     label: 'Amount',
     sortable: true,
     className: 'text-right',
-    render: (t) => <PriceDisplay value={t.amount} className="text-xs" />,
+    render: (t) => <SignedAmount value={t.amount} type={t.type} className="text-xs" />,
   },
   {
     key: 'payment_method',
@@ -396,7 +397,7 @@ export default function AdminAnalyticsPage() {
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
               <MetricCard label="Total Sold" value={showDetail.total_sold} icon={<ShoppingBag size={14} />} color="text-mint" />
               <MetricCard label="Total Bought" value={showDetail.total_bought} icon={<ShoppingCart size={14} />} color="text-blue-400" />
-              <MetricCard label="Net Sales" value={showDetail.net_sales} icon={<DollarSign size={14} />} color="text-amber-400" />
+              <MetricCard label="Net Sales" value={showDetail.net_sales} icon={<DollarSign size={14} />} color="text-amber-400" signed />
               {showDetail.inventory_value_at_start != null && (
                 <MetricCard label="Inventory Value at Start" value={String(showDetail.inventory_value_at_start)} icon={<Package size={14} />} color="text-pine-200" />
               )}
@@ -543,7 +544,7 @@ export default function AdminAnalyticsPage() {
                 <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
                   <MetricCard label="Total Sold" value={dailyData.total_sold} icon={<ShoppingBag size={14} />} color="text-mint" />
                   <MetricCard label="Total Bought" value={dailyData.total_bought} icon={<ShoppingCart size={14} />} color="text-blue-400" />
-                  <MetricCard label="Net Sales" value={dailyData.net_sales} icon={<DollarSign size={14} />} color="text-amber-400" />
+                  <MetricCard label="Net Sales" value={dailyData.net_sales} icon={<DollarSign size={14} />} color="text-amber-400" signed />
                   <MetricCard label="Inventory Value at Start" value={dailyData.inventory_value_at_start} icon={<Package size={14} />} color="text-pine-200" />
                   <MetricCard
                     label="Sell-Through"
@@ -636,7 +637,7 @@ export default function AdminAnalyticsPage() {
                 <DollarSign size={12} className="text-amber-400" />
                 <span className="text-[10px] text-pine-500 uppercase tracking-wider">Net Profit</span>
               </div>
-              <PriceDisplay value={netProfit} className={`text-lg ${netProfit >= 0 ? 'text-mint' : 'text-red-400'}`} />
+              <SignedAmount value={netProfit} fromValue className="text-lg" />
             </div>
             <div className="vault-panel rounded-xl px-4 py-3 border border-pine-700/30">
               <div className="flex items-center gap-1.5 mb-1">
@@ -695,10 +696,7 @@ export default function AdminAnalyticsPage() {
                           </div>
                           <div className="text-right">
                             <div className="text-[10px] text-pine-500">Net</div>
-                            <PriceDisplay
-                              value={showAnalytic.net_sales}
-                              className={`text-xs ${parseFloat(showAnalytic.net_sales) >= 0 ? 'text-mint' : 'text-red-400'}`}
-                            />
+                            <SignedAmount value={showAnalytic.net_sales} fromValue className="text-xs" />
                           </div>
                           <div className="text-right hidden sm:block">
                             <div className="text-[10px] text-pine-500">Items S/B/T</div>
@@ -760,12 +758,15 @@ function MetricCard({
   icon,
   color,
   isCount,
+  signed,
 }: {
   label: string
   value: string
   icon: React.ReactNode
   color: string
   isCount?: boolean
+  /** A genuinely signed figure (Net Sales). Its own tone replaces `color`. */
+  signed?: boolean
 }) {
   return (
     <div className="vault-panel rounded-xl px-3 py-3 border border-pine-700/30">
@@ -775,6 +776,8 @@ function MetricCard({
       </div>
       {isCount ? (
         <div className={`text-base font-mono ${color}`}>{value}</div>
+      ) : signed ? (
+        <SignedAmount value={value} fromValue className="text-base" />
       ) : (
         <PriceDisplay value={value} className={`text-base ${color}`} />
       )}

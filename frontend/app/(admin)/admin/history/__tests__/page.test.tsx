@@ -154,3 +154,38 @@ describe('AdminHistoryPage trade lineage', () => {
     expect(await screen.findByText('Booster Box')).toBeInTheDocument()
   })
 })
+
+// ---------------------------------------------------------------------------
+// RFC 0010 T9 — one component, both surfaces, so they cannot drift
+// ---------------------------------------------------------------------------
+
+describe('History timeline signed amounts (RFC 0010 T9)', () => {
+  beforeEach(() => {
+    getMock.mockImplementation((path: string) => {
+      if (path === '/inventory/search') return Promise.resolve({ items: [searchHit], total: 1 })
+      if (path.endsWith('/timeline')) {
+        return Promise.resolve({
+          item_id: 'item-1',
+          events: [
+            { txn_id: 't1', type: 'purchase', date: '2026-08-01', amount: '200.00', payment_method: 'cash' },
+            { txn_id: 't2', type: 'sale', date: '2026-08-10', amount: '40.00', payment_method: 'cash' },
+          ],
+        })
+      }
+      if (path.endsWith('/lineage')) {
+        return Promise.resolve({ lineage_id: 'item-0', chain, chain_complete: false })
+      }
+      return Promise.resolve({})
+    })
+  })
+
+  it('signs a purchase and a sale the same way Show Analytics does', async () => {
+    await searchAndSelect()
+
+    const purchase = (await screen.findByText('Purchased')).closest('.vault-panel') as HTMLElement
+    expect(within(purchase).getByTestId('signed-amount')).toHaveTextContent('−$200.00')
+
+    const sale = screen.getByText('Sold').closest('.vault-panel') as HTMLElement
+    expect(within(sale).getByTestId('signed-amount')).toHaveTextContent('+$40.00')
+  })
+})

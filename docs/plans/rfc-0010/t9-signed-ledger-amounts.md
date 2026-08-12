@@ -85,8 +85,11 @@ as profit whichever direction it went.
 10. transaction amounts there are signed the same way — one component, both surfaces, so they
     cannot drift.
 
+**Corrected as executed** — `npx vitest` fails here with *"Vitest failed to find
+the runner"*; use the workspace form:
+
 ```bash
-cd frontend && npx vitest run components/admin/shared/__tests__/SignedAmount "app/(admin)/admin/analytics" "app/(admin)/admin/history" --reporter=verbose
+npm test --workspace=frontend -- --run components/admin/shared/__tests__/SignedAmount "app/(admin)/admin/analytics" "app/(admin)/admin/history"
 ```
 
 ## GREEN — done when

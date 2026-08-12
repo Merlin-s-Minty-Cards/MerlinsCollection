@@ -147,3 +147,75 @@ describe('Show Analytics dates (RFC 0010 T8)', () => {
     expect(end.value).toBe('2026-08-10')
   })
 })
+
+// ---------------------------------------------------------------------------
+// RFC 0010 T9 — a sale reads +$40, a purchase reads −$200
+// ---------------------------------------------------------------------------
+
+describe('Show Analytics signed amounts (RFC 0010 T9)', () => {
+  beforeEach(() => {
+    getMock.mockImplementation((path: string) => {
+      if (path === '/analytics/dates') return Promise.resolve({ dates: ['2026-08-10'] })
+      if (path === '/analytics/daily') {
+        return Promise.resolve({
+          date: '2026-08-10',
+          total_sold: '40.00',
+          total_bought: '200.00',
+          // A buying-heavy day: net genuinely went the other way.
+          net_sales: '-160.00',
+          items_sold_count: 1,
+          items_bought_count: 1,
+          trades_count: 0,
+          inventory_value_at_start: '5000.00',
+          sell_through_rate: null,
+        })
+      }
+      if (path === '/transactions') {
+        return Promise.resolve({
+          items: [
+            TXN,
+            {
+              txn_id: 'txn-2',
+              type: 'purchase',
+              item_id: 'item-2',
+              date: '2026-08-10',
+              amount: '200.00',
+              payment_method: 'venmo',
+            },
+          ],
+        })
+      }
+      if (path === '/shows') return Promise.resolve({ shows: [SHOW] })
+      if (path === '/analytics/by-date') return Promise.resolve({ analytics: [] })
+      return Promise.resolve({})
+    })
+  })
+
+  async function openTheDay() {
+    await renderPage()
+    const picker = document.querySelector('input[type="date"]') as HTMLInputElement
+    fireEvent.change(picker, { target: { value: '2026-08-10' } })
+    await screen.findByText('venmo')
+  }
+
+  it('renders a purchase row as −$200.00', async () => {
+    await openTheDay()
+    const row = screen.getByText('venmo').closest('tr') as HTMLElement
+    expect(within(row).getByTestId('signed-amount')).toHaveTextContent('−$200.00')
+  })
+
+  it('renders a sale row as +$40.00', async () => {
+    await openTheDay()
+    const row = screen.getByText('cash').closest('tr') as HTMLElement
+    expect(within(row).getByTestId('signed-amount')).toHaveTextContent('+$40.00')
+  })
+
+  it('renders a negative Net Sales signed, not as a bare figure', async () => {
+    // Today it renders a plain number that reads as profit whichever direction
+    // the day actually went.
+    await openTheDay()
+    const tile = screen.getByText('Net Sales').closest('div')
+      ?.parentElement as HTMLElement
+    expect(within(tile).getByTestId('signed-amount')).toHaveTextContent('−$160.00')
+  })
+})

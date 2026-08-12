@@ -20,6 +20,7 @@ import { useCardImages } from '@/lib/use-card-images'
 import CardImage, { TABLE_THUMB_SIZE } from '@/components/admin/shared/CardImage'
 import SearchInput from '@/components/admin/shared/SearchInput'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
+import SignedAmount from '@/components/admin/shared/SignedAmount'
 import StatusBadge from '@/components/admin/shared/StatusBadge'
 import { adminItemName } from '@/lib/admin-item-name'
 
@@ -483,7 +484,7 @@ export default function AdminHistoryPage() {
                           {event.amount && (
                             <span className="flex items-center gap-1">
                               <DollarSign size={11} />
-                              <PriceDisplay value={event.amount} className="text-[11px]" />
+                              <SignedAmount value={event.amount} type={event.type} className="text-[11px]" />
                             </span>
                           )}
                           {event.payment_method && (
