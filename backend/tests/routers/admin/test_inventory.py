@@ -320,6 +320,131 @@ class TestAdminInventorySearch:
             )
             assert [i["item_id"] for i in resp.json()["items"]][-1] == "blank"
 
+    # --- RFC 0011 T3: the generic filter layer ----------------------------
+
+    def test_unknown_filter_field_is_a_422(self, admin_client):
+        client, _, admin_token, _ = admin_client
+
+        resp = client.get(
+            "/admin/inventory/search?filter=wibble:eq:x",
+            headers=_auth_header(admin_token),
+        )
+
+        assert resp.status_code == 422
+        assert "wibble" in resp.json()["detail"]
+
+    def test_an_op_the_field_does_not_support_is_a_422(self, admin_client):
+        """`status` is a select. `contains` on it is a caller mistake, not a wider
+        match — the whole point of a closed list is that you pick from it."""
+        client, _, admin_token, _ = admin_client
+
+        resp = client.get(
+            "/admin/inventory/search?filter=status:contains:avail",
+            headers=_auth_header(admin_token),
+        )
+
+        assert resp.status_code == 422
+
+    def test_an_unparseable_bound_is_a_422(self, admin_client):
+        """Silently dropping every row looks exactly like "you own nothing"."""
+        client, _, admin_token, _ = admin_client
+
+        resp = client.get(
+            "/admin/inventory/search?filter=acquired_at:gte:yesterday",
+            headers=_auth_header(admin_token),
+        )
+
+        assert resp.status_code == 422
+
+    def test_a_generic_filter_narrows(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="foil", notes="signed FOIL promo"))
+        repo.put_inventory_item(_raw(item_id="plain", card_id="sv1-2", notes="ordinary"))
+
+        resp = client.get(
+            "/admin/inventory/search?filter=notes:contains:foil",
+            headers=_auth_header(admin_token),
+        )
+
+        assert [i["item_id"] for i in resp.json()["items"]] == ["foil"]
+
+    def test_generic_filters_and_combine(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(
+            _raw(item_id="both", notes="foil", cost_basis="50.00")
+        )
+        repo.put_inventory_item(
+            _raw(item_id="cheap", card_id="sv1-2", notes="foil", cost_basis="5.00")
+        )
+
+        resp = client.get(
+            "/admin/inventory/search"
+            "?filter=notes:contains:foil&filter=cost_basis:gte:10",
+            headers=_auth_header(admin_token),
+        )
+
+        assert [i["item_id"] for i in resp.json()["items"]] == ["both"]
+
+    def test_the_named_param_and_its_generic_twin_agree(self, admin_client):
+        """ONE evaluator, two spellings.
+
+        Two IMPLEMENTATIONS is the "two definitions of countability" failure CLAUDE.md
+        warns about under the ledger: one drifts, and two filters that look identical
+        quietly return different sets.
+        """
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="owned"))
+        repo.put_inventory_item(
+            _raw(item_id="consigned", card_id="sv1-2",
+                 consignment={"consignor_id": "c1", "split_percent": "0.8"})
+        )
+
+        named = client.get(
+            "/admin/inventory/search?ownership=owned",
+            headers=_auth_header(admin_token),
+        )
+        generic = client.get(
+            "/admin/inventory/search?filter=consignment:isnull:",
+            headers=_auth_header(admin_token),
+        )
+
+        assert named.status_code == generic.status_code == 200
+        assert (
+            [i["item_id"] for i in named.json()["items"]]
+            == [i["item_id"] for i in generic.json()["items"]]
+            == ["owned"]
+        )
+
+    def test_a_generic_filter_combines_with_a_named_one(self, admin_client):
+        """An admin using both gets the intersection, not one silently winning."""
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(
+            _raw(item_id="match", status="available", notes="foil")
+        )
+        repo.put_inventory_item(
+            _raw(item_id="sold_foil", card_id="sv1-2", status="sold", notes="foil")
+        )
+
+        resp = client.get(
+            "/admin/inventory/search?status=available&filter=notes:contains:foil",
+            headers=_auth_header(admin_token),
+        )
+
+        assert [i["item_id"] for i in resp.json()["items"]] == ["match"]
+
+    def test_the_card_link_filter_answers_the_unlinked_question(self, admin_client):
+        """`card_id` is a presence control, not a text box — nobody types an id."""
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="linked", card_id="sv1-2"))
+        repo.put_inventory_item(_raw(item_id="unlinked", card_id=None))
+
+        resp = client.get(
+            "/admin/inventory/search?filter=card_id:isnull:",
+            headers=_auth_header(admin_token),
+        )
+
+        assert [i["item_id"] for i in resp.json()["items"]] == ["unlinked"]
+
 
 # ===========================================================================
 # A5: Enhanced Inventory Search — card_number, artist, min/max price

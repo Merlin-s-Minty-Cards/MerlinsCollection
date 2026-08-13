@@ -34,6 +34,11 @@ from merlins_collection.services.condition_pricing import (
     condition_multiplier,
 )
 from merlins_collection.services.dynamodb import InventoryRepository
+from merlins_collection.services.inventory_filters import (
+    FieldFilter,
+    apply_filters,
+    validate_filters,
+)
 from merlins_collection.services.inventory_sort import (
     SORT_FIELDS,
     parse_sort,
@@ -129,6 +134,11 @@ def admin_search_inventory(
     min_profit: Decimal | None = Query(None),
     max_profit: Decimal | None = Query(None),
     sort: str | None = Query(None),
+    # RFC 0011 T3: the generic, registry-validated filter. Repeatable —
+    # `?filter=notes:contains:foil&filter=cost_basis:gte:100`. The named parameters
+    # above are kept and build the SAME FieldFilter objects, so there are two
+    # spellings but only ever one evaluator.
+    filter_: list[str] = Query(default_factory=list, alias="filter"),
     repo: InventoryRepository = Depends(get_repo),
 ) -> AdminInventorySearchResult:
     """Search inventory with full admin visibility.
@@ -144,6 +154,7 @@ def admin_search_inventory(
     # Same rule, same place: before the table read, because a caller mistake must not
     # cost a full `list_inventory()` scan first.
     _validate_sort(sort)
+    parsed_filters = _validate_filters(filter_)
 
     items = repo.list_inventory()
 
@@ -274,6 +285,16 @@ def admin_search_inventory(
         items = _filter_by_catalog(
             items, repo, card_number=card_number, artist=artist, set_name=set_name,
         )
+
+    # RFC 0011 T3: the generic filters, applied AFTER the named ones so an admin
+    # combining both gets the intersection. `apply_filters` raises ValueError on a
+    # bound it cannot parse (a date field given "yesterday"), which is a caller
+    # mistake and must be as loud as an unknown field.
+    if parsed_filters:
+        try:
+            items = apply_filters(items, parsed_filters)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     # Sort
     items = _sort_admin_results(items, sort)
@@ -1190,6 +1211,20 @@ def _attach_catalog_cards(
             card = repo.get_catalog_card(card_id)
             cache[card_id] = card.model_dump(mode="json") if card is not None else None
         row["card"] = cache[card_id]
+
+
+def _validate_filters(raws: list[str]) -> list[FieldFilter]:
+    """Parse the generic ``filter`` params, or 422.
+
+    Three distinct caller mistakes get three distinct messages — a malformed triple, an
+    unknown field, and an operator the field's kind does not support. The alternative,
+    ignoring what we cannot parse, produces a response identical to "no filter was
+    applied", which is the failure this whole parameter was designed around.
+    """
+    try:
+        return validate_filters(raws)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _validate_sort(sort: str | None) -> None:
