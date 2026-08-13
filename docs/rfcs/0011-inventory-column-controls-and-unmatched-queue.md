@@ -483,3 +483,149 @@ None blocking. Two deliberately deferred:
   is not the first version of this feature.
 - **Notifying on a new candidate** (as opposed to showing one on the dashboard) is
   deferred. The widget answers the question; a push channel is a separate decision.
+
+---
+
+# Part 2 — The unified deal surface (owner asks, 2026-08-13, second round)
+
+**Added after T1–T4 shipped.** The owner asked for slabs to move through trades, and in the
+same message asked for Buy, Sell and Trade to become one tab with a mode toggle, on a
+layout they explicitly do not want preserved. Recorded here rather than as a separate RFC
+because it lands on the same branch, in the same round, and shares a component with §G.
+
+## Summary
+
+Owner, verbatim: *"There needs to be a way for slabs to be going in and out of the trade
+menu… I want to combine them all into one big tab, with a toggle between buying, selling,
+or trading… I really do not like the layout, so you do not need to feel the need to keep
+the layout the same. I don't like the show image on hover, because card image, name, and
+price should all be shown when searching for cards, as well as when added to coming in or
+going out."*
+
+Four root causes:
+
+- **(H) `trades.py` hardcodes `"kind": "raw"`** on every incoming leg
+  (`routers/admin/trades.py:792`), plus `ItemCategory.RAW` on the transaction. A slab
+  acquired in a trade is therefore written as a raw card and loses its company, grade and
+  cert entirely. **Trading a slab OUT already works** — outgoing legs reference an existing
+  `item_id` and never inspect `kind` — so this is an incoming-only gap. → §H.
+- **(I) Three pages run one workflow.** Buy, Sell and Trade are 707, 687 and 914 lines of
+  substantially parallel state: a session id, a cart, cash components, a balance, a
+  customer view, a date, a confirm dialog. The owner works all three at one table and wants
+  one surface. → §I.
+- **(J) Card identity is behind a hover, and absent entirely in two places.** Sell renders
+  its image from `onMouseEnter` into a side panel captioned *"Hover or select a card"*
+  (`sell/page.tsx:390, 508`), and Trade's Going Out picker shows name + price with **no
+  image at all** (`trade/page.tsx:713`) while its Coming In picker uses `CardPickerRow` and
+  does. → §J.
+- **(K) Manual entry is still a consolation prize on the surfaces being rebuilt.** Same
+  defect §G records for Buy, restated by the owner for the new page: manual entry must be
+  permanently available and **put away by default**. → §K.
+
+## Owner decisions, 2026-08-13 (second round)
+
+| # | Decision | Consequence |
+|---|---|---|
+| 10 | **One route: `/admin/trade`.** `/admin/buy` and `/admin/sell` are **removed**, not redirected. | Departs from the `/admin/outgoing` precedent — but that precedent was about *renaming* a page that still existed. These two pages genuinely stop existing. The dashboard quick actions, the sidebar and `mobileItems` are rewritten in the same task. |
+| 11 | Sidebar label **"Buy / Sell / Trade"** | Spells out all three modes, so nothing has to be learned. Costs a longer nav label. |
+| 12 | **Full-width search on top; Coming In / Going Out side by side; summary rail** | Gives result rows the whole page width, which is what stops image + name + set + price being squished — the owner's stated objection. |
+| 13 | Search source **auto-locked by mode**, switchable only in Trade | A control settable one way is noise on two modes of three, and a mis-set source in Sell would search 31,603 catalog rows for a card you are trying to sell. |
+| 14 | **Incoming is ALWAYS a catalog pick first**, then Raw or Graded | Owner: *"regardless you should be picking a card from the catalog, it's just that graded cards have more values."* |
+| 15 | **Condition and grade are never on screen together** | They are alternatives, not companions. Showing both invites entering both. |
+| 16 | **Keep three session APIs**; merge only the UI | These are the highest-risk money paths in the repo. RFC 0010 T0 exists because a partial write in one of them created real inventory and then reported "Nothing was created". |
+
+## Detailed Design
+
+### H. Slabs through a trade (owner ask)
+
+Incoming legs gain optional `kind` (`"raw"` default, or `"graded"`), `company`, `grade`,
+`cert_number` and `grade_label`. When `kind == "graded"` the committed item is a
+`GradedInventoryItem` and the transaction carries `ItemCategory.GRADED`.
+
+**A graded incoming leg still requires the same catalog `card_id` a raw one does**
+(decision 14). Graded pricing joins on `(card_id, company, grade)`, so a slab with no
+`card_id` is unpriceable by construction — exactly the state RFC 0009 documents for
+free-text slabs, and not one to create by accident from a trade.
+
+`GET /admin/slabs/certs/{cert}` supplies the already-owned warning, reused rather than
+reimplemented. It stays a **warning with override, never a gate**: a slab sold and bought
+back is legitimate re-entry (RFC 0009).
+
+Validation is symmetric with the model: a graded leg missing `company`, `grade` or
+`cert_number` is a **422**, and a raw leg carrying them is a 422 too — silently dropping
+fields is how a slab becomes a raw card, which is the defect being fixed.
+
+### I. One surface, three modes
+
+`/admin/trade?mode=buy|sell|trade`. `mode` lives in the query string so the toggle is
+bookmarkable, a refresh keeps the mode, and the dashboard keeps **three** distinct quick
+actions pointing at one page.
+
+| mode | Coming In | Going Out | search source | session API |
+|---|---|---|---|---|
+| buy | shown | hidden | catalog (locked) | `purchases.py` |
+| sell | hidden | shown | inventory (locked) | `sales.py` |
+| trade | shown | shown | toggle | `trades.py` |
+
+**Everything the owner named as keeping, keeps:** customer view, cost-basis mode, cash
+components, balance, profit and date. Each renders where it applies — cost-basis mode is a
+trade concept and shows in trade mode only; profit is meaningless on a pure buy.
+
+**Switching mode with a session in progress must not silently discard it.** A started
+session belongs to one API, and there is no migration between them. The toggle therefore
+confirms before abandoning a non-empty session, on the same reasoning as every other
+destructive confirm in this codebase.
+
+### J. Card identity is never behind a hover
+
+**Three fields — image, name, price — everywhere a card appears**: in search results, in
+Coming In, and in Going Out. This extends §L's picker rule (RFC 0010) to **staged lists**,
+which it did not previously cover.
+
+The hover preview is **deleted, not restyled**. A hover is not a way of showing an image:
+it needs a mouse, it shows one card at a time, it shows nothing to a person reading the
+list, and it vanishes. The owner is standing at a table comparing several physical cards
+against several rows at once.
+
+Rows use the shared `CardPickerRow` shape and `TABLE_THUMB_SIZE`, so art never shrinks,
+never grows, keeps 5:7 proportions and renders the placeholder on a card-less or failed
+id — a row that changes height as art loads makes the list jump under the cursor mid-click.
+
+### K. Adding a card, in one shape
+
+```
+pick a catalog card  ──or──  open manual entry (put away by default)
+          │
+          ▼
+   [ Raw ] [ Graded ]      ← kind toggle
+          │
+          ├── raw:    condition, finish, language, location, cost
+          └── graded: company, grade, cert #, grade label, language, location, cost
+```
+
+**Condition renders for raw only; company/grade/cert for graded only** (decision 15).
+
+Manual entry is a **disclosure that is put away by default and stays open across adds**,
+exactly as `/admin/slabs`' "Manual entry" button behaves — intake is a batch workflow, and
+a control that closes after every add fights the person using it.
+
+## API Contracts (Part 2)
+
+| Method | Path | Change |
+|---|---|---|
+| `POST` | `/admin/trades/{id}/incoming` | Accepts `kind`, `company`, `grade`, `cert_number`, `grade_label`. 422 on a graded leg missing cert fields, and on a raw leg carrying them. |
+| `GET` | `/admin/slabs/certs/{cert}` | Unchanged; reused by the trade incoming form. |
+
+No other endpoint changes. `purchases.py` and `sales.py` are untouched (decision 16).
+
+## Risks & Mitigations (Part 2)
+
+7. **Deleting two routes breaks anything pointing at them.** Mitigation: the sidebar,
+   `mobileItems`, the dashboard's three quick actions and every test referencing
+   `/admin/buy` or `/admin/sell` are updated in the same task, and a test asserts neither
+   path resolves.
+8. **Rebuilding three money-entry surfaces at once is the largest single UI change in this
+   RFC.** Mitigation: the session APIs are untouched (decision 16), so a bug has one
+   possible home; and the three modes are separately testable against unchanged endpoints.
+9. **A graded leg that silently loses its cert fields recreates the exact defect.**
+   Mitigation: 422 in both directions rather than dropping unknown fields.

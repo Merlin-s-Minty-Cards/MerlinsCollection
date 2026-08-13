@@ -1,6 +1,24 @@
 # T11 — One shared card search, and manual entry that is always there
 
-**RFC:** 0011 §G · **Layer:** frontend + a small backend fix · **Depends on:** — · **Blocks:** —
+**RFC:** 0011 §G · **Layer:** frontend + a small backend fix · **Depends on:** — · **Blocks:** T14
+
+> ## ⚠ RE-SCOPED when RFC 0011 Part 2 landed — read this before starting
+>
+> This doc was written when Buy, Sell and Trade were three pages. Part 2 merges them:
+> **`/admin/buy` and `/admin/sell` are deleted (T16) and `/admin/trade` is rebuilt (T15).**
+>
+> So **do NOT adopt `CardSearchPanel` in Buy or Trade.** Those adoptions are struck from
+> the list below. Build the component and adopt it in **Slabs intake, Triage re-point,
+> Market**, and **Unmatched** if T8 has landed. T14 then *composes* this component for the
+> new deal page's catalog source rather than duplicating it — which is the whole point of
+> decision 6.
+>
+> The "manual entry is a permanent control" requirement is unchanged and still applies to
+> Slabs here; T14 carries it for the deal page.
+>
+> Everything else in this doc — the three search fields, the backend number
+> normalization, the props, the tests — stands as written.
+
 **Owner report, 2026-08-13:** *"There is no way to manually enter a card for buys, trades,
 etc, when you search for a Pokemon that exists, but there is not correct catalog card.
 There should always be an option for manual entry, not just when the catalog search
@@ -14,13 +32,13 @@ even adding a place to enter a set too (this should be a searchable dropdown men
 (`routers/admin/market.py:83-88`), and the `set_id` branch uses the GSI rather than the
 catalog scan. All five frontend callers send `name` alone:
 
-| caller | line |
-|---|---|
-| Buy | `admin/buy/page.tsx:94` |
-| Market | `admin/market/page.tsx:266` |
-| Trade | `admin/trade/page.tsx:176` |
-| Triage re-point | `admin/triage/page.tsx:581` |
-| Slabs intake | `components/admin/slabs/SlabEntryForm.tsx:93` |
+| caller | line | fate |
+|---|---|---|
+| Buy | `admin/buy/page.tsx:94` | deleted by T16 |
+| Market | `admin/market/page.tsx:266` | **adopt here** |
+| Trade | `admin/trade/page.tsx:176` | rebuilt by T15, which composes this |
+| Triage re-point | `admin/triage/page.tsx:581` | **adopt here** |
+| Slabs intake | `components/admin/slabs/SlabEntryForm.tsx:93` | **adopt here** |
 
 So this is a frontend consolidation plus **one** backend fix.
 
@@ -28,12 +46,11 @@ So this is a frontend consolidation plus **one** backend fix.
 
 - **Create:** `frontend/components/admin/shared/CardSearchPanel.tsx`
 - **Create:** `frontend/components/admin/shared/__tests__/CardSearchPanel.test.tsx`
-- **Modify:** the five callers above
+- **Modify:** the three callers marked "adopt here" above (Market, Triage, Slabs)
 - **Modify:** `backend/src/merlins_collection/routers/admin/market.py` — normalized number
   matching (line 114-116)
-- **Test:** `backend/tests/routers/test_admin_market.py`,
-  `frontend/app/(admin)/admin/buy/__tests__/page.test.tsx`, and the Trade and Slabs test
-  files
+- **Test:** `backend/tests/routers/test_admin_market.py`, plus the Market, Triage and
+  Slabs page test files
 
 ## Interfaces
 
@@ -128,15 +145,14 @@ are showing, and when there are none.
 
 | surface | `onManualEntry` | why |
 |---|---|---|
-| Buy | yes | creating an off-catalog item is a real outcome at a buy table |
-| Trade | yes | same |
+| ~~Buy~~ | — | **struck.** Deleted by T16; T14 carries manual entry for the merged page |
+| ~~Trade~~ | — | **struck.** Rebuilt by T15, which composes this component |
 | Slabs intake | yes | already has a free-text fallback; this makes it reachable up front |
 | Triage re-point | **no** | must select a genuine catalog row; its "no match" answer is T6's park action |
 | Market | **no** | a browse tool; there is nothing to create |
 | Unmatched (T8) | **no** | same as re-point |
 
-Buy's existing "Unknown card — not found in catalog" hint (`buy/page.tsx:482-497`) **stays
-as an additional nudge.** It stops being the only door; it was never wrong as a hint.
+The prop stays on the component exactly as specified — T14 is the caller that passes it.
 
 ## RED — write these first, show the failing output, then STOP
 
@@ -234,12 +250,13 @@ describe('CardSearchPanel', () => {
 })
 ```
 
-And on the Buy page, the one that pins the owner's report directly:
+And on Slabs intake, the one that pins the owner's report directly on a surface that
+survives Part 2:
 
 ```tsx
 it('offers manual entry before the admin has searched for anything', async () => {
-  render(<AdminBuyPage />)
-  expect(await screen.findByRole('button', { name: /enter manually/i })).toBeInTheDocument()
+  render(<SlabEntryForm {...props} />)
+  expect(await screen.findByRole('button', { name: /manual/i })).toBeInTheDocument()
 })
 ```
 
@@ -252,9 +269,10 @@ cd frontend && npx vitest run components/admin/shared/__tests__/CardSearchPanel.
 
 ## Watch for
 
-- **Adopt one caller at a time and run that page's tests each time.** Five swaps in one
-  commit is five ways to be wrong at once. Buy first — it is the reference row CLAUDE.md
-  points at (`buy/page.tsx:418-440`).
+- **Adopt one caller at a time and run that page's tests each time.** Three swaps in one
+  commit is three ways to be wrong at once. Slabs first — it is the smallest surface.
+  (Buy WAS the reference row CLAUDE.md points at, `buy/page.tsx:418-440`; read it for the
+  row layout before deleting it in T16, then let it go.)
 - **`min-w-0 flex-1` + `truncate` on the text block, and the image neither shrinks nor
   grows.** CLAUDE.md is explicit that adding an image is not finished when it renders:
   a long name must shrink instead of shoving the art, and rows must not change height as
@@ -270,7 +288,7 @@ cd frontend && npx vitest run components/admin/shared/__tests__/CardSearchPanel.
 ## Done means
 
 1. the backend market test and `CardSearchPanel.test.tsx` pass, output shown;
-2. each adopted page's own test file passes — Buy, Trade, Slabs, Triage, Market;
+2. each adopted page's own test file passes — Slabs, Triage, Market;
    **and if T8 has already landed**, swap `/admin/unmatched`'s "Search catalog" dialog
    onto this panel too (with `onManualEntry` omitted) and clear that row from
    `follow-ups.md`;

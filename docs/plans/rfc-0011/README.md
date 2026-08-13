@@ -55,12 +55,23 @@ of these.
 | [T8](t8-unmatched-queue-page.md) | `/admin/unmatched` page + sidebar entry | frontend | T5, T6, T7 | T10 |
 | [T9](t9-catalog-first-seen-and-sync.md) | `first_seen_at` + new cards in existing sets | backend | — | T10 |
 | [T10](t10-dashboard-new-cards-widget.md) | "New from TCGdex" dashboard widget | frontend | T7, T9 | — |
-| [T11](t11-shared-card-search-panel.md) | Shared card search + always-on manual entry | both | — | — |
-| [T12](t12-docs-and-verification.md) | Docs, CLAUDE.md, full-suite verification | both | all | — |
+| [T11](t11-shared-card-search-panel.md) | Shared card search + always-on manual entry | both | — | T14 |
+| [T13](t13-graded-incoming-on-trades.md) | Slabs can come in through a trade | backend | — | T14, T15 |
+| [T14](t14-deal-search-and-add-card.md) | One search, one add-card form, identity always visible | frontend | T11, T13 | T15 |
+| [T15](t15-unified-deal-page.md) | One page, three modes | frontend | T13, T14 | T16 |
+| [T16](t16-retire-buy-and-sell-routes.md) | Retire `/admin/buy` and `/admin/sell` | frontend | T15 | — |
+| [T12](t12-docs-and-verification.md) | Docs, CLAUDE.md, full-suite verification | both | **all, incl. T13–T16** | — |
 
-**Two independent tracks.** T1–T4 (the inventory table) and T5–T10 (the unmatched queue)
-share no files. T11 is independent of both. If work is parallelised, that is where the
-seams are.
+**T12 runs LAST**, after T16. It keeps its number because the task docs cross-reference it
+and renumbering a doc that is already linked from `progress.md` buys nothing.
+
+**Three tracks.** T1–T4 (the inventory table) and T5–T10 (the unmatched queue) share no
+files. **T13–T16 (the unified deal surface, RFC Part 2) is the third**, and it is the only
+one with a hard internal order — T13 → T14 → T15 → T16 — because each builds on the last.
+
+**T11 sits across two tracks and was re-scoped when Part 2 landed.** It still builds
+`CardSearchPanel`, but it no longer adopts it in Buy or Trade: Buy is deleted by T16 and
+Trade is rebuilt by T15, which composes the component instead. See T11's own note.
 
 ## One task per conversation — and how each one ends
 

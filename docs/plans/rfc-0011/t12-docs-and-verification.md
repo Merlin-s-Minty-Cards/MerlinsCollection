@@ -1,6 +1,6 @@
 # T12 — Docs, CLAUDE.md, and full-suite verification
 
-**RFC:** 0011 (all) · **Layer:** both · **Depends on:** every task · **Blocks:** —
+**RFC:** 0011 (all, incl. Part 2) · **Layer:** both · **Depends on:** every task, T16 last · **Blocks:** —
 
 This is the only task that runs the full suite. Everything before it ran a narrow
 selection on purpose.
@@ -9,7 +9,7 @@ selection on purpose.
 
 ### CLAUDE.md
 
-Six edits. Each one is a rule a future reader will otherwise re-derive or break.
+Eight edits. Each one is a rule a future reader will otherwise re-derive or break.
 
 **1. The Admin Panel table** gains a row in the **Back office** group, between Triage and
 Market:
@@ -87,16 +87,57 @@ Market:
 **5. Under the card-picker rule (§L's descendant)**, one paragraph:
 
 > **`CardSearchPanel` is the one card search** — name + card number + set combobox,
-> adopted by Buy, Trade, Slabs, Triage re-point, Market and Unmatched. `GET
-> /admin/market/search` always accepted all three fields; the pickers just never sent
-> them. **Manual entry is a permanent control**, not something that appears after a failed
-> search — the owner's report was finding a card that exists whose catalog row is the
-> wrong printing, at which point a gated button is unreachable. It is offered only where
-> creating an off-catalog item is meaningful: Buy, Trade, Slabs.
+> adopted by Slabs intake, Triage re-point, Market and Unmatched, and **composed** by the
+> deal page's `DealSearchPanel` rather than duplicated. `GET /admin/market/search` always
+> accepted all three fields; the pickers just never sent them. **Manual entry is a
+> permanent control**, not something that appears after a failed search — the owner's
+> report was finding a card that exists whose catalog row is the wrong printing, at which
+> point a gated button is unreachable. It is offered only where creating an off-catalog
+> item is meaningful: the deal page (Buy/Trade modes) and Slabs.
 
 **6. Correct anything now stale.** Search CLAUDE.md for claims this RFC invalidates — in
 particular any text implying Triage is the only place unmatched cards live, or that the
 inventory table's sortable columns are a fixed short list.
+
+**7. Part 2: the Admin Panel table loses two rows and gains a merged one.** `/admin/buy`
+and `/admin/sell` are gone; `/admin/trade` becomes **Buy / Sell / Trade**, covering all
+three modes via `?mode=`. Add a section:
+
+> **Buy / Sell / Trade** (`/admin/trade?mode=buy|sell|trade`) — one surface, three modes.
+> RFC 0011 Part 2. `/admin/buy` and `/admin/sell` were **removed**, not redirected (owner
+> decision 10). That departs from the `/admin/outgoing` precedent recorded above, and the
+> distinction is real: that precedent covers *renaming a page that still exists*, while
+> these two genuinely stopped existing.
+>
+> **`mode` lives in the query string**, which is what lets one route serve the dashboard's
+> three quick actions and keeps the toggle bookmarkable.
+>
+> **`lib/deal-session.ts` is the ONLY place that knows which API a mode drives.**
+> `purchases.py`, `sales.py` and `trades.py` stay separate (decision 16) because they are
+> the highest-risk money paths in the repo. A `if (mode === 'buy')` at a call site is three
+> code paths coming back in disguise.
+>
+> **Switching mode with a non-empty session confirms first.** A session belongs to one API
+> and there is no migration between them.
+>
+> **A slab can now come IN through a trade.** Trading one OUT always worked — outgoing legs
+> reference an existing `item_id` and never inspect `kind`. Incoming was hardcoded to
+> `kind: "raw"`, so a PSA 10 arrived as a raw NM card with its cert gone. A graded incoming
+> leg **requires a `card_id`**: graded pricing joins on `(card_id, company, grade)`, so an
+> unlinked slab is unpriceable by construction. Consequence: **manual entry can only ever
+> be raw.**
+>
+> **Condition and grade are never rendered together.** They are alternatives, and the
+> backend 422s a raw leg carrying graded fields.
+
+**8. Part 2: extend the card-identity rule to STAGED lists.** The existing rule (RFC 0010
+§L) covers pickers. Add:
+
+> **The three fields are required wherever a card appears, not only in pickers** — search
+> results *and* staged/selected rows. **No hover may carry information.** A hover needs a
+> mouse, shows one card at a time, shows nothing to someone reading the list, and vanishes.
+> The Sell page's `onMouseEnter` preview panel was deleted rather than restyled (RFC 0011
+> §J).
 
 ### Other docs
 
@@ -160,6 +201,12 @@ List these in `progress.md` as outstanding. They need a browser and real data:
    number alone finds a card.
 6. **Run "check for new sets"** on `/admin/market` once, so `first_seen_at` starts being
    populated. Until it runs, the dashboard's new-card count is legitimately `0`.
+7. **`/admin/trade` in all three modes** — stage a card in each, confirm image + name +
+   price show on the staged row (not on hover), check the balance, and commit one.
+8. **A graded card in through a trade** — add it, commit, then confirm on `/admin/slabs`
+   that it arrived as a slab with its cert, company and grade intact.
+9. **Every nav route resolves**, desktop and mobile width, and `/admin/buy` and
+   `/admin/sell` are gone.
 
 ## Done means
 

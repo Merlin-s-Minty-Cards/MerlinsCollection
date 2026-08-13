@@ -60,14 +60,18 @@ permanently floored. Everything on the queue track is downstream of it.
 | T2 | All columns sortable | **DONE** | (see below) | 31 of 33 columns now sortable; `_image` and `_actions` deliberately not. Inventory page tests (27) pass unchanged — `handleSort` and the desc-first default were not touched. |
 | T3 | Generic filter backend | **DONE** | (see below) | 36 filterable fields. **Design change vs the task doc:** bound parsing moved from evaluation into `validate_filters`, because `apply_filters` is a comprehension and never evaluated a bad bound on an empty result set — a 422 that fired only when rows happened to exist. Caught by `test_an_unparseable_bound_is_a_422`. Named params left hand-written as planned: `name`, `condition`, `min_price`/`max_price`, `set_id`/`card_number`/`artist`. |
 | T4 | Per-column filters frontend | **DONE** | `2942598` | 44 filters covering all 31 filterable columns (`_image`/`_actions` excluded). **Three changes vs the task doc, all forced:** (1) `product_type` is a **select**, not the text box the doc's table listed — it is `FieldKind.SELECT` on the backend and `OPS_BY_KIND[SELECT]` is `{eq}`, so a `contains` would have been a guaranteed 422; (2) `admin-api.ts` had to learn **repeatable params** — it used `searchParams.set`, which keeps only the LAST `filter=` and silently widens the result set; (3) the doc's page test was rewritten **scoped to the filter panel**, because the column picker's checkbox for a column carries the same accessible name as that column's filter, so the unscoped `getByLabelText('Notes')` matches both once the picker is open. **Fixed in passing:** the Ownership filter sent `consigned` where the backend accepts only `owned`/`cosigned` — picking "Cosigned" 400'd. |
-| T5 | `no_catalog_match` model | **DONE** | (see below) | **T6, T7 and T8 are unblocked.** Two fields on `_ItemBase`, one suppression inside `is_missing_card_id`, one query param, one PUT transition helper. The queue is `GET /admin/inventory/search?no_catalog_match=true` — **no new list endpoint**, and **nothing backfilled** (pinned by `test_the_unmatched_queue_ships_empty`). The sealed/bulk guard has to live in the ROUTER, not the model validator: a sealed item has no `card_id` to be non-None, so the invariant cannot see it. `_apply_no_catalog_match_transition` **pops a client-sent `no_catalog_match_at`** before doing anything — the doc only said "server-stamped", which a client could otherwise satisfy by sending its own. Blast radius checked beyond the named selection: `backend/tests/{routers,services,models}` = **1483 passed**. |
+| T5 | `no_catalog_match` model | **DONE** | `e94b6da` | **T6, T7 and T8 are unblocked.** Two fields on `_ItemBase`, one suppression inside `is_missing_card_id`, one query param, one PUT transition helper. The queue is `GET /admin/inventory/search?no_catalog_match=true` — **no new list endpoint**, and **nothing backfilled** (pinned by `test_the_unmatched_queue_ships_empty`). The sealed/bulk guard has to live in the ROUTER, not the model validator: a sealed item has no `card_id` to be non-None, so the invariant cannot see it. `_apply_no_catalog_match_transition` **pops a client-sent `no_catalog_match_at`** before doing anything — the doc only said "server-stamped", which a client could otherwise satisfy by sending its own. Blast radius checked beyond the named selection: `backend/tests/{routers,services,models}` = **1483 passed**. |
 | T6 | Triage unlink + park | TODO | — | |
 | T7 | Pairing suggestions endpoint | TODO | — | |
 | T8 | Unmatched queue page | TODO | — | |
 | T9 | `first_seen_at` + sync | TODO | — | |
 | T10 | Dashboard widget | TODO | — | |
-| T11 | Shared card search panel | TODO | — | |
-| T12 | Docs + verification | TODO | — | |
+| T11 | Shared card search panel | TODO | — | **RE-SCOPED by Part 2** — no longer adopted in Buy (deleted) or Trade (rebuilt). Adopt in Slabs, Triage, Market, +Unmatched. T14 composes it. |
+| **T13** | Slabs come in through a trade | TODO | — | RFC Part 2. Trading a slab OUT already works; only incoming is broken (`trades.py:792` hardcodes `kind: "raw"`). |
+| **T14** | Deal search + add-card form | TODO | — | RFC Part 2. Depends on T11 + T13. |
+| **T15** | Unified deal page, three modes | TODO | — | RFC Part 2. Depends on T13 + T14. |
+| **T16** | Retire `/admin/buy` and `/admin/sell` | TODO | — | RFC Part 2. Depends on T15. The only task that deletes reachable pages. |
+| T12 | Docs + verification | TODO | — | **Runs LAST, after T16.** |
 
 ## Decisions
 
@@ -85,6 +89,19 @@ code does today and are not open for re-litigation during implementation.**
 | 7 | **One shared card-search component** across all five pickers | Three of five pickers had already lost their card images by drifting apart. |
 | 8 | Condition gains a **real ordinal rank** (NM > LP+ > LP > LP- > MP > HP > DMG) | Alphabetical sorting made `LP+` and `LP-` indistinguishable — the exact distinction RFC 0008 T2 stored separately. |
 | 9 | An unknown `sort` field becomes a **422**, not a silent unsorted list | Same class as `_validate_triage_reason`. May require updating existing tests that assert the silent form — do that deliberately. |
+
+### Part 2 decisions (2026-08-13, second round) — the unified deal surface
+
+| # | Decision | Why it matters |
+|---|---|---|
+| 10 | **One route: `/admin/trade`.** `/admin/buy` and `/admin/sell` are **removed**, not redirected | Departs from the `/admin/outgoing` precedent — but that was about *renaming* a page that still existed. These two genuinely stop existing. Sidebar, `mobileItems` and the dashboard quick actions are rewritten in T16. |
+| 11 | Sidebar label **"Buy / Sell / Trade"**; mobile bar says **"Deal"** | The long label does not fit four-across on a phone. A deliberate divergence — do not "fix" it into consistency. |
+| 12 | **Full-width search on top; Coming In / Going Out side by side; summary rail** | The width IS the fix for the owner's "squished" objection. |
+| 13 | Search source **auto-locked by mode**, switchable only in Trade | A control settable one way is noise on two modes of three. |
+| 14 | **Incoming is ALWAYS a catalog pick first**, then Raw or Graded | Owner: *"regardless you should be picking a card from the catalog."* Consequence: a manual entry can only ever be raw, because graded pricing joins on `card_id`. |
+| 15 | **Condition and grade are never on screen together** | They are alternatives. Showing both invites entering both, and T13 422s a raw leg carrying graded fields. |
+| 16 | **Keep three session APIs**; merge only the UI | Highest-risk money paths in the repo. RFC 0010 T0 exists because a partial write in one created real inventory then reported "Nothing was created". |
+| 17 | **No hover carries information anywhere on the new surface** | Owner: *"I don't like the show image on hover."* Image + name + price render in search results AND in staged rows. The Sell preview panel is deleted, not restyled. |
 
 ## Measurements worth keeping
 

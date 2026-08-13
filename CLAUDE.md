@@ -494,6 +494,24 @@ sets, printings, finishes and languages, so a list of names is a list of things
 the operator cannot tell apart. They are standing at a table with the physical
 card in hand.
 
+**And not only in pickers — wherever a card APPEARS.** Owner, 2026-08-13: *"card
+image, name, and price should all be shown when searching for cards, as well as
+when added to coming in or going out."* The first version of this rule was scoped
+to the moment of *choosing*, so surfaces showing an **already-chosen** card — a
+staged trade leg, a sale cart, a commit dialog — were read as out of scope and
+shipped without art. That reading was wrong: identity is needed **continuously**,
+not once. The operator builds a five-card deal over several minutes and
+re-verifies every row against the physical cards in their hand before confirming.
+A staged row is not a receipt; it is a thing still being checked.
+
+> **A HOVER NEVER SATISFIES THIS RULE.** `/admin/sell` rendered its art from
+> `onMouseEnter` into a side panel captioned *"Hover or select a card"*, and that
+> counted as "has an image" for months. It does not: a hover needs a mouse, shows
+> exactly one card when the operator is comparing several, shows **nothing** to
+> someone reading the list, and vanishes the moment the pointer moves. RFC 0011 §J
+> **deletes** that panel rather than restyling it. Hover may change a background
+> colour. It may never be the only way to see an image, a price, or a control.
+
 **Both fields are already in the response.** `CatalogCard.images` and
 `CatalogCard.prices` (`models/catalog.py`) are both populated and
 `GET /admin/market/search` returns them via `model_dump`. A picker without art or
@@ -545,6 +563,39 @@ as art loads make the list jump under the cursor mid-click. Speed is the point:
 keep the debounce, keep the batching, never fire a request per row.
 
 **Check this rule before writing any card-picking UI, and check it in review.**
+
+## AN ESCAPE HATCH IS NEVER GATED ON THE FAILURE OF THE PATH IT ESCAPES
+
+Owner rule, stated twice — 2026-08-13: *"There should always be an option for
+manual entry, not just when the catalog search returns no results"*, and again
+the same day for the merged deal surface.
+
+**Manual entry on `/admin/buy` appeared only after a search returned nothing.**
+That affordance was designed for the case that *motivated* it — the catalog has
+no such card — and not for the case that actually happens: **the search succeeds
+and every result is the wrong printing.** A Pokémon that exists, found, with no
+correct catalog row behind it. In exactly that state the button was unreachable,
+because the search had "worked".
+
+The general form, and it applies to any fallback, override or manual path:
+
+> **If the escape hatch is only reachable when the primary path fails, it cannot
+> be reached in the case where the primary path succeeds and is wrong** — which is
+> the more common and more expensive failure, because the operator has no signal
+> that anything went wrong.
+
+So: **a permanent control, put away by default.** Present before any search runs,
+while results are showing, and when there are none. `/admin/slabs`' "Manual entry"
+disclosure is the reference implementation — it is a button that is always there,
+the form is closed until asked for, and **it stays open across adds** because
+intake is a batch workflow and a control that closes after every entry fights the
+person using it.
+
+A disabled escape hatch is worse than none: it implies a roadmap. Either it works,
+or it is gone (RFC 0010 T12 deleted three buttons on exactly this reasoning). If
+it must be unavailable in some state, **say why in one line beside it** — e.g.
+manual entry forces Raw, because a graded item needs a `card_id` for pricing to
+join on.
 
 **Card art: import the size, never re-pick it.** `TABLE_THUMB_SIZE` (`xs`,
 56×78 — real card proportions) and `TABLE_THUMB_COLUMN` (`w-16`) are exported
