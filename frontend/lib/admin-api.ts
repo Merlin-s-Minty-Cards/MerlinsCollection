@@ -18,7 +18,11 @@ export class AdminApiError extends Error {
 
 type FetchOptions = {
   body?: unknown
-  params?: Record<string, string | number | boolean | undefined | null>
+  /**
+   * An array value is a REPEATABLE parameter — `?filter=a&filter=b` — which is
+   * how `GET /admin/inventory/search` takes its generic filters (RFC 0011 T3).
+   */
+  params?: Record<string, string | number | boolean | string[] | undefined | null>
 }
 
 /**
@@ -48,7 +52,13 @@ export function useAdminApi() {
       if (opts?.params) {
         const searchParams = new URLSearchParams()
         for (const [key, value] of Object.entries(opts.params)) {
-          if (value !== undefined && value !== null) {
+          if (value === undefined || value === null) continue
+          if (Array.isArray(value)) {
+            // `append`, never `set`: `set` REPLACES, so a list of five filters
+            // would arrive as the last one alone — a query that silently
+            // returns a wider set than the admin asked for.
+            for (const member of value) searchParams.append(key, String(member))
+          } else {
             searchParams.set(key, String(value))
           }
         }

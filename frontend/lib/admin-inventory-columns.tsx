@@ -32,7 +32,8 @@ import OwnershipBadge from '@/components/admin/shared/OwnershipBadge'
 import TriageRowAction from '@/components/admin/shared/TriageRowAction'
 import type { TriageItem } from '@/lib/triage'
 import { adminItemName } from '@/lib/admin-item-name'
-import { formatCondition } from '@/lib/constants'
+import { CONDITION_OPTIONS as CONDITION_VALUES, formatCondition } from '@/lib/constants'
+import { parseMoney } from '@/lib/money'
 
 /** One inventory row as the admin search returns it (a full `model_dump`). */
 export interface InventoryItem {
@@ -452,11 +453,22 @@ export function saveVisibleColumnKeys(keys: string[]): void {
 // Filters
 // --------------------------------------------------------------------------
 
+/**
+ * The control a field deserves. Mirrors `FieldKind` in
+ * `backend/services/inventory_filters.py` CHARACTER FOR CHARACTER — these
+ * strings are the wire contract, not a display label.
+ */
+export type FilterKind = 'text' | 'select' | 'range' | 'dateRange' | 'presence'
+
+/** What a filter does to its field. Mirrors the backend `FilterOp` exactly. */
+export type FilterOp = 'contains' | 'eq' | 'gte' | 'lte' | 'isnull' | 'notnull'
+
+/** Where a `select` gets its options when they are not a static list. */
+export type FilterOptionSource = 'locations' | 'shows' | 'sets'
+
 export interface InventoryFilterDef {
-  /** The page's state key for this filter. */
+  /** The page's state key for this filter, and its key in `FilterValues`. */
   id: string
-  /** The query param sent to `GET /admin/inventory/search`. */
-  param: string
   /** Accessible name of the control, and the label used in the hidden notice. */
   label: string
   /**
@@ -464,10 +476,45 @@ export interface InventoryFilterDef {
    * all — see the note on the catalog filters below.
    */
   columnKey: string | null
+  /** Which control to render, and which operators are legal for it. */
+  kind: FilterKind
+  /** The backend field name. Defaults to `columnKey` when omitted. */
+  field?: string
+  /**
+   * The operator this entry sends. Required on `range` and `dateRange`, where
+   * the two bounds are two entries over one column — `gte` and `lte`. Derived
+   * from `kind` for everything else.
+   */
+  op?: FilterOp
+  /** For `kind: 'select'` — a static list of choices. */
+  options?: { value: string; label: string }[]
+  /** For `kind: 'select'` — a list the page fetches rather than declares. */
+  optionSource?: FilterOptionSource
+  /**
+   * The pre-existing named parameter this filter sends INSTEAD of the generic
+   * `filter=` triple. See `buildFilterParams` for why four of them must stay.
+   */
+  legacyParam?: string
 }
+
+/** `['a', 'b_c']` → `[{value: 'a', label: 'a'}, {value: 'b_c', label: 'b c'}]`. */
+function opts(values: readonly string[]): { value: string; label: string }[] {
+  return values.map((v) => ({ value: v, label: v.replace(/_/g, ' ') }))
+}
+
+const YES_NO = [
+  { value: 'true', label: 'Yes' },
+  { value: 'false', label: 'No' },
+]
 
 /**
  * Every filter the page offers, each bound to the column it follows.
+ *
+ * **The registry is TOTAL** (RFC 0011 T4): every column but `_image` and
+ * `_actions` has at least one entry, and `admin-inventory-columns.test.ts` fails
+ * the moment a new column arrives without one. It covered twelve of
+ * thirty-three before, which is how the panel ended up offering fields
+ * (`card_number`, `artist`) with no relationship to what was on screen.
  *
  * `set_id` / `card_number` / `artist` are bound to `null` deliberately. They
  * filter on catalog fields, and the ordinary admin search response carries no
@@ -480,20 +527,160 @@ export interface InventoryFilterDef {
  * The Set filter sends `set_id`, not the `set_name` substring it used to (T8).
  * Names are not unique across languages — "Base Set" is both `en:base1` and
  * `ja:base1` — so a substring cannot express the selection the combobox makes.
+ *
+ * **Every `kind` here must match `FILTERABLE_FIELDS` on the backend**, because
+ * the kind picks the operator and the backend 422s an operator its own kind
+ * does not allow. `only ever emits ops the backend registry accepts` is the test
+ * that catches a drift, but it can only compare against a hand-copied table —
+ * check `services/inventory_filters.py` when adding a field.
  */
 export const INVENTORY_FILTERS: InventoryFilterDef[] = [
-  { id: 'search', param: 'name', label: 'Name', columnKey: 'display_name' },
-  { id: 'status', param: 'status', label: 'Status', columnKey: 'status' },
-  { id: 'condition', param: 'condition', label: 'Condition', columnKey: 'condition' },
-  { id: 'kind', param: 'kind', label: 'Kind', columnKey: 'kind' },
-  { id: 'location', param: 'location', label: 'Location', columnKey: 'location' },
-  { id: 'minPrice', param: 'min_price', label: 'Min $', columnKey: 'current_market_value' },
-  { id: 'maxPrice', param: 'max_price', label: 'Max $', columnKey: 'current_market_value' },
-  { id: 'ownership', param: 'ownership', label: 'Ownership', columnKey: 'consignment' },
-  { id: 'needsReview', param: 'needs_review', label: 'Needs Review', columnKey: 'needs_review' },
-  { id: 'setId', param: 'set_id', label: 'Set', columnKey: null },
-  { id: 'cardNumber', param: 'card_number', label: 'Card #', columnKey: null },
-  { id: 'artist', param: 'artist', label: 'Artist', columnKey: null },
+  // --- The nine that predate T4, keeping their named parameters -------------
+  { id: 'search', label: 'Name', columnKey: 'display_name', kind: 'text', legacyParam: 'name' },
+  {
+    id: 'status', label: 'Status', columnKey: 'status', kind: 'select', legacyParam: 'status',
+    options: opts(['available', 'sold', 'lost', 'on_hold', 'consigned']),
+  },
+  {
+    id: 'kind', label: 'Kind', columnKey: 'kind', kind: 'select', legacyParam: 'kind',
+    options: opts(['raw', 'graded', 'sealed', 'bulk']),
+  },
+  {
+    id: 'condition', label: 'Condition', columnKey: 'condition', kind: 'select',
+    legacyParam: 'condition', options: opts(CONDITION_VALUES),
+  },
+  {
+    id: 'location', label: 'Location', columnKey: 'location', kind: 'select',
+    legacyParam: 'location', optionSource: 'locations',
+  },
+  {
+    id: 'minPrice', label: 'Min $', columnKey: 'current_market_value', kind: 'range',
+    op: 'gte', legacyParam: 'min_price',
+  },
+  {
+    id: 'maxPrice', label: 'Max $', columnKey: 'current_market_value', kind: 'range',
+    op: 'lte', legacyParam: 'max_price',
+  },
+  {
+    id: 'ownership', label: 'Ownership', columnKey: 'consignment', kind: 'select',
+    legacyParam: 'ownership',
+    // `cosigned`, not `consigned`. The backend accepts exactly 'owned' and
+    // 'cosigned' and 400s anything else; this option sent the other spelling,
+    // so picking it took the list down rather than filtering it.
+    options: [{ value: 'owned', label: 'Owned' }, { value: 'cosigned', label: 'Cosigned' }],
+  },
+  {
+    id: 'needsReview', label: 'Needs Review', columnKey: 'needs_review', kind: 'select',
+    legacyParam: 'needs_review',
+    options: [{ value: 'true', label: 'Flagged' }, { value: 'false', label: 'Clear' }],
+  },
+
+  // --- T4: the twenty-two columns that had no filter at all ----------------
+  {
+    id: 'costBasisMin', label: 'Price Paid Min', columnKey: 'cost_basis',
+    kind: 'range', op: 'gte',
+  },
+  {
+    id: 'costBasisMax', label: 'Price Paid Max', columnKey: 'cost_basis',
+    kind: 'range', op: 'lte',
+  },
+  {
+    id: 'stickerPriceMin', label: 'Sticker Min', columnKey: 'sticker_price',
+    kind: 'range', op: 'gte',
+  },
+  {
+    id: 'stickerPriceMax', label: 'Sticker Max', columnKey: 'sticker_price',
+    kind: 'range', op: 'lte',
+  },
+  {
+    id: 'listedPriceMin', label: 'Listed Min', columnKey: 'listed_price',
+    kind: 'range', op: 'gte',
+  },
+  {
+    id: 'listedPriceMax', label: 'Listed Max', columnKey: 'listed_price',
+    kind: 'range', op: 'lte',
+  },
+  {
+    id: 'marketAtPurchaseMin', label: 'Market at Purchase Min',
+    columnKey: 'market_value_at_purchase', kind: 'range', op: 'gte',
+  },
+  {
+    id: 'marketAtPurchaseMax', label: 'Market at Purchase Max',
+    columnKey: 'market_value_at_purchase', kind: 'range', op: 'lte',
+  },
+  { id: 'gradeMin', label: 'Grade Min', columnKey: 'grade', kind: 'range', op: 'gte' },
+  { id: 'gradeMax', label: 'Grade Max', columnKey: 'grade', kind: 'range', op: 'lte' },
+
+  { id: 'acquiredFrom', label: 'Acquired From', columnKey: 'acquired_at', kind: 'dateRange', op: 'gte' },
+  { id: 'acquiredTo', label: 'Acquired To', columnKey: 'acquired_at', kind: 'dateRange', op: 'lte' },
+  { id: 'reviewedFrom', label: 'Reviewed From', columnKey: 'reviewed_at', kind: 'dateRange', op: 'gte' },
+  { id: 'reviewedTo', label: 'Reviewed To', columnKey: 'reviewed_at', kind: 'dateRange', op: 'lte' },
+
+  {
+    id: 'language', label: 'Language', columnKey: 'language', kind: 'select',
+    options: opts(['EN', 'JP', 'FR', 'DE', 'ES', 'IT', 'PT', 'KO', 'ZH']),
+  },
+  {
+    id: 'finish', label: 'Finish', columnKey: 'finish', kind: 'select',
+    // The INTERNAL finish vocabulary, which is what the item stores —
+    // `services/tcgdex._map_finish` is the only thing that speaks TCGdex's
+    // hyphenated spelling.
+    options: [
+      { value: 'normal', label: 'Normal' },
+      { value: 'holofoil', label: 'Holofoil' },
+      { value: 'reverseHolofoil', label: 'Reverse Holofoil' },
+    ],
+  },
+  {
+    id: 'factorySealed', label: 'Factory Sealed', columnKey: 'factory_sealed',
+    kind: 'select', options: YES_NO,
+  },
+  {
+    id: 'company', label: 'Grading Co.', columnKey: 'company', kind: 'select',
+    options: opts(['PSA', 'BGS', 'CGC', 'SGC']),
+  },
+  {
+    id: 'productType', label: 'Product Type', columnKey: 'product_type', kind: 'select',
+    // A closed `SealedProductType` enum on the backend, which is why this is a
+    // dropdown and not the text box the task doc first sketched: a `contains`
+    // on a SELECT field is a 422, not a wider match.
+    options: opts(['booster_box', 'etb', 'bundle', 'booster_pack', 'collection_box', 'other']),
+  },
+  {
+    id: 'acquiredShow', label: 'Acquired Show', columnKey: 'acquired_show_id',
+    // A SELECT sourced from GET /admin/shows, on the same reasoning that makes
+    // Location a dropdown: the values are a managed list, and a substring match
+    // across show names is not a question anyone has.
+    kind: 'select', optionSource: 'shows',
+  },
+
+  // Card ID is a PRESENCE control, not a text box. Nobody types `en:sv3pt5-158`
+  // from memory; the question actually asked at this column is "which of my
+  // cards are unlinked", and that is one dropdown.
+  { id: 'cardIdPresence', label: 'Card link', columnKey: 'card_id', kind: 'presence' },
+  {
+    id: 'nameOverridePresence', label: 'Name Override', columnKey: 'display_name_override',
+    kind: 'presence',
+  },
+
+  { id: 'reviewReason', label: 'Review Reason', columnKey: 'review_reason', kind: 'text' },
+  { id: 'certNumber', label: 'Cert #', columnKey: 'cert_number', kind: 'text' },
+  { id: 'description', label: 'Description', columnKey: 'description', kind: 'text' },
+  { id: 'stickerNotes', label: 'Sticker Notes', columnKey: 'sticker_notes', kind: 'text' },
+  { id: 'notes', label: 'Notes', columnKey: 'notes', kind: 'text' },
+  { id: 'valueNote', label: 'Value Note', columnKey: 'value_note', kind: 'text' },
+  { id: 'tcgUrl', label: 'TCGplayer URL', columnKey: 'tcg_url', kind: 'text' },
+  { id: 'lineageId', label: 'Lineage ID', columnKey: 'lineage_id', kind: 'text' },
+  { id: 'predecessor', label: 'Predecessor', columnKey: 'predecessor_item_id', kind: 'text' },
+  { id: 'itemId', label: 'Item ID', columnKey: 'item_id', kind: 'text' },
+
+  // --- Column-less: catalog joins, see the note above ----------------------
+  {
+    id: 'setId', label: 'Set', columnKey: null, kind: 'select', legacyParam: 'set_id',
+    optionSource: 'sets',
+  },
+  { id: 'cardNumber', label: 'Card #', columnKey: null, kind: 'text', legacyParam: 'card_number' },
+  { id: 'artist', label: 'Artist', columnKey: null, kind: 'text', legacyParam: 'artist' },
 ]
 
 /**
@@ -507,4 +694,83 @@ export function isFilterVisible(
 ): boolean {
   if (showAllFilters) return true
   return filter.columnKey !== null && visible.has(filter.columnKey)
+}
+
+// --------------------------------------------------------------------------
+// Turning the panel's values into a query
+// --------------------------------------------------------------------------
+
+/** Filter id → the raw string the control holds. `''` means unset. */
+export type FilterValues = Record<string, string>
+
+/** The op a filter sends, given its kind and (for presence) its value. */
+function opFor(def: InventoryFilterDef, value: string): FilterOp | null {
+  if (def.kind === 'presence') {
+    if (value === 'has') return 'notnull'
+    if (value === 'missing') return 'isnull'
+    return null
+  }
+  if (def.op) return def.op
+  return def.kind === 'select' ? 'eq' : 'contains'
+}
+
+/**
+ * The value as the backend wants it, or `null` to send nothing.
+ *
+ * A `range` bound goes through `parseMoney`, NEVER `parseFloat` — the owner
+ * types `1,300`, `parseFloat` reads that as `1`, and `1` is not `NaN` so it
+ * passes every guard on the way to the wire. An unparseable bound sends
+ * nothing rather than a 422: the value changes on every keystroke, so `1,`
+ * exists for as long as it takes to type the next digit, and a 422 there blanks
+ * the whole list mid-type.
+ */
+function wireValue(def: InventoryFilterDef, value: string): string | null {
+  if (def.kind === 'presence') return ''
+  if (def.kind !== 'range') return value
+  const parsed = parseMoney(value)
+  // `=== null`, never falsiness: `0` is a real bound (a free throw-in card).
+  return parsed === null ? null : String(parsed)
+}
+
+/**
+ * Split the panel's values into named params and generic `filter=` triples.
+ *
+ * Two spellings, ONE evaluator on the backend (RFC 0011 T3). A filter carrying
+ * `legacyParam` keeps sending it — four of those do something on the server a
+ * plain field comparison cannot (`name` searches notes too, `condition` splits
+ * `LP+` into tier and modifier, `min_price` falls back to cost when no market
+ * figure is known, and the catalog filters join the catalog). Re-expressing
+ * those as `filter=` would silently narrow what they match.
+ *
+ * Returns `filters` as an ARRAY because the parameter is repeatable:
+ * `?filter=notes:contains:foil&filter=cost_basis:gte:100`.
+ */
+export function buildFilterParams(
+  values: FilterValues,
+): { params: Record<string, string>; filters: string[] } {
+  const params: Record<string, string> = {}
+  const filters: string[] = []
+
+  for (const def of INVENTORY_FILTERS) {
+    const raw = values[def.id] ?? ''
+    if (raw === '') continue
+
+    // Normalised FIRST, so a legacy money param gets the same comma handling as
+    // a generic one. `min_price` is a `Decimal` query param on the backend and
+    // 422s on "1,300" exactly like `cost_basis:gte:` would.
+    const value = wireValue(def, raw)
+    if (value === null) continue
+
+    if (def.legacyParam) {
+      params[def.legacyParam] = value
+      continue
+    }
+
+    const field = def.field ?? def.columnKey
+    const op = opFor(def, raw)
+    if (!field || op === null) continue
+    filters.push(`${field}:${op}:${value}`)
+  }
+
+  return { params, filters }
 }

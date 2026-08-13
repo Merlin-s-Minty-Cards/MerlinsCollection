@@ -4,6 +4,7 @@ import {
   INVENTORY_FILTERS,
   DEFAULT_VISIBLE_COLUMN_KEYS,
   COLUMN_STORAGE_KEY,
+  buildFilterParams,
   loadVisibleColumnKeys,
   saveVisibleColumnKeys,
   isFilterVisible,
@@ -191,5 +192,146 @@ describe('every column is sortable except the two that cannot be', () => {
       expect(col.key.endsWith('_asc')).toBe(false)
       expect(col.key.endsWith('_desc')).toBe(false)
     }
+  })
+})
+
+// ===========================================================================
+// RFC 0011 T4 — a dedicated filter for every column
+// ===========================================================================
+//
+// The show/hide behaviour already shipped in RFC 0008 T6; what was missing was
+// COVERAGE — twelve filters for thirty-three columns. These pin that the
+// registry is now total, and that `buildFilterParams` speaks both spellings the
+// backend accepts (T3): the pre-existing named parameters, and the generic
+// repeatable `filter={field}:{op}:{value}`.
+
+describe('every column has a filter', () => {
+  const NO_FILTER = new Set(['_image', '_actions'])
+
+  it('covers every column', () => {
+    const covered = new Set(INVENTORY_FILTERS.map((f) => f.columnKey).filter(Boolean))
+    const uncovered = INVENTORY_COLUMNS
+      .filter((c) => !NO_FILTER.has(c.key) && !covered.has(c.key))
+      .map((c) => c.key)
+    expect(uncovered).toEqual([])
+  })
+
+  it('gives every filter a kind and a unique id', () => {
+    const ids = INVENTORY_FILTERS.map((f) => f.id)
+    expect(new Set(ids).size).toBe(ids.length)
+    for (const f of INVENTORY_FILTERS) {
+      expect(f.kind).toBeTruthy()
+    }
+  })
+
+  it('gives every filter a unique label', () => {
+    // The panel is queried BY LABEL, in the page tests and by an admin's screen
+    // reader alike. Two filters sharing one accessible name make
+    // `getByLabelText` ambiguous, which fails as "found multiple elements"
+    // rather than as anything that names the duplicate.
+    const labels = INVENTORY_FILTERS.map((f) => f.label)
+    const dupes = labels.filter((l, i) => labels.indexOf(l) !== i)
+    expect(dupes).toEqual([])
+  })
+
+  it('names a real column, or is deliberately column-less', () => {
+    const keys = new Set(INVENTORY_COLUMNS.map((c) => c.key))
+    for (const f of INVENTORY_FILTERS) {
+      if (f.columnKey !== null) expect(keys.has(f.columnKey)).toBe(true)
+    }
+  })
+})
+
+describe('buildFilterParams', () => {
+  it('sends a legacy named param where one exists', () => {
+    const { params, filters } = buildFilterParams({ status: 'available' })
+    expect(params.status).toBe('available')
+    expect(filters).toEqual([])
+  })
+
+  it('sends a generic triple for a new filter', () => {
+    const { params, filters } = buildFilterParams({ notes: 'foil' })
+    expect(filters).toEqual(['notes:contains:foil'])
+    expect(params).toEqual({})
+  })
+
+  it('maps presence to isnull and notnull', () => {
+    expect(buildFilterParams({ cardIdPresence: 'missing' }).filters)
+      .toEqual(['card_id:isnull:'])
+    expect(buildFilterParams({ cardIdPresence: 'has' }).filters)
+      .toEqual(['card_id:notnull:'])
+  })
+
+  it('accepts a money bound typed with a comma', () => {
+    // parseFloat("1,300") is 1 and is not NaN — a silent $1,299 error.
+    expect(buildFilterParams({ costBasisMin: '1,300' }).filters)
+      .toEqual(['cost_basis:gte:1300'])
+  })
+
+  it('parses a comma on the LEGACY money params too', () => {
+    // min_price/max_price keep their named parameter, but they are still money
+    // fields typed by the same person. Passing "1,300" through untouched sends
+    // it at a `Decimal` query param and 422s the whole list.
+    expect(buildFilterParams({ minPrice: '1,300' }).params.min_price).toBe('1300')
+  })
+
+  it('drops a half-typed bound rather than sending one the backend will reject', () => {
+    // The value changes on every keystroke, so "1," exists for as long as it
+    // takes to type the next digit. Sending it 422s the list mid-type.
+    expect(buildFilterParams({ costBasisMin: '1,' }).filters).toEqual([])
+  })
+
+  it('sends a date bound through untouched, in the ISO form the input produced', () => {
+    // `<input type="date">` already yields YYYY-MM-DD. Routing it through
+    // `new Date()` would reinterpret it as UTC midnight and shift it a day.
+    expect(buildFilterParams({ acquiredFrom: '2026-08-13' }).filters)
+      .toEqual(['acquired_at:gte:2026-08-13'])
+  })
+
+  it('AND-combines two bounds on one field into two triples', () => {
+    const { filters } = buildFilterParams({ gradeMin: '9', gradeMax: '10' })
+    expect(filters).toEqual(['grade:gte:9', 'grade:lte:10'])
+  })
+
+  it('omits an empty value entirely', () => {
+    const { params, filters } = buildFilterParams({ notes: '', status: '' })
+    expect(filters).toEqual([])
+    expect(params).toEqual({})
+  })
+
+  it('only ever emits ops the backend registry accepts for that kind', () => {
+    // A `contains` on a SELECT field is a 422, not a wider match. This is the
+    // one place the two registries can silently disagree.
+    const OPS_BY_KIND: Record<string, string[]> = {
+      text: ['contains', 'eq'],
+      select: ['eq'],
+      range: ['gte', 'lte'],
+      dateRange: ['gte', 'lte'],
+      presence: ['isnull', 'notnull'],
+    }
+    for (const def of INVENTORY_FILTERS) {
+      if (def.legacyParam) continue
+      const probe = def.kind === 'presence' ? 'has'
+        : def.kind === 'dateRange' ? '2026-08-13'
+        : def.kind === 'range' ? '1'
+        : 'x'
+      const [triple] = buildFilterParams({ [def.id]: probe }).filters
+      expect(triple, `filter ${def.id} produced nothing`).toBeTruthy()
+      const op = triple.split(':')[1]
+      expect(OPS_BY_KIND[def.kind], `filter ${def.id} emitted op ${op}`).toContain(op)
+    }
+  })
+})
+
+describe('a filter follows its column', () => {
+  it('is hidden when its column is hidden', () => {
+    const notes = INVENTORY_FILTERS.find((f) => f.id === 'notes')!
+    expect(isFilterVisible(notes, new Set(['status']), false)).toBe(false)
+    expect(isFilterVisible(notes, new Set(['notes']), false)).toBe(true)
+  })
+
+  it('is revealed by the show-all escape hatch regardless', () => {
+    const notes = INVENTORY_FILTERS.find((f) => f.id === 'notes')!
+    expect(isFilterVisible(notes, new Set(['status']), true)).toBe(true)
   })
 })

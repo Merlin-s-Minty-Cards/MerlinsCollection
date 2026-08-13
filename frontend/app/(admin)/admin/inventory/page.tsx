@@ -6,10 +6,12 @@ import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { CONDITION_OPTIONS as COND_VALUES } from '@/lib/constants'
 import { useCardImages } from '@/lib/use-card-images'
 import { useLocations } from '@/lib/use-locations'
+import { useShows } from '@/lib/use-shows'
 import { useCatalogSets, toComboboxSets } from '@/lib/use-catalog-sets'
 import SetCombobox from '@/components/shared/SetCombobox'
 import DataTable from '@/components/admin/shared/DataTable'
 import SearchInput from '@/components/admin/shared/SearchInput'
+import ColumnFilter from '@/components/admin/shared/ColumnFilter'
 import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
 import ImageToggle from '@/components/admin/shared/ImageToggle'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
@@ -19,16 +21,15 @@ import {
   INVENTORY_FILTERS,
   TOGGLEABLE_COLUMNS,
   DEFAULT_VISIBLE_COLUMN_KEYS,
+  buildFilterParams,
   isFilterVisible,
   loadVisibleColumnKeys,
   saveVisibleColumnKeys,
   toDataTableColumns,
+  type FilterValues,
+  type InventoryFilterDef,
   type InventoryItem,
 } from '@/lib/admin-inventory-columns'
-
-const STATUS_OPTIONS = ['', 'available', 'sold', 'lost', 'on_hold', 'consigned']
-const CONDITION_OPTIONS = ['', ...COND_VALUES]
-const KIND_OPTIONS = ['', 'raw', 'graded', 'sealed', 'bulk']
 
 /** The image column is a registry entry now, not a second competing toggle. */
 const IMAGE_COLUMN_KEY = '_image'
@@ -38,18 +39,15 @@ export default function AdminInventoryPage() {
   const [items, setItems] = useState<InventoryItem[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
-  const [search, setSearch] = useState('')
-  const [statusFilter, setStatusFilter] = useState('')
-  const [conditionFilter, setConditionFilter] = useState('')
-  const [kindFilter, setKindFilter] = useState('')
-  const [locationFilter, setLocationFilter] = useState('')
-  const [setIdFilter, setSetIdFilter] = useState('')
-  const [cardNumberFilter, setCardNumberFilter] = useState('')
-  const [artistFilter, setArtistFilter] = useState('')
-  const [minPriceFilter, setMinPriceFilter] = useState('')
-  const [maxPriceFilter, setMaxPriceFilter] = useState('')
-  const [ownershipFilter, setOwnershipFilter] = useState('')
-  const [needsReviewFilter, setNeedsReviewFilter] = useState('')
+  // ONE record keyed by filter id, not thirteen `useState`s (RFC 0011 T4).
+  // Every filter added used to cost a state hook, a JSX block and a line in
+  // `fetchItems`' dependency array — which is how the panel came to cover
+  // twelve of thirty-three columns. `''` is the unset value throughout.
+  const [filterValues, setFilterValues] = useState<FilterValues>({})
+  const setFilter = useCallback(
+    (id: string, value: string) => setFilterValues((v) => ({ ...v, [id]: value })),
+    [],
+  )
   const [sortKey, setSortKey] = useState<string | null>(null)
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
@@ -86,6 +84,9 @@ export default function AdminInventoryPage() {
 
   // Dynamic locations dropdown
   const { options: locationOptions } = useLocations()
+
+  // `acquired_show_id` stores an opaque id; the filter has to offer names.
+  const { options: showOptions } = useShows()
 
   // Every set in the CATALOG, fetched once and narrowed in the browser — so a
   // set we own nothing from is still pickable. That is the whole point of the
@@ -129,21 +130,15 @@ export default function AdminInventoryPage() {
     if (!api.isAuthenticated) return
     setLoading(true)
     try {
-      const params: Record<string, string> = {}
-      if (search) params.name = search
-      if (statusFilter) params.status = statusFilter
-      if (conditionFilter) params.condition = conditionFilter
-      if (kindFilter) params.kind = kindFilter
-      if (locationFilter) params.location = locationFilter
-      // Note: set_id, card_number, and artist filters only match catalog-linked
-      // items (backend drops card_id=None rows for those filters — known behavior).
-      if (setIdFilter) params.set_id = setIdFilter
-      if (cardNumberFilter) params.card_number = cardNumberFilter
-      if (artistFilter) params.artist = artistFilter
-      if (minPriceFilter) params.min_price = minPriceFilter
-      if (maxPriceFilter) params.max_price = maxPriceFilter
-      if (ownershipFilter) params.ownership = ownershipFilter
-      if (needsReviewFilter) params.needs_review = needsReviewFilter
+      // Two spellings, one evaluator: the pre-existing named parameters, plus
+      // the repeatable generic `filter={field}:{op}:{value}`. `buildFilterParams`
+      // is the only place that knows which filter is which.
+      //
+      // Note: set_id, card_number, and artist only match catalog-linked items
+      // (the backend drops card_id=None rows for those — known behavior).
+      const { params: named, filters } = buildFilterParams(filterValues)
+      const params: Record<string, string | string[]> = { ...named }
+      if (filters.length > 0) params.filter = filters
       if (sortKey) params.sort = `${sortKey}_${sortDir}`
 
       const res = await api.get<{ items: InventoryItem[]; total: number }>('/inventory/search', params)
@@ -154,7 +149,7 @@ export default function AdminInventoryPage() {
     } finally {
       setLoading(false)
     }
-  }, [api, search, statusFilter, conditionFilter, kindFilter, locationFilter, setIdFilter, cardNumberFilter, artistFilter, minPriceFilter, maxPriceFilter, ownershipFilter, needsReviewFilter, sortKey, sortDir])
+  }, [api, filterValues, sortKey, sortDir])
 
   useEffect(() => {
     fetchItems()
@@ -247,116 +242,54 @@ export default function AdminInventoryPage() {
 
   // --- Filters ------------------------------------------------------------
   // The panel is driven by INVENTORY_FILTERS so that "which filters are shown"
-  // and "which columns are visible" cannot drift apart. Value, clear and
-  // control live in ONE record keyed by filter id rather than three parallel
-  // ones: an id present in two of three maps is a silent half-broken filter,
-  // and `filters-cover-every-id` in the page tests pins that none is missing.
-  const filters: Record<string, { value: string; clear: () => void; control: React.ReactNode }> = {
-    search: {
-      value: search,
-      clear: () => setSearch(''),
-      control: <SearchInput ariaLabel="Name" value={search} onChange={setSearch} placeholder="Search by name…" />,
-    },
-    status: {
-      value: statusFilter,
-      clear: () => setStatusFilter(''),
-      control: <FilterSelect label="Status" value={statusFilter} onChange={setStatusFilter} options={STATUS_OPTIONS} />,
-    },
-    condition: {
-      value: conditionFilter,
-      clear: () => setConditionFilter(''),
-      control: <FilterSelect label="Condition" value={conditionFilter} onChange={setConditionFilter} options={CONDITION_OPTIONS} />,
-    },
-    kind: {
-      value: kindFilter,
-      clear: () => setKindFilter(''),
-      control: <FilterSelect label="Kind" value={kindFilter} onChange={setKindFilter} options={KIND_OPTIONS} />,
-    },
-    location: {
-      value: locationFilter,
-      clear: () => setLocationFilter(''),
-      control: (
-        <select
-          aria-label="Location"
-          value={locationFilter}
-          onChange={(e) => setLocationFilter(e.target.value)}
-          className="vault-field px-2.5 py-1.5 rounded-lg text-xs appearance-none cursor-pointer w-full"
-        >
-          <option value="">All locations</option>
-          {locationOptions.map((loc) => (
-            <option key={loc.value} value={loc.value}>{loc.label}</option>
-          ))}
-        </select>
-      ),
-    },
-    minPrice: {
-      value: minPriceFilter,
-      clear: () => setMinPriceFilter(''),
-      control: <FilterText label="Min $" value={minPriceFilter} onChange={setMinPriceFilter} numeric />,
-    },
-    maxPrice: {
-      value: maxPriceFilter,
-      clear: () => setMaxPriceFilter(''),
-      control: <FilterText label="Max $" value={maxPriceFilter} onChange={setMaxPriceFilter} numeric />,
-    },
-    ownership: {
-      value: ownershipFilter,
-      clear: () => setOwnershipFilter(''),
-      control: (
-        <select
-          aria-label="Ownership"
-          value={ownershipFilter}
-          onChange={(e) => setOwnershipFilter(e.target.value)}
-          className="vault-field px-2.5 py-1.5 rounded-lg text-xs appearance-none cursor-pointer w-full"
-        >
-          <option value="">Ownership</option>
-          <option value="owned">Owned</option>
-          <option value="consigned">Cosigned</option>
-        </select>
-      ),
-    },
-    needsReview: {
-      value: needsReviewFilter,
-      clear: () => setNeedsReviewFilter(''),
-      control: (
-        <select
-          aria-label="Needs Review"
-          value={needsReviewFilter}
-          onChange={(e) => setNeedsReviewFilter(e.target.value)}
-          className="vault-field px-2.5 py-1.5 rounded-lg text-xs appearance-none cursor-pointer w-full"
-        >
-          <option value="">Needs Review</option>
-          <option value="true">Flagged</option>
-          <option value="false">Clear</option>
-        </select>
-      ),
-    },
-    setId: {
-      value: setIdFilter,
-      clear: () => setSetIdFilter(''),
-      control: (
+  // and "which columns are visible" cannot drift apart. Since T4 the registry
+  // is TOTAL and every control is rendered from its declared `kind`, so a new
+  // column arrives with a working filter rather than needing one written by
+  // hand — which is what let coverage rot to twelve of thirty-three.
+  //
+  // Two entries are still rendered here rather than by `ColumnFilter`, because
+  // neither is a plain form control: Name is a debounced `SearchInput`, and Set
+  // is a combobox over ~400 catalog sets.
+  const selectOptions = (def: InventoryFilterDef) => {
+    if (def.optionSource === 'locations') return locationOptions
+    if (def.optionSource === 'shows') return showOptions
+    return def.options ?? []
+  }
+
+  const renderFilter = (def: InventoryFilterDef) => {
+    const value = filterValues[def.id] ?? ''
+    if (def.id === 'search') {
+      return (
+        <SearchInput
+          ariaLabel="Name"
+          value={value}
+          onChange={(v) => setFilter('search', v)}
+          placeholder="Search by name…"
+        />
+      )
+    }
+    if (def.id === 'setId') {
+      return (
         <SetCombobox
           sets={toComboboxSets(catalogSets)}
-          value={setIdFilter}
-          onChange={setSetIdFilter}
+          value={value}
+          onChange={(v) => setFilter('setId', v)}
           inputId="admin-inv-set"
           ariaLabel="Set"
           placeholder="All sets"
           emptyLabel="All sets"
           className="vault-field px-2.5 py-1.5 rounded-lg text-xs w-full"
         />
-      ),
-    },
-    cardNumber: {
-      value: cardNumberFilter,
-      clear: () => setCardNumberFilter(''),
-      control: <FilterText label="Card #" value={cardNumberFilter} onChange={setCardNumberFilter} />,
-    },
-    artist: {
-      value: artistFilter,
-      clear: () => setArtistFilter(''),
-      control: <FilterText label="Artist" value={artistFilter} onChange={setArtistFilter} />,
-    },
+      )
+    }
+    return (
+      <ColumnFilter
+        def={def}
+        value={value}
+        onChange={(v) => setFilter(def.id, v)}
+        options={selectOptions(def)}
+      />
+    )
   }
 
   const shownFilters = INVENTORY_FILTERS.filter((f) => isFilterVisible(f, visible, showAllFilters))
@@ -364,7 +297,7 @@ export default function AdminInventoryPage() {
   // reason the admin cannot see. That is the failure mode this whole feature
   // has to avoid, so it is named explicitly rather than left to be discovered.
   const hiddenActiveFilters = INVENTORY_FILTERS.filter(
-    (f) => (filters[f.id]?.value ?? '') !== '' && (f.columnKey === null || !visible.has(f.columnKey)),
+    (f) => (filterValues[f.id] ?? '') !== '' && (f.columnKey === null || !visible.has(f.columnKey)),
   )
 
   return (
@@ -466,7 +399,7 @@ export default function AdminInventoryPage() {
         className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2 mb-4"
       >
         {shownFilters.map((f) => (
-          <div key={f.id} className="contents">{filters[f.id]?.control}</div>
+          <div key={f.id} className="contents">{renderFilter(f)}</div>
         ))}
       </div>
 
@@ -484,7 +417,7 @@ export default function AdminInventoryPage() {
               key={f.id}
               className="inline-flex items-center gap-1.5 rounded-md border border-amber-400/30 bg-amber-400/10 px-2 py-0.5"
             >
-              <span>{f.label}: {filters[f.id]?.value}</span>
+              <span>{f.label}: {filterValues[f.id]}</span>
               {f.columnKey && (
                 <button
                   type="button"
@@ -496,7 +429,7 @@ export default function AdminInventoryPage() {
               )}
               <button
                 type="button"
-                onClick={filters[f.id]?.clear}
+                onClick={() => setFilter(f.id, '')}
                 aria-label={`Clear ${f.label} filter`}
                 className="text-pine-400 hover:text-pine-200"
               >
@@ -575,61 +508,6 @@ export default function AdminInventoryPage() {
         }}
       />
     </div>
-  )
-}
-
-// `label` doubles as the control's accessible name and as the placeholder
-// option, so the hidden-filter notice and the panel always call a filter the
-// same thing.
-function FilterSelect({
-  label,
-  value,
-  onChange,
-  options,
-}: {
-  label: string
-  value: string
-  onChange: (v: string) => void
-  options: string[]
-}) {
-  return (
-    <select
-      aria-label={label}
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="vault-field px-2.5 py-1.5 rounded-lg text-xs appearance-none cursor-pointer w-full"
-    >
-      <option value="">{label}</option>
-      {options.filter(Boolean).map((opt) => (
-        <option key={opt} value={opt}>
-          {opt.replace(/_/g, ' ')}
-        </option>
-      ))}
-    </select>
-  )
-}
-
-function FilterText({
-  label,
-  value,
-  onChange,
-  numeric,
-}: {
-  label: string
-  value: string
-  onChange: (v: string) => void
-  numeric?: boolean
-}) {
-  return (
-    <input
-      type={numeric ? 'number' : 'text'}
-      step={numeric ? '0.01' : undefined}
-      aria-label={label}
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      placeholder={label}
-      className="vault-field px-2.5 py-1.5 rounded-lg text-xs w-full"
-    />
   )
 }
 

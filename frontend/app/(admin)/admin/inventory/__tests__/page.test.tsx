@@ -479,6 +479,139 @@ describe('AdminInventoryPage — filters follow the visible columns', () => {
   })
 })
 
+// ===========================================================================
+// RFC 0011 T4 — a dedicated filter for every column
+// ===========================================================================
+//
+// The owner's ask, verbatim: "each column should have a dedicated filter that
+// shows up and disappears when the column is selected or unselected." The
+// show/hide MECHANISM shipped in RFC 0008 T6; what T4 adds is that there is
+// something to show for every column, and that the new ones reach the backend
+// as the generic repeatable `filter={field}:{op}:{value}` triple T3 accepts.
+describe('AdminInventoryPage — a filter for every column (RFC 0011 T4)', () => {
+  beforeEach(() => {
+    window.localStorage.clear()
+    getMock.mockReset()
+    postMock.mockReset()
+    putMock.mockReset()
+    putMock.mockResolvedValue({})
+    getMock.mockImplementation((path: string) => {
+      if (path === '/locations') return Promise.resolve([{ value: 'glass', label: 'Glass' }])
+      if (path === '/inventory/search') {
+        return Promise.resolve({
+          items: [{
+            item_id: 'item-1', kind: 'raw', display_name: 'Pikachu',
+            location: 'glass', status: 'available', needs_review: false,
+          }],
+          total: 1,
+        })
+      }
+      return Promise.resolve(null)
+    })
+  })
+
+  /**
+   * Scoped to the panel on purpose. The column picker's checkbox for a column
+   * carries the SAME accessible name as that column's own filter, so once the
+   * picker is open an unscoped `getByLabelText` matches both and fails as
+   * "found multiple elements" rather than as anything about the filter.
+   */
+  const panel = () => screen.getByRole('group', { name: /^filters$/i })
+
+  it('shows a column filter when the column is turned on, and hides it again', async () => {
+    const user = userEvent.setup({ delay: null })   // never the default: it is per-keystroke
+    render(<AdminInventoryPage />)
+    await act(async () => { await Promise.resolve() })
+
+    expect(within(panel()).queryByLabelText('Notes')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /^columns$/i }))
+    const picker = await screen.findByRole('group', { name: /column visibility/i })
+    await user.click(within(picker).getByRole('checkbox', { name: 'Notes' }))
+    expect(within(panel()).getByLabelText('Notes')).toBeInTheDocument()
+
+    await user.click(within(picker).getByRole('checkbox', { name: 'Notes' }))
+    expect(within(panel()).queryByLabelText('Notes')).not.toBeInTheDocument()
+  })
+
+  it('sends a generic filter triple for a column that has no named param', async () => {
+    const user = userEvent.setup({ delay: null })
+    render(<AdminInventoryPage />)
+    await act(async () => { await Promise.resolve() })
+
+    await user.click(screen.getByRole('button', { name: /^columns$/i }))
+    const picker = await screen.findByRole('group', { name: /column visibility/i })
+    await user.click(within(picker).getByRole('checkbox', { name: 'Notes' }))
+    await user.type(within(panel()).getByLabelText('Notes'), 'foil')
+
+    await waitFor(() =>
+      expect(getMock).toHaveBeenLastCalledWith(
+        '/inventory/search',
+        expect.objectContaining({ filter: ['notes:contains:foil'] }),
+      ),
+    )
+  })
+
+  it('keeps sending the named param for a filter that has one', async () => {
+    // T3 left four named parameters hand-written on the backend because each
+    // does something a field comparison cannot. Rewriting them as `filter=`
+    // would silently narrow what they match.
+    render(<AdminInventoryPage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.change(within(panel()).getByLabelText('Status'), { target: { value: 'available' } })
+
+    await waitFor(() =>
+      expect(getMock).toHaveBeenLastCalledWith(
+        '/inventory/search',
+        expect.objectContaining({ status: 'available' }),
+      ),
+    )
+    expect(getMock).not.toHaveBeenCalledWith(
+      '/inventory/search',
+      expect.objectContaining({ filter: expect.arrayContaining(['status:eq:available']) }),
+    )
+  })
+
+  it('offers a Min and a Max box for a money column, neither of them type=number', async () => {
+    // A native number input refuses the comma in `1,300`, which makes the
+    // owner's input un-typeable rather than correct. CLAUDE.md, "MONEY INPUT".
+    const user = userEvent.setup({ delay: null })
+    render(<AdminInventoryPage />)
+    await act(async () => { await Promise.resolve() })
+
+    const min = within(panel()).getByLabelText('Price Paid Min')
+    expect(min).toHaveAttribute('type', 'text')
+    expect(within(panel()).getByLabelText('Price Paid Max')).toHaveAttribute('type', 'text')
+
+    await user.type(min, '1,300')
+    await waitFor(() =>
+      expect(getMock).toHaveBeenLastCalledWith(
+        '/inventory/search',
+        expect.objectContaining({ filter: ['cost_basis:gte:1300'] }),
+      ),
+    )
+  })
+
+  it('renders every filter control with vault-field', async () => {
+    // The admin theme is dark. An unstyled <select> inherits the theme's light
+    // green text over the browser's white default — unreadable, and exactly how
+    // the Slabs page shipped.
+    render(<AdminInventoryPage />)
+    await act(async () => { await Promise.resolve() })
+    fireEvent.click(screen.getByRole('button', { name: /show all filters/i }))
+
+    const controls = within(panel()).getAllByRole(
+      'combobox', { hidden: true },
+    ).concat(within(panel()).getAllByRole('textbox', { hidden: true }))
+    expect(controls.length).toBeGreaterThan(10)
+    for (const control of controls) {
+      expect(control.className, `${control.getAttribute('aria-label')} has no vault-field`)
+        .toContain('vault-field')
+    }
+  })
+})
+
 describe('AdminInventoryPage — set filter is a combobox over the whole catalog (T8)', () => {
   // The owner's ask, and the reason this list is NOT built from inventory
   // facets: "so we can double check if there is a set in the catalog we have no

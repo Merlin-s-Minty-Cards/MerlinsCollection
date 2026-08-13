@@ -6,23 +6,36 @@
 gitignored (`.gitignore:60`), so it is local-only and your edits to it will never appear
 in `git status` or reach anyone else. Record all RFC 0011 status **in this file**.
 
-**Last updated:** 2026-08-13 (**T1, T2, T3 DONE** at `371523e`. Next up: T4, T5, T6)
+**Last updated:** 2026-08-13 (**T1–T4 DONE**. Next up: T5, T6)
 **Branch:** `Polishing-For-Deployment`
 **RFC:** [`docs/rfcs/0011-inventory-column-controls-and-unmatched-queue.md`](../../rfcs/0011-inventory-column-controls-and-unmatched-queue.md)
 **Task index:** [`README.md`](README.md)
 **Source of the requests:** the owner's message of 2026-08-13, plus three design answers
 and two scope additions given the same day (recorded in the RFC under "Owner decisions").
 
-## Next: T4, T5, T6
+## Next: T5, T6
 
-**T1–T3 are done** (`c7abd3e`, `84275cc`, `371523e`). The backend now sorts and filters
-every field; **T4 is the frontend half that makes any of it visible to the owner** —
-until it lands, the new filters exist but nothing renders them.
+**The table track (T1–T4) is COMPLETE.** Every inventory column now sorts and filters,
+server-side, from one registry per layer. What remains in this RFC is the unmatched-queue
+track (T5–T10), the shared card search panel (T11) and verification (T12).
 
-There is no merge blocker in this RFC and nothing is waiting on an owner action. The
-table track (T1–T4) and the unmatched-queue track (T5–T10) touch disjoint files.
+There is no merge blocker in this RFC and nothing is waiting on an owner action.
 
-### What T1–T3 left behind that T4/T5 need to know
+### What T4 left behind that later tasks need to know
+
+- **`admin-api.ts` now sends an ARRAY param as a repeatable one** (`?filter=a&filter=b`),
+  via `URLSearchParams.append`. Any endpoint wanting a repeatable parameter gets it for
+  free; passing an array used to stringify to `"a,b"` under `set`.
+- **`buildFilterParams` is the only place that knows the two spellings.** New filter →
+  add a registry entry; do not add a branch to `fetchItems`.
+- **A filter's `kind` must match `FILTERABLE_FIELDS` in
+  `services/inventory_filters.py`.** The kind picks the operator and the backend 422s an
+  operator its own kind disallows. `only ever emits ops the backend registry accepts`
+  catches a drift, but only against a hand-copied table in the test.
+- **`useShows()`** (`frontend/lib/use-shows.ts`) is new — show ids as `{value, label}`,
+  archived included, empty list on failure. T8/T10 can reuse it.
+
+### What T1–T3 left behind that T5 needs to know
 
 - **`FieldKind` / `FilterOp` string values are the wire contract T4 mirrors in
   TypeScript** — `text`, `select`, `range`, `dateRange`, `presence`; `contains`, `eq`,
@@ -46,7 +59,7 @@ permanently floored. Everything on the queue track is downstream of it.
 | T1 | Generic sort backend | **DONE** | (see below) | Registry covers all 38 model fields; 2 excluded with reasons. **No existing test asserted the silent-unsorted behavior**, so Risk 1 did not materialize — all 530 admin router tests passed unchanged. Verified every caller that sends `sort`: only Prep Queue and Inventory, and all their column keys resolve. |
 | T2 | All columns sortable | **DONE** | (see below) | 31 of 33 columns now sortable; `_image` and `_actions` deliberately not. Inventory page tests (27) pass unchanged — `handleSort` and the desc-first default were not touched. |
 | T3 | Generic filter backend | **DONE** | (see below) | 36 filterable fields. **Design change vs the task doc:** bound parsing moved from evaluation into `validate_filters`, because `apply_filters` is a comprehension and never evaluated a bad bound on an empty result set — a 422 that fired only when rows happened to exist. Caught by `test_an_unparseable_bound_is_a_422`. Named params left hand-written as planned: `name`, `condition`, `min_price`/`max_price`, `set_id`/`card_number`/`artist`. |
-| T4 | Per-column filters frontend | TODO | — | |
+| T4 | Per-column filters frontend | **DONE** | (see below) | 44 filters covering all 31 filterable columns (`_image`/`_actions` excluded). **Three changes vs the task doc, all forced:** (1) `product_type` is a **select**, not the text box the doc's table listed — it is `FieldKind.SELECT` on the backend and `OPS_BY_KIND[SELECT]` is `{eq}`, so a `contains` would have been a guaranteed 422; (2) `admin-api.ts` had to learn **repeatable params** — it used `searchParams.set`, which keeps only the LAST `filter=` and silently widens the result set; (3) the doc's page test was rewritten **scoped to the filter panel**, because the column picker's checkbox for a column carries the same accessible name as that column's filter, so the unscoped `getByLabelText('Notes')` matches both once the picker is open. **Fixed in passing:** the Ownership filter sent `consigned` where the backend accepts only `owned`/`cosigned` — picking "Cosigned" 400'd. |
 | T5 | `no_catalog_match` model | TODO | — | |
 | T6 | Triage unlink + park | TODO | — | |
 | T7 | Pairing suggestions endpoint | TODO | — | |
@@ -80,8 +93,8 @@ Taken while writing the RFC on 2026-08-13, from the code rather than from a live
 | | value | source |
 |---|---|---|
 | columns in `INVENTORY_COLUMNS` | 33 | `frontend/lib/admin-inventory-columns.tsx` |
-| of those, sortable today | **8** | `sortable: true` count |
-| filters in `INVENTORY_FILTERS` | **12** (3 of them column-less) | same file |
+| of those, sortable today | **8** → **31** after T2 | `sortable: true` count |
+| filters in `INVENTORY_FILTERS` | **12** (3 column-less) → **44** after T4 | same file |
 | sort fields the backend accepts | **8** | `_sort_admin_results` if/elif chain |
 | catalog rows carrying `first_seen_at` | **0** — the field does not exist | `models/catalog.py` |
 | catalog rows total (measured 2026-08-06) | 31,603 | CLAUDE.md, Ops |
