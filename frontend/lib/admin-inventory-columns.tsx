@@ -164,12 +164,16 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
     key: 'kind',
     label: 'Kind',
     defaultVisible: true,
+    sortable: true,
     render: (item) => <span className="text-xs capitalize text-pine-300">{item.kind}</span>,
   },
   {
     key: 'condition',
     label: 'Cond',
     defaultVisible: true,
+    // Sorts by ORDINAL RANK on the backend (NM > LP+ > LP > LP- > MP > HP > DMG),
+    // not alphabetically — which used to render an LP+ and an LP- identically.
+    sortable: true,
     render: (item) => (
       // Joined with the modifier, not the bare tier: T2 went to real trouble
       // making the backend emit and filter LP+/LP-, and this table was the one
@@ -234,6 +238,7 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
     key: 'sticker_price',
     label: 'Sticker',
     defaultVisible: true,
+    sortable: true,
     className: 'text-right',
     render: (item, ctx) => {
       const sticker = item.sticker_price as string | undefined
@@ -273,6 +278,9 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
     key: 'consignment',
     label: 'Ownership',
     defaultVisible: true,
+    // Sorts by PRESENCE on the backend — "consigned or owned" is the question this
+    // column asks, and ConsignmentTerms is not a comparable value.
+    sortable: true,
     render: (item) => <OwnershipBadge consigned={item.consignment != null} />,
   },
 
@@ -281,23 +289,25 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
     key: 'needs_review',
     label: 'Review',
     defaultVisible: false,
+    sortable: true,
     render: (item) => yesNo(item.needs_review),
   },
-  { key: 'review_reason', label: 'Review Reason', defaultVisible: false, render: (i) => clamped(i.review_reason) },
-  { key: 'reviewed_at', label: 'Reviewed', defaultVisible: false, render: (i) => text(i.reviewed_at, 'text-xs font-mono text-pine-400') },
-  { key: 'card_id', label: 'Card ID', defaultVisible: false, render: (i) => text(i.card_id, 'text-xs font-mono text-pine-400') },
-  { key: 'language', label: 'Language', defaultVisible: false, render: (i) => text(i.language) },
-  { key: 'finish', label: 'Finish', defaultVisible: false, render: (i) => text(i.finish) },
-  { key: 'factory_sealed', label: 'Factory Sealed', defaultVisible: false, render: (i) => yesNo(i.factory_sealed) },
-  { key: 'company', label: 'Grading Co.', defaultVisible: false, render: (i) => text(i.company) },
-  { key: 'grade', label: 'Grade', defaultVisible: false, render: (i) => text(i.grade, 'text-xs font-mono text-pine-300') },
-  { key: 'cert_number', label: 'Cert #', defaultVisible: false, render: (i) => text(i.cert_number, 'text-xs font-mono text-pine-400') },
-  { key: 'product_type', label: 'Product Type', defaultVisible: false, render: (i) => text(i.product_type) },
-  { key: 'description', label: 'Description', defaultVisible: false, render: (i) => clamped(i.description) },
+  { key: 'review_reason', label: 'Review Reason', defaultVisible: false, sortable: true, render: (i) => clamped(i.review_reason) },
+  { key: 'reviewed_at', label: 'Reviewed', defaultVisible: false, sortable: true, render: (i) => text(i.reviewed_at, 'text-xs font-mono text-pine-400') },
+  { key: 'card_id', label: 'Card ID', defaultVisible: false, sortable: true, render: (i) => text(i.card_id, 'text-xs font-mono text-pine-400') },
+  { key: 'language', label: 'Language', defaultVisible: false, sortable: true, render: (i) => text(i.language) },
+  { key: 'finish', label: 'Finish', defaultVisible: false, sortable: true, render: (i) => text(i.finish) },
+  { key: 'factory_sealed', label: 'Factory Sealed', defaultVisible: false, sortable: true, render: (i) => yesNo(i.factory_sealed) },
+  { key: 'company', label: 'Grading Co.', defaultVisible: false, sortable: true, render: (i) => text(i.company) },
+  { key: 'grade', label: 'Grade', defaultVisible: false, sortable: true, render: (i) => text(i.grade, 'text-xs font-mono text-pine-300') },
+  { key: 'cert_number', label: 'Cert #', defaultVisible: false, sortable: true, render: (i) => text(i.cert_number, 'text-xs font-mono text-pine-400') },
+  { key: 'product_type', label: 'Product Type', defaultVisible: false, sortable: true, render: (i) => text(i.product_type) },
+  { key: 'description', label: 'Description', defaultVisible: false, sortable: true, render: (i) => clamped(i.description) },
   {
     key: 'market_value_at_purchase',
     label: 'Market at Purchase',
     defaultVisible: false,
+    sortable: true,
     className: 'text-right',
     render: (i) => money(i.market_value_at_purchase, 'text-xs text-pine-300'),
   },
@@ -305,22 +315,23 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
     key: 'listed_price',
     label: 'Listed Price',
     defaultVisible: false,
+    sortable: true,
     className: 'text-right',
     render: (i) => money(i.listed_price, 'text-xs text-pine-300'),
   },
-  { key: 'sticker_notes', label: 'Sticker Notes', defaultVisible: false, render: (i) => clamped(i.sticker_notes) },
-  { key: 'acquired_at', label: 'Acquired', defaultVisible: false, render: (i) => text(i.acquired_at, 'text-xs font-mono text-pine-300') },
-  { key: 'acquired_show_id', label: 'Acquired Show', defaultVisible: false, render: (i) => text(i.acquired_show_id, 'text-xs font-mono text-pine-400') },
-  { key: 'notes', label: 'Notes', defaultVisible: false, render: (i) => clamped(i.notes) },
-  { key: 'value_note', label: 'Value Note', defaultVisible: false, render: (i) => clamped(i.value_note) },
-  { key: 'display_name_override', label: 'Name Override', defaultVisible: false, render: (i) => clamped(i.display_name_override) },
+  { key: 'sticker_notes', label: 'Sticker Notes', defaultVisible: false, sortable: true, render: (i) => clamped(i.sticker_notes) },
+  { key: 'acquired_at', label: 'Acquired', defaultVisible: false, sortable: true, render: (i) => text(i.acquired_at, 'text-xs font-mono text-pine-300') },
+  { key: 'acquired_show_id', label: 'Acquired Show', defaultVisible: false, sortable: true, render: (i) => text(i.acquired_show_id, 'text-xs font-mono text-pine-400') },
+  { key: 'notes', label: 'Notes', defaultVisible: false, sortable: true, render: (i) => clamped(i.notes) },
+  { key: 'value_note', label: 'Value Note', defaultVisible: false, sortable: true, render: (i) => clamped(i.value_note) },
+  { key: 'display_name_override', label: 'Name Override', defaultVisible: false, sortable: true, render: (i) => clamped(i.display_name_override) },
   // Deliberately NOT an <a href>. `tcg_url` is admin-typed free text, and a
   // `javascript:` value in an href on a list page is a stored-XSS sink that
   // fires on one click. The detail modal is the place that links out.
-  { key: 'tcg_url', label: 'TCGplayer URL', defaultVisible: false, render: (i) => clamped(i.tcg_url) },
-  { key: 'lineage_id', label: 'Lineage ID', defaultVisible: false, render: (i) => text(i.lineage_id, 'text-xs font-mono text-pine-400') },
-  { key: 'predecessor_item_id', label: 'Predecessor', defaultVisible: false, render: (i) => text(i.predecessor_item_id, 'text-xs font-mono text-pine-400') },
-  { key: 'item_id', label: 'Item ID', defaultVisible: false, render: (i) => text(i.item_id, 'text-xs font-mono text-pine-400') },
+  { key: 'tcg_url', label: 'TCGplayer URL', defaultVisible: false, sortable: true, render: (i) => clamped(i.tcg_url) },
+  { key: 'lineage_id', label: 'Lineage ID', defaultVisible: false, sortable: true, render: (i) => text(i.lineage_id, 'text-xs font-mono text-pine-400') },
+  { key: 'predecessor_item_id', label: 'Predecessor', defaultVisible: false, sortable: true, render: (i) => text(i.predecessor_item_id, 'text-xs font-mono text-pine-400') },
+  { key: 'item_id', label: 'Item ID', defaultVisible: false, sortable: true, render: (i) => text(i.item_id, 'text-xs font-mono text-pine-400') },
 
   {
     key: '_actions',

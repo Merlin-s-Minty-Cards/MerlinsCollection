@@ -206,7 +206,7 @@ class TestNoCatalogMatch:
 
     def test_a_parked_jp_item_with_no_english_name_stays_in_triage(self):
         item = raw_item(card_id=None, no_catalog_match=True,
-                        language=Language.JA, display_name_override=None)
+                        language=Language.JP, display_name_override=None)
         assert "missing_english_name" in reasons_for(item)
 
     def test_the_list_and_the_counts_agree_about_parked_items(self, repo, admin_client):

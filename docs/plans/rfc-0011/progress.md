@@ -27,7 +27,7 @@ permanently floored. Everything on the queue track is downstream of it.
 | # | Task | Status | Commit | Notes |
 |---|---|---|---|---|
 | T1 | Generic sort backend | **DONE** | (see below) | Registry covers all 38 model fields; 2 excluded with reasons. **No existing test asserted the silent-unsorted behavior**, so Risk 1 did not materialize — all 530 admin router tests passed unchanged. Verified every caller that sends `sort`: only Prep Queue and Inventory, and all their column keys resolve. |
-| T2 | All columns sortable | TODO | — | |
+| T2 | All columns sortable | **DONE** | (see below) | 31 of 33 columns now sortable; `_image` and `_actions` deliberately not. Inventory page tests (27) pass unchanged — `handleSort` and the desc-first default were not touched. |
 | T3 | Generic filter backend | TODO | — | |
 | T4 | Per-column filters frontend | TODO | — | |
 | T5 | `no_catalog_match` model | TODO | — | |

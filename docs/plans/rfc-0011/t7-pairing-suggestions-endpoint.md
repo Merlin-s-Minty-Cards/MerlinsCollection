@@ -198,7 +198,7 @@ class TestLanguage:
         catalog.add(card_id="en:base1-4", name="Charizard", number="4",
                     language=Language.EN)
         item = raw_item(display_name="Charizard", card_number="4",
-                        language=Language.JA, card_id=None)
+                        language=Language.JP, card_id=None)
 
         assert [c.card_id for c in candidates_for(item, catalog.index)] == []
 

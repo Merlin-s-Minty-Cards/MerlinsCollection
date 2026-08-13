@@ -155,3 +155,41 @@ describe('storage access that throws is survivable', () => {
     expect(() => saveVisibleColumnKeys(['status'])).not.toThrow()
   })
 })
+
+// ===========================================================================
+// RFC 0011 T1/T2 — every column is sortable
+// ===========================================================================
+//
+// The backend registry (`services/inventory_sort.SORT_FIELDS`) covers every
+// model field. These pin the frontend half: that we actually MARK the columns,
+// and that the keys stay parseable as `{field}_{direction}`.
+
+describe('every column is sortable except the two that cannot be', () => {
+  // `_image` renders art resolved client-side from card_id — there is no
+  // server-side value to order by. `_actions` is a pinned button cell.
+  const UNSORTABLE = new Set(['_image', '_actions'])
+
+  it('marks every data column sortable', () => {
+    const unmarked = INVENTORY_COLUMNS
+      .filter((c) => !UNSORTABLE.has(c.key) && !c.sortable)
+      .map((c) => c.key)
+
+    expect(unmarked).toEqual([])
+  })
+
+  it('leaves the image and action cells unsortable', () => {
+    for (const key of UNSORTABLE) {
+      expect(INVENTORY_COLUMNS.find((c) => c.key === key)?.sortable).toBeFalsy()
+    }
+  })
+
+  it('uses keys the backend can parse as {field}_{direction}', () => {
+    // The page sends `${key}_${dir}` and the backend rsplits on the LAST
+    // underscore, so a key ending in _asc or _desc would parse as a direction
+    // and lose its field entirely.
+    for (const col of INVENTORY_COLUMNS) {
+      expect(col.key.endsWith('_asc')).toBe(false)
+      expect(col.key.endsWith('_desc')).toBe(false)
+    }
+  })
+})
