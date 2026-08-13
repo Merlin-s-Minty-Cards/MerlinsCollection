@@ -35,6 +35,13 @@ export interface TriageItem {
    * button and the endpoint come to disagree about what is being destroyed.
    */
   bulk_clearable?: boolean
+  /**
+   * An admin's stored answer that TCGdex does not carry this card (RFC 0011 T5).
+   * Suppresses `missing_card_id` — see `reasonsFor`.
+   */
+  no_catalog_match?: boolean
+  /** Server-stamped when the flag is set. The client never writes this. */
+  no_catalog_match_at?: string | null
   lineage_id?: string | null
   predecessor_item_id?: string | null
   card?: { card_id?: string; name?: string; set_name?: string; number?: string } | null
@@ -116,7 +123,14 @@ function isCardLinkable(item: TriageItem): boolean {
 export function reasonsFor(item: TriageItem): TriageReason[] {
   const reasons: TriageReason[] = []
   if (item.needs_review) reasons.push('flagged')
-  if (isCardLinkable(item) && !item.card_id) reasons.push('missing_card_id')
+  // `!item.no_catalog_match` mirrors T5's suppression in
+  // `services/triage.is_missing_card_id`. Without it, parking a card would
+  // predict the row STAYING in the queue and the page would leave it on screen
+  // until the next refetch removed it — the row jumping is exactly what the
+  // optimistic update exists to avoid.
+  if (isCardLinkable(item) && !item.card_id && !item.no_catalog_match) {
+    reasons.push('missing_card_id')
+  }
   if (item.language && item.language !== 'EN' && !item.display_name_override) {
     reasons.push('missing_english_name')
   }
@@ -164,4 +178,37 @@ export function quickFlagBody() {
 /** The body that clears an item. The server stamps `reviewed_at` itself. */
 export function clearTriageBody() {
   return { needs_review: false, review_reason: null }
+}
+
+/**
+ * Park a row that ALREADY has no catalog link — RFC 0011 T6.
+ *
+ * One field. `card_id` is not in this body and must never be: there is nothing
+ * to unlink, and sending `card_id: null` on a row that already has none would be
+ * a meaningless write on the one field that drives pricing, images and set
+ * membership. It would also read, in the timeline diff, as though a link had
+ * been broken.
+ *
+ * `no_catalog_match_at` is absent for the same reason it is in `unlinkBody`:
+ * the server stamps it, and T5's handler discards a client-supplied value.
+ */
+export function parkBody() {
+  return { no_catalog_match: true }
+}
+
+/**
+ * Unlink a wrongly-matched card AND park it, in ONE write — RFC 0011 T6.
+ *
+ * `current_market_value: null` is not tidiness, it is the whole complaint. The
+ * card is pointed at a close-but-wrong promo, so the figure it inherited is that
+ * promo's price, and once the link is gone no sync will ever correct it. A
+ * leftover wrong number on a customer-facing surface is worse than no number, so
+ * it goes — and the hand-value tool opens immediately afterwards.
+ *
+ * One request, not three. Three PUTs could half-succeed and leave a card
+ * unlinked but still carrying the wrong price, which is strictly worse than the
+ * state being repaired.
+ */
+export function unlinkBody() {
+  return { card_id: null, no_catalog_match: true, current_market_value: null }
 }

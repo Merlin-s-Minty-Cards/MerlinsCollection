@@ -15,8 +15,10 @@ import {
   REASON_LABELS,
   clearTriageBody,
   effectiveName,
+  parkBody,
   reasonsFor,
   reviewReasonLabel,
+  unlinkBody,
   type TriageItem,
   type TriageReason,
 } from '@/lib/triage'
@@ -127,6 +129,38 @@ export default function AdminTriagePage() {
       r.item_id === item.item_id
         ? { ...r, needs_review: false, review_reason: null, triage_reasons: remaining }
         : r,
+    ))
+  }
+
+  /**
+   * Move a row to the Unmatched queue — RFC 0011 T6, the owner's second entry
+   * point: *"cards that already don't have a matching should also have a button
+   * to move them to the new tab."*
+   *
+   * This is the SIMPLE half. There is no link to break and therefore no
+   * inherited price to clear, so it writes one field. The destructive half —
+   * unlinking a card that is pointed at the wrong promo — lives inside
+   * `RepointDialog`, behind the diff and the lineage warnings.
+   */
+  const park = async (item: TriageItem) => {
+    setError(null)
+    try {
+      await api.put(`/inventory/${item.item_id}`, parkBody())
+    } catch {
+      // Say so. A silent failure here looks identical to success — the admin
+      // moves on believing the card is out of the queue when it is still in it.
+      setError('Could not move that card to Unmatched. It is still in the queue.')
+      return
+    }
+    // Drops only if `missing_card_id` was its ONLY reason. A flagged or unnamed
+    // row keeps that problem and stays put, carrying its remaining chips —
+    // parking answers one question, not all of them. `reasonsFor` is a
+    // PREDICTION here, exactly as in `clearReview`.
+    const next = { ...item, no_catalog_match: true }
+    const remaining = reasonsFor(next)
+    if (remaining.length === 0) dropRow(item.item_id)
+    else setItems((rows) => rows.map((r) =>
+      r.item_id === item.item_id ? { ...next, triage_reasons: remaining } : r,
     ))
   }
 
@@ -296,6 +330,20 @@ export default function AdminTriagePage() {
                          hover:text-sky-300 hover:border-sky-400/40 transition-colors"
             >
               Set a value by hand
+            </button>
+          )}
+          {/* RFC 0011 T6. Same gate, same reason: only where there is nothing
+              to unlink. On a LINKED card this action is the re-point dialog's
+              "No match in TCGdex" instead, because that one also has to clear
+              the wrong card's inherited price. */}
+          {(item.triage_reasons ?? []).includes('missing_card_id') && (
+            <button
+              type="button"
+              onClick={() => park(item)}
+              className="px-2 py-1 rounded-md text-[11px] text-pine-300 border border-pine-700/60
+                         hover:text-amber-300 hover:border-amber-400/40 transition-colors"
+            >
+              No TCGdex match
             </button>
           )}
           <button
@@ -477,15 +525,31 @@ export default function AdminTriagePage() {
           item={openTool.item}
           onClose={() => setOpenTool(null)}
           onRepointed={(cardId) => {
-            setOpenTool(null)
-            // Predicted, not authoritative — see `reasonsFor`'s docstring.
-            const predicted = reasonsFor({ ...openTool.item, card_id: cardId })
+            // `null` is the UNLINK outcome (T6): the card was unlinked, parked
+            // and had its inherited price cleared, all in the dialog's one
+            // write. The parked flag has to ride into the prediction or the row
+            // re-renders with a `missing_card_id` chip for a frame before
+            // dropping — and on a row that ALSO has a real reason it would keep
+            // that wrong chip until the next refetch.
+            const unlinked = cardId === null
+            const next = {
+              ...openTool.item,
+              card_id: cardId,
+              ...(unlinked
+                ? { no_catalog_match: true, current_market_value: null }
+                : {}),
+            }
+            const predicted = reasonsFor(next)
             setItems((rows) => rows.map((r) =>
               r.item_id === openTool.item.item_id
-                ? { ...r, card_id: cardId, triage_reasons: predicted }
+                ? { ...next, triage_reasons: predicted }
                 : r,
             ))
             if (predicted.length === 0) dropRow(openTool.item.item_id)
+            // The price is gone and nothing will refill it, so the hand-value
+            // tool opens straight away rather than leaving a card at no value.
+            // Set LAST: the branches above read `openTool.item`.
+            setOpenTool(unlinked ? { item: next, tool: 'value' } : null)
           }}
         />
       )}
@@ -609,11 +673,13 @@ function RepointDialog({
 }: {
   item: TriageItem
   onClose: () => void
-  onRepointed: (cardId: string) => void
+  /** `null` is the UNLINK outcome — see `confirmUnlink`. */
+  onRepointed: (cardId: string | null) => void
 }) {
   const api = useAdminApi()
   const [query, setQuery] = useState('')
   const [candidate, setCandidate] = useState<CatalogCard | null>(null)
+  const [confirmingUnlink, setConfirmingUnlink] = useState(false)
   const [saving, setSaving] = useState(false)
   const [failed, setFailed] = useState(false)
   const results = useCatalogSearch(query)
@@ -636,6 +702,82 @@ function RepointDialog({
     } finally {
       setSaving(false)
     }
+  }
+
+  /**
+   * The answer when the catalog has nothing to point at — RFC 0011 T6.
+   *
+   * ONE request doing three things (unlink, park, clear the price), because
+   * three could half-succeed and leave a card unlinked but still carrying the
+   * wrong promo's price — strictly worse than the state being repaired.
+   */
+  const confirmUnlink = async () => {
+    setSaving(true)
+    setFailed(false)
+    try {
+      await api.put(`/inventory/${item.item_id}`, unlinkBody())
+      onRepointed(null)
+    } catch {
+      setFailed(true)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const currentValue = parseMoney(String(item.current_market_value ?? ''))
+
+  if (confirmingUnlink) {
+    return (
+      <Dialog label="Move to Unmatched" onClose={onClose}>
+        {/* Each consequence stated plainly, because this does three things at
+            once and the admin should see all three before clicking. A dialog
+            that says "this will be unlinked" and silently wipes $42.00 is the
+            surprise this codebase writes confirmation copy to prevent. */}
+        <p className="text-[12px] text-pine-300">
+          <span className="text-pine-100">{effectiveName(item)}</span> will be unlinked
+          from <span className="font-mono text-[11px] text-pine-400">{item.card_id}</span>,
+          {currentValue === null ? (
+            <> it has no stored market value to clear,</>
+          ) : (
+            <> its market value of{' '}
+              <span className="text-amber-300">{formatMoney(currentValue)}</span> will be
+              cleared,</>
+          )}{' '}
+          and it will move to the Unmatched queue until the catalog carries it.
+        </p>
+        <p className="mt-2 text-[11px] text-pine-400">
+          The stored price belongs to the wrong card, and no sync will correct it once
+          the link is gone. You can set a value by hand next, and pair it later from
+          that queue.
+        </p>
+
+        {failed && (
+          <p className="mt-2 text-[11px] text-red-400">
+            That did not save. The item is still linked to its original card.
+          </p>
+        )}
+
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => setConfirmingUnlink(false)}
+            className="px-3 py-1.5 rounded-md text-[11px] text-pine-400 hover:text-pine-200"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={confirmUnlink}
+            disabled={saving}
+            className="px-3 py-1.5 rounded-md text-[11px] font-medium bg-amber-500/15
+                       text-amber-300 border border-amber-500/30 hover:bg-amber-500/25
+                       disabled:opacity-50"
+          >
+            Move to Unmatched
+          </button>
+        </div>
+      </Dialog>
+    )
   }
 
   return (
@@ -708,14 +850,37 @@ function RepointDialog({
           </div>
         </>
       ) : (
-        <CatalogPicker
-          query={query}
-          onQueryChange={setQuery}
-          results={results}
-          renderAction={(card) => (
-            <CardPickerRow card={card} onSelect={setCandidate} />
+        <>
+          <CatalogPicker
+            query={query}
+            onQueryChange={setQuery}
+            results={results}
+            renderAction={(card) => (
+              <CardPickerRow card={card} onSelect={setCandidate} />
+            )}
+          />
+          {/* Available with NO candidate selected — this is the answer when the
+              catalog has nothing to point at, so gating it behind picking a card
+              would make it unreachable exactly when it is needed. Styled as the
+              secondary choice: picking the right card is still this dialog's
+              main job. Only offered where there is a link to break. */}
+          {item.card_id && (
+            <div className="mt-3 pt-3 border-t border-pine-700/40 flex items-center
+                            justify-between gap-3">
+              <span className="text-[11px] text-pine-500">
+                Nothing here is the right card?
+              </span>
+              <button
+                type="button"
+                onClick={() => setConfirmingUnlink(true)}
+                className="px-2 py-1 rounded-md text-[11px] text-pine-300 border border-pine-700/60
+                           hover:text-amber-300 hover:border-amber-400/40 transition-colors"
+              >
+                No match in TCGdex
+              </button>
+            </div>
           )}
-        />
+        </>
       )}
     </Dialog>
   )

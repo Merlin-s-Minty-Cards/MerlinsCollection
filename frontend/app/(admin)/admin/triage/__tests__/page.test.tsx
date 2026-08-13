@@ -1152,3 +1152,178 @@ describe('Set a value by hand', () => {
     expect(within(tableRow()).getByText(/entered by hand/i)).toBeInTheDocument()
   })
 })
+
+// ===========================================================================
+// RFC 0011 T6 — unlink-and-park, and the park button
+// ===========================================================================
+//
+// Two entry points, and they are NOT the same action:
+//
+//   a row that already has no card_id  -> a row button, writes only the flag
+//   a row pointed at the WRONG card    -> inside RepointDialog, which also
+//                                         clears the inherited wrong price
+//
+// The second lives behind the re-point dialog because it is the same dangerous
+// write with a null target, and that dialog is where the diff and the lineage
+// warnings already live.
+
+describe('Triage — moving a card to the Unmatched queue (RFC 0011 T6)', () => {
+  const PARK = 'No TCGdex match'
+
+  it('offers the park button only on rows that have no catalog link', async () => {
+    // Gated on the SERVER's reason, never a local `!item.card_id` — RFC 0010 T3
+    // made `services/triage.reasons_for` the authority and this is not the place
+    // to open a second one.
+    mockList([unlinkedItem, flaggedItem])
+    render(<AdminTriagePage />)
+
+    await screen.findByText(/Charizard #4/)
+    expect(screen.getAllByRole('button', { name: PARK })).toHaveLength(1)
+
+    const row = await findRow(/Charizard #4/)
+    expect(within(row).getByRole('button', { name: PARK })).toBeInTheDocument()
+  })
+
+  it('parks a card and drops it from the queue', async () => {
+    mockList([unlinkedItem])
+    render(<AdminTriagePage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: PARK }))
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith('/inventory/unlinked-1', {
+        no_catalog_match: true,
+      }),
+    )
+    await waitFor(() =>
+      expect(screen.queryByText(/Charizard #4/)).not.toBeInTheDocument(),
+    )
+  })
+
+  it('keeps a parked row that is also flagged, carrying its remaining chip', async () => {
+    // Parking answers ONE question. The human's flag is a different, real
+    // problem, so the row stays — with "No catalog link" gone and flagged left.
+    mockList([twoReasonItem])
+    render(<AdminTriagePage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: PARK }))
+
+    await waitFor(() => expect(putMock).toHaveBeenCalled())
+    const row = await findRow(/Blastoise #9/)
+    expect(within(row).getByText(/Entered by hand/)).toBeInTheDocument()
+    expect(within(row).queryByText('No catalog link')).not.toBeInTheDocument()
+  })
+
+  it('says so when parking fails, and leaves the row', async () => {
+    // A silent failure here looks identical to success: the admin moves on
+    // believing the card is out of the queue when it is still in it.
+    putMock.mockRejectedValue(new Error('nope'))
+    mockList([unlinkedItem])
+    render(<AdminTriagePage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: PARK }))
+
+    expect(await screen.findByText(/still in the queue/i)).toBeInTheDocument()
+    expect(screen.getByText(/Charizard #4/)).toBeInTheDocument()
+  })
+
+  it('does not offer the row button to sealed product', async () => {
+    // Sealed has no catalog link BY DESIGN, so it never carries the reason —
+    // this asserts the gate is the reason and not a second kind check.
+    mockList([{ ...unlinkedItem, kind: 'sealed', triage_reasons: ['flagged'] }])
+    render(<AdminTriagePage />)
+
+    await screen.findByText(/Charizard #4/)
+    expect(screen.queryByRole('button', { name: PARK })).not.toBeInTheDocument()
+  })
+})
+
+describe('Triage — unlinking a wrong match parks it too (RFC 0011 T6)', () => {
+  const UNLINK = 'No match in TCGdex'
+
+  function mockRepointable(item: unknown) {
+    getMock.mockImplementation((path: string) => {
+      if (path === '/inventory/search') return Promise.resolve({ items: [item], total: 1 })
+      if (path === '/market/search') return Promise.resolve({ items: [], total: 0 })
+      if (path === '/locations') return Promise.resolve([])
+      return Promise.resolve({})
+    })
+  }
+
+  const wronglyMatched = {
+    ...flaggedItem,
+    item_id: 'wrong-1',
+    card_id: 'en:swshp-SWSH039',
+    current_market_value: '42.00',
+  }
+
+  it('offers the unlink action without a candidate picked', async () => {
+    // It is the answer WHEN the catalog has nothing to point at, so gating it
+    // behind picking a card would make it unreachable exactly when it is needed.
+    mockRepointable(wronglyMatched)
+    render(<AdminTriagePage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /re-point/i }))
+    expect(await screen.findByRole('button', { name: UNLINK })).toBeInTheDocument()
+  })
+
+  it('names the price it is about to clear before doing it', async () => {
+    // A dialog that says "this will be unlinked" and silently wipes $42.00 is
+    // the surprise this codebase writes confirmation copy to prevent.
+    mockRepointable(wronglyMatched)
+    render(<AdminTriagePage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /re-point/i }))
+    fireEvent.click(await screen.findByRole('button', { name: UNLINK }))
+
+    const confirm = await screen.findByRole('dialog', { name: /move to unmatched/i })
+    expect(within(confirm).getByText(/\$42\.00/)).toBeInTheDocument()
+    expect(within(confirm).getByText(/en:swshp-SWSH039/)).toBeInTheDocument()
+    expect(putMock).not.toHaveBeenCalled()
+  })
+
+  it('writes the unlink, the park and the price clear in ONE request', async () => {
+    mockRepointable(wronglyMatched)
+    render(<AdminTriagePage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /re-point/i }))
+    fireEvent.click(await screen.findByRole('button', { name: UNLINK }))
+    const confirm = await screen.findByRole('dialog', { name: /move to unmatched/i })
+    fireEvent.click(within(confirm).getByRole('button', { name: /move to unmatched/i }))
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith('/inventory/wrong-1', {
+        card_id: null, no_catalog_match: true, current_market_value: null,
+      }),
+    )
+    expect(putMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('opens the hand-value tool afterwards, since the price is now gone', async () => {
+    mockRepointable(wronglyMatched)
+    render(<AdminTriagePage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /re-point/i }))
+    fireEvent.click(await screen.findByRole('button', { name: UNLINK }))
+    const confirm = await screen.findByRole('dialog', { name: /move to unmatched/i })
+    fireEvent.click(within(confirm).getByRole('button', { name: /move to unmatched/i }))
+
+    expect(await screen.findByRole('dialog', { name: /value/i })).toBeInTheDocument()
+  })
+
+  it('stays open and says so when the write fails', async () => {
+    // Closing on a failed write leaves the admin believing the most dangerous
+    // edit in this feature landed.
+    putMock.mockRejectedValue(new Error('nope'))
+    mockRepointable(wronglyMatched)
+    render(<AdminTriagePage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /re-point/i }))
+    fireEvent.click(await screen.findByRole('button', { name: UNLINK }))
+    const confirm = await screen.findByRole('dialog', { name: /move to unmatched/i })
+    fireEvent.click(within(confirm).getByRole('button', { name: /move to unmatched/i }))
+
+    expect(await screen.findByText(/did not save/i)).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: /move to unmatched/i })).toBeInTheDocument()
+  })
+})

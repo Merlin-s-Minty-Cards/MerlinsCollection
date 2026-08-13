@@ -6,20 +6,36 @@
 gitignored (`.gitignore:60`), so it is local-only and your edits to it will never appear
 in `git status` or reach anyone else. Record all RFC 0011 status **in this file**.
 
-**Last updated:** 2026-08-13 (**T1–T4 DONE**. Next up: T5, T6)
+**Last updated:** 2026-08-13 (**T1–T6 DONE**. Next up: T7)
 **Branch:** `Polishing-For-Deployment`
 **RFC:** [`docs/rfcs/0011-inventory-column-controls-and-unmatched-queue.md`](../../rfcs/0011-inventory-column-controls-and-unmatched-queue.md)
 **Task index:** [`README.md`](README.md)
 **Source of the requests:** the owner's message of 2026-08-13, plus three design answers
 and two scope additions given the same day (recorded in the RFC under "Owner decisions").
 
-## Next: T5, T6
+## Next: T7
 
-**The table track (T1–T4) is COMPLETE.** Every inventory column now sorts and filters,
-server-side, from one registry per layer. What remains in this RFC is the unmatched-queue
-track (T5–T10), the shared card search panel (T11) and verification (T12).
+**The table track (T1–T4) is COMPLETE**, and the unmatched queue can now be **filled**
+(T5, T6) — but it cannot yet be **read**: there is no `/admin/unmatched` page (T8), so
+today a parked card is only reachable via
+`GET /admin/inventory/search?no_catalog_match=true`. That is the gap to close next, and
+T8 wants T7's suggestions first.
 
 There is no merge blocker in this RFC and nothing is waiting on an owner action.
+
+### What T5/T6 left behind that T7 and T8 need to know
+
+- **The write contract is settled and lives in `frontend/lib/triage.ts`** — `parkBody()`
+  and `unlinkBody()`. T8's queue page should call the same two, not restate the fields.
+- **`reasonsFor` mirrors the server's suppression** now. Any page predicting triage
+  reasons after a park must pass `no_catalog_match: true` into it, or its optimistic row
+  keeps a `missing_card_id` chip it no longer has.
+- **Assigning a `card_id` unparks server-side**, so T8's "pair it" action needs to send
+  only `card_id` — sending `no_catalog_match: false` alongside is redundant, and sending
+  it *without* a `card_id` would return the row to Triage.
+- **`no_catalog_match_at` is the queue's sort key** ("parked 3 weeks ago"). It is a
+  `datetime`, so render it through `lib/dates.ts` — `formatTimestamp`, never `new Date()`
+  on a date-only string.
 
 ### What T4 left behind that later tasks need to know
 
@@ -61,7 +77,7 @@ permanently floored. Everything on the queue track is downstream of it.
 | T3 | Generic filter backend | **DONE** | (see below) | 36 filterable fields. **Design change vs the task doc:** bound parsing moved from evaluation into `validate_filters`, because `apply_filters` is a comprehension and never evaluated a bad bound on an empty result set — a 422 that fired only when rows happened to exist. Caught by `test_an_unparseable_bound_is_a_422`. Named params left hand-written as planned: `name`, `condition`, `min_price`/`max_price`, `set_id`/`card_number`/`artist`. |
 | T4 | Per-column filters frontend | **DONE** | `2942598` | 44 filters covering all 31 filterable columns (`_image`/`_actions` excluded). **Three changes vs the task doc, all forced:** (1) `product_type` is a **select**, not the text box the doc's table listed — it is `FieldKind.SELECT` on the backend and `OPS_BY_KIND[SELECT]` is `{eq}`, so a `contains` would have been a guaranteed 422; (2) `admin-api.ts` had to learn **repeatable params** — it used `searchParams.set`, which keeps only the LAST `filter=` and silently widens the result set; (3) the doc's page test was rewritten **scoped to the filter panel**, because the column picker's checkbox for a column carries the same accessible name as that column's filter, so the unscoped `getByLabelText('Notes')` matches both once the picker is open. **Fixed in passing:** the Ownership filter sent `consigned` where the backend accepts only `owned`/`cosigned` — picking "Cosigned" 400'd. |
 | T5 | `no_catalog_match` model | **DONE** | `e94b6da` | **T6, T7 and T8 are unblocked.** Two fields on `_ItemBase`, one suppression inside `is_missing_card_id`, one query param, one PUT transition helper. The queue is `GET /admin/inventory/search?no_catalog_match=true` — **no new list endpoint**, and **nothing backfilled** (pinned by `test_the_unmatched_queue_ships_empty`). The sealed/bulk guard has to live in the ROUTER, not the model validator: a sealed item has no `card_id` to be non-None, so the invariant cannot see it. `_apply_no_catalog_match_transition` **pops a client-sent `no_catalog_match_at`** before doing anything — the doc only said "server-stamped", which a client could otherwise satisfy by sending its own. Blast radius checked beyond the named selection: `backend/tests/{routers,services,models}` = **1483 passed**. |
-| T6 | Triage unlink + park | TODO | — | |
+| T6 | Triage unlink + park | **DONE** | (see below) | Both entry points, plus the `reasonsFor` mirror of T5's suppression. **The unlink is ONE `PUT`, not three** — three could half-succeed and leave a card unlinked but still carrying the wrong promo's price, which is worse than the state being repaired. `onRepointed` widens to `string \| null`; the `null` branch must fold `no_catalog_match: true` into its optimistic prediction or the row re-renders with a `missing_card_id` chip for a frame before dropping. The confirm copy **names the price** (`formatMoney`) and has a separate branch for a row with no stored value, so it never reads "its market value of $0.00 will be cleared". The "No match in TCGdex" action is hidden when `item.card_id` is already null — that row's action is the row-level button instead. Consumers of `reasonsFor` re-checked (outgoing, `CardDetailModal`, `TriageRowAction`): **127 passed**. |
 | T7 | Pairing suggestions endpoint | TODO | — | |
 | T8 | Unmatched queue page | TODO | — | |
 | T9 | `first_seen_at` + sync | TODO | — | |
