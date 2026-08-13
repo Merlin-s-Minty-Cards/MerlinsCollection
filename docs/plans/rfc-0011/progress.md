@@ -6,22 +6,41 @@
 gitignored (`.gitignore:60`), so it is local-only and your edits to it will never appear
 in `git status` or reach anyone else. Record all RFC 0011 status **in this file**.
 
-**Last updated:** 2026-08-13 (**T1–T6 DONE**. Next up: T7)
+**Last updated:** 2026-08-13 (**T1–T7 DONE**. Next up: T8)
 **Branch:** `Polishing-For-Deployment`
 **RFC:** [`docs/rfcs/0011-inventory-column-controls-and-unmatched-queue.md`](../../rfcs/0011-inventory-column-controls-and-unmatched-queue.md)
 **Task index:** [`README.md`](README.md)
 **Source of the requests:** the owner's message of 2026-08-13, plus three design answers
 and two scope additions given the same day (recorded in the RFC under "Owner decisions").
 
-## Next: T7
+## Next: T8
 
-**The table track (T1–T4) is COMPLETE**, and the unmatched queue can now be **filled**
-(T5, T6) — but it cannot yet be **read**: there is no `/admin/unmatched` page (T8), so
-today a parked card is only reachable via
-`GET /admin/inventory/search?no_catalog_match=true`. That is the gap to close next, and
-T8 wants T7's suggestions first.
+**The table track (T1–T4) is COMPLETE**, the unmatched queue can be **filled** (T5, T6),
+and T7 can now say **what each parked card might pair with** — but the queue still cannot
+be **read**: there is no `/admin/unmatched` page, so today a parked card is only reachable
+via `GET /admin/inventory/search?no_catalog_match=true`. That is the gap T8 closes.
 
 There is no merge blocker in this RFC and nothing is waiting on an owner action.
+
+### What T7 left behind that T8 and T10 need to know
+
+- **`GET /admin/unmatched/suggestions?limit=3`** is the only route on the new
+  `/admin/unmatched` router. There is **no second list endpoint** — the list stays
+  `GET /admin/inventory/search?no_catalog_match=true`.
+- **A candidate maps onto `CardPickerRow`'s `PickerCard` with one rename**: send
+  `display_price: market_price` and `images: { small: image_small }`; `detail` and
+  `last_synced_at` pass through by name, and they are what make the component's absent-
+  and stale-price wording honest. **Do not render an absent price as `$0.00`** — and note
+  the shared component says *"no price yet"* / *"not priced"* rather than a bare `—`,
+  which is strictly more informative and is the rendering T8 should keep.
+- **Items with no candidates are still returned**, with `candidates: []`. Only
+  `items_with_candidates` excludes them, and it counts ROWS you can act on, never
+  suggestions in total — that is the number T10's widget quotes.
+- **The response is already ordered oldest-park-first.** T8 re-sorts candidates-first on
+  top of that (the task doc's `ordered` snippet), which preserves the age order within
+  each group.
+- **`score` is one of exactly three values** — `1.0`, `0.7`, `0.5` — and `why` is the
+  matching sentence. Render `why`, not the number.
 
 ### What T5/T6 left behind that T7 and T8 need to know
 
@@ -77,8 +96,8 @@ permanently floored. Everything on the queue track is downstream of it.
 | T3 | Generic filter backend | **DONE** | (see below) | 36 filterable fields. **Design change vs the task doc:** bound parsing moved from evaluation into `validate_filters`, because `apply_filters` is a comprehension and never evaluated a bad bound on an empty result set — a 422 that fired only when rows happened to exist. Caught by `test_an_unparseable_bound_is_a_422`. Named params left hand-written as planned: `name`, `condition`, `min_price`/`max_price`, `set_id`/`card_number`/`artist`. |
 | T4 | Per-column filters frontend | **DONE** | `2942598` | 44 filters covering all 31 filterable columns (`_image`/`_actions` excluded). **Three changes vs the task doc, all forced:** (1) `product_type` is a **select**, not the text box the doc's table listed — it is `FieldKind.SELECT` on the backend and `OPS_BY_KIND[SELECT]` is `{eq}`, so a `contains` would have been a guaranteed 422; (2) `admin-api.ts` had to learn **repeatable params** — it used `searchParams.set`, which keeps only the LAST `filter=` and silently widens the result set; (3) the doc's page test was rewritten **scoped to the filter panel**, because the column picker's checkbox for a column carries the same accessible name as that column's filter, so the unscoped `getByLabelText('Notes')` matches both once the picker is open. **Fixed in passing:** the Ownership filter sent `consigned` where the backend accepts only `owned`/`cosigned` — picking "Cosigned" 400'd. |
 | T5 | `no_catalog_match` model | **DONE** | `e94b6da` | **T6, T7 and T8 are unblocked.** Two fields on `_ItemBase`, one suppression inside `is_missing_card_id`, one query param, one PUT transition helper. The queue is `GET /admin/inventory/search?no_catalog_match=true` — **no new list endpoint**, and **nothing backfilled** (pinned by `test_the_unmatched_queue_ships_empty`). The sealed/bulk guard has to live in the ROUTER, not the model validator: a sealed item has no `card_id` to be non-None, so the invariant cannot see it. `_apply_no_catalog_match_transition` **pops a client-sent `no_catalog_match_at`** before doing anything — the doc only said "server-stamped", which a client could otherwise satisfy by sending its own. Blast radius checked beyond the named selection: `backend/tests/{routers,services,models}` = **1483 passed**. |
-| T6 | Triage unlink + park | **DONE** | (see below) | Both entry points, plus the `reasonsFor` mirror of T5's suppression. **The unlink is ONE `PUT`, not three** — three could half-succeed and leave a card unlinked but still carrying the wrong promo's price, which is worse than the state being repaired. `onRepointed` widens to `string \| null`; the `null` branch must fold `no_catalog_match: true` into its optimistic prediction or the row re-renders with a `missing_card_id` chip for a frame before dropping. The confirm copy **names the price** (`formatMoney`) and has a separate branch for a row with no stored value, so it never reads "its market value of $0.00 will be cleared". The "No match in TCGdex" action is hidden when `item.card_id` is already null — that row's action is the row-level button instead. Consumers of `reasonsFor` re-checked (outgoing, `CardDetailModal`, `TriageRowAction`): **127 passed**. |
-| T7 | Pairing suggestions endpoint | TODO | — | |
+| T6 | Triage unlink + park | **DONE** | `c5686b8` | Both entry points, plus the `reasonsFor` mirror of T5's suppression. **The unlink is ONE `PUT`, not three** — three could half-succeed and leave a card unlinked but still carrying the wrong promo's price, which is worse than the state being repaired. `onRepointed` widens to `string \| null`; the `null` branch must fold `no_catalog_match: true` into its optimistic prediction or the row re-renders with a `missing_card_id` chip for a frame before dropping. The confirm copy **names the price** (`formatMoney`) and has a separate branch for a row with no stored value, so it never reads "its market value of $0.00 will be cleared". The "No match in TCGdex" action is hidden when `item.card_id` is already null — that row's action is the row-level button instead. Consumers of `reasonsFor` re-checked (outgoing, `CardDetailModal`, `TriageRowAction`): **127 passed**. |
+| T7 | Pairing suggestions endpoint | **DONE** | (this commit) | **T8 and T10 are unblocked.** `GET /admin/unmatched/suggestions?limit=3` (`ge=1, le=10`) → `{items: [{item_id, candidates[]}], items_with_candidates}`; a candidate carries `card_id, name, set_id, set_name, number, rarity, image_small, market_price, detail, last_synced_at, score, why`. **Two fields beyond the task doc's shape, both forced by `CardPickerRow`:** `detail` (T8 must keep `brief` = never fetched vs `full` = no provider covers it — CLAUDE.md calls collapsing them a lie) and `last_synced_at` (so a stale figure shows its age). Both are free; the catalog row is already in hand. **The doc's `_identity` reads a `card_number` field that DOES NOT EXIST on an inventory item** — the number is materialized inside `display_name` as `"Dragonair #181"`, so `identity_of` splits the trailing `#N` back off; without that, `normalize_name` yields `"dragonair 181"` and every lookup misses. A fourth tier was NOT added: an item with no number falls to the 0.7 name-only tier, which is number-blind and reads honestly. Tests live at `tests/routers/admin/test_unmatched.py`, not the doc's `tests/routers/test_admin_unmatched.py` — `admin_client` is defined in that package's conftest. Blast radius: `backend/tests/{routers/admin,services}` = **1255 passed**. |
 | T8 | Unmatched queue page | TODO | — | |
 | T9 | `first_seen_at` + sync | TODO | — | |
 | T10 | Dashboard widget | TODO | — | |
