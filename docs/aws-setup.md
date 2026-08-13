@@ -547,25 +547,30 @@ service has ever held.** Everything before it was an AWS credential resolved fro
 a role. That difference is the whole point of this subsection: a role has no
 value to paste anywhere, and this key does.
 
-**It goes in the task definition's `secrets` array, never `environment`.** An
-`environment` value is returned verbatim by `ecs:DescribeTaskDefinition` and shown
-in the console, so a key there is readable by anyone who can look at the service.
-`ADMIN_API_KEY` has the same shape and the same rule.
+**Owner decision, 2026-08-12: plain ECS `environment`, not Secrets Manager.**
+An earlier version of this section specified the task definition's `secrets`
+array (a `valueFrom` pointing at a Secrets Manager ARN). The owner explicitly
+declined that — no Secrets Manager secret, no execution-role grant, just the
+same `environment` array every other non-AWS config value already goes
+through (`deploy/backend-container.json` has always held `AWS_COGNITO_CLIENT_SECRET`
+this way). `ADMIN_API_KEY` has the same shape and follows the same rule.
+This trades the "readable by anyone who can call `ecs:DescribeTaskDefinition`"
+exposure for one less moving part; that tradeoff was made knowingly, not
+missed. Do not silently reintroduce a `secrets` block for these two keys.
 
 ```json
-"secrets": [
-  { "name": "POKEMONPRICETRACKER_API_KEY",
-    "valueFrom": "arn:aws:secretsmanager:us-east-1:<ACCOUNT_ID>:secret:merlins/pokemonpricetracker-api-key" },
-  { "name": "ADMIN_API_KEY",
-    "valueFrom": "arn:aws:secretsmanager:us-east-1:<ACCOUNT_ID>:secret:merlins/admin-api-key" }
+"environment": [
+  { "name": "POKEMONPRICETRACKER_API_KEY", "value": "<the real key>" },
+  { "name": "ADMIN_API_KEY", "value": "<the real key>" }
 ]
 ```
 
 `deploy/backend-container.json` is the reference container definition and
-deliberately carries **no** `secrets` block — a dangling ARN would make the task
-fail to start for anyone who applied the file before creating the secret. Add the
-block above when you wire the real secret. `PRICING_DAILY_QUOTA` is not a secret;
-it belongs in `environment` (default `100` **credits**, i.e. 50 lookups).
+deliberately carries a **placeholder** value (`PASTE_YOUR_KEY_HERE`) for
+`POKEMONPRICETRACKER_API_KEY` rather than a real one — replace it with the
+real key when you wire it, the same way you would any other env var here.
+`PRICING_DAILY_QUOTA` is not a secret either; it belongs in `environment` too
+(default `100` **credits**, i.e. 50 lookups).
 
 **Both consumers are covered by one injection.** The API service and the
 EventBridge-triggered sync task run the **same task definition** (Phase 8 above
@@ -582,11 +587,9 @@ button. Nothing separate to configure for the schedule.
   RFC needs a new task-role permission, it is wrong; re-check before granting.
   (The `dynamodb:Scan` / `UpdateItem` gap in CLAUDE.md's Ops section is a separate,
   pre-existing catalog-cache problem and has nothing to do with these keys.)
-- **The ECS *execution* role does need one grant**, and only because of the
-  injection mechanism: `secretsmanager:GetSecretValue` on each secret ARN above
-  (or `ssm:GetParameters` + `kms:Decrypt` if you use Parameter Store with a CMK).
-  This is the execution role (`ecsTaskExecutionRole`), which pulls the image and
-  resolves secrets at task start — not the task role the application code runs as.
+- **The ECS execution role needs nothing extra either**, now that the key is a
+  plain `environment` value rather than a `secrets` reference — no
+  `secretsmanager:GetSecretValue` grant to add or maintain.
 - An unset key is a **supported state**, not an outage: slab pricing is skipped
   with a warning and every other step of the nightly sync still runs. So a missed
   grant costs slab prices, not the site.
@@ -597,13 +600,20 @@ which makes it **50 slab lookups a night**. You are billed on the query `limit`
 even when the search matches zero cards. Above 50 owned slabs the job refreshes
 the 50 stalest and the rest wait for a later night — by design, not a failure.
 
-**Rotation — STILL OUTSTANDING, and this procedure is why the section stays.**
-Both this key and the PSA key were pasted into a chat transcript during planning
-on 2026-08-07. Rotating is an owner action in an external vendor web UI that no
-AWS command performs: issue a new key in the vendor portal, update `backend/.env`
-locally, update the Secrets Manager secret, then force a new ECS deployment so
-tasks pick it up (secrets resolve at task start, unlike task-role permissions
-which are read per request).
+**Rotation is an owner action in an external vendor web UI that no AWS command
+performs:** issue a new key in the vendor portal, update `backend/.env` locally,
+update the task definition's `environment` value, then force a new ECS
+deployment so the running tasks pick it up (a plain `environment` value only
+takes effect on the next task launch, same as any other env var here — there
+is no separate "resolve at start" step to think about now that it is not a
+Secrets Manager reference).
+
+**2026-08-12: the key that had been pasted into a chat transcript during
+2026-08-07 planning was never actually wired into production** — the task
+definition carried a literal `PASTE_YOUR_KEY_HERE` placeholder instead, which
+is why every graded-pricing lookup failed with a 401 until this was caught.
+Fixed by wiring a freshly-issued key directly into `environment` (see the
+decision above); nothing from the 2026-08-07 transcript was reused.
 
 **Only the PokemonPriceTracker key still matters.** The PSA key is **moot** as of
 2026-08-10: PSA's cert API became a paid feature, the owner declined it, and RFC
@@ -636,8 +646,9 @@ Backend (`backend/.env`): `AWS_REGION`, `DYNAMODB_TABLE_NAME`, `BEDROCK_MODEL_ID
 `AUTH_DISABLED`, `EUR_USD_RATE`, `POKEMONPRICETRACKER_API_KEY`,
 `PRICING_DAILY_QUOTA`. AWS credentials are **not** read from this file — see
 Phase 1 (`aws configure` / an IAM role in production). In production the two
-bearer tokens (`POKEMONPRICETRACKER_API_KEY`, `ADMIN_API_KEY`) are ECS **secrets**,
-not `environment` entries — see Phase 8.
+bearer tokens (`POKEMONPRICETRACKER_API_KEY`, `ADMIN_API_KEY`) are plain ECS
+`environment` entries, same as every other non-AWS config value — see Phase 8
+for the 2026-08-12 decision against Secrets Manager for these.
 
 **`PSA_API_KEY` is gone from `backend/.env.example` (RFC 0010 T14) and must not
 come back.** No code reads it — there is no `psa_api_key` field on `Settings` and

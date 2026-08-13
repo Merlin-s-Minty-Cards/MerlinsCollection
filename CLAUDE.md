@@ -870,7 +870,11 @@ case any more.
 
 Both keys are bearer tokens spending a metered daily quota: never log one, never
 return one from an endpoint. Real values live in `backend/.env` (gitignored) and,
-in production, in **ECS secrets** — never a task-definition literal. An empty key
+in production, in the ECS task definition's plain `environment` array — owner
+decision, 2026-08-12, explicitly declining Secrets Manager for these two keys
+in favor of the same mechanism every other non-AWS config value already uses
+(see `docs/aws-setup.md`'s "Outbound third-party credentials" section). Do not
+reintroduce a `secrets`/Secrets Manager reference for these. An empty key
 is a supported state: `build_pricing_provider()` returns `None`, the nightly job
 skips graded pricing and every other step still runs, while the admin button
 reports `state: "failed"` because a human is standing there waiting.
