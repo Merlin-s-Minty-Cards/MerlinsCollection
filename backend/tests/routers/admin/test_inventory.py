@@ -265,6 +265,61 @@ class TestAdminInventorySearch:
         assert items[0]["item_id"] == "cheap"
         assert items[1]["item_id"] == "expensive"
 
+    # --- RFC 0011 T1: every column sorts, and an unknown one is LOUD -------
+
+    def test_unknown_sort_field_is_a_422(self, admin_client):
+        """A silently-unsorted list is indistinguishable from a column with no order.
+
+        Before RFC 0011 this returned 200 and the table's natural order, which is why
+        twenty-five dead headers went unnoticed.
+        """
+        client, _, admin_token, _ = admin_client
+
+        resp = client.get(
+            "/admin/inventory/search?sort=wibble_asc",
+            headers=_auth_header(admin_token),
+        )
+
+        assert resp.status_code == 422
+        assert "wibble_asc" in resp.json()["detail"]
+
+    def test_unknown_sort_direction_is_a_422(self, admin_client):
+        client, _, admin_token, _ = admin_client
+
+        resp = client.get(
+            "/admin/inventory/search?sort=cost_basis_sideways",
+            headers=_auth_header(admin_token),
+        )
+
+        assert resp.status_code == 422
+
+    def test_a_previously_unsortable_column_now_sorts(self, admin_client):
+        """`notes` was one of the twenty-five that fell through to `return ""`."""
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="zulu", notes="zulu"))
+        repo.put_inventory_item(_raw(item_id="alpha", card_id="sv1-2", notes="alpha"))
+
+        resp = client.get(
+            "/admin/inventory/search?sort=notes_asc",
+            headers=_auth_header(admin_token),
+        )
+
+        assert resp.status_code == 200
+        assert [i["item_id"] for i in resp.json()["items"]] == ["alpha", "zulu"]
+
+    def test_rows_with_no_value_sort_last_in_both_directions(self, admin_client):
+        """The generalized missing-last rule, end to end through the endpoint."""
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="has", notes="alpha"))
+        repo.put_inventory_item(_raw(item_id="blank", card_id="sv1-2", notes=None))
+
+        for direction in ("asc", "desc"):
+            resp = client.get(
+                f"/admin/inventory/search?sort=notes_{direction}",
+                headers=_auth_header(admin_token),
+            )
+            assert [i["item_id"] for i in resp.json()["items"]][-1] == "blank"
+
 
 # ===========================================================================
 # A5: Enhanced Inventory Search — card_number, artist, min/max price

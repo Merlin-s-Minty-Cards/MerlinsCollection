@@ -34,6 +34,11 @@ from merlins_collection.services.condition_pricing import (
     condition_multiplier,
 )
 from merlins_collection.services.dynamodb import InventoryRepository
+from merlins_collection.services.inventory_sort import (
+    SORT_FIELDS,
+    parse_sort,
+    sort_items,
+)
 from merlins_collection.services.locations import validate_location
 from merlins_collection.services.triage import (
     TRIAGE_REASONS,
@@ -136,6 +141,9 @@ def admin_search_inventory(
     # and it must be LOUD. Ignoring it silently returns the whole union, which
     # looks exactly like the "the filter doesn't filter" report this replaced.
     _validate_triage_reason(triage_reason)
+    # Same rule, same place: before the table read, because a caller mistake must not
+    # cost a full `list_inventory()` scan first.
+    _validate_sort(sort)
 
     items = repo.list_inventory()
 
@@ -1149,52 +1157,18 @@ def _item_matches_name(item: InventoryItem, name_lower: str) -> bool:
 def _sort_admin_results(
     items: list[InventoryItem], sort: str | None
 ) -> list[InventoryItem]:
-    """Sort items by the requested criteria.
+    """Sort items by the requested criteria — see ``services.inventory_sort``.
 
     Sort format: ``{field}_{direction}`` e.g. ``name_asc``, ``cost_basis_desc``.
-    Supported fields: price (alias for current_market_value), name, status,
-    cost_basis, current_market_value, location, condition, display_name, kind.
+
+    This used to be an if/elif chain over EIGHT field names while the admin table
+    offered thirty-three columns, so twenty-five headers had no order at all and an
+    unknown field fell through to ``return ""`` — every row comparing equal, which
+    reads as "sorting is broken" (RFC 0011 §A). The registry now covers every model
+    field, missing values sort last in both directions, and ``condition`` orders by
+    rank rather than alphabetically.
     """
-    if sort is None:
-        return items
-
-    # Parse sort parameter
-    parts = sort.rsplit("_", 1)
-    if len(parts) != 2 or parts[1] not in ("asc", "desc"):
-        return items
-
-    field, direction = parts
-    reverse = direction == "desc"
-
-    # Alias
-    if field == "price":
-        field = "current_market_value"
-
-    def _get_sort_value(item: InventoryItem):
-        if field in ("current_market_value", "cost_basis"):
-            if field == "current_market_value":
-                val = item.current_market_value
-            else:
-                val = item.cost_basis
-            if val is None:
-                return float("inf") if not reverse else float("-inf")
-            return float(val)
-        elif field in ("name", "display_name"):
-            return _node_name(item).lower()
-        elif field == "status":
-            return str(item.status)
-        elif field == "location":
-            loc = getattr(item, "location", None) or ""
-            return loc.lower()
-        elif field == "condition":
-            cond = getattr(item, "condition", None) or ""
-            return str(cond)
-        elif field == "kind":
-            return str(item.kind)
-        else:
-            return ""
-
-    return sorted(items, key=_get_sort_value, reverse=reverse)
+    return sort_items(items, sort)
 
 
 def _attach_catalog_cards(
@@ -1216,6 +1190,24 @@ def _attach_catalog_cards(
             card = repo.get_catalog_card(card_id)
             cache[card_id] = card.model_dump(mode="json") if card is not None else None
         row["card"] = cache[card_id]
+
+
+def _validate_sort(sort: str | None) -> None:
+    """422 on a sort field that is not in the registry.
+
+    Never a silent no-op. An ignored ``sort`` returns the list in table order, which
+    looks exactly like "this column has no order" from the admin's side — the same
+    indistinguishable-failure class ``_validate_triage_reason`` below was written to
+    eliminate, and the reason twenty-five dead headers went unnoticed for so long.
+    """
+    if sort is not None and parse_sort(sort) is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Unknown sort {sort!r}. Expected {{field}}_asc or {{field}}_desc, "
+                f"where field is one of: {', '.join(sorted(SORT_FIELDS))}."
+            ),
+        )
 
 
 def _validate_triage_reason(reason: str | None) -> None:
