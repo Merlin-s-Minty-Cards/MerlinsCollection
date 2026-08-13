@@ -6,17 +6,34 @@
 gitignored (`.gitignore:60`), so it is local-only and your edits to it will never appear
 in `git status` or reach anyone else. Record all RFC 0011 status **in this file**.
 
-**Last updated:** 2026-08-13 (plan written; **no task executed yet**)
+**Last updated:** 2026-08-13 (**T1, T2, T3 DONE** at `371523e`. Next up: T4, T5, T6)
 **Branch:** `Polishing-For-Deployment`
 **RFC:** [`docs/rfcs/0011-inventory-column-controls-and-unmatched-queue.md`](../../rfcs/0011-inventory-column-controls-and-unmatched-queue.md)
 **Task index:** [`README.md`](README.md)
 **Source of the requests:** the owner's message of 2026-08-13, plus three design answers
 and two scope additions given the same day (recorded in the RFC under "Owner decisions").
 
-## Start at T1 or T5 — the two tracks are independent
+## Next: T4, T5, T6
+
+**T1–T3 are done** (`c7abd3e`, `84275cc`, `371523e`). The backend now sorts and filters
+every field; **T4 is the frontend half that makes any of it visible to the owner** —
+until it lands, the new filters exist but nothing renders them.
 
 There is no merge blocker in this RFC and nothing is waiting on an owner action. The
 table track (T1–T4) and the unmatched-queue track (T5–T10) touch disjoint files.
+
+### What T1–T3 left behind that T4/T5 need to know
+
+- **`FieldKind` / `FilterOp` string values are the wire contract T4 mirrors in
+  TypeScript** — `text`, `select`, `range`, `dateRange`, `presence`; `contains`, `eq`,
+  `gte`, `lte`, `isnull`, `notnull`. Character for character.
+- **The generic parameter is `?filter=field:op:value`, repeatable**, split on the first
+  two colons only (a `card_id` contains one).
+- **`no_catalog_match` and `no_catalog_match_at` are ALREADY in both backend
+  registries**, sorting and filtering as all-missing until T5 adds the model fields.
+  T5 does not need to come back and register them.
+- **`_validate_sort` and `_validate_filters` run before the table read**, next to
+  `_validate_triage_reason` in `routers/admin/inventory.py`.
 
 **T5 is the load-bearing task of the whole RFC.** One line in
 `services/triage.is_missing_card_id` is what lets a card leave a queue that is otherwise
