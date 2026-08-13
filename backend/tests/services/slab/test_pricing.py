@@ -399,6 +399,33 @@ class TestVerifiedJoin:
                                                    Decimal("10")) is None
 
 
+class TestSearchDisambiguation:
+    """A bare-name search is ambiguous for any card with a promo reprint, and
+    the vendor's own ranking tends to prefer the promo. Measured on live
+    inventory 2026-08-12: 7 of 8 catalog-linked-but-unpriced slabs were
+    refused for exactly this reason (external_id_mismatch against a promo
+    reprint the vendor matched instead of the owned mainline print, e.g.
+    Volcanion EX: Steam Siege #115 owned, vendor matched XY Promos #173).
+    The catalog card's own set_name/number narrow the query so the correct
+    printing is far more likely to rank first."""
+
+    def test_attach_price_includes_set_and_number_in_the_search_query(self, dynamo_repo):
+        from merlins_collection.services.slab.pricing import attach_price
+
+        dynamo_repo.batch_upsert_catalog_cards([_catalog_card()])  # Fusion Strike #271
+        item = _graded()
+        dynamo_repo.put_inventory_item(item)
+
+        spy: list[httpx.Request] = []
+        attach_price(item=item, provider=make_client(body=load_fixture(GENGAR), spy=spy),
+                     repo=dynamo_repo)
+
+        assert spy, "no request was made"
+        query = spy[0].url.params["search"]
+        assert "Fusion Strike" in query
+        assert "271" in query
+
+
 class TestStorage:
     def test_a_resolved_price_writes_a_readable_graded_price_row(self, dynamo_repo):
         """RED 9."""

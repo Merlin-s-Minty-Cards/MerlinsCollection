@@ -473,7 +473,7 @@ def attach_price(*, item: GradedInventoryItem, provider: GradedPricing,
         return _write(item=item, prices=prices, repo=repo,
                       price_source_id=item.price_source_id)
 
-    search_name = _search_name(item, repo)
+    search_name, search_set, search_number = _search_terms(item, repo)
     if not search_name:
         # Refused BEFORE the call. An empty query is billed exactly like a real
         # one (2 credits, hits or no hits) and can only return an arbitrary
@@ -481,7 +481,8 @@ def attach_price(*, item: GradedInventoryItem, provider: GradedPricing,
         return AttachResult(False, reason=NO_NAME)
 
     resolved = provider.resolve(
-        name=search_name, set_name=None, number=None, language=item.language,
+        name=search_name, set_name=search_set, number=search_number,
+        language=item.language,
     )
     if resolved is None:
         return AttachResult(False, reason=NOT_FOUND)
@@ -499,8 +500,9 @@ def attach_price(*, item: GradedInventoryItem, provider: GradedPricing,
                   price_source_id=resolved.price_source_id)
 
 
-def _search_name(item: GradedInventoryItem, repo) -> str:
-    """The best name we hold for this item, for the vendor's search box.
+def _search_terms(item: GradedInventoryItem, repo) -> tuple[str, str | None, str | None]:
+    """The best (name, set, number) we hold for this item, for the vendor's
+    search box.
 
     The CATALOG name is preferred over the admin's own label when the item is
     linked, and that is not a slight on the admin — it is what T0 measured. The
@@ -509,14 +511,22 @@ def _search_name(item: GradedInventoryItem, repo) -> str:
     same vocabulary the vendor's own catalog was built from. An admin's label is
     the fallback for an unlinked slab, which will not pass the join anyway.
 
+    Set and number ride along whenever the item is linked, because a bare name
+    is ambiguous for any card with a promo reprint — measured on live inventory
+    2026-08-12: 7 of 8 catalog-linked-but-unpriced slabs were refused because
+    the vendor's name-only search preferred a promo reprint over the owned
+    mainline print (e.g. Volcanion EX: Steam Siege #115 owned, XY Promos #173
+    matched). The verified-join check downstream still has the final say — this
+    only narrows the search so the right printing is more likely to rank first.
+
     Note what this does NOT do: it never writes a name anywhere, and it never
     lets the vendor's answer replace one.
     """
     if item.card_id:
         card = repo.get_catalog_card(item.card_id)
         if card and card.name:
-            return card.name
-    return item.display_name_override or item.display_name or ""
+            return card.name, card.set_name, card.number
+    return (item.display_name_override or item.display_name or ""), None, None
 
 
 def _verify_join(item: GradedInventoryItem, resolved: ResolvedCard, repo) -> str | None:
