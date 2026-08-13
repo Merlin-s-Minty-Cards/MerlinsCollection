@@ -286,3 +286,144 @@ class TestSaleBatchId:
         txns = repo.list_transactions(date(2000, 1, 1), date(2100, 1, 1))
         assert len(txns) == 2
         assert {t.batch_id for t in txns} == {sell_id}
+
+
+class TestSellItemPriceEdit:
+    """``PATCH /sales/{id}/items/{item_id}`` — a discount must reach the ledger.
+
+    Before this route existed there was no way to send one. The Sell page's
+    per-item price field and its bulk-discount button both mutated local state
+    only, and ``handleConfirm`` PATCHed session metadata and POSTed
+    ``/confirm`` with no body — so the sale recorded whatever ``addItem``
+    posted when the card was added: sticker, else market.
+
+    The money consequence is the reason this is a test and not a nicety:
+    discounting a card at a show sold it to the customer at the lower price and
+    booked it at the higher one, so revenue and profit were BOTH overstated on
+    every discounted sale. See docs/plans/rfc-0010/follow-ups.md (T1).
+    """
+
+    def _session_with_item(self, client, repo, token, *, price="50.00"):
+        repo.put_inventory_item(_raw(item_id="card-1"))
+        sell_id = client.post(
+            "/admin/sales", json={"payment_method": "cash"}, headers=_auth(token)
+        ).json()["sell_id"]
+        client.post(f"/admin/sales/{sell_id}/items", json={
+            "item_id": "card-1", "agreed_price": price,
+        }, headers=_auth(token))
+        return sell_id
+
+    def test_edited_price_is_what_the_sale_records(self, admin_client):
+        """The headline bug: the edit has to survive all the way to the ledger."""
+        client, repo, token = admin_client
+        sell_id = self._session_with_item(client, repo, token, price="50.00")
+
+        patch = client.patch(
+            f"/admin/sales/{sell_id}/items/card-1",
+            json={"agreed_price": 40.00},
+            headers=_auth(token),
+        )
+        assert patch.status_code == 200
+
+        confirm = client.post(f"/admin/sales/{sell_id}/confirm", headers=_auth(token))
+        assert confirm.status_code == 200
+        # Compared as a Decimal, not a string: how many trailing zeros the total
+        # carries is a formatting choice this route does not make a promise
+        # about, and `formatMoney` renders either as "$40.00".
+        assert Decimal(confirm.json()["total_revenue"]) == Decimal("40.00")
+
+        txns = repo.list_transactions(date(2000, 1, 1), date(2100, 1, 1))
+        assert [t.amount for t in txns] == [Decimal("40.00")]
+
+    def test_patch_returns_the_updated_session(self, admin_client):
+        client, repo, token = admin_client
+        sell_id = self._session_with_item(client, repo, token)
+
+        resp = client.patch(
+            f"/admin/sales/{sell_id}/items/card-1",
+            json={"agreed_price": "42.50"},
+            headers=_auth(token),
+        )
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert len(items) == 1
+        assert Decimal(str(items[0]["agreed_price"])) == Decimal("42.50")
+
+    def test_a_free_card_is_allowed(self, admin_client):
+        """``0`` is a real price at a show — a throw-in. Never test falsiness."""
+        client, repo, token = admin_client
+        sell_id = self._session_with_item(client, repo, token)
+
+        resp = client.patch(
+            f"/admin/sales/{sell_id}/items/card-1",
+            json={"agreed_price": 0},
+            headers=_auth(token),
+        )
+        assert resp.status_code == 200
+        assert Decimal(str(resp.json()["items"][0]["agreed_price"])) == Decimal("0")
+
+    def test_a_negative_price_is_rejected(self, admin_client):
+        client, repo, token = admin_client
+        sell_id = self._session_with_item(client, repo, token)
+
+        resp = client.patch(
+            f"/admin/sales/{sell_id}/items/card-1",
+            json={"agreed_price": -5},
+            headers=_auth(token),
+        )
+        assert resp.status_code == 422
+
+    def test_a_non_finite_price_is_rejected(self, admin_client):
+        """``Decimal("NaN")`` PARSES. A bare try/except is not enough."""
+        client, repo, token = admin_client
+        sell_id = self._session_with_item(client, repo, token)
+
+        resp = client.patch(
+            f"/admin/sales/{sell_id}/items/card-1",
+            json={"agreed_price": "NaN"},
+            headers=_auth(token),
+        )
+        assert resp.status_code == 422
+
+    def test_a_missing_price_is_rejected(self, admin_client):
+        client, repo, token = admin_client
+        sell_id = self._session_with_item(client, repo, token)
+
+        resp = client.patch(
+            f"/admin/sales/{sell_id}/items/card-1",
+            json={}, headers=_auth(token),
+        )
+        assert resp.status_code == 422
+
+    def test_unknown_item_returns_404(self, admin_client):
+        client, repo, token = admin_client
+        sell_id = self._session_with_item(client, repo, token)
+
+        resp = client.patch(
+            f"/admin/sales/{sell_id}/items/not-in-session",
+            json={"agreed_price": "10.00"},
+            headers=_auth(token),
+        )
+        assert resp.status_code == 404
+
+    def test_unknown_session_returns_404(self, admin_client):
+        client, repo, token = admin_client
+        resp = client.patch(
+            "/admin/sales/no-such-session/items/card-1",
+            json={"agreed_price": "10.00"},
+            headers=_auth(token),
+        )
+        assert resp.status_code == 404
+
+    def test_a_confirmed_session_cannot_be_repriced(self, admin_client):
+        """The ledger's correction path is a void, not an edit to a closed sale."""
+        client, repo, token = admin_client
+        sell_id = self._session_with_item(client, repo, token)
+        client.post(f"/admin/sales/{sell_id}/confirm", headers=_auth(token))
+
+        resp = client.patch(
+            f"/admin/sales/{sell_id}/items/card-1",
+            json={"agreed_price": "10.00"},
+            headers=_auth(token),
+        )
+        assert resp.status_code == 409

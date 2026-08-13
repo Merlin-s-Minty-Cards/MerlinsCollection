@@ -83,6 +83,7 @@ export default function AdminSellPage() {
 
   // Discount
   const [bulkDiscount, setBulkDiscount] = useState('')
+  const [applyingDiscount, setApplyingDiscount] = useState(false)
 
   // Fee preview
   const [feePreview, setFeePreview] = useState<{ fee: string; net: string } | null>(null)
@@ -180,25 +181,88 @@ export default function AdminSellPage() {
     }
   }
 
+  // Local only, per keystroke: the operator owns the raw string while typing.
+  // The commit is `commitItemPrice` on blur — a PATCH per character would be
+  // one write per keystroke and would fight the field's own normalisation.
   const updateItemPrice = (itemId: string, newPrice: string) => {
     setItems((prev) => prev.map((i) =>
       i.item_id === itemId ? { ...i, agreed_price: newPrice } : i
     ))
   }
 
+  /** Send an edited price to the session. Without this the edit is discarded. */
+  const commitItemPrice = async (itemId: string) => {
+    if (!sellId) return
+    const item = items.find((i) => i.item_id === itemId)
+    if (!item) return
+    // `=== null`, never falsiness: 0 is a legitimate price (a throw-in).
+    const parsed = parseMoney(String(item.agreed_price ?? ''))
+    if (parsed === null) return  // the field already shows the parse error
+
+    try {
+      const session = await api.patch<{ items: SellItem[] }>(
+        `/sales/${sellId}/items/${itemId}`, { agreed_price: parsed },
+      )
+      syncCartFromSession(session)
+    } catch (err) {
+      // The local value and the session now disagree, which is the exact bug
+      // this route exists to close — so resync rather than leaving the screen
+      // showing a price the sale will not use.
+      alert(err instanceof AdminApiError ? err.detail : 'Failed to save the new price')
+      await reloadSession()
+    }
+  }
+
+  /** Overwrite cart prices from a session response, keeping local-only fields. */
+  const syncCartFromSession = (session: { items: SellItem[] }) => {
+    setItems((prev) => prev.map((i) => {
+      const server = session.items?.find((s) => s.item_id === i.item_id)
+      return server ? { ...i, agreed_price: server.agreed_price } : i
+    }))
+  }
+
+  const reloadSession = async () => {
+    if (!sellId) return
+    try {
+      syncCartFromSession(await api.get<{ items: SellItem[] }>(`/sales/${sellId}`))
+    } catch {
+      /* leave the cart as-is; the confirm step will surface a real mismatch */
+    }
+  }
+
   // bulkDiscount is a bounded percent, not money — it cannot carry a
   // thousands separator, so parseFloat stays.
-  const applyBulkDiscount = () => {
+  const applyBulkDiscount = async () => {
     const pct = parseFloat(bulkDiscount)
-    if (!pct || pct <= 0 || pct > 100) return
-    setItems((prev) => prev.map((i) => {
+    if (!pct || pct <= 0 || pct > 100 || !sellId) return
+
+    const priced = items.map((i) => {
       // The last arm of this fallback is `agreed_price`, which the admin may
       // have typed — so the whole chain goes through parseMoney.
       const original = parseMoney(String(i.sticker_price || i.original_price || i.agreed_price))
-      if (original === null) return i
-      const discounted = (original * (1 - pct / 100)).toFixed(2)
-      return { ...i, agreed_price: discounted }
-    }))
+      return original === null ? null : {
+        item_id: i.item_id,
+        price: Number((original * (1 - pct / 100)).toFixed(2)),
+      }
+    }).filter((p): p is { item_id: string; price: number } => p !== null)
+
+    setApplyingDiscount(true)
+    try {
+      // Sequential, and every leg is sent before anything is trusted: a draft
+      // is not money yet, so a partial discount is visible and correctable —
+      // but it must never be INVISIBLE, which is what a local-only edit was.
+      for (const p of priced) {
+        await api.patch(`/sales/${sellId}/items/${p.item_id}`, { agreed_price: p.price })
+      }
+      setBulkDiscount('')
+    } catch (err) {
+      alert(err instanceof AdminApiError ? err.detail : 'Some prices were not discounted')
+    } finally {
+      // Always resync: the cart now reflects what the session actually holds,
+      // whether every leg landed or only some did.
+      await reloadSession()
+      setApplyingDiscount(false)
+    }
   }
 
   const removeItem = async (itemId: string) => {
@@ -506,6 +570,7 @@ export default function AdminSellPage() {
                             label={`Agreed price for ${item.name}`}
                             value={String(item.agreed_price ?? '')}
                             onChange={(raw) => updateItemPrice(item.item_id, raw)}
+                            onBlur={() => commitItemPrice(item.item_id)}
                             className="vault-field w-20 px-1.5 py-0.5 rounded text-sm text-right text-mint font-mono"
                           />
                         </div>
@@ -545,10 +610,10 @@ export default function AdminSellPage() {
                   <button
                     type="button"
                     onClick={applyBulkDiscount}
-                    disabled={!bulkDiscount || parseFloat(bulkDiscount) <= 0}
+                    disabled={!bulkDiscount || parseFloat(bulkDiscount) <= 0 || applyingDiscount}
                     className="px-2 py-0.5 rounded text-[10px] font-medium bg-mint/10 text-mint border border-mint/20 hover:bg-mint/20 disabled:opacity-40 transition-colors"
                   >
-                    Apply
+                    {applyingDiscount ? 'Applying…' : 'Apply'}
                   </button>
                 </div>
 

@@ -21,6 +21,7 @@ from merlins_collection.models.inventory import (
 )
 from merlins_collection.services.dynamodb import InventoryRepository
 from merlins_collection.services.locations import validate_location
+from merlins_collection.services.money import coerce_decimal
 
 router = APIRouter(prefix="/purchases", tags=["admin-purchases"])
 
@@ -73,35 +74,14 @@ _STAGED_NUMERIC_FIELDS = (
 )
 
 
-def _coerce_decimal(value: Any, field: str, *, required: bool) -> Decimal | None:
-    """Coerce a JSON number or numeric string to an exact ``Decimal``.
-
-    Raises ``ValueError`` with an operator-readable message rather than letting
-    ``InvalidOperation`` escape as an unhandled 500.
-
-    Two traps this exists for:
-
-    * ``Decimal("NaN")`` and ``Decimal("Infinity")`` both PARSE. A bare
-      try/except around the conversion is not enough — ``is_finite()`` is part
-      of the check, not a nicety.
-    * conversion goes through ``str()`` so a JSON float lands as an exact
-      ``Decimal`` rather than its binary approximation (CLAUDE.md, Ops).
-
-    Accepts a number or a numeric string on purpose: MCP and curl are real
-    clients, and the backend is the last line rather than a mirror of one
-    form's habits.
-    """
-    if value is None or value == "":
-        if required:
-            raise ValueError(f"{field} is required")
-        return None
-    try:
-        dec = Decimal(str(value))
-    except (ArithmeticError, TypeError, ValueError) as exc:
-        raise ValueError(f"{field} must be an amount, got {value!r}") from exc
-    if not dec.is_finite():
-        raise ValueError(f"{field} must be a finite amount, got {value!r}")
-    return dec
+# The shared parser (``services/money.py``), which this module used to own as a
+# private helper. Bound to the old name so every call site below is unchanged.
+#
+# NOTE: no ``minimum`` is passed, so a NEGATIVE ``buy_price`` is still accepted
+# here — see docs/plans/rfc-0010/follow-ups.md (T0). Turning that on is a
+# deliberate contract decision with its own test, not a side effect of the
+# extraction.
+_coerce_decimal = coerce_decimal
 
 
 def _build_purchase(

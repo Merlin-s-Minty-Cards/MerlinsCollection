@@ -18,6 +18,7 @@ from merlins_collection.models.business import ItemCategory, Transaction, Transa
 from merlins_collection.models.inventory import ItemStatus, new_ulid
 from merlins_collection.services.card_text import admin_item_name
 from merlins_collection.services.dynamodb import InventoryRepository, ItemAlreadySoldError
+from merlins_collection.services.money import coerce_decimal
 
 router = APIRouter(prefix="/sales", tags=["admin-sales"])
 
@@ -209,6 +210,57 @@ def add_sell_item(
         "discount_pct": body.get("discount_pct"),
     }
     session.setdefault("items", []).append(sell_item)
+    repo.put_sell_session(session)
+    return session
+
+
+@router.patch("/{sell_id}/items/{item_id}")
+def update_sell_item_price(
+    sell_id: str,
+    item_id: str,
+    body: dict[str, Any],
+    repo: InventoryRepository = Depends(get_repo),
+) -> dict[str, Any]:
+    """Reprice one staged item — the route a discount at the table travels on.
+
+    Without this the Sell page could only ever send the price ``add_sell_item``
+    posted: its per-item field and its bulk-discount button both edited local
+    state, and confirm carried no per-item body. So a card discounted at a show
+    was handed over at the lower price and BOOKED at the higher one, overstating
+    revenue and profit on every discounted sale (follow-ups.md, T1).
+
+    Draft-only, for the same reason the ledger's correction path is a void
+    rather than an edit: once a sale is confirmed the transaction is written,
+    and quietly changing what it says is how two sets of books come to disagree.
+
+    ``agreed_price`` is the ONLY field here on purpose. ``discount_pct`` is
+    stored on the staged item but the client computes the discounted figure, and
+    accepting both would make two fields authoritative for one number — the
+    exact shape of the bug this route exists to close.
+    """
+    session = repo.get_sell_session(sell_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Sell session not found")
+    if session.get("status") != "draft":
+        raise HTTPException(status_code=409, detail="Can only reprice draft sessions")
+
+    try:
+        # minimum=0, not a truthiness check: a free throw-in is a real sale at a
+        # show, so ZERO is allowed and only a negative is refused.
+        price = coerce_decimal(
+            body.get("agreed_price"), "agreed_price",
+            required=True, minimum=Decimal(0),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    for sell_item in session.get("items", []):
+        if sell_item["item_id"] == item_id:
+            sell_item["agreed_price"] = str(price)
+            break
+    else:
+        raise HTTPException(status_code=404, detail=f"Item {item_id} not in session")
+
     repo.put_sell_session(session)
     return session
 
