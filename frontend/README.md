@@ -171,6 +171,7 @@ Server-side secrets are passed as ECS task definition environment variables — 
 
 - `AUTH_SECRET` — NextAuth encryption key
 - `AWS_COGNITO_CLIENT_ID` / `AWS_COGNITO_CLIENT_SECRET` / `AWS_COGNITO_ISSUER` — Cognito provider
+- `AWS_COGNITO_DOMAIN` — Hosted UI domain (e.g. `https://<domain-prefix>.auth.<region>.amazoncognito.com`), used only for the silent access-token refresh POST to `/oauth2/token`. This is a **different host** than `AWS_COGNITO_ISSUER` — the issuer has no `/oauth2/token` route, so the refresh silently fails without this var set, and the user is signed out the first time the access token needs renewing (roughly hourly)
 - `COGNITO_ADMIN_GROUP` — admin group name (default: `admins`)
 
 ### Infrastructure

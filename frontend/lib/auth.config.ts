@@ -102,7 +102,12 @@ export const authConfig: NextAuthConfig = {
  */
 async function refreshAccessToken(token: JWT): Promise<JWT> {
   try {
-    const issuer = process.env.AWS_COGNITO_ISSUER
+    // NOT `AWS_COGNITO_ISSUER` — that is the OIDC/JWKS host
+    // (cognito-idp.<region>.amazonaws.com/<pool-id>), which has no
+    // /oauth2/token route. The token endpoint lives on the Hosted UI domain
+    // (Cognito's own .well-known/openid-configuration confirms the two are
+    // different hosts), which is what this refresh must POST to.
+    const domain = process.env.AWS_COGNITO_DOMAIN
     const clientId = process.env.AWS_COGNITO_CLIENT_ID ?? ''
     const clientSecret = process.env.AWS_COGNITO_CLIENT_SECRET ?? ''
 
@@ -112,7 +117,7 @@ async function refreshAccessToken(token: JWT): Promise<JWT> {
       refresh_token: token.refreshToken as string,
     })
 
-    const response = await fetch(`${issuer}/oauth2/token`, {
+    const response = await fetch(`${domain}/oauth2/token`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',

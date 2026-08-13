@@ -78,9 +78,17 @@ describe('auth config', () => {
 // `session` callbacks.
 describe('auth config — access token refresh', () => {
   const ISSUER = 'https://cognito.example.com/pool'
+  // The Hosted UI domain, NOT the OIDC issuer host. Cognito's own
+  // .well-known/openid-configuration confirms token_endpoint lives here
+  // (verified live 2026-08-12: https://cognito-idp.us-east-1.amazonaws.com/
+  // us-east-1_Ab945I9ir/.well-known/openid-configuration returns
+  // token_endpoint = https://us-east-1ab945i9ir.auth.us-east-1.amazoncognito.com/oauth2/token
+  // — a different host than the issuer).
+  const DOMAIN = 'https://cognito-domain.example.com'
 
   beforeEach(() => {
     process.env.AWS_COGNITO_ISSUER = ISSUER
+    process.env.AWS_COGNITO_DOMAIN = DOMAIN
     process.env.AWS_COGNITO_CLIENT_ID = 'client-123'
     process.env.AWS_COGNITO_CLIENT_SECRET = 'secret-abc'
     vi.restoreAllMocks()
@@ -169,7 +177,11 @@ describe('auth config — access token refresh', () => {
 
     expect(fetchSpy).toHaveBeenCalledTimes(1)
     const [url, init] = fetchSpy.mock.calls[0]
-    expect(url).toBe(`${ISSUER}/oauth2/token`)
+    // NOT `${ISSUER}/oauth2/token` — the issuer is the OIDC/JWKS host
+    // (cognito-idp.<region>.amazonaws.com/<pool-id>), which has no
+    // /oauth2/token route at all. The real token endpoint lives on the
+    // Hosted UI domain, confirmed against Cognito's own discovery document.
+    expect(url).toBe(`${DOMAIN}/oauth2/token`)
     const body = String((init as RequestInit).body)
     expect(body).toContain('grant_type=refresh_token')
     expect(body).toContain('old-refresh-token')
