@@ -487,7 +487,7 @@ aws scheduler create-schedule \
         }
       }
     },
-    "Input": "{\"containerOverrides\":[{\"name\":\"backend\",\"command\":[\"python\",\"-m\",\"scripts.scheduled_sync\",\"--job\",\"prices\"]}]}",
+    "Input": "{\"containerOverrides\":[{\"name\":\"Main\",\"command\":[\"python\",\"-m\",\"scripts.scheduled_sync\",\"--job\",\"prices\"]}]}",
     "RetryPolicy": {"MaximumRetryAttempts": 2, "MaximumEventAgeInSeconds": 3600}
   }'
 
@@ -511,7 +511,7 @@ aws scheduler create-schedule \
         }
       }
     },
-    "Input": "{\"containerOverrides\":[{\"name\":\"backend\",\"command\":[\"python\",\"-m\",\"scripts.scheduled_sync\",\"--job\",\"catalog\"]}]}",
+    "Input": "{\"containerOverrides\":[{\"name\":\"Main\",\"command\":[\"python\",\"-m\",\"scripts.scheduled_sync\",\"--job\",\"catalog\"]}]}",
     "RetryPolicy": {"MaximumRetryAttempts": 2, "MaximumEventAgeInSeconds": 3600}
   }'
 ```
