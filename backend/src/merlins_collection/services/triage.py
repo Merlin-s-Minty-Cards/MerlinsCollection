@@ -42,8 +42,21 @@ def is_missing_card_id(item: InventoryItem) -> bool:
     field at all. Sealed product and bulk lots have no catalog link BY DESIGN,
     so a plain attribute access would both raise ``AttributeError`` and, if
     defaulted to None, drag every sealed box into the queue permanently.
+
+    ``no_catalog_match`` is an admin's explicit answer that TCGdex does not carry
+    this card. It is STORED precisely because this function is derived: without
+    it a human could confirm "there is nothing to match" a hundred times and the
+    row would return to the queue on the very next read (RFC 0011 §C).
+
+    Note this is a SUPPRESSION inside an existing predicate, not a fourth
+    ``TRIAGE_REASONS`` entry. A new reason would keep the card in Triage, which
+    is the opposite of what parking is for. A parked item that is ALSO flagged or
+    unnamed keeps those reasons and stays — those are real errors, and "the
+    catalog does not have it" is not.
     """
     if not hasattr(item, "card_id"):
+        return False
+    if item.no_catalog_match:
         return False
     return item.card_id is None
 

@@ -116,6 +116,11 @@ def admin_search_inventory(
     set_name: str | None = Query(None, max_length=200),
     ownership: str | None = Query(None),
     needs_review: bool | None = Query(None),
+    # RFC 0011 T5: the unmatched queue is THIS endpoint with this parameter, not
+    # a new list route — the same "reuse before adding" rule that keeps Triage on
+    # the shared search. `false` is a real query, not a synonym for unset: it is
+    # how an ordinary inventory list hides the parked cohort.
+    no_catalog_match: bool | None = Query(None),
     missing_sticker: bool = Query(False),
     # Triage (T11). `triage` is the one OR on this endpoint — the union of every
     # reason — while the ones below narrow WITHIN it like every other filter here.
@@ -203,6 +208,16 @@ def admin_search_inventory(
 
     if needs_review is not None:
         items = [i for i in items if i.needs_review == needs_review]
+
+    if no_catalog_match is not None:
+        # `getattr` with a default rather than attribute access: a row written
+        # before the field existed loads without it, and defaulting to False is
+        # what makes the queue ship empty instead of scooping up every legacy
+        # unlinked card.
+        items = [
+            i for i in items
+            if getattr(i, "no_catalog_match", False) == no_catalog_match
+        ]
 
     # Show-prep queue: everything still waiting for a price sticker.
     if missing_sticker:
@@ -481,6 +496,7 @@ def admin_update_item(
                 ),
             )
     body = _apply_review_transition(existing, body)
+    body = _apply_no_catalog_match_transition(existing, body)
 
     # Merge: dump existing to dict, overlay with update body, re-validate
     current_data = existing.model_dump(mode="python")
@@ -1325,6 +1341,60 @@ def _apply_review_transition(
             body["reviewed_at"] = None  # rule 3
     else:
         body["reviewed_at"] = datetime.now(tz=timezone.utc)  # rule 1
+
+    return body
+
+
+def _apply_no_catalog_match_transition(
+    existing: InventoryItem, body: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve a ``no_catalog_match`` change into the fields actually written.
+
+    Four rules, all of them about keeping the unmatched queue drainable:
+
+    1. **Only a catalog-linkable kind can be parked.** Sealed product and bulk
+       lots have no ``card_id`` field at all, so there is no catalog link for
+       them to be missing — the same ``hasattr`` reasoning
+       ``triage.is_missing_card_id`` documents. The model validator cannot catch
+       this one, because a sealed item has no ``card_id`` to be non-None.
+    2. **Parking stamps ``no_catalog_match_at`` server-side**, and the client's
+       own value is discarded. A client clock is not evidence of when a human
+       looked, exactly as with ``reviewed_at``.
+    3. **Unparking clears the stamp.** Parking that cannot be undone is just a
+       slower delete, and a stale "parked 3 weeks ago" on an active card is a
+       lie the queue would render.
+    4. **Assigning a ``card_id`` unparks.** Pairing is the exit condition, and
+       requiring a SECOND write to leave the queue is how rows get stranded in
+       it. This runs LAST so a body carrying both a ``card_id`` and
+       ``no_catalog_match: true`` resolves to "paired" rather than tripping the
+       model's invariant.
+    """
+    body = dict(body)
+
+    if body.get("no_catalog_match") and not hasattr(existing, "card_id"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"A {existing.kind} item has no catalog link to be missing. "
+                "Only raw and graded items can be marked as having no catalog "
+                "match."
+            ),
+        )
+
+    # Never client-supplied. Popped before the branches below so a request that
+    # sends the stamp alone cannot rewrite history either.
+    body.pop("no_catalog_match_at", None)
+
+    if "no_catalog_match" in body:
+        if body["no_catalog_match"]:
+            if not existing.no_catalog_match:
+                body["no_catalog_match_at"] = datetime.now(tz=timezone.utc)
+        else:
+            body["no_catalog_match_at"] = None
+
+    if body.get("card_id") is not None:
+        body["no_catalog_match"] = False
+        body["no_catalog_match_at"] = None
 
     return body
 

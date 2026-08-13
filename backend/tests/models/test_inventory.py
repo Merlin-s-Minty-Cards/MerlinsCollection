@@ -388,3 +388,53 @@ def test_cert_lookup_failed_is_a_machine_review_reason():
     from merlins_collection.models.inventory import MACHINE_REVIEW_REASONS
 
     assert "cert_lookup_failed" in MACHINE_REVIEW_REASONS
+
+
+# ===========================================================================
+# RFC 0011 T5 — the `no_catalog_match` invariant
+# ===========================================================================
+
+def _raw_unmatched(**over):
+    kw = _base(finish="normal", condition="NM", card_id=None)
+    kw.update(over)
+    return RawInventoryItem(**kw)
+
+
+class TestUnmatchedInvariant:
+    """``no_catalog_match=True`` implies ``card_id is None``.
+
+    Allowing both creates a row that is simultaneously in Triage's "no catalog
+    link" reason and in the queue that exists to hold cards which have no link —
+    two answers to one question, which is the state this feature removes.
+    """
+
+    def test_cannot_park_an_item_that_still_has_a_card_id(self):
+        with pytest.raises(ValidationError, match="unlink the card first"):
+            _raw_unmatched(card_id="en:base1-4", no_catalog_match=True)
+
+    def test_parking_an_unlinked_item_is_fine(self):
+        assert _raw_unmatched(no_catalog_match=True).no_catalog_match is True
+
+    def test_a_graded_slab_can_be_parked_too(self):
+        """Graded cards carry a ``card_id`` and are the harder half of the
+        unmatched problem — a JP slab has no ``externalCatalogId`` at all."""
+        item = GradedInventoryItem(**_base(
+            card_id=None, company=GradingCompany.PSA, grade=Decimal("9"),
+            cert_number="12345678", no_catalog_match=True,
+        ))
+        assert item.no_catalog_match is True
+
+    def test_the_flag_defaults_off_and_carries_no_timestamp(self):
+        """Nothing is backfilled. A row written before these fields existed
+        loads as un-parked, which is what makes the queue ship empty."""
+        item = _raw_unmatched()
+        assert item.no_catalog_match is False
+        assert item.no_catalog_match_at is None
+
+    def test_no_catalog_match_is_not_a_customer_field(self):
+        """INTERNAL, same rule as ``review_reason``. A customer has no use for
+        our cataloguing backlog."""
+        from merlins_collection.routers.inventory import _CUSTOMER_ITEM_FIELDS
+
+        assert "no_catalog_match" not in _CUSTOMER_ITEM_FIELDS
+        assert "no_catalog_match_at" not in _CUSTOMER_ITEM_FIELDS

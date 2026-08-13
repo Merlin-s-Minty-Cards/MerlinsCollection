@@ -1262,3 +1262,75 @@ class TestBulkClearMachineFlags:
             "to the unlinked queue clears nothing"
         )
         assert repo.get_inventory_item("flagged-only").needs_review is True
+
+
+# ===========================================================================
+# RFC 0011 T5 — `no_catalog_match`, the stored answer a derived reason cannot hold
+# ===========================================================================
+#
+# `is_missing_card_id` is DERIVED — recomputed on every read — so a card TCGdex
+# simply does not carry sits in Triage permanently, and a queue whose stated goal
+# is zero has a floor it can never get under. The fix is a suppression inside the
+# existing predicate, NOT a fourth reason: a new reason would keep the card in
+# Triage, which is the opposite of the ask.
+
+class TestNoCatalogMatch:
+    """RFC 0011 §C — the stored answer a derived reason cannot hold."""
+
+    def test_a_parked_item_leaves_the_missing_card_id_reason(self):
+        from merlins_collection.services.triage import is_missing_card_id, reasons_for
+
+        item = _raw(card_id=None, no_catalog_match=True)
+        assert is_missing_card_id(item) is False
+        assert "missing_card_id" not in reasons_for(item)
+
+    def test_an_unparked_unlinked_item_still_has_the_reason(self):
+        from merlins_collection.services.triage import is_missing_card_id
+
+        assert is_missing_card_id(_raw(card_id=None)) is True
+
+    def test_a_parked_item_with_no_other_problem_leaves_triage(self):
+        """The whole point: the queue can now reach zero."""
+        from merlins_collection.services.triage import needs_triage
+
+        assert needs_triage(_raw(card_id=None, no_catalog_match=True)) is False
+
+    def test_a_parked_item_that_is_also_flagged_stays_in_triage(self):
+        """Parking answers ONE question. A human's flag is a different, real problem."""
+        from merlins_collection.services.triage import needs_triage, reasons_for
+
+        item = _raw(card_id=None, no_catalog_match=True, needs_review=True)
+        assert needs_triage(item) is True
+        assert reasons_for(item) == ["flagged"]
+
+    def test_a_parked_jp_item_with_no_english_name_stays_in_triage(self):
+        from merlins_collection.services.triage import reasons_for
+
+        item = _raw(card_id=None, no_catalog_match=True,
+                    language=Language.JP, display_name_override=None)
+        assert "missing_english_name" in reasons_for(item)
+
+    def test_a_sealed_item_is_unaffected_either_way(self):
+        """Sealed product has no ``card_id`` attribute at all, so it was never in
+        the reason and cannot be parked out of it."""
+        from merlins_collection.services.triage import is_missing_card_id
+
+        assert is_missing_card_id(_sealed()) is False
+
+    def test_the_list_and_the_counts_agree_about_parked_items(self, admin_client):
+        """One predicate, two consumers. A badge that counts differently from the
+        list it links to is worse than no badge."""
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(
+            _raw(item_id="parked", card_id=None, no_catalog_match=True),
+        )
+        repo.put_inventory_item(_raw(item_id="open", card_id=None))
+
+        listed = client.get(
+            "/admin/inventory/search", params={"triage": "true"}, headers=_auth(admin),
+        )
+        counts = client.get("/admin/triage/counts", headers=_auth(admin))
+
+        assert [i["item_id"] for i in listed.json()["items"]] == ["open"]
+        assert counts.json()["total"] == 1
+        assert counts.json()["reasons"]["missing_card_id"] == 1

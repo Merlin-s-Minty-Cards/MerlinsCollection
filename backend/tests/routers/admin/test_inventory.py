@@ -1817,3 +1817,184 @@ class TestAdminHandValuation:
         # LP+ is the midpoint of LP (0.82) and NM (1.00).
         assert Decimal(by_id["lp-plus-1"]["condition_multiplier"]) == Decimal("0.91")
         assert by_id["sealed-1"]["condition_multiplier"] is None
+
+
+# ===========================================================================
+# RFC 0011 T5 — the unmatched queue's model + endpoint behaviour
+# ===========================================================================
+#
+# The queue is `GET /admin/inventory/search?no_catalog_match=true` — NOT a new
+# list endpoint, on the same "reuse before adding" rule that keeps Triage on the
+# shared search.
+
+class TestNoCatalogMatchQueue:
+
+    def test_the_unmatched_queue_ships_empty(self, admin_client):
+        """Owner requirement, 2026-08-13, verbatim: "make sure that the new tab
+        is empty right now, all cards that go there should only be moved under
+        admin supervision."
+
+        Nothing is backfilled and nothing auto-migrates. Unlinked inventory that
+        no admin has touched must NOT appear here.
+        """
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_raw(card_id=None, item_id="unlinked"))
+        repo.put_inventory_item(_sealed(item_id="box"))
+
+        resp = client.get(
+            "/admin/inventory/search",
+            params={"no_catalog_match": "true"},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["items"] == []
+
+    def test_the_queue_lists_exactly_what_an_admin_parked(self, admin_client):
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(
+            _raw(card_id=None, item_id="parked", no_catalog_match=True),
+        )
+        repo.put_inventory_item(_raw(card_id=None, item_id="unlinked"))
+        repo.put_inventory_item(_raw(item_id="linked"))
+
+        resp = client.get(
+            "/admin/inventory/search",
+            params={"no_catalog_match": "true"},
+            headers=_auth_header(admin),
+        )
+
+        assert [i["item_id"] for i in resp.json()["items"]] == ["parked"]
+
+    def test_the_parameter_also_excludes(self, admin_client):
+        """`false` is a real query, not a synonym for "unset" — it is how the
+        ordinary inventory list hides the parked cohort."""
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(
+            _raw(card_id=None, item_id="parked", no_catalog_match=True),
+        )
+        repo.put_inventory_item(_raw(item_id="linked"))
+
+        resp = client.get(
+            "/admin/inventory/search",
+            params={"no_catalog_match": "false"},
+            headers=_auth_header(admin),
+        )
+
+        assert [i["item_id"] for i in resp.json()["items"]] == ["linked"]
+
+    def test_parking_stamps_the_server_side_timestamp(self, admin_client):
+        """Server-stamped, never client-supplied — the rule ``reviewed_at``
+        already follows. Drives "parked 3 weeks ago" on the queue."""
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_raw(card_id=None, item_id="x"))
+
+        resp = client.put(
+            "/admin/inventory/x",
+            json={"no_catalog_match": True},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.status_code == 200
+        assert repo.get_inventory_item("x").no_catalog_match_at is not None
+
+    def test_a_client_supplied_timestamp_is_ignored(self, admin_client):
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_raw(card_id=None, item_id="x"))
+
+        client.put(
+            "/admin/inventory/x",
+            json={
+                "no_catalog_match": True,
+                "no_catalog_match_at": "2020-01-01T00:00:00Z",
+            },
+            headers=_auth_header(admin),
+        )
+
+        stamped = repo.get_inventory_item("x").no_catalog_match_at
+        assert stamped.year > 2020
+
+    def test_assigning_a_card_id_unparks_automatically(self, admin_client):
+        """Pairing is the exit condition. Requiring a SECOND write to leave the
+        queue is how rows get stranded in it."""
+        client, repo, admin, _ = admin_client
+        repo.batch_upsert_catalog_cards([_catalog(card_id="sv1-9")])
+        repo.put_inventory_item(
+            _raw(card_id=None, item_id="x", no_catalog_match=True),
+        )
+
+        resp = client.put(
+            "/admin/inventory/x",
+            json={"card_id": "sv1-9"},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.status_code == 200
+        item = repo.get_inventory_item("x")
+        assert item.no_catalog_match is False
+        assert item.no_catalog_match_at is None
+
+    def test_unparking_clears_the_timestamp(self, admin_client):
+        """Parking that cannot be undone is just a slower delete."""
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_raw(
+            card_id=None, item_id="x", no_catalog_match=True,
+            no_catalog_match_at=datetime.now(tz=timezone.utc),
+        ))
+
+        resp = client.put(
+            "/admin/inventory/x",
+            json={"no_catalog_match": False},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.status_code == 200
+        assert repo.get_inventory_item("x").no_catalog_match_at is None
+
+    def test_parking_a_still_linked_item_is_a_422(self, admin_client):
+        """The model invariant, surfaced at the endpoint an admin actually hits.
+        T6 unlinks and parks in one click; doing only half of it must not pass.
+        """
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="x"))
+
+        resp = client.put(
+            "/admin/inventory/x",
+            json={"no_catalog_match": True},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.status_code == 422
+        assert "unlink" in resp.json()["detail"].lower()
+
+    def test_unlinking_and_parking_in_one_body_succeeds(self, admin_client):
+        """The T6 gesture. Order inside the handler has to resolve this, not
+        reject it."""
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="x"))
+
+        resp = client.put(
+            "/admin/inventory/x",
+            json={"card_id": None, "no_catalog_match": True},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.status_code == 200
+        item = repo.get_inventory_item("x")
+        assert item.card_id is None
+        assert item.no_catalog_match is True
+        assert item.no_catalog_match_at is not None
+
+    def test_a_sealed_item_cannot_be_parked(self, admin_client):
+        """Sealed product has no catalog link BY DESIGN — there is nothing
+        missing, so there is nothing to park."""
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_sealed(item_id="box"))
+
+        resp = client.put(
+            "/admin/inventory/box",
+            json={"no_catalog_match": True},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.status_code == 422

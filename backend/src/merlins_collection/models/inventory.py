@@ -17,7 +17,7 @@ from enum import StrEnum
 from typing import Annotated, Literal, Union
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field, TypeAdapter, field_validator
+from pydantic import BaseModel, Field, TypeAdapter, field_validator, model_validator
 from ulid import ULID
 
 
@@ -247,6 +247,44 @@ class _ItemBase(BaseModel):
     # catalog link. Bounded because it reaches customers.
     # See docs/plans/rfc-0008/t10-jp-english-names.md.
     display_name_override: str | None = Field(default=None, max_length=200)
+    # Stored answer to a question the DERIVED ``missing_card_id`` reason cannot
+    # ask: "we looked, and TCGdex does not carry this card." Without it an
+    # unmatchable card sits in Triage forever, because ``is_missing_card_id`` is
+    # recomputed on every read and stays true no matter how many times a human
+    # confirms there is nothing to match — so the queue has a floor it can never
+    # get under. See RFC 0011 §C.
+    #
+    # INTERNAL. Deliberately kept OUT of ``_CUSTOMER_ITEM_FIELDS``, same rule as
+    # ``review_reason`` — a customer has no use for our cataloguing backlog.
+    #
+    # Defaults to False and NOTHING is backfilled: the owner's requirement is
+    # that the queue ships empty and every card in it got there under admin
+    # supervision.
+    no_catalog_match: bool = False
+    # Stamped by the SERVER when the flag is set; the client never sends it —
+    # the same rule ``reviewed_at`` follows. Drives "parked 3 weeks ago" on the
+    # queue and lets the list sort oldest-first.
+    no_catalog_match_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def _unmatched_implies_unlinked(self):
+        """A card that is matched is not unmatched.
+
+        Allowing both to be true creates a row that is simultaneously in
+        Triage's "no catalog link" reason AND in the queue that exists to hold
+        cards which have no link — two answers to one question, which is the
+        state this whole feature exists to remove. The admin's route is: unlink
+        first, which T6 does in the same click.
+
+        ``getattr``, not attribute access: sealed and bulk items have no
+        ``card_id`` field at all, and must never be parkable.
+        """
+        if self.no_catalog_match and getattr(self, "card_id", None) is not None:
+            raise ValueError(
+                "no_catalog_match cannot be set on an item that still has a "
+                "card_id; unlink the card first"
+            )
+        return self
 
     @field_validator("display_name_override", "review_reason", mode="before")
     @classmethod
