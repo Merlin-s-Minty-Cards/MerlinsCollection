@@ -9,6 +9,7 @@
 | C2 — Inventory filter by cosigner | Done | Review clean, no fix rounds. |
 | C3 — CardDetailModal assign/unassign | Done | Review clean after 1 fix round (added RFC-mandated split_percent/minimum_price advanced overrides, dropped from the original brief). |
 | C4 — Buy/Trade assign + trades.py item_ids fix | Done | Review clean, no fix rounds. |
+| Bonus — CosignorPicker unmount-timeout leak | Done | Review clean. Found independently by C3 and C4, fixed centrally rather than left as duplicate per-consumer test workarounds. |
 | D — Lesson capture | Not started | blocked on A, B1, B2, C1-C4 (all now done) |
 | Final full-suite run | Not started | blocked on all above |
 
