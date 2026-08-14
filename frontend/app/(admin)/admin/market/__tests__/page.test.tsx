@@ -370,6 +370,50 @@ describe('AdminMarketPage catalog search failure states', () => {
 // RFC 0010 T1 — money fields accept what a human types
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// RFC 0011 T11 — search by number and set too, not just name
+// ---------------------------------------------------------------------------
+
+describe('AdminMarketPage search fields', () => {
+  const coverage = {
+    total_items: 10, items_with_market_value: 8,
+    catalog_cards: 5, catalog_cards_with_prices: 5, unmatched_sample: [],
+  }
+
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    getMock.mockImplementation((path: string) => {
+      if (path === '/market/coverage') return Promise.resolve(coverage)
+      if (path === '/market/search') return Promise.resolve({ items: [], total: 0 })
+      return Promise.resolve({})
+    })
+  })
+
+  it('sends name and number together', async () => {
+    render(<AdminMarketPage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.change(screen.getByPlaceholderText(/search catalog by name/i), {
+      target: { value: 'Charizard' },
+    })
+    fireEvent.change(screen.getByLabelText(/card number/i), { target: { value: '4' } })
+
+    await waitFor(() => expect(getMock).toHaveBeenCalledWith('/market/search',
+      expect.objectContaining({ name: 'Charizard', number: '4' })))
+  })
+
+  it('searches on the number alone', async () => {
+    render(<AdminMarketPage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.change(screen.getByLabelText(/card number/i), { target: { value: '182' } })
+
+    await waitFor(() => expect(getMock).toHaveBeenCalledWith('/market/search',
+      expect.objectContaining({ number: '182' })))
+  })
+})
+
 describe('AdminMarketPage watchlist target price', () => {
   const promptSpy = vi.spyOn(window, 'prompt')
 

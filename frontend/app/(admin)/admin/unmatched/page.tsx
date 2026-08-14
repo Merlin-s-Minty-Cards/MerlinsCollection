@@ -5,6 +5,7 @@ import { Unlink, Search } from 'lucide-react'
 import { useAdminApi } from '@/lib/admin-api'
 import CardImage, { TABLE_THUMB_SIZE } from '@/components/admin/shared/CardImage'
 import CardPickerRow, { type PickerCard } from '@/components/admin/shared/CardPickerRow'
+import CardSearchPanel from '@/components/admin/shared/CardSearchPanel'
 import DataTable, { type Column } from '@/components/admin/shared/DataTable'
 import HandValuedBadge from '@/components/admin/shared/HandValuedBadge'
 import MoneyInput from '@/components/admin/shared/MoneyInput'
@@ -507,13 +508,9 @@ function PairDialog({
 /**
  * Full-catalog search, the door that is always open.
  *
- * There is deliberately **no manual-entry affordance** here: a parked card is
- * being *paired* with a catalog row that already exists, so there is nothing to
+ * There is deliberately **no `onManualEntry`** here: a parked card is being
+ * *paired* with a catalog row that already exists, so there is nothing to
  * create. That is the one shape of escape hatch this page does not need.
- *
- * **This is a local copy of Triage's `CatalogPicker`, and it should not stay
- * one.** T11 builds the shared `CardSearchPanel` (name + number + set); this
- * page adopts it then, and there is a row in `follow-ups.md` holding that swap.
  */
 function CatalogSearchDialog({
   item,
@@ -524,53 +521,9 @@ function CatalogSearchDialog({
   onClose: () => void
   onPick: (card: PickerCard) => void
 }) {
-  const api = useAdminApi()
-  const [query, setQuery] = useState('')
-  const [results, setResults] = useState<PickerCard[]>([])
-
-  useEffect(() => {
-    const term = query.trim()
-    if (term.length < 2) {
-      setResults([])
-      return
-    }
-    // Debounced: the endpoint filters a cached full-catalog read, so a request
-    // per keystroke is affordable but wasteful.
-    let cancelled = false
-    const timer = setTimeout(() => {
-      api
-        .get<{ items: PickerCard[] }>('/market/search', { name: term })
-        .then((data) => { if (!cancelled) setResults(data?.items ?? []) })
-        .catch(() => { if (!cancelled) setResults([]) })
-    }, 200)
-    return () => { cancelled = true; clearTimeout(timer) }
-  }, [api, query])
-
   return (
     <Dialog label={`Search the catalog for ${adminItemName(item)}`} onClose={onClose}>
-      <label
-        htmlFor="unmatched-catalog-search"
-        className="block text-[10px] uppercase tracking-wider text-pine-500 mb-1"
-      >
-        Search the catalog
-      </label>
-      <input
-        id="unmatched-catalog-search"
-        type="text"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        placeholder="Card name"
-        className="vault-field w-full rounded px-2 py-1 text-xs"
-        autoFocus
-      />
-      {/* Tall enough for ~5 candidates with art: scanning five cards at a glance
-          is the whole point of putting the art there. */}
-      <div className="mt-2 max-h-[28rem] overflow-y-auto vault-scroll
-                      divide-y divide-pine-700/25">
-        {results.map((card) => (
-          <CardPickerRow key={card.card_id} card={card} onSelect={onPick} />
-        ))}
-      </div>
+      <CardSearchPanel onSelect={onPick} autoFocus />
     </Dialog>
   )
 }

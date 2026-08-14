@@ -20,7 +20,11 @@ from pydantic import BaseModel
 from merlins_collection.dependencies import get_repo
 from merlins_collection.models.inventory import market_price_and_finish, new_ulid
 from merlins_collection.services import catalog_cache
-from merlins_collection.services.card_text import admin_item_name
+from merlins_collection.services.card_text import (
+    admin_item_name,
+    normalize_number,
+    number_keys,
+)
 from merlins_collection.services.catalog_sync import (
     as_utc,
     build_pricing_provider,
@@ -111,9 +115,13 @@ def market_search(
         name_lower = name.lower()
         cards = [c for c in cards if name_lower in c.name.lower()]
 
-    # Apply number filter (exact match)
+    # Apply number filter. Both sides normalized, exactly as `_match_card` does
+    # -- an Excel float artifact ("181.0"), a slash form ("182/167") and a bare
+    # "182" all have to find the same card. Hand-typed at a buy table, all
+    # three get typed.
     if number is not None:
-        cards = [c for c in cards if c.number == number]
+        wanted = set(number_keys(normalize_number(number)))
+        cards = [c for c in cards if set(number_keys(normalize_number(c.number))) & wanted]
 
     total = len(cards)
     # Cap the response to keep the payload bounded — the catalog scan behind

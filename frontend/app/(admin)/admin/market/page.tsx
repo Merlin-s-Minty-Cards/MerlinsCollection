@@ -9,6 +9,8 @@ import { MONEY_PARSE_MESSAGE, parseMoney } from '@/lib/money'
 import SearchInput from '@/components/admin/shared/SearchInput'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import CardPickerRow, { type PickerCard } from '@/components/admin/shared/CardPickerRow'
+import SetCombobox from '@/components/shared/SetCombobox'
+import { useCatalogSets, toComboboxSets } from '@/lib/use-catalog-sets'
 
 interface CatalogCard extends PickerCard {
   prices?: Record<string, unknown>
@@ -129,6 +131,9 @@ export default function AdminMarketPage() {
 
   // Search
   const [query, setQuery] = useState('')
+  const [number, setNumber] = useState('')
+  const [setId, setSetId] = useState('')
+  const { sets: catalogSets } = useCatalogSets()
   const [results, setResults] = useState<CatalogCard[]>([])
   const [searching, setSearching] = useState(false)
   // Described, not a bare boolean — see the note in lib/admin-error.ts.
@@ -257,13 +262,20 @@ export default function AdminMarketPage() {
     }
   }
 
-  const searchCatalog = useCallback(async (q: string) => {
-    if (!q.trim() || !api.isAuthenticated) { setResults([]); setSearchError(null); return }
+  const searchCatalog = useCallback(async (q: string, num: string, set: string) => {
+    if (!q.trim() && !num.trim() && !set.trim()) {
+      setResults([]); setSearchError(null); return
+    }
+    if (!api.isAuthenticated) return
     const seq = ++searchSeqRef.current
     setSearching(true)
     setSearchError(null)
+    const params: Record<string, string> = {}
+    if (q.trim()) params.name = q.trim()
+    if (num.trim()) params.number = num.trim()
+    if (set.trim()) params.set_id = set.trim()
     try {
-      const res = await api.get<{ items: CatalogCard[]; total: number }>('/market/search', { name: q })
+      const res = await api.get<{ items: CatalogCard[]; total: number }>('/market/search', params)
       if (seq !== searchSeqRef.current) return
       setResults(res.items.slice(0, 20))
     } catch (err) {
@@ -276,9 +288,9 @@ export default function AdminMarketPage() {
   }, [api])
 
   useEffect(() => {
-    const timeout = setTimeout(() => searchCatalog(query), 350)
+    const timeout = setTimeout(() => searchCatalog(query, number, setId), 350)
     return () => clearTimeout(timeout)
-  }, [query, searchCatalog])
+  }, [query, number, setId, searchCatalog])
 
   const loadPriceHistory = async (card: CatalogCard) => {
     setSelectedCard(card)
@@ -466,6 +478,25 @@ export default function AdminMarketPage() {
           {/* Search + Results */}
           <div className="lg:col-span-2 space-y-4">
             <SearchInput value={query} onChange={setQuery} placeholder="Search catalog by name…" />
+            <div className="grid grid-cols-2 gap-2">
+              <input
+                aria-label="Card number"
+                value={number}
+                placeholder="Card #"
+                className="vault-field w-full rounded-lg px-2.5 py-1.5 text-xs"
+                onChange={(e) => setNumber(e.target.value)}
+              />
+              <SetCombobox
+                sets={toComboboxSets(catalogSets)}
+                value={setId}
+                onChange={setSetId}
+                inputId="market-search-set"
+                ariaLabel="Set"
+                placeholder="All sets"
+                emptyLabel="All sets"
+                className="vault-field w-full rounded-lg px-2.5 py-1.5 text-xs"
+              />
+            </div>
             <div className="vault-panel rounded-xl overflow-hidden max-h-[500px] overflow-y-auto vault-scroll">
               {searching ? (
                 <div className="p-4 text-xs text-pine-400">Searching…</div>
@@ -478,7 +509,7 @@ export default function AdminMarketPage() {
                   {searchError.retryable && (
                     <button
                       type="button"
-                      onClick={() => searchCatalog(query)}
+                      onClick={() => searchCatalog(query, number, setId)}
                       className="flex items-center gap-1.5 text-[11px] text-pine-300 hover:text-mint transition-colors"
                     >
                       <RefreshCw size={12} />
@@ -486,7 +517,7 @@ export default function AdminMarketPage() {
                     </button>
                   )}
                 </div>
-              ) : results.length === 0 && query ? (
+              ) : results.length === 0 && (query || number || setId) ? (
                 <div className="p-4 text-xs text-pine-500">No cards found in catalog</div>
               ) : (
                 <div className="divide-y divide-pine-700/25">

@@ -1,12 +1,13 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Plus } from 'lucide-react'
 import { useAdminApi } from '@/lib/admin-api'
 import { parseMoney } from '@/lib/money'
 import { useLocations } from '@/lib/use-locations'
 import MoneyInput from '@/components/admin/shared/MoneyInput'
-import CardPickerRow, { type PickerCard } from '@/components/admin/shared/CardPickerRow'
+import CardSearchPanel from '@/components/admin/shared/CardSearchPanel'
+import type { PickerCard } from '@/components/admin/shared/CardPickerRow'
 import CertInput from './CertInput'
 
 export interface StagedSlab {
@@ -21,8 +22,6 @@ export interface StagedSlab {
   buy_price: number
   location: string
 }
-
-type CatalogCard = PickerCard
 
 interface OwnedCheck {
   owned: boolean
@@ -64,15 +63,12 @@ export default function SlabEntryForm({
   const [cost, setCost] = useState('')
   const [location, setLocation] = useState('toploader')
 
-  const [results, setResults] = useState<CatalogCard[]>([])
   const [owned, setOwned] = useState<OwnedCheck | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Remounts CardSearchPanel after a successful add so its internal name,
+  // number and set state clear along with the rest of the form.
+  const [panelKey, setPanelKey] = useState(0)
 
-  // A catalog search can take seconds and several are in flight while the
-  // operator types; they do NOT come back in send order. Without this guard the
-  // response for "Gen" lands last and replaces the results for "Gengar". Same
-  // guard the Buy page uses (app/(admin)/admin/buy/page.tsx:64).
-  const seqRef = useRef(0)
   const nameRef = useRef<HTMLInputElement>(null)
   const certRef = useRef<HTMLInputElement>(null)
 
@@ -82,28 +78,6 @@ export default function SlabEntryForm({
     if (focusToken === undefined) return
     certRef.current?.focus()
   }, [focusToken])
-
-  const searchCatalog = useCallback(async (q: string) => {
-    if (!q.trim() || cardId) {
-      setResults([])
-      return
-    }
-    const seq = ++seqRef.current
-    try {
-      const res = await api.get<{ items: CatalogCard[]; total: number }>('/market/search', { name: q })
-      if (seq !== seqRef.current) return
-      setResults(res.items.slice(0, 8))
-    } catch {
-      // A request that threw is not evidence the catalog lacks the card, so
-      // this clears the list and says nothing about it.
-      if (seq === seqRef.current) setResults([])
-    }
-  }, [api, cardId])
-
-  useEffect(() => {
-    const t = setTimeout(() => searchCatalog(name), 300)
-    return () => clearTimeout(t)
-  }, [name, searchCatalog])
 
   const checkOwned = async () => {
     if (!cert.trim()) return
@@ -158,8 +132,8 @@ export default function SlabEntryForm({
     setGrade('')
     setGradeLabel('')
     setCost('')
-    setResults([])
     setOwned(null)
+    setPanelKey((k) => k + 1)
   }
 
   return (
@@ -175,20 +149,6 @@ export default function SlabEntryForm({
           onEnter={() => nameRef.current?.focus()}
           onBlur={checkOwned}
         />
-
-        <label className="flex flex-col gap-1">
-          <span className="text-[11px] uppercase tracking-wider text-pine-400">Card name</span>
-          <input
-            ref={nameRef}
-            aria-label="Card name"
-            value={name}
-            className="vault-field w-full rounded-lg px-3 py-2 text-sm"
-            onChange={(e) => {
-              setName(e.target.value)
-              setCardId(null)
-            }}
-          />
-        </label>
       </div>
 
       {owned?.owned && (
@@ -200,22 +160,23 @@ export default function SlabEntryForm({
         </p>
       )}
 
-      {results.length > 0 && !cardId && (
-        <ul className="vault-panel max-h-[28rem] divide-y divide-pine-700/25 overflow-y-auto vault-scroll rounded-lg">
-          {results.map((c) => (
-            <li key={c.card_id}>
-              <CardPickerRow
-                card={c}
-                onSelect={(picked) => {
-                  setCardId(picked.card_id)
-                  setName(picked.name)
-                  setResults([])
-                }}
-              />
-            </li>
-          ))}
-        </ul>
-      )}
+      <CardSearchPanel
+        key={panelKey}
+        nameInputRef={nameRef}
+        initialName={name}
+        onNameChange={(v) => {
+          setName(v)
+          setCardId(null)
+        }}
+        onSelect={(picked: PickerCard) => {
+          setCardId(picked.card_id)
+          setName(picked.name)
+        }}
+        // A permanent affordance -- the owner's report was that manual entry
+        // only appeared after a search returned nothing, unreachable in the
+        // more common case: the search succeeds and every result is wrong.
+        onManualEntry={() => nameRef.current?.focus()}
+      />
       {cardId && (
         <p className="text-[11px] text-spriggatito-400">Linked to catalog ({cardId})</p>
       )}

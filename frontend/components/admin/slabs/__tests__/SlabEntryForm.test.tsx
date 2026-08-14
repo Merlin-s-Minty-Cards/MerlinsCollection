@@ -26,6 +26,11 @@ describe('SlabEntryForm', () => {
     mockApi.get.mockResolvedValue({ items: [], total: 0 })
   })
 
+  it('offers manual entry before the admin has searched for anything', async () => {
+    render(<SlabEntryForm onAdd={vi.fn()} />)
+    expect(await screen.findByRole('button', { name: /manual/i })).toBeInTheDocument()
+  })
+
   it('blocks the add when the cert is blank and points at the Buy page', async () => {
     const onAdd = vi.fn()
     render(<SlabEntryForm onAdd={onAdd} />)

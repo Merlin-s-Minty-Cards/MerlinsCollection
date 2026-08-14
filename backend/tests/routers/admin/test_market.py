@@ -156,6 +156,33 @@ class TestAdminMarketSearch:
         assert len(data["items"]) == 1
         assert data["items"][0]["number"] == "25"
 
+    @pytest.mark.parametrize("typed", ["182", "182/167", "182.0"])
+    def test_number_search_normalizes_both_sides(self, admin_client, typed):
+        """All three get typed at a buy table. Excel really does produce "181.0"."""
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([
+            _catalog_card(card_id="en:base1-182", name="Rayquaza", number="182/167"),
+        ])
+
+        resp = client.get(
+            f"/admin/market/search?number={typed}", headers=_auth(token)
+        )
+        assert resp.status_code == 200
+        assert [c["card_id"] for c in resp.json()["items"]] == ["en:base1-182"]
+
+    def test_number_and_name_combine(self, admin_client):
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([
+            _catalog_card(card_id="en:a-4", name="Charizard", number="4"),
+            _catalog_card(card_id="en:b-4", name="Blastoise", number="4"),
+        ])
+
+        resp = client.get(
+            "/admin/market/search?name=Charizard&number=4", headers=_auth(token)
+        )
+        assert resp.status_code == 200
+        assert [c["card_id"] for c in resp.json()["items"]] == ["en:a-4"]
+
 
 class TestAdminMarketSearchDisplayPrice:
     """The picker's price column (RFC 0010 T15).

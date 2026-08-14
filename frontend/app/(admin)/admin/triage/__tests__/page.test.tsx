@@ -437,7 +437,7 @@ describe('Triage — re-pointing a mismatched card', () => {
 
   async function pickReplacement(candidateName = 'Charizard') {
     fireEvent.click(await screen.findByRole('button', { name: /re-point/i }))
-    fireEvent.change(await screen.findByLabelText(/search the catalog/i), {
+    fireEvent.change(await screen.findByLabelText(/^card name$/i), {
       target: { value: candidateName },
     })
     fireEvent.click(await screen.findByRole('button', { name: new RegExp(candidateName) }))
@@ -708,9 +708,13 @@ describe('AdminTriagePage catalog picker (RFC 0010 T15)', () => {
     })
   }
 
-  async function openPicker(button: RegExp) {
+  // Re-point now searches through the shared `CardSearchPanel` ("Card name");
+  // the name dialog still uses the page's own `CatalogPicker` ("Search the
+  // catalog") — T11 adopted the shared component only where the search must
+  // resolve to a genuine catalog row.
+  async function openPicker(button: RegExp, label: RegExp = /search the catalog/i) {
     fireEvent.click(await screen.findByRole('button', { name: button }))
-    fireEvent.change(await screen.findByLabelText(/search the catalog/i), {
+    fireEvent.change(await screen.findByLabelText(label), {
       target: { value: 'Charizard' },
     })
     return screen.findByTestId('card-picker-row')
@@ -720,7 +724,7 @@ describe('AdminTriagePage catalog picker (RFC 0010 T15)', () => {
     mockPicker(flaggedItem)
     render(<AdminTriagePage />)
 
-    const row = await openPicker(/re-point/i)
+    const row = await openPicker(/re-point/i, /^card name$/i)
     expect(within(row).getByAltText('Charizard')).toHaveAttribute('src', 'https://img.example/zard.png')
     expect(within(row).getByTestId('card-picker-price').textContent).toContain('$189.99')
   })
@@ -738,7 +742,7 @@ describe('AdminTriagePage catalog picker (RFC 0010 T15)', () => {
     mockPicker(flaggedItem)
     render(<AdminTriagePage />)
 
-    const row = await openPicker(/re-point/i)
+    const row = await openPicker(/re-point/i, /^card name$/i)
     fireEvent.click(within(row).getByRole('button', { name: /Charizard/ }))
 
     const confirm = await screen.findByRole('dialog', { name: /confirm re-point/i })

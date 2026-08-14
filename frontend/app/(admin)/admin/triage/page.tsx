@@ -6,6 +6,7 @@ import { useAdminApi } from '@/lib/admin-api'
 import { useCardImages } from '@/lib/use-card-images'
 import CardImage, { TABLE_THUMB_SIZE } from '@/components/admin/shared/CardImage'
 import CardPickerRow, { type PickerCard } from '@/components/admin/shared/CardPickerRow'
+import CardSearchPanel from '@/components/admin/shared/CardSearchPanel'
 import DataTable, { type Column } from '@/components/admin/shared/DataTable'
 import SearchInput from '@/components/admin/shared/SearchInput'
 import CardDetailModal from '@/components/admin/shared/CardDetailModal'
@@ -677,12 +678,10 @@ function RepointDialog({
   onRepointed: (cardId: string | null) => void
 }) {
   const api = useAdminApi()
-  const [query, setQuery] = useState('')
   const [candidate, setCandidate] = useState<CatalogCard | null>(null)
   const [confirmingUnlink, setConfirmingUnlink] = useState(false)
   const [saving, setSaving] = useState(false)
   const [failed, setFailed] = useState(false)
-  const results = useCatalogSearch(query)
 
   const hasHistory = Boolean(item.lineage_id || item.predecessor_item_id)
   const crossLanguage =
@@ -851,14 +850,10 @@ function RepointDialog({
         </>
       ) : (
         <>
-          <CatalogPicker
-            query={query}
-            onQueryChange={setQuery}
-            results={results}
-            renderAction={(card) => (
-              <CardPickerRow card={card} onSelect={setCandidate} />
-            )}
-          />
+          {/* No `onManualEntry` -- this dialog must resolve to a genuine
+              catalog row. Its "no match" answer is "No match in TCGdex"
+              below, T6's park action. */}
+          <CardSearchPanel onSelect={setCandidate} autoFocus />
           {/* Available with NO candidate selected — this is the answer when the
               catalog has nothing to point at, so gating it behind picking a card
               would make it unreachable exactly when it is needed. Styled as the
