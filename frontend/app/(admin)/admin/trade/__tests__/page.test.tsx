@@ -271,4 +271,18 @@ describe('the unified deal page', () => {
     await screen.findByRole('heading', { name: /coming in/i })
     expect(screen.getByRole('button', { name: /manual entry/i })).toBeInTheDocument()
   })
+
+  it('allows Graded to be picked on an incoming card in Buy mode (RFC 0012 — regression coverage for trade/page.tsx wiring, not just IncomingCardForm internals)', async () => {
+    const user = userEvent.setup({ delay: null })
+    mockSearchParams({ mode: 'buy' })
+    render(<DealPage />)
+
+    const nameInput = await screen.findByLabelText('Card name')
+    await user.type(nameInput, CARD.name)
+    const row = await screen.findByTestId('card-picker-row')
+    await user.click(within(row).getByRole('button', { name: new RegExp(CARD.name) }))
+    const form = screen.getByTestId('incoming-form')
+
+    expect(within(form).getByRole('radio', { name: /graded/i })).toBeEnabled()
+  })
 })
