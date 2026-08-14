@@ -278,13 +278,61 @@ data. Outstanding for the owner:
    `/admin/sell` are gone (already confirmed by the build's route table above;
    this is the visual/interactive confirmation).
 
+## Final whole-branch review (2026-08-14, after T12)
+
+Per the user's request, a final review pass ran across the whole Part 2 diff
+(T13 through T12, base `27f3ca2` → `e7e28bc`) looking specifically for issues
+that only become visible across task boundaries — things no single task's own
+review could have caught because each task only sees its own slice.
+
+**It found three Critical and four Important issues, all in the seams between
+tasks:**
+
+1. **Critical — a graded card added in Buy mode was silently downgraded to
+   raw, cert discarded.** `IncomingCardForm` showed the Graded toggle in every
+   mode, but `buyApi.addIncoming` had no graded path — exactly the bug T13 was
+   written to fix, reintroduced on the buy money path by the merged UI.
+2. **Critical — every non-cash Sell/Buy was booked with a zero fee.** The
+   deleted `/admin/sell` had a payment-method selector; the merged page had
+   none, so `confirm_sell_session` always defaulted to `payment_method="cash"`.
+3. **Critical — the outgoing `index→item_id` map inside the session adapter
+   could go stale on a next-auth token refresh mid-deal**, silently no-op'ing
+   `removeOutgoing`/`updateOutgoing` while the UI showed the edit/removal as
+   applied — reopening the exact bug T15's own fix round had already closed
+   once, under a different trigger.
+4. Cash-component amount input lost a typed decimal point or comma
+   mid-keystroke (a controlled value re-derived from the parsed number every
+   render).
+5. "+ Manual entry" was offered in Sell mode, where it always threw.
+6. `canConfirmBasis` used `Number()` instead of `parseMoney`, greying out
+   Confirm on a legitimately comma-grouped manual-basis value.
+7. `market_value`/`image_url` were collected on the picked card but never sent
+   on an incoming leg, even though the backend reads both.
+
+**All seven were fixed and re-reviewed.** The fix wave (commits `46bd1db`,
+`b45b467`, `5498120`, `1978f52`, `6ff8605`) closed 1, 2, 3, 5, 6 cleanly and
+partially closed 7 (trade path fixed, buy path still dropped `market_value`)
+with 4 implemented but untested. The scoped re-review caught both residuals;
+a follow-up commit (`a57bf60`) closed the buy-path `market_value` gap and
+added the missing `DealSummary.test.tsx` coverage for 4. Verified after: 85
+tests across the deal-surface selection, lint clean, build exits 0.
+
+**No Minor findings from either review round were fixed** — they're
+cosmetic/deferred and listed in `follow-ups.md` if load-bearing enough to
+record, otherwise left as noted in the review transcripts (e.g. a stale
+docstring in `page.tsx` still describing buy/sell as "untouched by this
+task," and `frontend/README.md` still listing `/admin/sell`).
+
 ## Final state
 
-**T1–T11, T13–T16 all DONE.** T12 (this task) closes the RFC: CLAUDE.md carries
-all eight documentation edits (see commit `feecce8`), the full verification
-suite is green end to end, and the nine manual checks above are the only
-remaining work — all of them need a browser and real data neither of which
-exist in this sandbox.
+**T1–T11, T13–T16 all DONE, plus a final whole-branch review and its fix
+wave.** T12 closed the RFC's own scope: CLAUDE.md carries all eight
+documentation edits (commit `feecce8`), the full verification suite was green
+end to end (commit `e7e28bc`). The final review that followed (this section)
+found and closed three Critical and four Important cross-task issues that
+individual task reviews structurally could not have caught. The nine manual
+checks listed above remain the only outstanding work — all of them need a
+browser and real data, neither of which exist in this sandbox.
 
-**Not merged, not pushed** — that is the owner's call, per every task doc in
-this RFC.
+**HEAD is now `a57bf60`. Not merged, not pushed** — that is the owner's call,
+per every task doc in this RFC.
