@@ -442,7 +442,12 @@ def add_incoming_leg(
             )
 
     leg = {
-        "card_id": body.get("card_id"),
+        # `or None`: an empty-string card_id is the same fact as an absent one,
+        # and it must be STORED as None. is_missing_card_id tests `is None`, not
+        # falsiness, so a "" would slip past Triage while still being unpriceable
+        # — unlinked and invisible, the one combination worth ruling out. This
+        # became reachable when RFC 0012 dropped the graded card_id gate above.
+        "card_id": body.get("card_id") or None,
         "location": body.get("location"),
         "name": body["name"],
         "card_number": body.get("card_number"),

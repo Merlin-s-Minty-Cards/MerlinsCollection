@@ -1562,6 +1562,55 @@ class TestGradedIncoming:
         assert legs[-1]["kind"] == "graded"
         assert legs[-1]["company"] == "PSA"
 
+    def test_an_empty_string_card_id_is_stored_as_none(self, admin_client):
+        """RFC 0012: removing the Decision-14 gate made `card_id: ""` reachable
+        for the first time — the old `if not body.get("card_id")` check used to
+        reject it. Stored verbatim it would be the worst of both worlds: still
+        unpriceable (graded pricing joins on a real card_id) yet INVISIBLE to
+        Triage, because is_missing_card_id tests `is None`, not falsiness."""
+        client, _, token = admin_client
+        trade_id = _start_trade(client, token)
+
+        resp = client.post(f"/admin/trades/{trade_id}/incoming", headers=_auth(token),
+                           json={"card_id": "", "name": "Charizard",
+                                 "agreed_value": 400, "kind": "graded",
+                                 "company": "PSA", "grade": 10,
+                                 "cert_number": "1"})
+
+        assert resp.status_code == 200
+        assert resp.json()["incoming_legs"][-1]["card_id"] is None
+
+    def test_an_empty_string_card_id_still_reaches_triage(self, admin_client):
+        """The same end-to-end proof as the None case below, for the ""
+        spelling — a normalization that stops at the session dict would leave
+        the created ITEM carrying "" and out of the queue."""
+        client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="our-1"))
+
+        trade_id = _start_trade(client, token)
+        client.post(f"/admin/trades/{trade_id}/outgoing", json={
+            "item_id": "our-1", "agreed_value": "50.00",
+        }, headers=_auth(token))
+        client.post(f"/admin/trades/{trade_id}/incoming", headers=_auth(token), json={
+            "card_id": "", "name": "Mystery Charizard", "agreed_value": "400.00",
+            "kind": "graded", "company": "PSA", "grade": 10, "cert_number": "99",
+        })
+
+        confirm = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
+        assert confirm.status_code == 200
+
+        new_items = [i for i in repo.list_inventory() if i.item_id != "our-1"]
+        assert len(new_items) == 1
+        created = new_items[0]
+        assert created.card_id is None
+
+        search = client.get("/admin/inventory/search", params={"triage": "true"},
+                            headers=_auth(token))
+        rows = search.json()["items"]
+        matching = [r for r in rows if r["item_id"] == created.item_id]
+        assert len(matching) == 1
+        assert "missing_card_id" in matching[0]["triage_reasons"]
+
     def test_a_manually_entered_graded_item_self_routes_to_triage(self, admin_client):
         """RFC 0012: no new triage-routing code exists for this — it relies
         entirely on services/triage.py's is_missing_card_id(), which already
