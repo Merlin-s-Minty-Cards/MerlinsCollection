@@ -1,11 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { AdminApiError } from '@/lib/admin-api'
 import CardDetailModal from '../CardDetailModal'
 
 const getMock = vi.fn()
 const postMock = vi.fn()
 const putMock = vi.fn()
+const delMock = vi.fn()
 
 vi.mock('@/lib/admin-api', async () => {
   const actual = await vi.importActual<typeof import('@/lib/admin-api')>('@/lib/admin-api')
@@ -16,7 +18,7 @@ vi.mock('@/lib/admin-api', async () => {
       post: postMock,
       put: putMock,
       patch: vi.fn(),
-      del: vi.fn(),
+      del: delMock,
       isAuthenticated: true,
       isLoading: false,
     }),
@@ -26,6 +28,13 @@ vi.mock('@/lib/admin-api', async () => {
 vi.mock('@/lib/use-locations', () => ({
   useLocations: () => ({
     options: [{ value: 'custom_shelf', label: 'Custom Shelf' }],
+    loading: false,
+  }),
+}))
+
+vi.mock('@/lib/use-cosigners', () => ({
+  useCosigners: () => ({
+    options: [{ value: 'cos-1', label: 'Alex' }],
     loading: false,
   }),
 }))
@@ -258,11 +267,20 @@ describe('CardDetailModal field coverage (RFC 0008 §F6)', () => {
     expect(screen.getByText('cosigner-7')).toBeInTheDocument()
   })
 
-  it('omits the consignment section entirely for an owned item', async () => {
+  // RFC 0012 C3 changed this: the section used to be omitted entirely for an
+  // owned item, but it now always renders so an "Assign consignor" control is
+  // reachable on every item, not only ones a consignment already exists on
+  // (the escape-hatch rule in CLAUDE.md — a control gated on the state it is
+  // meant to create is unreachable exactly when it is needed). The read-only
+  // consignment ROWS are still shown only when a consignment exists; see the
+  // dedicated RFC 0012 C3 describe block below for the assign/unassign tests.
+  it('shows only an assign control, no consignment rows, for an owned item', async () => {
     render(<CardDetailModal item={item} onClose={vi.fn()} />)
 
     await screen.findByText('Condition')
-    expect(screen.queryByText('Consignment')).not.toBeInTheDocument()
+    expect(screen.getByText('Consignment')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /assign consignor/i })).toBeInTheDocument()
+    expect(screen.queryByText('Our Cut')).not.toBeInTheDocument()
   })
 
   // The Round 1 bug: a combined "LP+" sent as a `condition` enum value fails
@@ -759,5 +777,136 @@ describe('CardDetailModal hand-valued marker', () => {
 
     await waitFor(() => expect(postMock).toHaveBeenCalled())
     expect(screen.queryByText(/hand-valued/i)).not.toBeInTheDocument()
+  })
+})
+
+// ===========================================================================
+// RFC 0012 C3 — assign/unassign a cosigner directly from the modal
+// ===========================================================================
+//
+// The Consignment section used to be read-only (see the comment on
+// `consignment` in CardDetailModal.tsx): a partial PUT through the generic
+// field editor risks reinventing POST /admin/cosigners/{id}/link's
+// default-split-percent logic and silently dropping `paid_out`. This calls
+// the existing, tested cosigner endpoints directly instead. Neither endpoint
+// returns a full item, so these call `onUpdated()` with no argument — the
+// modal's documented "something changed, but I cannot tell you what" shape,
+// same as a refetch is the parent's job.
+describe('CardDetailModal — assign/unassign a cosigner (RFC 0012 C3)', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    putMock.mockReset()
+    delMock.mockReset()
+    getMock.mockResolvedValue(null)
+    postMock.mockResolvedValue({})
+  })
+
+  it('shows an "Assign consignor" control when the item has no consignment', () => {
+    render(<CardDetailModal item={{ item_id: 'i1', name: 'Charizard' }} onClose={vi.fn()} />)
+    expect(screen.getByRole('button', { name: /assign consignor/i })).toBeInTheDocument()
+  })
+
+  it('links the item to a cosigner and refetches', async () => {
+    const user = userEvent.setup({ delay: null })
+    postMock.mockResolvedValue({ linked: 1, consignor_id: 'cos-1', failed_item_ids: [] })
+    const onUpdated = vi.fn()
+    render(<CardDetailModal item={{ item_id: 'i1', name: 'Charizard' }} onClose={vi.fn()} onUpdated={onUpdated} />)
+
+    await user.click(screen.getByRole('button', { name: /assign consignor/i }))
+    await user.click(screen.getByRole('combobox', { name: /consignor/i }))
+    await user.click(screen.getByText('Alex'))
+    await user.click(screen.getByRole('button', { name: /^save$/i }))
+
+    // Left blank, so the server's own defaults apply — omitted from the
+    // body entirely, not sent as empty strings.
+    await waitFor(() => expect(postMock).toHaveBeenCalledWith('/cosigners/cos-1/link', { item_ids: ['i1'] }))
+    expect(onUpdated).toHaveBeenCalledWith()
+
+    // CosignorPicker's onBlur schedules a real 150ms setTimeout (not
+    // cancelled on unmount) to close its dropdown. Clicking "Save" moves
+    // focus off the combobox and triggers it; without draining it here it
+    // fires after this test's jsdom environment tears down and throws
+    // "window is not defined" from inside React's setState machinery,
+    // surfacing as an unhandled error at the end of the whole suite run.
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  })
+
+  // RFC 0012 §C.2 — the assign flow also has to surface split_percent and
+  // minimum_price as optional, collapsed "advanced" inputs. The endpoint
+  // (cosigners.py:209-243) already defaults split_percent from the
+  // consignor's own payout_percent and treats an absent minimum_price as no
+  // override, so both must be OMITTED from the body — not sent blank —
+  // when the admin never opens the disclosure (covered by the test above,
+  // which never touches it and asserts the bare `{ item_ids: ['i1'] }` body).
+  it('sends split_percent and minimum_price overrides when the admin fills in the advanced panel', async () => {
+    const user = userEvent.setup({ delay: null })
+    postMock.mockResolvedValue({ linked: 1, consignor_id: 'cos-1', failed_item_ids: [] })
+    const onUpdated = vi.fn()
+    render(<CardDetailModal item={{ item_id: 'i1', name: 'Charizard' }} onClose={vi.fn()} onUpdated={onUpdated} />)
+
+    await user.click(screen.getByRole('button', { name: /assign consignor/i }))
+    await user.click(screen.getByRole('combobox', { name: /consignor/i }))
+    await user.click(screen.getByText('Alex'))
+    await user.click(screen.getByRole('button', { name: /advanced: split % \/ minimum price override/i }))
+
+    await user.type(screen.getByLabelText(/split % override/i), '0.15')
+    await user.type(screen.getByLabelText(/minimum price override/i), '50')
+
+    await user.click(screen.getByRole('button', { name: /^save$/i }))
+
+    await waitFor(() =>
+      expect(postMock).toHaveBeenCalledWith('/cosigners/cos-1/link', {
+        item_ids: ['i1'],
+        split_percent: '0.15',
+        minimum_price: '50',
+      }),
+    )
+    expect(onUpdated).toHaveBeenCalledWith()
+
+    // Same leaked-timeout drain as the test above.
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  })
+
+  it('never sends minimum_price as $0 falling out of the body — a legitimate free consignment counts', async () => {
+    // parseMoney('0') is 0, not null — this must go through as an explicit
+    // override, not be treated as "nothing typed".
+    const user = userEvent.setup({ delay: null })
+    postMock.mockResolvedValue({ linked: 1, consignor_id: 'cos-1', failed_item_ids: [] })
+    render(<CardDetailModal item={{ item_id: 'i1', name: 'Charizard' }} onClose={vi.fn()} />)
+
+    await user.click(screen.getByRole('button', { name: /assign consignor/i }))
+    await user.click(screen.getByRole('combobox', { name: /consignor/i }))
+    await user.click(screen.getByText('Alex'))
+    await user.click(screen.getByRole('button', { name: /advanced: split % \/ minimum price override/i }))
+    await user.type(screen.getByLabelText(/minimum price override/i), '0')
+    await user.click(screen.getByRole('button', { name: /^save$/i }))
+
+    await waitFor(() =>
+      expect(postMock).toHaveBeenCalledWith('/cosigners/cos-1/link', {
+        item_ids: ['i1'],
+        minimum_price: '0',
+      }),
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  })
+
+  it('shows an "Unassign" control and unlinks a consigned item', async () => {
+    const user = userEvent.setup({ delay: null })
+    delMock.mockResolvedValue({ status: 'unlinked', item_id: 'i1' })
+    const onUpdated = vi.fn()
+    render(
+      <CardDetailModal
+        item={{ item_id: 'i1', name: 'Charizard', consignment: { consignor_id: 'cos-1', split_percent: '0.5' } }}
+        onClose={vi.fn()}
+        onUpdated={onUpdated}
+      />,
+    )
+
+    await user.click(screen.getByRole('button', { name: /unassign consignor/i }))
+
+    await waitFor(() => expect(delMock).toHaveBeenCalledWith('/cosigners/cos-1/assets/i1'))
+    expect(onUpdated).toHaveBeenCalledWith()
   })
 })
