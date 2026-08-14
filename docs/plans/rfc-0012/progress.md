@@ -3,7 +3,7 @@
 | Task | Status | Notes |
 |---|---|---|
 | A — Layout width | Done | Review clean. Manual visual check not performed (no dev server); pre-existing `npx vitest run` breakage in this checkout noted (`npm test --workspace=frontend` works and was used). |
-| B1 — trades.py backend | Not started | |
+| B1 — trades.py backend | Done | Review clean after 1 fix round (normalized empty-string card_id to None). Implementer also investigated and ruled out a pre-existing `test_rate_limit.py` flake as unrelated. |
 | B2 — IncomingCardForm/trade page frontend | Not started | |
 | C1 — CosignorPicker + useCosigners | Not started | |
 | C2 — Inventory filter by cosigner | Not started | blocked on C1 |
