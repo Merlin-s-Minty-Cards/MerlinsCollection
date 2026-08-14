@@ -114,6 +114,7 @@ def admin_search_inventory(
     artist: str | None = Query(None, max_length=200),
     set_id: str | None = Query(None, max_length=100),
     set_name: str | None = Query(None, max_length=200),
+    consignor_id: str | None = Query(None, max_length=64),
     ownership: str | None = Query(None),
     needs_review: bool | None = Query(None),
     # RFC 0011 T5: the unmatched queue is THIS endpoint with this parameter, not
@@ -193,6 +194,12 @@ def admin_search_inventory(
         items = [
             i for i in items
             if _item_matches_name(i, name_lower)
+        ]
+
+    if consignor_id is not None:
+        items = [
+            i for i in items
+            if i.consignment is not None and i.consignment.consignor_id == consignor_id
         ]
 
     if ownership is not None:

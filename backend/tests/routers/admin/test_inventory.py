@@ -219,6 +219,39 @@ class TestAdminInventorySearch:
         assert data["total"] == 1
         assert data["items"][0]["item_id"] == "glass-1"
 
+    def test_consignor_id_filter(self, admin_client):
+        from merlins_collection.models.inventory import ConsignmentTerms
+
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="owned-1"))
+        consigned = _raw(item_id="consigned-1", card_id="sv1-2")
+        consigned = consigned.model_copy(update={
+            "consignment": ConsignmentTerms(
+                consignor_id="cos-1", split_percent=Decimal("0.5"),
+            ),
+        })
+        repo.put_inventory_item(consigned)
+
+        resp = client.get(
+            "/admin/inventory/search?consignor_id=cos-1",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert len(items) == 1
+        assert items[0]["item_id"] == "consigned-1"
+
+    def test_consignor_id_filter_matches_nothing_for_unknown_id_not_a_422(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="owned-1"))
+
+        resp = client.get(
+            "/admin/inventory/search?consignor_id=no-such-cosigner",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["items"] == []
+
     def test_includes_cost_basis_in_response(self, admin_client):
         """Admin search MUST expose internal fields like cost_basis."""
         client, repo, admin_token, _ = admin_client
