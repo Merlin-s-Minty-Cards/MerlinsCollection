@@ -193,8 +193,13 @@ function tradeApi(api: AdminApi): DealSessionApi {
     },
     async addIncoming(id, leg) {
       // The keys already mirror T13's `POST /admin/trades/{id}/incoming`
-      // exactly (see `lib/trade-incoming-form.ts`), so the leg is sent as-is.
-      await api.post(`/trades/${id}/incoming`, leg)
+      // exactly (see `lib/trade-incoming-form.ts`), so the leg is sent as-is
+      // — except `consignor_id`, which is client-side only (RFC 0012: the
+      // endpoint doesn't accept consignment at create time) and is stripped
+      // rather than relying on the backend's `dict[str, Any]` body to ignore
+      // an unknown key it was never told about.
+      const { consignor_id: _consignor_id, ...body } = leg
+      await api.post(`/trades/${id}/incoming`, body)
     },
     async addOutgoing(id, item, value) {
       await api.post(`/trades/${id}/outgoing`, {

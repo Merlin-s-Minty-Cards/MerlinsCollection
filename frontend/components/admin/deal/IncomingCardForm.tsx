@@ -7,6 +7,7 @@ import { parseMoney } from '@/lib/money'
 import { CONDITION_OPTIONS } from '@/lib/constants'
 import { buildIncomingLeg, type IncomingLeg } from '@/lib/trade-incoming-form'
 import MoneyInput from '@/components/admin/shared/MoneyInput'
+import CosignorPicker from '@/components/admin/shared/CosignorPicker'
 import type { PickerCard } from '@/components/admin/shared/CardPickerRow'
 import DealCardRow from './DealCardRow'
 
@@ -85,6 +86,8 @@ export default function IncomingCardForm({ card, onAdd, onCancel, gradedAllowed 
   const [value, setValue] = useState('')
   const [owned, setOwned] = useState<OwnedCheck | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [consignorPanel, setConsignorPanel] = useState(false)
+  const [consignorId, setConsignorId] = useState<string | null>(null)
 
   // The location list is admin-managed and arrives async, so the default is
   // picked once it does rather than hardcoded here.
@@ -145,8 +148,8 @@ export default function IncomingCardForm({ card, onAdd, onCancel, gradedAllowed 
       return
     }
     setError(null)
-    onAdd(
-      buildIncomingLeg({
+    onAdd({
+      ...buildIncomingLeg({
         card_id: card?.card_id ?? null,
         name,
         agreed_value: parsed,
@@ -168,7 +171,10 @@ export default function IncomingCardForm({ card, onAdd, onCancel, gradedAllowed 
         market_value: card ? parseMoney(String(card.display_price ?? '')) : null,
         image_url: card?.images?.small ?? null,
       }),
-    )
+      // Client-side only — see IncomingLeg.consignor_id. Omitted entirely
+      // (never `null`) when no consignor was staged.
+      ...(consignorId ? { consignor_id: consignorId } : {}),
+    })
   }
 
   return (
@@ -370,6 +376,20 @@ export default function IncomingCardForm({ card, onAdd, onCancel, gradedAllowed 
           <span className="text-[11px] uppercase tracking-wider text-pine-400">Value</span>
           <MoneyInput label="Value" value={value} onChange={(raw) => setValue(raw)} />
         </label>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        {consignorPanel ? (
+          <CosignorPicker value={consignorId} onChange={setConsignorId} />
+        ) : (
+          <button
+            type="button"
+            onClick={() => setConsignorPanel(true)}
+            className="self-start text-[11px] text-mint hover:text-mint/80"
+          >
+            + Consignor
+          </button>
+        )}
       </div>
 
       {error && (
