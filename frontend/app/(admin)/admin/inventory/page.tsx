@@ -7,6 +7,7 @@ import { CONDITION_OPTIONS as COND_VALUES } from '@/lib/constants'
 import { useCardImages } from '@/lib/use-card-images'
 import { useLocations } from '@/lib/use-locations'
 import { useShows } from '@/lib/use-shows'
+import { useCosigners } from '@/lib/use-cosigners'
 import { useCatalogSets, toComboboxSets } from '@/lib/use-catalog-sets'
 import SetCombobox from '@/components/shared/SetCombobox'
 import DataTable from '@/components/admin/shared/DataTable'
@@ -87,6 +88,9 @@ export default function AdminInventoryPage() {
 
   // `acquired_show_id` stores an opaque id; the filter has to offer names.
   const { options: showOptions } = useShows()
+
+  // `consignor_id` stores an opaque id; the filter has to offer names too.
+  const { options: cosignorOptions } = useCosigners()
 
   // Every set in the CATALOG, fetched once and narrowed in the browser — so a
   // set we own nothing from is still pickable. That is the whole point of the
@@ -253,6 +257,7 @@ export default function AdminInventoryPage() {
   const selectOptions = (def: InventoryFilterDef) => {
     if (def.optionSource === 'locations') return locationOptions
     if (def.optionSource === 'shows') return showOptions
+    if (def.optionSource === 'cosigners') return cosignorOptions
     return def.options ?? []
   }
 

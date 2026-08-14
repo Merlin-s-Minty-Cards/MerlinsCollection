@@ -464,7 +464,7 @@ export type FilterKind = 'text' | 'select' | 'range' | 'dateRange' | 'presence'
 export type FilterOp = 'contains' | 'eq' | 'gte' | 'lte' | 'isnull' | 'notnull'
 
 /** Where a `select` gets its options when they are not a static list. */
-export type FilterOptionSource = 'locations' | 'shows' | 'sets'
+export type FilterOptionSource = 'locations' | 'shows' | 'sets' | 'cosigners'
 
 export interface InventoryFilterDef {
   /** The page's state key for this filter, and its key in `FilterValues`. */
@@ -681,6 +681,10 @@ export const INVENTORY_FILTERS: InventoryFilterDef[] = [
   },
   { id: 'cardNumber', label: 'Card #', columnKey: null, kind: 'text', legacyParam: 'card_number' },
   { id: 'artist', label: 'Artist', columnKey: null, kind: 'text', legacyParam: 'artist' },
+  {
+    id: 'consignor', label: 'Consignor', columnKey: null, kind: 'select',
+    legacyParam: 'consignor_id', optionSource: 'cosigners',
+  },
 ]
 
 /**

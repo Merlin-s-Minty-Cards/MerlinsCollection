@@ -240,6 +240,14 @@ describe('every column has a filter', () => {
       if (f.columnKey !== null) expect(keys.has(f.columnKey)).toBe(true)
     }
   })
+
+  it('has a consignor filter that sends consignor_id and sources cosigners', () => {
+    const consignorFilter = INVENTORY_FILTERS.find((f) => f.id === 'consignor')
+    expect(consignorFilter).toBeDefined()
+    expect(consignorFilter?.legacyParam).toBe('consignor_id')
+    expect(consignorFilter?.optionSource).toBe('cosigners')
+    expect(consignorFilter?.columnKey).toBeNull()
+  })
 })
 
 describe('buildFilterParams', () => {
