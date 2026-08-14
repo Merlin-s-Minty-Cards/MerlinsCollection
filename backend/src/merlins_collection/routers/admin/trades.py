@@ -411,6 +411,39 @@ def add_incoming_leg(
     # Locations are admin-managed (Task 1.1) — never hardcode the list here.
     validate_location(repo, body.get("location"))
 
+    # RFC 0011 §H — validation is symmetric, and both directions are 422.
+    kind = body.get("kind", "raw")
+    if kind not in ("raw", "graded"):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown kind {kind!r}; expected 'raw' or 'graded'",
+        )
+
+    graded_fields = ("company", "grade", "cert_number")
+    if kind == "graded":
+        missing = [f for f in graded_fields if body.get(f) in (None, "")]
+        if missing:
+            raise HTTPException(
+                status_code=422,
+                detail=f"A graded incoming leg needs {', '.join(missing)}.",
+            )
+        # Decision 14: a graded leg is ALWAYS a catalog pick. Graded pricing joins on
+        # (card_id, company, grade), so a slab with no card_id is unpriceable by
+        # construction (RFC 0009) -- not a state to create by accident from a trade.
+        if not body.get("card_id"):
+            raise HTTPException(
+                status_code=422,
+                detail="A graded incoming leg must be linked to a catalog card.",
+            )
+    else:
+        present = [f for f in graded_fields if body.get(f) not in (None, "")]
+        if present:
+            raise HTTPException(
+                status_code=422,
+                detail=(f"A raw incoming leg cannot carry {', '.join(present)}. "
+                        "Set kind to 'graded'."),
+            )
+
     leg = {
         "card_id": body.get("card_id"),
         "location": body.get("location"),
@@ -423,6 +456,11 @@ def add_incoming_leg(
         "market_value": body.get("market_value"),
         "agreed_value": body["agreed_value"],
         "image_url": body.get("image_url"),
+        "kind": kind,
+        "company": body.get("company"),
+        "grade": body.get("grade"),
+        "cert_number": body.get("cert_number"),
+        "grade_label": body.get("grade_label"),
     }
     session.setdefault("incoming_legs", []).append(leg)
     repo.put_trade_session(session)
@@ -788,13 +826,10 @@ def confirm_trade_session(
         agreed_value = Decimal(str(leg.get("agreed_value") or 0))
         cost_basis = incoming_basis[index]
 
-        item_data = {
-            "kind": "raw",
+        common = {
             "item_id": new_item_id,
             "card_id": leg.get("card_id"),
             "status": "available",
-            "finish": leg.get("finish") or "normal",
-            "condition": leg.get("condition") or "NM",
             "language": leg.get("language") or "EN",
             "location": leg.get("location") or "toploader",
             "cost_basis": str(cost_basis),
@@ -806,6 +841,24 @@ def confirm_trade_session(
             "lineage_id": lineage_id,
             "predecessor_item_id": predecessor_item_id,
         }
+        if leg.get("kind") == "graded":
+            item_data = {
+                **common,
+                "kind": "graded",
+                "company": leg["company"],
+                "grade": str(leg["grade"]),
+                "cert_number": leg["cert_number"],
+                "grade_label": leg.get("grade_label"),
+            }
+            category = ItemCategory.GRADED
+        else:
+            item_data = {
+                **common,
+                "kind": "raw",
+                "finish": leg.get("finish") or "normal",
+                "condition": leg.get("condition") or "NM",
+            }
+            category = ItemCategory.RAW
         inv_item = InventoryItemAdapter.validate_python(item_data)
         repo.put_inventory_item(inv_item)
         items_created += 1
@@ -813,7 +866,7 @@ def confirm_trade_session(
         txn = Transaction(
             type=TransactionType.PURCHASE,
             item_id=new_item_id,
-            category=ItemCategory.RAW,
+            category=category,
             date=txn_date,
             amount=agreed_value,
             payment_method="trade",

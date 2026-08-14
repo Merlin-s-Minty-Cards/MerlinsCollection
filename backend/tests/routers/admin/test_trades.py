@@ -8,8 +8,11 @@ from datetime import date
 from decimal import Decimal
 
 
+from merlins_collection.models.business import ItemCategory, TransactionType
 from merlins_collection.models.inventory import (
     Condition,
+    GradedInventoryItem,
+    GradingCompany,
     ItemStatus,
     RawInventoryItem,
 )
@@ -40,6 +43,35 @@ def _raw(item_id="item-1", *, card_id="sv1-1", status=ItemStatus.AVAILABLE,
 
 def _auth(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
+
+
+def _graded_item(item_id="slab-1", *, card_id="swsh1-1", grade="10",
+                  status=ItemStatus.AVAILABLE):
+    return GradedInventoryItem(
+        item_id=item_id,
+        card_id=card_id,
+        location="glass",
+        status=status,
+        cost_basis=Decimal("300"),
+        current_market_value=Decimal("500"),
+        acquired_at=date(2025, 1, 1),
+        company=GradingCompany.PSA,
+        grade=Decimal(grade),
+        cert_number="12345678",
+    )
+
+
+def _start_trade(client, token) -> str:
+    resp = client.post("/admin/trades", json={}, headers=_auth(token))
+    return resp.json()["trade_id"]
+
+
+def _add_graded_incoming(client, token, trade_id) -> None:
+    client.post(f"/admin/trades/{trade_id}/incoming", headers=_auth(token), json={
+        "card_id": "en:base1-4", "name": "Charizard",
+        "agreed_value": 400, "kind": "graded",
+        "company": "PSA", "grade": 10, "cert_number": "12345678",
+    })
 
 
 # ===========================================================================
@@ -1447,3 +1479,130 @@ class TestTradeBatchId:
         assert {t.batch_id for t in txns} == {trade_id}
         # The pre-existing trade_id stays put; batch_id does not replace it.
         assert {t.trade_id for t in txns} == {trade_id}
+
+
+# ===========================================================================
+# RFC 0011 T13 -- graded incoming legs
+# ===========================================================================
+
+class TestGradedIncoming:
+    """RFC 0011 §H — a slab received in a trade must stay a slab."""
+
+    def test_a_graded_leg_creates_a_graded_item(self, admin_client):
+        client, repo, token = admin_client
+        trade_id = _start_trade(client, token)
+        client.post(f"/admin/trades/{trade_id}/incoming", headers=_auth(token), json={
+            "card_id": "en:base1-4", "name": "Charizard",
+            # A JSON NUMBER, not a string. Every existing test sends strings, which is
+            # how the bare-float DynamoDB bug survived for months.
+            "agreed_value": 400, "kind": "graded",
+            "company": "PSA", "grade": 10, "cert_number": "12345678",
+        })
+
+        client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token), json={})
+
+        [item] = [i for i in repo.list_inventory() if i.kind == "graded"]
+        assert item.company == GradingCompany.PSA
+        assert item.grade == Decimal("10")
+        assert item.cert_number == "12345678"
+        assert item.card_id == "en:base1-4"
+
+    def test_the_transaction_is_categorised_graded(self, admin_client):
+        """Analytics and the ledger group by category — RAW misreports both."""
+        client, repo, token = admin_client
+        trade_id = _start_trade(client, token)
+        _add_graded_incoming(client, token, trade_id)
+        client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token), json={})
+
+        txns = repo.list_transactions(date(2000, 1, 1), date(2100, 1, 1))
+        purchases = [t for t in txns if t.type == TransactionType.PURCHASE]
+        assert [t.category for t in purchases] == [ItemCategory.GRADED]
+
+    def test_a_raw_leg_is_unchanged(self, admin_client):
+        """The default path must not move. `kind` is optional and defaults to raw."""
+        client, repo, token = admin_client
+        trade_id = _start_trade(client, token)
+        client.post(f"/admin/trades/{trade_id}/incoming", headers=_auth(token), json={
+            "card_id": "en:base1-4", "name": "Charizard",
+            "agreed_value": 40, "condition": "LP",
+        })
+
+        client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token), json={})
+
+        [item] = [i for i in repo.list_inventory() if i.kind == "raw"]
+        assert item.condition == Condition.LP
+
+    def test_a_graded_leg_without_cert_fields_is_a_422(self, admin_client):
+        client, _, token = admin_client
+        trade_id = _start_trade(client, token)
+
+        resp = client.post(f"/admin/trades/{trade_id}/incoming", headers=_auth(token),
+                           json={"card_id": "en:base1-4", "name": "Charizard",
+                                 "agreed_value": 400, "kind": "graded"})
+
+        assert resp.status_code == 422
+        assert "cert_number" in resp.json()["detail"]
+
+    def test_a_graded_leg_without_a_card_id_is_a_422(self, admin_client):
+        """Decision 14. Graded pricing joins on (card_id, company, grade), so an
+        unlinked slab is unpriceable by construction."""
+        client, _, token = admin_client
+        trade_id = _start_trade(client, token)
+
+        resp = client.post(f"/admin/trades/{trade_id}/incoming", headers=_auth(token),
+                           json={"name": "Charizard", "agreed_value": 400,
+                                 "kind": "graded", "company": "PSA", "grade": 10,
+                                 "cert_number": "1"})
+
+        assert resp.status_code == 422
+        assert "catalog card" in resp.json()["detail"]
+
+    def test_a_raw_leg_carrying_graded_fields_is_a_422(self, admin_client):
+        """Silently dropping them is the defect this task fixes, one layer up."""
+        client, _, token = admin_client
+        trade_id = _start_trade(client, token)
+
+        resp = client.post(f"/admin/trades/{trade_id}/incoming", headers=_auth(token),
+                           json={"card_id": "en:base1-4", "name": "Charizard",
+                                 "agreed_value": 40, "kind": "raw",
+                                 "company": "PSA", "grade": 10, "cert_number": "1"})
+
+        assert resp.status_code == 422
+
+    def test_an_unknown_kind_is_a_422(self, admin_client):
+        client, _, token = admin_client
+        trade_id = _start_trade(client, token)
+
+        resp = client.post(f"/admin/trades/{trade_id}/incoming", headers=_auth(token),
+                           json={"card_id": "en:base1-4", "name": "X",
+                                 "agreed_value": 1, "kind": "sealed"})
+
+        assert resp.status_code == 422
+
+    def test_a_graded_leg_survives_the_session_round_trip(self, admin_client):
+        """The leg dict is an ALLOWLIST — a field missing from it is dropped silently,
+        which is how a slab became a raw card in the first place."""
+        client, repo, token = admin_client
+        trade_id = _start_trade(client, token)
+        _add_graded_incoming(client, token, trade_id)
+
+        session = repo.get_trade_session(trade_id)
+
+        leg = session["incoming_legs"][0]
+        assert leg["kind"] == "graded"
+        assert leg["cert_number"] == "12345678"
+        assert leg["company"] == "PSA"
+
+
+class TestGradedOutgoingStillWorks:
+    def test_a_slab_can_be_traded_out(self, admin_client):
+        """Already true before this task — pinned so the branch above cannot break it."""
+        client, repo, token = admin_client
+        repo.put_inventory_item(_graded_item(item_id="slab", grade="10"))
+        trade_id = _start_trade(client, token)
+
+        resp = client.post(f"/admin/trades/{trade_id}/outgoing", headers=_auth(token),
+                           json={"item_id": "slab", "name": "Charizard",
+                                 "agreed_value": 400})
+
+        assert resp.status_code == 200
