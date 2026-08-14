@@ -96,6 +96,18 @@ describe('IncomingCardForm', () => {
     expect(onAdd.mock.calls[0][0]).not.toHaveProperty('grade')
   })
 
+  it('emits the backend language enum casing, not the display casing', async () => {
+    // `Language` on InventoryItem is a case-sensitive StrEnum: EN/JP only.
+    const user = userEvent.setup({ delay: null })
+    const onAdd = vi.fn()
+    render(<IncomingCardForm card={card()} onAdd={onAdd} onCancel={vi.fn()} />)
+
+    await user.type(screen.getByLabelText(/value/i), '40')
+    await user.click(screen.getByRole('button', { name: /^add$/i }))
+
+    expect(onAdd).toHaveBeenCalledWith(expect.objectContaining({ language: 'EN' }))
+  })
+
   it('emits a graded leg with the cert fields', async () => {
     const user = userEvent.setup({ delay: null })
     const onAdd = vi.fn()

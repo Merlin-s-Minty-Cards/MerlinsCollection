@@ -30,9 +30,10 @@ const COMPANIES = ['PSA', 'BGS', 'CGC', 'SGC']
 
 const FINISHES = ['normal', 'holofoil', 'reverseHolofoil', 'firstEditionHolofoil']
 
+/** `Language` on `InventoryItem` is a case-sensitive StrEnum: `EN`/`JP` only. */
 const LANGUAGES = [
-  { value: 'en', label: 'EN' },
-  { value: 'ja', label: 'JP' },
+  { value: 'EN', label: 'EN' },
+  { value: 'JP', label: 'JP' },
 ]
 
 const CERT_DEBOUNCE_MS = 300
@@ -68,7 +69,7 @@ export default function IncomingCardForm({ card, onAdd, onCancel }: IncomingCard
   const [grade, setGrade] = useState('')
   const [gradeLabel, setGradeLabel] = useState('')
   const [cert, setCert] = useState('')
-  const [language, setLanguage] = useState('en')
+  const [language, setLanguage] = useState('EN')
   const [location, setLocation] = useState('')
   const [value, setValue] = useState('')
   const [owned, setOwned] = useState<OwnedCheck | null>(null)
