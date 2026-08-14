@@ -126,9 +126,12 @@ export default function AdminDashboardPage() {
         data-testid="quick-actions"
         className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-8"
       >
-        <QuickAction href="/admin/sell" label="New Sale" hint="Start selling"
+        {/* RFC 0011 T16: /admin/buy and /admin/sell are retired. All three
+            quick actions now point at the merged /admin/trade page, with the
+            mode carried in the query string. */}
+        <QuickAction href="/admin/trade?mode=sell" label="New Sale" hint="Start selling"
           icon={<ShoppingCart size={20} />} tone="text-mint bg-mint/10 group-hover:bg-mint/20" />
-        <QuickAction href="/admin/buy" label="New Buy" hint="Purchase cards"
+        <QuickAction href="/admin/trade?mode=buy" label="New Buy" hint="Purchase cards"
           icon={<ShoppingBag size={20} />}
           tone="text-spriggatito-400 bg-spriggatito-400/10 group-hover:bg-spriggatito-400/20" />
         <QuickAction href="/admin/trade" label="New Trade" hint="Trade calculator"

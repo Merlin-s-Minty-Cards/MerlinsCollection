@@ -6,8 +6,6 @@ import Link from 'next/link'
 import {
   LayoutDashboard,
   Package,
-  ShoppingCart,
-  ShoppingBag,
   ArrowRightLeft,
   ScanLine,
   TrendingUp,
@@ -57,9 +55,11 @@ const navGroups = [
     label: 'At the show',
     items: [
       { href: '/admin/inventory', label: 'Inventory', icon: Package },
-      { href: '/admin/sell', label: 'Sell', icon: ShoppingCart },
-      { href: '/admin/buy', label: 'Buy', icon: ShoppingBag },
-      { href: '/admin/trade', label: 'Trade', icon: ArrowRightLeft },
+      // RFC 0011 T16: /admin/buy and /admin/sell are retired. `/admin/trade`
+      // is now the single route for all three modes (T15), reached via
+      // ?mode=buy|sell|trade — the label spells out all three so nothing has
+      // to be learned from a one-word name.
+      { href: '/admin/trade', label: 'Buy / Sell / Trade', icon: ArrowRightLeft },
       { href: '/admin/slabs', label: 'Slabs', icon: ScanLine },
     ],
   },
@@ -102,11 +102,13 @@ const navGroups = [
  * It is not hypothetical here — flattening the groups above and taking five
  * yields Trade where Slabs used to be.
  */
+// "Deal" here, "Buy / Sell / Trade" in the sidebar (RFC 0011 T16) — a
+// deliberate divergence, not an inconsistency to "fix": the mobile bar is
+// four icons across a phone and the long sidebar label does not fit.
 const mobileItems = [
   { href: '/admin', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/admin/inventory', label: 'Inventory', icon: Package },
-  { href: '/admin/sell', label: 'Sell', icon: ShoppingCart },
-  { href: '/admin/buy', label: 'Buy', icon: ShoppingBag },
+  { href: '/admin/trade', label: 'Deal', icon: ArrowRightLeft },
   { href: '/admin/slabs', label: 'Slabs', icon: ScanLine },
 ]
 
@@ -309,7 +311,12 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
                   )}
                 </button>
                 {open && (
-                  <div id={`nav-group-${group.id}`} className="space-y-0.5">
+                  <div
+                    id={`nav-group-${group.id}`}
+                    role="group"
+                    aria-label={group.label}
+                    className="space-y-0.5"
+                  >
                     {group.items.map((item) => navLink(item, { indented: true }))}
                   </div>
                 )}
@@ -337,7 +344,11 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
       </aside>
 
       {/* Mobile bottom nav */}
-      <nav className="md:hidden fixed bottom-0 inset-x-0 z-50 bg-pine-900/95 backdrop-blur-md border-t border-pine-700/60 px-1 py-1 flex justify-around safe-bottom">
+      <nav
+        aria-label="Mobile navigation"
+        className="md:hidden fixed bottom-0 inset-x-0 z-50 bg-pine-900/95 backdrop-blur-md border-t border-pine-700/60 px-1 py-1 flex justify-around safe-bottom"
+      >
+
         {mobileItems.map(({ href, label, icon: Icon }) => {
           const active = isActive(href)
           return (

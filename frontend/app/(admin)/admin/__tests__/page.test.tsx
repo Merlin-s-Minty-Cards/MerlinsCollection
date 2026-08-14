@@ -198,6 +198,17 @@ describe('Dashboard quick actions', () => {
       expect(within(nav).getByText(label)).toBeInTheDocument()
     }
   })
+
+  it('sends each quick action to the merged page with its mode', async () => {
+    render(<AdminDashboardPage />)
+    const actions = within(await screen.findByTestId('quick-actions'))
+    expect(actions.getByRole('link', { name: /new sale/i }))
+      .toHaveAttribute('href', '/admin/trade?mode=sell')
+    expect(actions.getByRole('link', { name: /new buy/i }))
+      .toHaveAttribute('href', '/admin/trade?mode=buy')
+    expect(actions.getByRole('link', { name: /new trade/i }))
+      .toHaveAttribute('href', '/admin/trade')
+  })
 })
 
 // ---------------------------------------------------------------------------

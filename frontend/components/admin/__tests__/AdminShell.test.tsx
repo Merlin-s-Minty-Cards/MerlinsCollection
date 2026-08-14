@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor, fireEvent, cleanup } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent, cleanup, within } from '@testing-library/react'
 import AdminShell from '../AdminShell'
 
 // Mutable so a test can render at a DIFFERENT route — RFC 0010 T13's
@@ -174,10 +174,8 @@ const NAV_KEY = 'admin-nav-groups-v1'
 const ALL_DESTINATIONS: [string, RegExp][] = [
   ['/admin', /^dashboard$/i],
   ['/admin/inventory', /^inventory$/i],
-  ['/admin/sell', /^sell$/i],
-  ['/admin/buy', /^buy$/i],
   ['/admin/slabs', /^slabs$/i],
-  ['/admin/trade', /^trade$/i],
+  ['/admin/trade', /buy \/ sell \/ trade/i],
   ['/admin/outgoing', /^prep queue$/i],
   ['/admin/show-prep', /^show prep$/i],
   ['/admin/shows', /^shows$/i],
@@ -313,12 +311,52 @@ describe('AdminShell grouped navigation (RFC 0010 T13)', () => {
     expect(screen.getByRole('link', { name: /^unmatched$/i })).not.toHaveTextContent('21')
   })
 
-  it('gives the mobile nav five EXPLICIT entries, not a slice of the tree', () => {
+  it('gives the mobile nav four EXPLICIT entries, not a slice of the tree', () => {
+    // RFC 0011 T16: Sell + Buy collapsed into one "Deal" entry.
     const wrapper = renderShell()
     const mobile = wrapper.querySelectorAll('nav')[1]
     const hrefs = Array.from(mobile.querySelectorAll('a')).map((a) => a.getAttribute('href'))
     expect(hrefs).toEqual([
-      '/admin', '/admin/inventory', '/admin/sell', '/admin/buy', '/admin/slabs',
+      '/admin', '/admin/inventory', '/admin/trade', '/admin/slabs',
     ])
+  })
+})
+
+// ===========================================================================
+// RFC 0011 T16 — /admin/buy and /admin/sell retired into /admin/trade
+// ===========================================================================
+
+describe('AdminShell nav after Buy/Sell retirement (RFC 0011 T16)', () => {
+  it('offers one Buy / Sell / Trade entry, not three', () => {
+    renderShell()
+    const group = screen.getByRole('group', { name: 'At the show' })
+    const labels = within(group).getAllByRole('link').map((l) => l.textContent?.trim())
+    expect(labels).toEqual(['Inventory', 'Buy / Sell / Trade', 'Slabs'])
+  })
+
+  it('points the mobile bar at the merged route', () => {
+    // An explicit list, never a .slice() of the groups.
+    renderShell()
+    const bar = screen.getByRole('navigation', { name: /mobile/i })
+    expect(within(bar).getByRole('link', { name: /deal/i }))
+      .toHaveAttribute('href', '/admin/trade')
+    expect(within(bar).queryByRole('link', { name: /^buy$/i })).not.toBeInTheDocument()
+  })
+
+  it('marks the group active for the merged route', () => {
+    // The group holding the active route is forced open regardless of what was saved.
+    mockPathname = '/admin/trade'
+    renderShell()
+    expect(screen.getByRole('group', { name: 'At the show' })).toBeVisible()
+  })
+
+  it('has no link anywhere to a retired route', () => {
+    // A nav entry pointing at a deleted page is a 404 the owner finds mid-show.
+    renderShell()
+    for (const link of screen.getAllByRole('link')) {
+      const href = link.getAttribute('href') ?? ''
+      expect(href.startsWith('/admin/buy')).toBe(false)
+      expect(href.startsWith('/admin/sell')).toBe(false)
+    }
   })
 })
