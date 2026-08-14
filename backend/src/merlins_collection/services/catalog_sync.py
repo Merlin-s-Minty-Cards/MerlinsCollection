@@ -998,6 +998,7 @@ def _sync_new_sets(repo, client, *, dry_run: bool = False) -> dict:
     sets_checked = 0
     new_sets: list[str] = []
     cards_added = 0
+    cards_added_to_existing_sets = 0
     sets_registered = 0
     synced_at = datetime.now(timezone.utc)
 
@@ -1016,21 +1017,41 @@ def _sync_new_sets(repo, client, *, dry_run: bool = False) -> dict:
         # count is a `len()` on a query we ran anyway.
         held_counts: dict[str, int] = {}
         names_by_composite: dict[str, str] = {}
+        # Every card id we already hold in this language, built from the SAME
+        # queries — `list_cards_by_set` hands back the rows, not just a count.
+        #
+        # This is deliberately not `list_cards_by_language` (no such method) and
+        # not a per-card `get_catalog_card` (31,603 point reads, which turns a
+        # button into a timeout). A card in a set TCGdex no longer lists is
+        # absent from this set — and also absent from `iter_brief_cards`, which
+        # reads the same upstream — so it can never be spuriously re-added.
+        held_ids: set[str] = set()
         for raw_set in sets:
             raw_set_id = raw_set.get("id")
             if not raw_set_id:
                 continue
             composite_set_id = build_card_id(language, raw_set_id)
-            held = len(repo.list_cards_by_set(composite_set_id))
-            held_counts[composite_set_id] = held
+            rows = repo.list_cards_by_set(composite_set_id)
+            held_ids.update(c.card_id for c in rows)
+            held_counts[composite_set_id] = len(rows)
             names_by_composite[composite_set_id] = raw_set.get("name") or ""
-            if not held:
+            if not rows:
                 missing_set_ids.add(composite_set_id)
 
         added_by_set: dict[str, int] = {}
         if missing_set_ids:
             new_sets.extend(sorted(missing_set_ids))
 
+        # ALWAYS walk, not only when some set is entirely absent (RFC 0011 T9).
+        #
+        # **Do not restore the `if missing_set_ids:` early-out around this
+        # walk.** It will read like an optimization to the next person and it is
+        # the bug: a promo finally catalogued into a set we already hold — the
+        # exact case RFC 0011 exists for — was invisible while the walk only ran
+        # for entirely-absent sets. The cost is one brief-card list walk per
+        # language per run, on a button and a monthly job, and it was accepted
+        # deliberately (RFC 0011, Risks).
+        if sets:
             set_names = {s["id"]: s.get("name", "") for s in sets}
             buffer: list = []
 
@@ -1051,9 +1072,17 @@ def _sync_new_sets(repo, client, *, dry_run: bool = False) -> dict:
                     logger.warning("catalog sync: skipped %r (%s: %s)",
                                    raw.get("id"), type(exc).__name__, exc)
                     continue
-                if card.set_id not in missing_set_ids:
+                # Membership on the CARD, not on its set. A set lookup answers
+                # "have we ever seen this set", which stopped being the question
+                # the moment a held set could gain a card.
+                if card.card_id in held_ids:
                     continue
-                added_by_set[card.set_id] = added_by_set.get(card.set_id, 0) + 1
+                if card.set_id in missing_set_ids:
+                    added_by_set[card.set_id] = added_by_set.get(card.set_id, 0) + 1
+                else:
+                    # The case this RFC exists for.
+                    cards_added_to_existing_sets += 1
+                    added_by_set[card.set_id] = added_by_set.get(card.set_id, 0) + 1
                 buffer.append(card)
                 if len(buffer) >= _NEW_SETS_BATCH_SIZE:
                     flush()
@@ -1074,4 +1103,10 @@ def _sync_new_sets(repo, client, *, dry_run: bool = False) -> dict:
             ])
 
     return {"sets_checked": sets_checked, "new_sets": new_sets,
-            "cards_added": cards_added, "sets_registered": sets_registered}
+            "cards_added": cards_added,
+            # A SUBSET of `cards_added`, reported separately so the "check for
+            # new sets" button can say what the extra walk actually bought. A
+            # run finding no new set but three new promos in sets we hold used
+            # to report "0 new sets" and nothing else.
+            "cards_added_to_existing_sets": cards_added_to_existing_sets,
+            "sets_registered": sets_registered}

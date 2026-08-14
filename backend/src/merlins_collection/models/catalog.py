@@ -92,6 +92,21 @@ class CatalogCard(BaseModel):
     prices: dict[str, FinishPrice] = {}
     detail: Literal["brief", "full"] = "brief"
     last_synced_at: datetime
+    #: When this row FIRST appeared in our catalog. ``last_synced_at`` cannot
+    #: answer that — it is bumped by ANY write, so a price refresh re-stamps a
+    #: row from 2024 and every card looks new.
+    #:
+    #: ``None`` means "predates this field", **not** "new". All 31,603 rows
+    #: seeded before RFC 0011 carry ``None``, so every reader must count only
+    #: non-null values — the same honesty ``detail: brief|full`` already keeps
+    #: between "never fetched" and "no provider covers this".
+    #:
+    #: **Never set by a caller building a card to write.** The repository owns
+    #: it (``services/dynamodb._first_seen_stamps``): a value riding in the item
+    #: body would be reset by the next full reseed, which whole-item
+    #: ``put_item``s every row, and the field would come to mean "when we last
+    #: rebuilt the catalog".
+    first_seen_at: datetime | None = None
 
 
 class PricePoint(BaseModel):

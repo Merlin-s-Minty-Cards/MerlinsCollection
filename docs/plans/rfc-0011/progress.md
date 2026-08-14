@@ -6,22 +6,35 @@
 gitignored (`.gitignore:60`), so it is local-only and your edits to it will never appear
 in `git status` or reach anyone else. Record all RFC 0011 status **in this file**.
 
-**Last updated:** 2026-08-13 (**T1–T8 DONE**. Next up: T9)
+**Last updated:** 2026-08-13 (**T1–T9 DONE**. Next up: T10)
 **Branch:** `Polishing-For-Deployment`
 **RFC:** [`docs/rfcs/0011-inventory-column-controls-and-unmatched-queue.md`](../../rfcs/0011-inventory-column-controls-and-unmatched-queue.md)
 **Task index:** [`README.md`](README.md)
 **Source of the requests:** the owner's message of 2026-08-13, plus three design answers
 and two scope additions given the same day (recorded in the RFC under "Owner decisions").
 
-## Next: T9
+## Next: T10
 
-**The queue track is now readable end to end.** A card can be parked from Triage (T6),
-it appears on `/admin/unmatched` (T8) with ranked candidates (T7), and it can be paired
-back or sent to Triage. T9 is independent of all of that — it adds `first_seen_at` to the
-catalog and teaches the sync to notice new cards in sets it already knows, which is what
-T10's dashboard widget reads alongside T7's `items_with_candidates`.
+**Everything T10 depends on is now DONE.** T7 gives it `items_with_candidates`, T9
+gives it `GET /admin/catalog/new-cards`. T10 is a pure read — it should not need to
+touch the backend at all.
 
 There is no merge blocker in this RFC and nothing is waiting on an owner action.
+
+### What T9 left behind that T10 needs to know
+
+- **`GET /admin/catalog/new-cards?since_days=30&limit=6`** → `{count, since, cards[]}`.
+  `count` is the WHOLE window (never capped by `limit`); `cards` is the rendered sample,
+  newest-first. Each card carries `card_id, name, set_id, set_name, number, rarity,
+  images, market_price, first_seen_at` — `images` is `{small, large}`, and `market_price`
+  is a NEAR MINT catalog figure, never condition-adjusted.
+- **`since` is a UTC date**, because the cutoff itself is computed in UTC. Render it
+  as-is; do not recompute a window boundary client-side.
+- **T7's `items_with_candidates`** (from `GET /admin/unmatched/suggestions`) is the
+  other number this widget quotes. The two endpoints are independent reads — fetch both,
+  do not derive one from the other.
+- **A widget with zero new cards and zero pairable cards is the ordinary state**, not an
+  error — same posture as the Unmatched queue's own empty state (T8).
 
 ### What T8 left behind that T10 needs to know
 
@@ -110,7 +123,7 @@ permanently floored. Everything on the queue track is downstream of it.
 | T6 | Triage unlink + park | **DONE** | `c5686b8` | Both entry points, plus the `reasonsFor` mirror of T5's suppression. **The unlink is ONE `PUT`, not three** — three could half-succeed and leave a card unlinked but still carrying the wrong promo's price, which is worse than the state being repaired. `onRepointed` widens to `string \| null`; the `null` branch must fold `no_catalog_match: true` into its optimistic prediction or the row re-renders with a `missing_card_id` chip for a frame before dropping. The confirm copy **names the price** (`formatMoney`) and has a separate branch for a row with no stored value, so it never reads "its market value of $0.00 will be cleared". The "No match in TCGdex" action is hidden when `item.card_id` is already null — that row's action is the row-level button instead. Consumers of `reasonsFor` re-checked (outgoing, `CardDetailModal`, `TriageRowAction`): **127 passed**. |
 | T7 | Pairing suggestions endpoint | **DONE** | (this commit) | **T8 and T10 are unblocked.** `GET /admin/unmatched/suggestions?limit=3` (`ge=1, le=10`) → `{items: [{item_id, candidates[]}], items_with_candidates}`; a candidate carries `card_id, name, set_id, set_name, number, rarity, image_small, market_price, detail, last_synced_at, score, why`. **Two fields beyond the task doc's shape, both forced by `CardPickerRow`:** `detail` (T8 must keep `brief` = never fetched vs `full` = no provider covers it — CLAUDE.md calls collapsing them a lie) and `last_synced_at` (so a stale figure shows its age). Both are free; the catalog row is already in hand. **The doc's `_identity` reads a `card_number` field that DOES NOT EXIST on an inventory item** — the number is materialized inside `display_name` as `"Dragonair #181"`, so `identity_of` splits the trailing `#N` back off; without that, `normalize_name` yields `"dragonair 181"` and every lookup misses. A fourth tier was NOT added: an item with no number falls to the 0.7 name-only tier, which is number-blind and reads honestly. Tests live at `tests/routers/admin/test_unmatched.py`, not the doc's `tests/routers/test_admin_unmatched.py` — `admin_client` is defined in that package's conftest. Blast radius: `backend/tests/{routers/admin,services}` = **1255 passed**. |
 | T8 | Unmatched queue page | **DONE** | (this commit) | **T10 is unblocked.** `/admin/unmatched`, sidebar entry in **Back office directly after Triage**, icon `Unlink`, **no badge** (the Triage count stays the group's only amber number) and **not** in `mobileItems`. The page reads `GET /inventory/search?no_catalog_match=true` + `GET /unmatched/suggestions?limit=3` in **one `Promise.all`** — not `allSettled`, because suggestions failing while the list succeeds renders every row silently claiming it has no candidates, a wrong answer wearing the shape of a right one. Pair sends **`{card_id}` alone**; Back to Triage sends `{no_catalog_match: false}`; both drop the row with no refetch. **The NM label lives on the COLUMN HEADER** (`Suggestions · Market (NM)`), once, rather than as a caption repeated per row. **The absent-price rendering is `CardPickerRow`'s "no price yet" / "not priced", NOT the task doc's bare `—`** — the doc predates the shared component, and the component keeps the `brief` vs `full` distinction CLAUDE.md forbids collapsing. `formatTimestamp` for the parked stamp (it is a datetime); tests pin `America/Los_Angeles` via `_timezone.ts` with **no fake timers at all**. Card art is the **placeholder by construction** and `useCardImages` is deliberately not called: a parked item has no `card_id`, so the lookup could never succeed. 36 passed (15 page + 21 shell); Triage's 56 unchanged; `tsc --noEmit` and lint clean. |
-| T9 | `first_seen_at` + sync | TODO | — | |
+| T9 | `first_seen_at` + sync | **DONE** | (this commit) | **T10 is unblocked.** `CatalogCard.first_seen_at: datetime \| None`, written only by the repository, never by a caller. **`repo.list_cards_by_language` does not exist** (the task doc assumed it); membership is instead built from the SAME `list_cards_by_set` queries the set-membership check already runs, unioned across every set in the language — no extra request. **The unconditional (reseed) path pre-reads `first_seen_at` via one chunked `BatchGetItem` per page** — safe there because that path is a whole-item replace that overwrites regardless of what it reads, so the read adds no decision-making window. **The conditional (priced-preserving) path could NOT do the same** — a pre-read in front of it reopens the exact Phase 2.0a race the `ConditionExpression` exists to close, caught immediately by the existing `test_the_seed_decides_at_write_time_not_by_pre_reading`. Fixed by reading the prior value off the conditional `put_item`'s own `ReturnValues="ALL_OLD"` instead, inside the same atomic operation — one extra `update_item` per card to restore it, accepted and recorded in follow-ups.md. `_sync_new_sets` now ALWAYS walks `iter_brief_cards` (never gated on `missing_set_ids`), and membership is checked per-CARD against `held_ids`, not per-set — `cards_added_to_existing_sets` is the new summary field. `GET /admin/catalog/new-cards?since_days=30&limit=6` reads `catalog_cache`, counts only non-null-stamped rows, and returns `since` as the **UTC** date (the cutoff is computed in UTC; a locally-derived `since` would name a day the filter did not use). Blast radius (`services + routers/admin + scripts + models`): **1615 passed**, ruff clean. |
 | T10 | Dashboard widget | TODO | — | |
 | T11 | Shared card search panel | TODO | — | **RE-SCOPED by Part 2** — no longer adopted in Buy (deleted) or Trade (rebuilt). Adopt in Slabs, Triage, Market, +Unmatched. T14 composes it. |
 | **T13** | Slabs come in through a trade | TODO | — | RFC Part 2. Trading a slab OUT already works; only incoming is broken (`trades.py:792` hardcodes `kind: "raw"`). |

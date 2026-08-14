@@ -26,8 +26,10 @@ What these tests pin:
   the kind of thing that silently disappears if the router is mounted wrong.
 """
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+
+import pytest
 
 
 from merlins_collection.models.catalog import CatalogCard
@@ -233,3 +235,151 @@ class TestListCatalogSets:
         resp = client.get("/admin/catalog/sets", headers=_auth(member_token))
 
         assert resp.status_code == 403
+
+
+# ===========================================================================
+# RFC 0011 T9 — GET /admin/catalog/new-cards
+# ===========================================================================
+#
+# The dashboard widget's data source (T10). The owner's ask: *"if there could be
+# some kind of widget on the dashboard to show any new cards from TCGdex, that
+# would be great, and then we can look at the new tab to see which card can now
+# be paired."*
+
+
+def _new_cards_row(repo, card_id, *, name="Celebi V", set_id="en:swsh1",
+                   first_seen_at=None, prices=None, image="https://img/1.png"):
+    """A catalog row written straight to the table.
+
+    Direct, because the point of most of these tests is a row whose
+    ``first_seen_at`` is a SPECIFIC value — including absent, which is what all
+    31,603 rows seeded before RFC 0011 look like and which no writer can produce
+    once the writer stamps.
+    """
+    item = {
+        "PK": f"CARD#{card_id}", "SK": "META",
+        "GSI1PK": f"SET#{set_id}", "GSI1SK": f"CARD#{card_id}",
+        "entity": "catalog_card",
+        "card_id": card_id, "language": "EN", "name": name,
+        "set_id": set_id, "set_name": "Sword & Shield", "number": "1",
+        "rarity": "Rare",
+        "images": {"small": image, "large": ""},
+        "prices": prices or {},
+        "detail": "brief",
+        "last_synced_at": datetime.now(tz=timezone.utc).isoformat(),
+    }
+    if first_seen_at is not None:
+        item["first_seen_at"] = first_seen_at.isoformat()
+    repo._table.put_item(Item=item)
+
+
+def _days_ago(days):
+    return datetime.now(tz=timezone.utc) - timedelta(days=days)
+
+
+def _get_new_cards(admin_client, **params):
+    client, _repo, token = admin_client
+    return client.get("/admin/catalog/new-cards", params=params,
+                      headers={"Authorization": f"Bearer {token}"})
+
+
+def test_new_cards_counts_only_stamped_rows(admin_client):
+    """A null ``first_seen_at`` means "predates the field", not "new". Counting
+    nulls would report all 31,603 rows as new on the very first load — the
+    same honesty ``detail: brief|full`` already keeps."""
+    _, repo, _ = admin_client
+    _new_cards_row(repo, "en:old-1")                                # unstamped
+    _new_cards_row(repo, "en:new-1", first_seen_at=_days_ago(1))
+
+    body = _get_new_cards(admin_client).json()
+
+    assert body["count"] == 1
+    assert [c["card_id"] for c in body["cards"]] == ["en:new-1"]
+
+
+def test_new_cards_respects_the_window(admin_client):
+    _, repo, _ = admin_client
+    _new_cards_row(repo, "en:ancient-1", first_seen_at=_days_ago(200))
+    _new_cards_row(repo, "en:new-1", first_seen_at=_days_ago(1))
+
+    body = _get_new_cards(admin_client, since_days=30).json()
+
+    assert [c["card_id"] for c in body["cards"]] == ["en:new-1"]
+    assert body["count"] == 1
+
+
+def test_new_cards_returns_newest_first(admin_client):
+    _, repo, _ = admin_client
+    _new_cards_row(repo, "en:older-1", first_seen_at=_days_ago(10))
+    _new_cards_row(repo, "en:newer-1", first_seen_at=_days_ago(1))
+
+    body = _get_new_cards(admin_client).json()
+
+    assert [c["card_id"] for c in body["cards"]] == ["en:newer-1", "en:older-1"]
+
+
+def test_the_count_is_the_whole_window_even_when_the_sample_is_capped(admin_client):
+    """``limit`` bounds what is RENDERED; ``count`` is the answer to "how many
+    new cards are there". Capping the count too would under-report the work."""
+    _, repo, _ = admin_client
+    for n in range(5):
+        _new_cards_row(repo, f"en:new-{n}", first_seen_at=_days_ago(1))
+
+    body = _get_new_cards(admin_client, limit=2).json()
+
+    assert body["count"] == 5
+    assert len(body["cards"]) == 2
+
+
+def test_each_returned_card_carries_an_image_and_a_price_field(admin_client):
+    """Owner rule, absolute: a card is never identified by name alone. The
+    fields must be present even when empty, or the widget cannot render its
+    placeholder."""
+    _, repo, _ = admin_client
+    _new_cards_row(repo, "en:new-1", first_seen_at=_days_ago(1))
+
+    card = _get_new_cards(admin_client).json()["cards"][0]
+
+    assert "images" in card
+    assert "market_price" in card
+    assert card["name"] == "Celebi V"
+    assert card["set_name"] == "Sword & Shield"
+
+
+def test_an_absent_price_is_none_never_zero(admin_client):
+    """``FinishPrice`` bands are written only when a provider published a
+    figure, so absent means absent."""
+    _, repo, _ = admin_client
+    _new_cards_row(repo, "en:new-1", first_seen_at=_days_ago(1), prices={})
+
+    assert _get_new_cards(admin_client).json()["cards"][0]["market_price"] is None
+
+
+def test_the_window_start_is_returned_so_the_ui_need_not_recompute_it(admin_client):
+    """And it is the UTC date, because that is the boundary actually applied.
+
+    first_seen_at is stored in UTC and the cutoff is computed in UTC, so a
+    since derived from the SERVER's local date would name a day the filter
+    did not use — off by one for the eight hours a day Pacific and UTC disagree.
+    Returning it at all exists to stop the UI recomputing it wrong; returning a
+    locally-derived one would just move the bug to the server.
+    """
+    body = _get_new_cards(admin_client, since_days=30).json()
+
+    expected = (datetime.now(tz=timezone.utc) - timedelta(days=30)).date()
+    assert body["since"] == expected.isoformat()
+
+
+@pytest.mark.parametrize(
+    "params",
+    [{"since_days": 0}, {"since_days": 366}, {"limit": 0}, {"limit": 26}],
+)
+def test_out_of_range_bounds_are_a_422(admin_client, params):
+    assert _get_new_cards(admin_client, **params).status_code == 422
+
+
+def test_an_empty_catalog_is_an_honest_zero(admin_client):
+    body = _get_new_cards(admin_client).json()
+
+    assert body["count"] == 0
+    assert body["cards"] == []

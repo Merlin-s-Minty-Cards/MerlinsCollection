@@ -22,11 +22,16 @@ scans, and ``test_does_not_scan_the_catalog`` fails the build if that changes.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
+from typing import Any
+
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
 from merlins_collection.dependencies import get_repo
-from merlins_collection.models.inventory import Language
+from merlins_collection.models.inventory import Language, _market_price
+from merlins_collection.services import catalog_cache
 from merlins_collection.services.dynamodb import InventoryRepository
 
 router = APIRouter(prefix="/catalog", tags=["admin-catalog"])
@@ -90,6 +95,108 @@ def list_catalog_sets(
     # order rather than DynamoDB's — a list that reshuffles between requests
     # moves the option under the admin's cursor.
     return sorted(summaries, key=lambda s: (s.set_name.lower(), s.language, s.set_id))
+
+
+class NewCard(BaseModel):
+    """One newly-catalogued card, as the dashboard widget renders it.
+
+    Name, image AND price — the owner's absolute rule, and the widget is a place
+    a card APPEARS, which the rule covers just as much as a picker does.
+
+    ``market_price`` is a **NEAR MINT** catalog figure and is **not**
+    condition-adjusted: there is no item involved, so there is no condition to
+    adjust by. ``None`` means no provider published a figure — never ``0``.
+    """
+
+    card_id: str
+    name: str
+    set_id: str
+    set_name: str
+    number: str
+    rarity: str | None = None
+    images: dict[str, Any] = {}
+    market_price: Decimal | None = None
+    first_seen_at: datetime | None = None
+
+
+class NewCardsResponse(BaseModel):
+    """``count`` is the whole window; ``cards`` is the sample the widget shows.
+
+    They are deliberately different numbers. ``limit`` bounds what is rendered,
+    never the answer to "how many new cards are there" — capping the count too
+    would under-report the work waiting.
+    """
+
+    count: int
+    #: The window's start, so the UI does not recompute it — and so it cannot
+    #: recompute it in UTC and land a day off (CLAUDE.md, dates).
+    since: date
+    cards: list[NewCard] = []
+
+
+@router.get("/new-cards", response_model=NewCardsResponse)
+def new_catalog_cards(
+    since_days: int = Query(30, ge=1, le=365),
+    limit: int = Query(6, ge=1, le=25),
+    repo: InventoryRepository = Depends(get_repo),
+) -> NewCardsResponse:
+    """Catalog cards first seen inside the window, newest first.
+
+    **Counts only rows carrying a ``first_seen_at``.** A null means "predates the
+    field", not "new" — every one of the 31,603 rows seeded before RFC 0011 has
+    one, so counting nulls would report the entire catalog as new on the very
+    first load. Same honesty ``detail: brief|full`` already keeps.
+
+    Served from ``catalog_cache`` (~93 MB resident, RFC 0008 T9), so this is an
+    in-memory filter and not the 11.2-second full-table scan that reading the
+    catalog per request used to cost.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
+    fresh = [
+        card
+        for card in catalog_cache.get_catalog_cards(repo.list_all_catalog_cards)
+        if (stamped := getattr(card, "first_seen_at", None)) is not None
+        and _as_utc(stamped) >= cutoff
+    ]
+    # `card_id` breaks the tie so a page of cards stamped in the same second
+    # comes back in a stable order rather than the scan's.
+    fresh.sort(key=lambda c: (_as_utc(c.first_seen_at), c.card_id), reverse=True)
+    return NewCardsResponse(
+        count=len(fresh),
+        since=(datetime.now(timezone.utc) - timedelta(days=since_days)).date(),
+        cards=[_new_card(card) for card in fresh[:limit]],
+    )
+
+
+def _as_utc(moment: datetime) -> datetime:
+    """A stored timestamp as an aware UTC datetime.
+
+    A row written before anything stamped a zone back can be naive, and
+    comparing a naive datetime to an aware one raises ``TypeError`` — a 500 on a
+    dashboard, caused by one old row.
+    """
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def _new_card(card) -> NewCard:
+    """Project a catalog card for the widget.
+
+    The price comes from ``_market_price(card, "normal")`` — the ONE shared
+    finish-aware lookup. There is no item here and therefore no finish, so
+    ``"normal"`` is passed to buy the whole fallback walk; re-implementing that
+    selection is how 174 of 213 live items once went unpriced.
+    """
+    return NewCard(
+        card_id=card.card_id,
+        name=card.name,
+        set_id=card.set_id,
+        set_name=card.set_name,
+        number=card.number,
+        rarity=card.rarity,
+        images=card.images.model_dump(),
+        market_price=_market_price(card, "normal"),
+        first_seen_at=card.first_seen_at,
+    )
 
 
 def _owned_counts_by_set(repo: InventoryRepository) -> dict[str, int]:

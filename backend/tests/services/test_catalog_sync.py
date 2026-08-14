@@ -2524,3 +2524,216 @@ class TestRefreshGradedPricesScopedToItemIds:
 
         assert summary["graded_candidates"] == 2
         assert summary["graded_priced"] == 2
+
+
+# ===========================================================================
+# RFC 0011 T9 — `first_seen_at`, and new cards inside sets we already hold
+# ===========================================================================
+
+
+def _raw_catalog_row(repo, card_id, *, set_id="en:swsh1", first_seen_at=None):
+    """Write a catalog row DIRECTLY, bypassing the model's writers.
+
+    There is no ``put_raw_catalog_row`` on the repo (the task doc assumed one),
+    and inventing a public repo method whose only caller is a test would be worse
+    than reaching for the table here. This is the one way to produce the state
+    that actually matters — a row seeded BEFORE ``first_seen_at`` existed, which
+    is what all 31,603 live rows are.
+    """
+    item = {
+        "PK": f"CARD#{card_id}", "SK": "META",
+        "GSI1PK": f"SET#{set_id}", "GSI1SK": f"CARD#{card_id}",
+        "entity": "catalog_card",
+        "card_id": card_id, "language": "EN", "name": "Ancient",
+        "set_id": set_id, "set_name": "", "number": "1",
+        "images": {"small": "", "large": ""}, "prices": {},
+        "detail": "brief",
+        "last_synced_at": datetime.now(tz=timezone.utc).isoformat(),
+    }
+    if first_seen_at is not None:
+        item["first_seen_at"] = first_seen_at.isoformat()
+    repo._table.put_item(Item=item)
+
+
+class TestFirstSeenAt:
+    """``last_synced_at`` cannot answer "when did this card first appear".
+
+    It is bumped by ANY write, so a price refresh re-stamps a row from 2024 and
+    every card looks new. ``first_seen_at`` answers it — and the whole subtlety
+    is that it must survive writers that whole-item ``put_item`` the row.
+    """
+
+    def test_a_new_card_is_stamped(self, dynamo_repo):
+        dynamo_repo.batch_upsert_catalog_cards(
+            [to_catalog_card_brief_for_test("swsh1", "1", "Celebi V")],
+            preserve_priced=True,
+        )
+        assert dynamo_repo.get_catalog_card("en:swsh1-1").first_seen_at is not None
+
+    def test_a_new_card_is_stamped_on_the_unconditional_path_too(self, dynamo_repo):
+        """The reseed writes brand-new rows as well as rewriting old ones. A card
+        that only ever arrives that way must not be permanently unstamped."""
+        dynamo_repo.batch_upsert_catalog_cards(
+            [to_catalog_card_brief_for_test("swsh1", "1", "Celebi V")]
+        )
+        assert dynamo_repo.get_catalog_card("en:swsh1-1").first_seen_at is not None
+
+    def test_an_existing_card_is_not_re_stamped(self, dynamo_repo):
+        """The whole point. ``last_synced_at`` already answers "when did we last
+        touch this"; this field must answer "when did it first appear"."""
+        card = to_catalog_card_brief_for_test("swsh1", "1", "Celebi V")
+        dynamo_repo.batch_upsert_catalog_cards([card], preserve_priced=True)
+        original = dynamo_repo.get_catalog_card("en:swsh1-1").first_seen_at
+
+        dynamo_repo.batch_upsert_catalog_cards([card], preserve_priced=True)
+
+        assert dynamo_repo.get_catalog_card("en:swsh1-1").first_seen_at == original
+
+    def test_a_full_reseed_does_not_reset_it(self, dynamo_repo):
+        """A reseed whole-item ``put_item``s every row. If ``first_seen_at`` were
+        simply written into the body it would come to mean "when we last rebuilt
+        the catalog", which answers nobody's question."""
+        card = to_catalog_card_brief_for_test("swsh1", "1", "Celebi V")
+        dynamo_repo.batch_upsert_catalog_cards([card], preserve_priced=True)
+        original = dynamo_repo.get_catalog_card("en:swsh1-1").first_seen_at
+
+        dynamo_repo.batch_upsert_catalog_cards([card], preserve_priced=False)
+
+        assert dynamo_repo.get_catalog_card("en:swsh1-1").first_seen_at == original
+
+    def test_the_depth_pass_does_not_reset_it(self, dynamo_repo):
+        """``upsert_catalog_card_preserving_prices`` runs nightly over held
+        cards. Re-stamping there would make every owned card permanently new."""
+        card = to_catalog_card_brief_for_test("swsh1", "1", "Celebi V")
+        dynamo_repo.batch_upsert_catalog_cards([card], preserve_priced=True)
+        original = dynamo_repo.get_catalog_card("en:swsh1-1").first_seen_at
+
+        dynamo_repo.upsert_catalog_card_preserving_prices(
+            card.model_copy(update={
+                "detail": "full",
+                "prices": {"normal": FinishPrice(market=Decimal("3.00"))},
+            })
+        )
+
+        stored = dynamo_repo.get_catalog_card("en:swsh1-1")
+        assert stored.first_seen_at == original
+        assert stored.prices["normal"].market == Decimal("3.00")
+
+    def test_a_pre_existing_row_reads_as_none_not_as_new(self, dynamo_repo):
+        """``None`` means "predates the field", NOT "new". Every one of the
+        31,603 rows seeded before RFC 0011 is one of these."""
+        _raw_catalog_row(dynamo_repo, "en:swsh1-9")
+        assert dynamo_repo.get_catalog_card("en:swsh1-9").first_seen_at is None
+
+    def test_a_preserved_priced_row_keeps_its_original_stamp(self, dynamo_repo):
+        """A ``detail="full"`` row refuses the brief write entirely. Its stamp
+        must survive that refusal untouched rather than being re-applied."""
+        priced = to_catalog_card_brief_for_test("swsh1", "1", "Celebi V").model_copy(
+            update={"detail": "full",
+                    "prices": {"holofoil": FinishPrice(market=Decimal("9.25"))}}
+        )
+        dynamo_repo.batch_upsert_catalog_cards([priced], preserve_priced=True)
+        original = dynamo_repo.get_catalog_card("en:swsh1-1").first_seen_at
+
+        dynamo_repo.batch_upsert_catalog_cards(
+            [to_catalog_card_brief_for_test("swsh1", "1", "Celebi V")],
+            preserve_priced=True,
+        )
+
+        assert dynamo_repo.get_catalog_card("en:swsh1-1").first_seen_at == original
+
+
+class TestNewCardsInExistingSets:
+    """``_sync_new_sets`` early-outed on ``missing_set_ids`` and walked cards
+    only when a set was ENTIRELY absent. A promo finally catalogued into a set we
+    already hold — the exact case driving RFC 0011 — was invisible to it."""
+
+    def test_a_new_card_in_a_held_set_is_added(self, dynamo_repo):
+        dynamo_repo.batch_upsert_catalog_cards([
+            to_catalog_card_brief_for_test("swsh1", "1", "Celebi V"),
+        ])
+        client = FakeSetsClient(
+            sets_by_language={Language.EN: [SWSH1_SET]},
+            cards_by_language={Language.EN: [
+                SWSH1_CARD_ROW,
+                {"id": "swsh1-2", "localId": "2", "name": "A Late Promo"},
+            ]},
+        )
+
+        summary = sync_new_sets(dynamo_repo, client)
+
+        assert summary["cards_added_to_existing_sets"] == 1
+        assert summary["new_sets"] == []
+        assert dynamo_repo.get_catalog_card("en:swsh1-2") is not None
+
+    def test_an_unchanged_catalog_adds_nothing(self, dynamo_repo):
+        dynamo_repo.batch_upsert_catalog_cards([
+            to_catalog_card_brief_for_test("swsh1", "1", "Celebi V"),
+        ])
+        client = FakeSetsClient(
+            sets_by_language={Language.EN: [SWSH1_SET]},
+            cards_by_language={Language.EN: [SWSH1_CARD_ROW]},
+        )
+
+        summary = sync_new_sets(dynamo_repo, client)
+
+        assert summary["cards_added_to_existing_sets"] == 0
+        assert summary["cards_added"] == 0
+
+    def test_an_existing_priced_row_is_never_overwritten(self, dynamo_repo):
+        """The guarantee ``preserve_priced=True`` exists for. Walking every card
+        now means the writer sees rows it used to skip entirely, so the
+        structural per-set skip is no longer carrying this on its own."""
+        priced = to_catalog_card_brief_for_test("swsh1", "1", "Celebi V").model_copy(
+            update={"detail": "full",
+                    "prices": {"holofoil": FinishPrice(market=Decimal("9.25"))}}
+        )
+        dynamo_repo.batch_upsert_catalog_cards([priced])
+        client = FakeSetsClient(
+            sets_by_language={Language.EN: [SWSH1_SET]},
+            cards_by_language={Language.EN: [SWSH1_CARD_ROW]},
+        )
+
+        sync_new_sets(dynamo_repo, client)
+
+        stored = dynamo_repo.get_catalog_card("en:swsh1-1")
+        assert stored.detail == "full"
+        assert stored.prices["holofoil"].market == Decimal("9.25")
+
+    def test_a_card_added_to_a_held_set_counts_toward_that_sets_registry(
+        self, dynamo_repo
+    ):
+        """The registry's ``card_count`` is the rows WE hold, and a card this
+        very run added to an existing set is one of them."""
+        dynamo_repo.batch_upsert_catalog_cards([
+            to_catalog_card_brief_for_test("swsh1", "1", "Celebi V"),
+        ])
+        client = FakeSetsClient(
+            sets_by_language={Language.EN: [SWSH1_SET]},
+            cards_by_language={Language.EN: [
+                SWSH1_CARD_ROW,
+                {"id": "swsh1-2", "localId": "2", "name": "A Late Promo"},
+            ]},
+        )
+
+        sync_new_sets(dynamo_repo, client)
+
+        registry = {r["set_id"]: r for r in dynamo_repo.list_catalog_sets()}
+        assert int(registry["en:swsh1"]["card_count"]) == 2
+
+    def test_a_dry_run_still_writes_nothing(self, dynamo_repo):
+        dynamo_repo.batch_upsert_catalog_cards([
+            to_catalog_card_brief_for_test("swsh1", "1", "Celebi V"),
+        ])
+        client = FakeSetsClient(
+            sets_by_language={Language.EN: [SWSH1_SET]},
+            cards_by_language={Language.EN: [
+                SWSH1_CARD_ROW,
+                {"id": "swsh1-2", "localId": "2", "name": "A Late Promo"},
+            ]},
+        )
+
+        summary = sync_new_sets(dynamo_repo, client, dry_run=True)
+
+        assert summary["cards_added_to_existing_sets"] == 1
+        assert dynamo_repo.get_catalog_card("en:swsh1-2") is None

@@ -724,8 +724,57 @@ class InventoryRepository:
                 return items
             kwargs["ExclusiveStartKey"] = last
 
-    def _catalog_item(self, card: CatalogCard) -> dict:
+    def _first_seen_stamps(self, cards) -> dict:
+        """``{card_id: first_seen_at}`` to write, for a page of catalog cards.
+
+        **Why this needs a read at all.** ``first_seen_at`` has to survive a
+        whole-item ``put_item``, which replaces the item entirely — an attribute
+        not in the body is REMOVED. A "stamp only if absent" conditional update
+        after the put is therefore always true and always re-stamps, which is
+        the exact bug the field exists to avoid: it would come to mean "when we
+        last rebuilt the catalog". So the existing value has to be carried
+        forward in the body, which means knowing it.
+
+        **This is used ONLY by the unconditional path, and that restriction is
+        load-bearing.** A pre-read in front of the *preserving* path would
+        reintroduce the Phase 2.0a race that path exists to close: a depth write
+        landing between the read and the put would be clobbered by a brief row
+        (``test_the_seed_decides_at_write_time_not_by_pre_reading``). The
+        unconditional path makes no decision from what it reads — it is a
+        whole-item replace that overwrites regardless — so a read here adds no
+        window that the write itself did not already have. The preserving path
+        gets the old value from ``ReturnValues="ALL_OLD"`` instead, inside the
+        same operation as its write.
+
+        One chunked ``BatchGetItem`` per page, not a point read per card. A card
+        with no stored value — genuinely new, or a row that predates the field —
+        gets ``now()``.
+        """
+        moment = datetime.now(timezone.utc)
+        card_ids = [c.card_id for c in cards]
+        if not card_ids:
+            return {}
+        existing = self.batch_get_catalog_cards(card_ids)
+        return {
+            card_id: (
+                stored.first_seen_at
+                if (stored := existing.get(card_id)) is not None
+                and stored.first_seen_at is not None
+                else moment
+            )
+            for card_id in card_ids
+        }
+
+    def _catalog_item(self, card: CatalogCard, first_seen_at=None) -> dict:
         body = _serialize(card.model_dump(mode="python"))
+        # The repository owns this field, never the caller. An inbound card
+        # always carries `None` (nothing constructs one with a value), so
+        # without this the attribute would be written as NULL and the stamp
+        # would be lost on every write.
+        if first_seen_at is not None:
+            body["first_seen_at"] = _serialize(first_seen_at)
+        else:
+            body.pop("first_seen_at", None)
         return {
             "PK": f"CARD#{card.card_id}",
             "SK": "META",
@@ -773,23 +822,49 @@ class InventoryRepository:
         """
         if preserve_priced:
             return self._upsert_catalog_cards_preserving_priced(cards)
+        cards = list(cards)
+        # Read the stamps BEFORE the writes, for the whole page at once. A
+        # whole-item `put_item` removes any attribute not in the body, so the
+        # existing `first_seen_at` has to be carried forward explicitly — see
+        # `_first_seen_stamps`.
+        first_seen = self._first_seen_stamps(cards)
         with self._table.batch_writer(  # auto-chunks to 25 + retries unprocessed
             overwrite_by_pkeys=["PK", "SK"]
         ) as batch:
             for card in cards:
-                batch.put_item(Item=self._catalog_item(card))
+                batch.put_item(
+                    Item=self._catalog_item(card, first_seen.get(card.card_id))
+                )
         return 0
 
     def _upsert_catalog_cards_preserving_priced(self, cards) -> int:
+        """See ``batch_upsert_catalog_cards`` for ``preserve_priced``.
+
+        **Deliberately NO pre-read of any kind** — for ``first_seen_at`` same as
+        for the priced-row refusal itself (Phase 2.0a). A pre-read in front of
+        this write would reopen the exact race the ``ConditionExpression``
+        exists to close: a depth write landing between the read and the put
+        would be overwritten by a brief row
+        (``test_the_seed_decides_at_write_time_not_by_pre_reading``).
+
+        Instead the put itself is asked for ``ReturnValues="ALL_OLD"``. On a
+        SUCCESSFUL conditional put, that is the prior item's attributes — read
+        for free, inside the same operation as the write, with no window for a
+        concurrent write to invalidate it. The follow-up ``update_item`` that
+        restores ``first_seen_at`` is then either writing back a value already
+        known correct (the row existed) or a plain "stamp if absent" (the row
+        did not) — never a decision made from a stale read.
+        """
         preserved = 0
         for card in cards:
             item = self._catalog_item(card)
             try:
-                self._table.put_item(
+                response = self._table.put_item(
                     Item=item,
                     ConditionExpression="attribute_not_exists(PK) OR #d <> :full",
                     ExpressionAttributeNames={"#d": "detail"},
                     ExpressionAttributeValues={":full": "full"},
+                    ReturnValues="ALL_OLD",
                 )
             except ClientError as exc:
                 if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
@@ -806,6 +881,16 @@ class InventoryRepository:
                         ExpressionAttributeNames={"#c": "cat_gen"},
                         ExpressionAttributeValues={":gen": self._catalog_gen},
                     )
+                continue
+            old_first_seen = (response.get("Attributes") or {}).get("first_seen_at")
+            if old_first_seen is not None:
+                self._table.update_item(
+                    Key={"PK": item["PK"], "SK": item["SK"]},
+                    UpdateExpression="SET first_seen_at = :fs",
+                    ExpressionAttributeValues={":fs": old_first_seen},
+                )
+            else:
+                self._stamp_first_seen_if_absent(item["PK"], item["SK"])
         return preserved
 
     def upsert_catalog_card_preserving_prices(self, card: CatalogCard) -> None:
@@ -864,6 +949,34 @@ class InventoryRepository:
             ExpressionAttributeNames=names,
             ExpressionAttributeValues=values,
         )
+        # This path costs no read, unlike the two put_item writers: `update_item`
+        # LEAVES an attribute it does not mention alone, so an existing
+        # `first_seen_at` survives the write above untouched (`_catalog_item`
+        # omits it from the body). All that is left is the genuinely-new case,
+        # and `attribute_not_exists` makes that idempotent.
+        self._stamp_first_seen_if_absent(item["PK"], item["SK"])
+
+    def _stamp_first_seen_if_absent(self, pk: str, sk: str) -> None:
+        """Set ``first_seen_at`` only on a row that has none.
+
+        Safe ONLY after a write that preserves absent attributes. After a
+        ``put_item`` the attribute is always absent — the put removed it — so
+        this would re-stamp every row on every write. That is why the two
+        put_item writers carry the value forward in the body instead.
+        """
+        try:
+            self._table.update_item(
+                Key={"PK": pk, "SK": sk},
+                UpdateExpression="SET first_seen_at = :now",
+                ConditionExpression="attribute_not_exists(first_seen_at)",
+                ExpressionAttributeValues={
+                    ":now": datetime.now(timezone.utc).isoformat()
+                },
+            )
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                raise
+            # Already stamped — the expected outcome for every existing row.
 
     def batch_get_catalog_cards(self, card_ids):
         """Point-read many catalog cards at once; missing ids are simply absent.
