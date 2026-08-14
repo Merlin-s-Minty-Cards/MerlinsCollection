@@ -44,6 +44,7 @@ const noop = {
   onPickCatalog: vi.fn(),
   onPickInventory: vi.fn(),
   onManualEntry: vi.fn(),
+  manualEntryAllowed: true,
 }
 
 function mockInventory(items: unknown[]) {
@@ -133,5 +134,10 @@ describe('DealSearchPanel', () => {
     render(<DealSearchPanel mode="buy" source="catalog" {...noop} onManualEntry={onManualEntry} />)
     await user.click(screen.getByRole('button', { name: /manual/i }))
     expect(onManualEntry).toHaveBeenCalled()
+  })
+
+  it('hides manual entry when manualEntryAllowed is false (Sell mode, Important 5)', () => {
+    render(<DealSearchPanel mode="sell" source="inventory" {...noop} manualEntryAllowed={false} />)
+    expect(screen.queryByRole('button', { name: /manual/i })).not.toBeInTheDocument()
   })
 })

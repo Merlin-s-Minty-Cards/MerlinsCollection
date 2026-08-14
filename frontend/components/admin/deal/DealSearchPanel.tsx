@@ -65,6 +65,16 @@ export interface DealSearchPanelProps {
    * ESCAPES".
    */
   onManualEntry: () => void
+  /**
+   * Whether this mode's session even has an incoming leg to add a manual
+   * entry to. `false` in Sell — a sale disposes of stock you already own
+   * (catalog-matched or not), so "manual entry" (an off-catalog NEW item) is
+   * meaningless there and previously threw `'A sell session has no incoming
+   * leg'`, surfaced as a raw `alert` (final-review Important 5). This is
+   * NOT the escape-hatch rule (manual entry isn't a fallback for a failed
+   * catalog search here — it's a control for a leg kind Sell doesn't have).
+   */
+  manualEntryAllowed: boolean
 }
 
 function InventorySearch({
@@ -161,6 +171,7 @@ export default function DealSearchPanel({
   onPickCatalog,
   onPickInventory,
   onManualEntry,
+  manualEntryAllowed,
 }: DealSearchPanelProps) {
   const showToggle = sourceForMode(mode) === 'both'
   // Outside trade, the caller's `source` cannot be wrong — but the mode is the
@@ -190,13 +201,15 @@ export default function DealSearchPanel({
           <span />
         )}
 
-        <button
-          type="button"
-          onClick={onManualEntry}
-          className="rounded-lg border border-pine-700/40 px-2.5 py-1 text-[11px] text-pine-300 transition-colors hover:border-mint/40 hover:text-mint"
-        >
-          + Manual entry
-        </button>
+        {manualEntryAllowed && (
+          <button
+            type="button"
+            onClick={onManualEntry}
+            className="rounded-lg border border-pine-700/40 px-2.5 py-1 text-[11px] text-pine-300 transition-colors hover:border-mint/40 hover:text-mint"
+          >
+            + Manual entry
+          </button>
+        )}
       </div>
 
       {active === 'catalog' ? (
