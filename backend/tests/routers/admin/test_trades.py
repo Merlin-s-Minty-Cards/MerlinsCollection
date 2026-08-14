@@ -349,6 +349,40 @@ class TestTradeConfirm:
         # 3.0: manual basis mode — operator set total basis to 20.00
         assert new_items[0].cost_basis == Decimal("20.00")
 
+    def test_confirm_returns_item_ids_for_incoming_legs_in_order(self, admin_client):
+        client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="our-1"))
+
+        create = client.post("/admin/trades", json={}, headers=_auth(token))
+        trade_id = create.json()["trade_id"]
+        client.patch(f"/admin/trades/{trade_id}", json={
+            "basis_mode": "manual", "manual_basis": "20.00",
+        }, headers=_auth(token))
+        client.post(f"/admin/trades/{trade_id}/outgoing", json={
+            "item_id": "our-1", "agreed_value": "50.00",
+        }, headers=_auth(token))
+        client.post(f"/admin/trades/{trade_id}/incoming", json={
+            "name": "Card A", "agreed_value": "30.00", "condition": "NM",
+        }, headers=_auth(token))
+        client.post(f"/admin/trades/{trade_id}/incoming", json={
+            "name": "Card B", "agreed_value": "45.00", "condition": "NM",
+        }, headers=_auth(token))
+        client.put(f"/admin/trades/{trade_id}/cash", json={
+            "direction": "they_pay", "amount": "25.00",
+        }, headers=_auth(token))
+
+        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "item_ids" in data
+        assert len(data["item_ids"]) == 2
+
+        all_items = {i.item_id: i for i in repo.list_inventory()}
+        first = all_items[data["item_ids"][0]]
+        second = all_items[data["item_ids"][1]]
+        assert first.display_name == "Card A"
+        assert second.display_name == "Card B"
+
     def test_confirm_empty_trade_returns_422(self, admin_client):
         client, repo, token = admin_client
         create = client.post("/admin/trades", json={}, headers=_auth(token))

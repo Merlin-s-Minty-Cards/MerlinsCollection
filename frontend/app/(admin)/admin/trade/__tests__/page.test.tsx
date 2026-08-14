@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest'
-import { render, screen, within } from '@testing-library/react'
+import { render, screen, within, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import DealPage from '../page'
 import { pinTimeZone, PACIFIC } from '@/lib/__tests__/_timezone'
@@ -71,6 +71,7 @@ function defaultGet(path: string) {
   if (path === '/inventory/search') return Promise.resolve({ items: [INVENTORY_ITEM] })
   if (path === '/locations') return Promise.resolve([])
   if (path === '/catalog/sets') return Promise.resolve([])
+  if (path === '/cosigners') return Promise.resolve([{ consignor_id: 'cos-1', name: 'Alex' }])
   return Promise.resolve({})
 }
 
@@ -284,5 +285,42 @@ describe('the unified deal page', () => {
     const form = screen.getByTestId('incoming-form')
 
     expect(within(form).getByRole('radio', { name: /graded/i })).toBeEnabled()
+  })
+
+  it('links a staged consignor to its resulting item after confirm', async () => {
+    apiPost.mockImplementation((path: string) => {
+      if (path === '/trades/deal-1/confirm') return Promise.resolve({ item_ids: ['new-item-1'] })
+      return defaultPost(path)
+    })
+
+    const user = userEvent.setup({ delay: null })
+    render(<DealPage />)
+
+    const nameInput = await screen.findByLabelText('Card name')
+    await user.type(nameInput, CARD.name)
+    const row = await screen.findByTestId('card-picker-row')
+    await user.click(within(row).getByRole('button', { name: new RegExp(CARD.name) }))
+    const form = screen.getByTestId('incoming-form')
+
+    await user.click(within(form).getByRole('button', { name: /consignor/i }))
+    await user.click(within(form).getByRole('combobox', { name: /consignor/i }))
+    await user.click(within(form).getByText('Alex'))
+
+    const valueInput = within(form).getByLabelText('Value')
+    await user.type(valueInput, '10.00')
+    await user.click(within(form).getByRole('button', { name: 'Add' }))
+
+    // CosignorPicker closes its dropdown on a 150ms blur timeout (moving
+    // focus to Value above triggered it). Let it fire here, with jsdom still
+    // up, rather than let it leak into teardown after this test unmounts the
+    // page on confirm.
+    await new Promise((resolve) => setTimeout(resolve, 200))
+
+    await user.click(screen.getByRole('button', { name: /confirm trade/i }))
+    await user.click(screen.getByRole('button', { name: /execute trade/i }))
+
+    await waitFor(() =>
+      expect(apiPost).toHaveBeenCalledWith('/cosigners/cos-1/link', { item_ids: ['new-item-1'] }),
+    )
   })
 })

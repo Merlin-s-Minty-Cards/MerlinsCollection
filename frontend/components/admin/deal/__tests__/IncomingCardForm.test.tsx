@@ -37,6 +37,10 @@ vi.mock('@/lib/use-locations', () => ({
   }),
 }))
 
+vi.mock('@/lib/use-cosigners', () => ({
+  useCosigners: () => ({ options: [{ value: 'cos-1', label: 'Alex' }], loading: false }),
+}))
+
 function card(over: Partial<PickerCard> = {}): PickerCard {
   return {
     card_id: 'en:base1-4',
@@ -226,6 +230,28 @@ describe('IncomingCardForm', () => {
     await user.type(screen.getByLabelText(/value/i), '40')
     await user.click(screen.getByRole('button', { name: /^add$/i }))
     expect(onAdd).toHaveBeenCalledWith(expect.objectContaining({ kind: 'graded' }))
+  })
+
+  it('lets the operator stage a consignor for the card being added', async () => {
+    const user = userEvent.setup({ delay: null })
+    const onAdd = vi.fn()
+    render(<IncomingCardForm card={card()} onAdd={onAdd} onCancel={vi.fn()} />)
+    await user.click(screen.getByRole('button', { name: /consignor/i })) // opens the collapsed section
+    await user.click(screen.getByRole('combobox', { name: /consignor/i }))
+    await user.click(screen.getByText('Alex'))
+    await user.type(screen.getByLabelText(/value/i), '40')
+    await user.click(screen.getByRole('button', { name: /^add$/i }))
+    expect(onAdd).toHaveBeenCalledWith(expect.objectContaining({ consignor_id: 'cos-1' }))
+  })
+
+  it('omits consignor_id entirely when none was staged', async () => {
+    const user = userEvent.setup({ delay: null })
+    const onAdd = vi.fn()
+    render(<IncomingCardForm card={card()} onAdd={onAdd} onCancel={vi.fn()} />)
+    await user.type(screen.getByLabelText(/value/i), '40')
+    await user.click(screen.getByRole('button', { name: /^add$/i }))
+    const leg = onAdd.mock.calls[0][0]
+    expect(leg.consignor_id).toBeUndefined()
   })
 
   it('cancels without emitting', async () => {

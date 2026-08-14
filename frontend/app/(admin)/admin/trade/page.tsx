@@ -42,6 +42,7 @@ const MODES: DealMode[] = ['buy', 'sell', 'trade']
 
 interface StagedIncoming extends DealRowCard {
   agreedValue: number
+  consignorId: string | null
 }
 
 interface StagedOutgoing extends DealRowCard {
@@ -158,6 +159,7 @@ export default function DealPage() {
         price: leg.agreed_value,
         priceLabel: 'value',
         agreedValue: leg.agreed_value,
+        consignorId: leg.consignor_id ?? null,
       }])
       setFormCard(undefined)
     } catch (err) {
@@ -257,7 +259,7 @@ export default function DealPage() {
     if (!sessionId) return
     setConfirming(true)
     try {
-      await session.confirm(sessionId, {
+      const result = await session.confirm(sessionId, {
         counterparty: counterparty || null,
         date,
         // Trade has no single payment method (its cash legs each carry their
@@ -273,6 +275,28 @@ export default function DealPage() {
       })
       setConfirmed(true)
       setShowConfirm(false)
+
+      // RFC 0012: neither /purchases/{id}/items nor /trades/{id}/incoming
+      // accepts consignment at create time (by design — see cosigners.py's
+      // default-split logic, which would otherwise need duplicating
+      // frontend-side). A staged consignor is linked here instead, after
+      // the deal has already committed — un-awaited and on its own,
+      // matching the existing "commit succeeds and is reported first, a
+      // secondary call happens after" shape already used for slab price
+      // refresh. item_ids is index-aligned with the incoming legs that were
+      // sent (trades.py's enumerate loop, purchases.py's append-in-order
+      // items list), which is the same order `incoming` was built in above.
+      const itemIds = result.item_ids ?? []
+      incoming.forEach((leg, i) => {
+        const itemId = itemIds[i]
+        if (leg.consignorId && itemId) {
+          api.post(`/cosigners/${leg.consignorId}/link`, { item_ids: [itemId] }).catch(() => {
+            // A link failure here must not read back as "the deal failed" —
+            // it already committed. Recoverable after the fact from
+            // CardDetailModal (Task C3).
+          })
+        }
+      })
     } catch (err) {
       alert(err instanceof AdminApiError ? err.detail : 'Failed to confirm')
     } finally {

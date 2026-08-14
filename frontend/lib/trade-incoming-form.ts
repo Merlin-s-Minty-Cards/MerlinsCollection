@@ -86,6 +86,14 @@ export interface IncomingLeg {
   market_value?: number
   /** The card's small image, when a catalog card supplied one. `undefined` for manual. */
   image_url?: string
+  /**
+   * Client-side only — never sent to POST /trades/{id}/incoming or
+   * POST /purchases/{id}/items (neither accepts consignment at create time,
+   * RFC 0012). The page reads this off the leg to stage a post-confirm
+   * POST /cosigners/{id}/link, keyed by position against the confirm
+   * response's item_ids.
+   */
+  consignor_id?: string
 }
 
 /** What the form holds — every money and grade field still raw text. */
