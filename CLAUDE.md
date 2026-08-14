@@ -701,6 +701,29 @@ it must be unavailable in some state, **say why in one line beside it** — e.g.
 manual entry forces Raw, because a graded item needs a `card_id` for pricing to
 join on.
 
+**That one-line "say why" comment is a promise, and promises go stale.** RFC
+0012 found the promise above already broken: `IncomingCardForm.tsx`'s comment
+said Buy-mode graded intake stayed off "until that lands" — meaning until a
+cert-ownership warning existed — but the warning (`GET /slabs/certs/{cert}`,
+firing on `kind === 'graded'` alone) had *already been built*, in the same
+file, and nobody had come back to remove the gate it was blocking. The safety
+check and the restriction waiting on it were two separate pieces of code with
+no link between them but a sentence, so they drifted: one got finished, the
+other didn't notice.
+
+> **When a gate's own comment names the specific thing it's waiting on, that
+> named thing can be built later without the gate ever being revisited** —
+> nothing forces the two to move together. Before trusting a "not yet" comment,
+> grep the file for whether the missing piece has since landed; a comment is
+> not a dependency, and code review rarely re-checks old justifications, only
+> new ones.
+
+This is a different failure than the escape-hatch rule above (that one is about
+reachability depending on a *sibling path's outcome*; this one is about a gate's
+justification going out of date). Same fix both times, though: a disabled
+control's reason is either still true or the control comes out — never left
+standing on a stale comment.
+
 **Card art: import the size, never re-pick it.** `TABLE_THUMB_SIZE` (`xs`,
 56×78 — real card proportions) and `TABLE_THUMB_COLUMN` (`w-16`) are exported
 from `components/admin/shared/CardImage.tsx`. Every admin list row uses them.
