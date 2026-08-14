@@ -49,4 +49,28 @@ describe('sessionApiFor', () => {
     expect(api.post).toHaveBeenCalledWith('/trades/t1/incoming',
       expect.objectContaining({ kind: 'graded', cert_number: '12345678' }))
   })
+
+  it('patches a staged sale item price through updateOutgoing', async () => {
+    vi.mocked(api.post).mockResolvedValue({ sell_id: 's1' })
+    const sell = sessionApiFor('sell', api)
+    await sell.create()
+    await sell.addOutgoing('s1', { item_id: 'item-1', current_market_value: '20.00' } as never, 20)
+    await sell.updateOutgoing('s1', 0, 15)
+    expect(api.patch).toHaveBeenCalledWith('/sales/s1/items/item-1', { agreed_price: 15 })
+  })
+
+  it('patches a staged trade outgoing leg price through updateOutgoing', async () => {
+    vi.mocked(api.post).mockResolvedValue({ trade_id: 't1' })
+    const trade = sessionApiFor('trade', api)
+    await trade.create()
+    await trade.addOutgoing('t1', { item_id: 'item-2', current_market_value: '20.00' } as never, 20)
+    await trade.updateOutgoing('t1', 0, 12.5)
+    expect(api.patch).toHaveBeenCalledWith('/trades/t1/outgoing/item-2', { agreed_value: 12.5 })
+  })
+
+  it('refuses updateOutgoing on a buy session, which has no outgoing leg', async () => {
+    await expect(sessionApiFor('buy', api).updateOutgoing('b1', 0, 5)).rejects.toThrow(
+      'A buy session has no outgoing leg',
+    )
+  })
 })

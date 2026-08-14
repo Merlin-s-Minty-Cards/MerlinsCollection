@@ -231,4 +231,15 @@ describe('the unified deal page', () => {
     expect(within(screen.getByTestId('deal-balance')).getByText('+$20.00'))
       .toBeInTheDocument()
   })
+
+  it('patches the negotiated Going Out price to the session before confirm', async () => {
+    const user = userEvent.setup({ delay: null })
+    render(<DealPage />)
+    await addOneOutgoing(user, { price: '15.00' })
+
+    expect(apiPatch).toHaveBeenCalledWith(
+      '/trades/deal-1/outgoing/item-1',
+      { agreed_value: 15 },
+    )
+  })
 })

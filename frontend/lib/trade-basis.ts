@@ -3,8 +3,19 @@ export type BasisMode = 'transfer' | 'split' | 'manual'
 const CASH_DISABLED_REASON = 'Unavailable while the trade includes cash — use Manual.'
 
 /**
+ * `IncomingLeg` carries no `market_value`, so Split has nothing to split
+ * against and silently computes the same number as Transfer — see the RFC
+ * 0011 T15 review. Per CLAUDE.md's escape-hatch rule, an option that claims
+ * to do one thing and does another is disabled with a one-line reason next
+ * to it rather than left selectable. Building real split math needs a wider
+ * `IncomingLeg` and is out of scope here.
+ */
+const SPLIT_DISABLED_REASON = 'Split needs per-card values — use Transfer or Manual for now.'
+
+/**
  * Returns the three basis modes with their current availability.
- * Transfer and Split are disabled when the trade includes cash.
+ * Transfer is disabled when the trade includes cash. Split is ALWAYS
+ * disabled (see `SPLIT_DISABLED_REASON`), independent of `hasCash`.
  */
 export function availableModes(hasCash: boolean): { mode: BasisMode; disabled: boolean; reason: string | null }[] {
   return [
@@ -15,8 +26,8 @@ export function availableModes(hasCash: boolean): { mode: BasisMode; disabled: b
     },
     {
       mode: 'split',
-      disabled: hasCash,
-      reason: hasCash ? CASH_DISABLED_REASON : null,
+      disabled: true,
+      reason: SPLIT_DISABLED_REASON,
     },
     {
       mode: 'manual',
@@ -34,7 +45,10 @@ export function availableModes(hasCash: boolean): { mode: BasisMode; disabled: b
  *   trade of worthless bulk is legitimate).
  */
 export function canConfirmBasis(mode: BasisMode, hasCash: boolean, manualBasis: string): boolean {
-  if (mode === 'transfer' || mode === 'split') {
+  // Split is always disabled (see `SPLIT_DISABLED_REASON`), so it can never
+  // confirm — it should be unreachable via the UI, but this is the backstop.
+  if (mode === 'split') return false
+  if (mode === 'transfer') {
     return !hasCash
   }
   // mode === 'manual'

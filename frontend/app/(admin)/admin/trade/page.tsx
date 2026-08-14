@@ -197,15 +197,22 @@ export default function DealPage() {
   }
 
   /**
-   * Editing a staged outgoing value is local-only, like the old page's
-   * `outDrafts` map — `MoneyInput` owns its text so a half-typed "1," is not
-   * thrown away on the next render. Nothing is re-sent to the session until
-   * the parse succeeds; `=== null`, never falsiness, so a re-typed `0` (a
+   * Editing a staged outgoing value updates local state immediately for a
+   * responsive UI — `MoneyInput` owns its text so a half-typed "1," is not
+   * thrown away on the next render — AND patches the session, so Confirm
+   * sends the negotiated price rather than the picked item's original one
+   * (RFC 0011 T15 fix round 1: this used to be local-only, so a price
+   * negotiated down at the table was silently re-sent at the original
+   * figure on confirm). `=== null`, never falsiness, so a re-typed `0` (a
    * throw-in) is accepted.
    */
   const editOutgoingValue = (idx: number, _raw: string, parsed: number | null) => {
     if (parsed === null) return
     setOutgoing((prev) => prev.map((row, i) => (i === idx ? { ...row, price: parsed, agreedValue: parsed } : row)))
+    if (!sessionId) return
+    session.updateOutgoing(sessionId, idx, parsed).catch((err) => {
+      alert(err instanceof AdminApiError ? err.detail : 'Failed to update price')
+    })
   }
 
   const removeOutgoing = async (idx: number) => {

@@ -48,6 +48,13 @@ export interface DealSessionApi {
   addOutgoing(id: string, item: DealInventoryItem, value: number): Promise<void>
   removeIncoming(id: string, index: number): Promise<void>
   removeOutgoing(id: string, index: number): Promise<void>
+  /**
+   * Patch a staged outgoing leg's negotiated price to the session, so a
+   * price the operator edits on screen is the price Confirm actually sends
+   * — not just the price the row happened to start with (RFC 0011 T15 fix
+   * round 1).
+   */
+  updateOutgoing(id: string, index: number, value: number): Promise<void>
   setCash(id: string, components: CashComponent[]): Promise<void>
   confirm(id: string, meta: ConfirmMeta): Promise<ConfirmResult>
   supports: { incoming: boolean; outgoing: boolean; costBasisMode: boolean }
@@ -97,6 +104,9 @@ function buyApi(api: AdminApi): DealSessionApi {
       await api.del(`/purchases/${id}/items/${index}`)
     },
     async removeOutgoing() {
+      throw new Error('A buy session has no outgoing leg')
+    },
+    async updateOutgoing() {
       throw new Error('A buy session has no outgoing leg')
     },
     async setCash() {
@@ -152,6 +162,12 @@ function sellApi(api: AdminApi): DealSessionApi {
       await api.del(`/sales/${id}/items/${itemId}`)
       outgoingIds.set(id, ids.filter((_, i) => i !== index))
     },
+    async updateOutgoing(id, index, value) {
+      const ids = outgoingIds.get(id) ?? []
+      const itemId = ids[index]
+      if (!itemId) return
+      await api.patch(`/sales/${id}/items/${itemId}`, { agreed_price: value })
+    },
     async setCash() {
       // Same as buy — one payment method, carried through `confirm`.
     },
@@ -202,6 +218,12 @@ function tradeApi(api: AdminApi): DealSessionApi {
       if (!itemId) return
       await api.del(`/trades/${id}/outgoing/${itemId}`)
       outgoingIds.set(id, ids.filter((_, i) => i !== index))
+    },
+    async updateOutgoing(id, index, value) {
+      const ids = outgoingIds.get(id) ?? []
+      const itemId = ids[index]
+      if (!itemId) return
+      await api.patch(`/trades/${id}/outgoing/${itemId}`, { agreed_value: value })
     },
     async setCash(id, components) {
       await api.put(`/trades/${id}/cash`, { cash_components: components })

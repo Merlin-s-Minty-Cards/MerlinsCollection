@@ -11,19 +11,29 @@ import { describe, it, expect } from 'vitest'
 import { availableModes, canConfirmBasis, type BasisMode } from '../trade-basis'
 
 const CASH_TOOLTIP = 'Unavailable while the trade includes cash — use Manual.'
+const SPLIT_TOOLTIP = 'Split needs per-card values — use Transfer or Manual for now.'
 
 describe('availableModes', () => {
-  it('returns all three modes enabled when hasCash is false', () => {
+  it('enables transfer and manual, but split is always disabled, when hasCash is false', () => {
     const modes = availableModes(false)
     expect(modes).toHaveLength(3)
-    for (const m of modes) {
-      expect(m.disabled).toBe(false)
-      expect(m.reason).toBeNull()
-    }
+
+    const transfer = modes.find((m) => m.mode === 'transfer')!
+    expect(transfer.disabled).toBe(false)
+    expect(transfer.reason).toBeNull()
+
+    const split = modes.find((m) => m.mode === 'split')!
+    expect(split.disabled).toBe(true)
+    expect(split.reason).toBe(SPLIT_TOOLTIP)
+
+    const manual = modes.find((m) => m.mode === 'manual')!
+    expect(manual.disabled).toBe(false)
+    expect(manual.reason).toBeNull()
+
     expect(modes.map((m) => m.mode)).toEqual(['transfer', 'split', 'manual'])
   })
 
-  it('disables transfer and split with tooltip when hasCash is true', () => {
+  it('disables transfer with the cash tooltip, and split stays disabled with its own reason, when hasCash is true', () => {
     const modes = availableModes(true)
     expect(modes).toHaveLength(3)
 
@@ -33,7 +43,7 @@ describe('availableModes', () => {
 
     const split = modes.find((m) => m.mode === 'split')!
     expect(split.disabled).toBe(true)
-    expect(split.reason).toBe(CASH_TOOLTIP)
+    expect(split.reason).toBe(SPLIT_TOOLTIP)
 
     const manual = modes.find((m) => m.mode === 'manual')!
     expect(manual.disabled).toBe(false)
@@ -52,6 +62,10 @@ describe('canConfirmBasis', () => {
 
   it('split with cash returns false even with an amount', () => {
     expect(canConfirmBasis('split', true, '25')).toBe(false)
+  })
+
+  it('split without cash still returns false — split is always disabled', () => {
+    expect(canConfirmBasis('split', false, '')).toBe(false)
   })
 
   it('manual with cash but no amount returns false', () => {
@@ -74,9 +88,5 @@ describe('canConfirmBasis', () => {
 
   it('manual without cash and a valid amount returns true', () => {
     expect(canConfirmBasis('manual', false, '10.50')).toBe(true)
-  })
-
-  it('split without cash returns true', () => {
-    expect(canConfirmBasis('split', false, '')).toBe(true)
   })
 })
