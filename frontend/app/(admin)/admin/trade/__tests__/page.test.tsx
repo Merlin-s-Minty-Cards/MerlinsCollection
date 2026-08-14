@@ -242,4 +242,33 @@ describe('the unified deal page', () => {
       { agreed_value: 15 },
     )
   })
+
+  it('sends the selected payment method on Sell confirm, not a hardcoded cash default (Critical 2)', async () => {
+    const user = userEvent.setup({ delay: null })
+    mockSearchParams({ mode: 'sell' })
+    render(<DealPage />)
+    await addOneOutgoing(user, { price: '15.00' })
+
+    await user.selectOptions(screen.getByLabelText(/^payment method$/i), 'venmo')
+    await user.click(screen.getByRole('button', { name: /confirm sale/i }))
+    await user.click(screen.getByRole('button', { name: /execute sell/i }))
+
+    expect(apiPatch).toHaveBeenCalledWith(
+      '/sales/deal-1',
+      expect.objectContaining({ payment_method: 'venmo' }),
+    )
+  })
+
+  it('gates "+ Manual entry" out of Sell mode, where a sale always has an existing item (Important 5)', async () => {
+    mockSearchParams({ mode: 'sell' })
+    render(<DealPage />)
+    await screen.findByRole('heading', { name: /going out/i })
+    expect(screen.queryByRole('button', { name: /manual entry/i })).not.toBeInTheDocument()
+  })
+
+  it('offers "+ Manual entry" in Buy and Trade modes', async () => {
+    render(<DealPage />)
+    await screen.findByRole('heading', { name: /coming in/i })
+    expect(screen.getByRole('button', { name: /manual entry/i })).toBeInTheDocument()
+  })
 })

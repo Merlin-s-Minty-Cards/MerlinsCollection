@@ -1,8 +1,9 @@
 'use client'
 
+import { useState } from 'react'
 import { Banknote, Calendar, CreditCard, DollarSign, Plus, Smartphone, X } from 'lucide-react'
 import MoneyInput from '@/components/admin/shared/MoneyInput'
-import { formatMoney } from '@/lib/money'
+import { formatMoney, formatMoneyInput } from '@/lib/money'
 import { availableModes, canConfirmBasis, type BasisMode } from '@/lib/trade-basis'
 import type { CashComponent, DealMode } from '@/lib/deal-session'
 
@@ -42,6 +43,16 @@ export interface DealSummaryProps {
   onCounterpartyChange: (name: string) => void
   onConfirm: () => void
   confirmDisabled: boolean
+  /**
+   * Buy/Sell only (`!supportsCostBasisMode`) — the payment method the whole
+   * deal books under, distinct from the cash-component list above (trade's
+   * cash-difference tracking, not a single payment method). Without this the
+   * old `/admin/sell` page's method selector had no replacement, so every
+   * non-cash sale silently booked as `cash` (final-review Critical 2) — the
+   * server defaults `payment_method` to `"cash"` when nothing overrides it.
+   */
+  paymentMethod?: string
+  onPaymentMethodChange?: (method: string) => void
 }
 
 export default function DealSummary({
@@ -63,8 +74,20 @@ export default function DealSummary({
   onCounterpartyChange,
   onConfirm,
   confirmDisabled,
+  paymentMethod = 'cash',
+  onPaymentMethodChange,
 }: DealSummaryProps) {
   const hasCash = cashComponents.length > 0
+
+  // Same reasoning as `DealStagedColumn`'s `drafts` map: a controlled input
+  // whose `value` re-derives from the already-parsed number every render
+  // loses whatever the parser can't yet make sense of — typing "1.50" or
+  // "1,300" had the decimal point or comma vanish mid-keystroke, because the
+  // parent immediately reflowed the field back to the last successfully
+  // parsed integer (final-review Important 4). The raw typed string lives
+  // here until it parses; the parsed number is what actually reaches
+  // `onCashComponentsChange`.
+  const [amountDrafts, setAmountDrafts] = useState<Record<number, string>>({})
 
   const addCashComponent = () => {
     onCashComponentsChange([...cashComponents, { direction: 'they_pay', amount: 0, payment_method: 'cash' }])
@@ -118,8 +141,18 @@ export default function DealSummary({
                   <DollarSign size={10} className="absolute left-1.5 top-1/2 -translate-y-1/2 text-pine-500" />
                   <MoneyInput
                     label={`Cash amount ${idx + 1}`}
-                    value={comp.amount ? String(comp.amount) : ''}
-                    onChange={(raw, parsed) => updateCashComponent(idx, { amount: parsed ?? 0 })}
+                    value={amountDrafts[idx] ?? formatMoneyInput(comp.amount)}
+                    onChange={(raw, parsed) => {
+                      setAmountDrafts((d) => ({ ...d, [idx]: raw }))
+                      if (parsed !== null) updateCashComponent(idx, { amount: parsed })
+                    }}
+                    onBlur={() => {
+                      setAmountDrafts((d) => {
+                        const next = { ...d }
+                        delete next[idx]
+                        return next
+                      })
+                    }}
                     className="vault-field w-full pl-5 pr-1.5 py-1 rounded text-[10px] font-mono"
                     placeholder="0.00"
                   />
@@ -185,6 +218,24 @@ export default function DealSummary({
           <div className={`text-lg font-mono ${(profit ?? 0) >= 0 ? 'text-mint' : 'text-red-400'}`}>
             {profit === null ? '—' : `${profit >= 0 ? '+' : '-'}${formatMoney(Math.abs(profit))}`}
           </div>
+        </div>
+      )}
+
+      {!supportsCostBasisMode && onPaymentMethodChange && (
+        <div className="vault-panel rounded-xl p-3 space-y-2">
+          <label className="block">
+            <span className="text-[11px] text-pine-400 uppercase tracking-wider">Payment method</span>
+            <select
+              aria-label="Payment method"
+              value={paymentMethod}
+              onChange={(e) => onPaymentMethodChange(e.target.value)}
+              className="vault-field w-full mt-1 px-2.5 py-1.5 rounded-lg text-xs"
+            >
+              {PAYMENT_METHOD_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </label>
         </div>
       )}
 
