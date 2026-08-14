@@ -130,7 +130,7 @@ permanently floored. Everything on the queue track is downstream of it.
 | **T14** | Deal search + add-card form | **DONE** | `ccde40b` | RFC Part 2. `DealSearchPanel` (catalog via T11's `CardSearchPanel`, or inventory via `/inventory/search?status=available` — the inventory picker had no image at all before this), `IncomingCardForm` (catalog-pick-first, kind toggle raw/graded, condition and grade never both rendered per decision 15, cert-owned warning that never blocks Add, manual entry disclosure forced to raw with a stated reason), `DealCardRow` (the one row shape: image, name, price, zero hover-only information). `buildIncomingLeg` (`frontend/lib/trade-incoming-form.ts`) keeps the raw/graded branches strictly disjoint so a leg can never carry both a condition and a grade — T13 422s exactly that. **`IncomingLeg` also carries optional `set_name`/`card_number`, manual-entry-only** — `trades.py:451-452` already reads these keys and dropping them silently would lose what an operator typed for an unmatched card. **Fix round 1 caught in review:** language values were lowercase `en`/`ja`; `InventoryItem.language` is a case-sensitive `EN`/`JP` StrEnum — fixed, with a test now pinning the emitted casing. 30 tests pass; lint clean. **T15 imports `IncomingLeg` from `frontend/lib/trade-incoming-form.ts`** with exactly the keys above; `onPickInventory` is typed against a local `DealInventoryItem` (no canonical `InventoryItem` type exists frontend-side) — widen it if T15 needs fields it omits. |
 | **T15** | Unified deal page, three modes | **DONE** | `1b1f1ac` | RFC Part 2. `frontend/app/(admin)/admin/trade/page.tsx` rewritten as `DealPage`, driven entirely by `lib/deal-session.ts` (`sessionApiFor(mode, api)` — the ONE place that picks `/purchases`, `/sales` or `/trades`). Mode read from `?mode=`, default `trade`, `router.replace` on toggle; switching mode with a non-empty session shows a discard `ConfirmDialog`, empty switches silently. Hidden columns are not rendered (`session.supports.incoming/outgoing` gates JSX, not CSS). New `DealStagedColumn` (Coming In / Going Out, reused twice) and `DealSummary` (cash components, balance hero — `font-mono`, net not summed-magnitude — profit, basis mode, date, Confirm) extracted to keep the page file to composition/state (435 lines). Customer view removes cost basis and profit from the DOM (conditional render, not `display:none`). **Fix round 1, both addressed by task review before this line was written DONE:** (1) editing a staged Going Out value was local-only — `DealSessionApi` gained `updateOutgoing(id, index, value)`, PATCHing the pre-existing `/sales/{id}/items/{item_id}` and `/trades/{id}/outgoing/{item_id}` routes via the same index→item_id map `removeOutgoing` uses, wired into `editOutgoingValue` on blur; (2) "Split" cost-basis mode computed identically to Transfer with no real per-card split data available (`IncomingLeg` carries no `market_value`) — now **permanently disabled** with a visible one-line reason (`SPLIT_DISABLED_REASON`, `trade-basis.ts`) rather than silently misleading; re-enabling it needs `IncomingLeg` widened, out of scope here. 30 tests pass (`page.test.tsx`, `deal-session.test.ts`, `trade-basis.test.ts`); lint and `tsc --noEmit` clean. **T13's graded-incoming path was verified at the unit level only** (`deal-session.test.ts`'s "sends graded incoming fields through to the trade API") — no live browser walkthrough was done (no running backend in this sandbox); worth a manual check before/at T12. `/admin/buy` and `/admin/sell` are untouched — deliberately, so this page could be reviewed independently; T16 retires them next. |
 | **T16** | Retire `/admin/buy` and `/admin/sell` | **DONE** | `57637f9` | RFC Part 2. Deleted `frontend/app/(admin)/admin/buy/` and `.../sell/` (page + tests). `AdminShell.tsx`'s "At the show" group drops from five entries to three, `/admin/sell`+`/admin/buy`+`/admin/trade` collapsed into one `{ href: '/admin/trade', label: 'Buy / Sell / Trade' }`; `mobileItems` (still an explicit array, never a `.slice()`) drops to four, with the merged entry labeled "Deal" — the sidebar/mobile label divergence is intentional and commented in the source. Dashboard's first two quick actions now point at `/admin/trade?mode=sell` and `?mode=buy`; the third (`New Trade`) already pointed bare at `/admin/trade` and needed no change; Vault untouched. Added `role="group"`/`aria-label` to each sidebar group's item container and `aria-label="Mobile navigation"` to the mobile `<nav>` so the RED tests could address them by role. `NAV_GROUPS_KEY` was NOT bumped — group ids (`show`/`office`/`data`) are unchanged, only one group's contents. Sweep (`grep -rn "admin/buy\|admin/sell" frontend/ --include=*.tsx --include=*.ts`) found no live `Link`/`href` reference outside `.next/` build output (regenerated) and this task's own comments/tests — no `CardDetailModal` or Prep Queue hit existed to begin with. 42/42 tests pass across both files (37 pre-existing + 5 new from the task doc's RED section); `npm run build` exits 0 with `/admin/buy` and `/admin/sell` absent from the emitted route table; lint clean (one pre-existing unrelated `<img>` warning in `CardDetailModal.tsx`). |
-| T12 | Docs + verification | TODO | — | **Runs LAST, after T16.** |
+| T12 | Docs + verification | **DONE** | `feecce8` | Eight CLAUDE.md edits, `follow-ups.md` updated, full suite green (backend 1832, frontend 915, MCP 98 — 2845 total, zero failures), build exits 0, both linters clean. Nine manual checks listed below as outstanding (need a browser + live data, neither available in this sandbox). |
 
 ## Decisions
 
@@ -183,4 +183,108 @@ Nothing. Every decision this RFC needed was taken on 2026-08-13.
 
 See [`follow-ups.md`](follow-ups.md). Two are already known and were deferred
 deliberately in the RFC's Open Questions: **bulk park** and **notifying on a new
-candidate**.
+candidate**. Three more were found during T15/T16: Split cost-basis is
+permanently disabled rather than implemented, T13's graded-incoming path was
+verified at the unit level only (no live backend in this sandbox), and RFC
+0008/0010's own follow-ups files still name the now-deleted buy/sell page
+files — left as accurate history.
+
+## T12 — Full-suite verification (2026-08-14, commit `feecce8`)
+
+All four suites and both linters, run from the repo root against
+`feecce8db98c15bc267810e2415e01137587c804`. Confirmed the right package loaded
+first: `./.venv/Scripts/python.exe -c "import merlins_collection,os;print(...)"` →
+`backend/src/merlins_collection` (not a shadowing sibling checkout).
+
+**Backend** — `./.venv/Scripts/python.exe -m pytest backend/tests -q --tb=short`:
+```
+1832 passed, 2 warnings in 165.05s (0:02:45)
+```
+(Two warnings are pre-existing framework deprecation notices — `httpx`/starlette
+and `HTTP_422_UNPROCESSABLE_ENTITY` — unrelated to this RFC.)
+
+**Frontend** — `npm test --workspace=frontend`:
+```
+Test Files  91 passed (91)
+     Tests  915 passed (915)
+  Duration  33.07s
+```
+`ChatPanel.test.tsx`'s documented load-dependent flakiness (CLAUDE.md) did not
+manifest — it passed cleanly in this run.
+
+**MCP server** — `npm test --workspace=mcp-server`:
+```
+Test Files  7 passed (7)
+     Tests  98 passed (98)
+  Duration  933ms
+```
+
+**Production build** — `cd frontend && npm run build`:
+```
+✓ Compiled successfully in 8.7s
+✓ Generating static pages (24/24)
+```
+Exit 0. Route table confirms `/admin/buy` and `/admin/sell` are **absent**;
+`/admin/trade` (10.9 kB) and `/admin/unmatched` (7.17 kB) are present. One
+pre-existing lint warning survives the build (`CardDetailModal.tsx:484`,
+`<img>` vs `next/image`) — unrelated to this RFC, not introduced by it.
+
+**Linters:**
+```
+$ ./.venv/Scripts/python.exe -m ruff check backend/src
+All checks passed!
+
+$ npm run lint --workspace=frontend
+./components/admin/shared/CardDetailModal.tsx
+484:15  Warning: Using `<img>` could result in slower LCP...
+```
+Both clean (the one frontend warning is the same pre-existing, unrelated one
+noted above).
+
+**Total: 2845 tests passed across all three suites, zero failures, build green,
+both linters clean.**
+
+## Part 3 — Manual checks only the owner can do
+
+Not run in this sandbox — no browser, no live AWS/backend, no real inventory
+data. Outstanding for the owner:
+
+1. `/admin/inventory` — turn on Notes, Grade and Acquired; confirm each header
+   sorts both ways with blanks at the bottom, and each filter narrows the list
+   and disappears when its column is off.
+2. Triage → Unmatched — park a card that already has no link; unlink a
+   wrongly-matched one and read the confirm copy, checking it names the price
+   it is about to clear.
+3. `/admin/unmatched` — pair a card from a suggestion; confirm it leaves the
+   queue and its value becomes sync-maintained. Send another back to Triage.
+4. Dashboard — the "Ready to pair" card shows the right count and links
+   through.
+5. `/admin/trade?mode=buy` (the task doc's original text names the now-deleted
+   `/admin/buy` — this is its replacement) — manual entry is clickable before
+   typing anything; search by card number alone finds a card.
+6. Run "check for new sets" on `/admin/market` once, so `first_seen_at` starts
+   being populated. Until it runs, the dashboard's new-card count is
+   legitimately `0`.
+7. `/admin/trade` in all three modes — stage a card in each, confirm image +
+   name + price show on the staged row (not on hover), check the balance, and
+   commit one. **Include an edited Going Out price** — confirm the committed
+   amount matches the edited figure, not the original (this is the fix-round-1
+   correction from T15's review; worth a live confirmation).
+8. A graded card in through a trade — add it, commit, then confirm on
+   `/admin/slabs` that it arrived as a slab with its cert, company and grade
+   intact. **This is T13's core path and has only been unit-tested so far**
+   (follow-ups.md #12) — the highest-value manual check on this list.
+9. Every nav route resolves, desktop and mobile width, and `/admin/buy` and
+   `/admin/sell` are gone (already confirmed by the build's route table above;
+   this is the visual/interactive confirmation).
+
+## Final state
+
+**T1–T11, T13–T16 all DONE.** T12 (this task) closes the RFC: CLAUDE.md carries
+all eight documentation edits (see commit `feecce8`), the full verification
+suite is green end to end, and the nine manual checks above are the only
+remaining work — all of them need a browser and real data neither of which
+exist in this sandbox.
+
+**Not merged, not pushed** — that is the owner's call, per every task doc in
+this RFC.
