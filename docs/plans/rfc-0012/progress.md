@@ -2,7 +2,7 @@
 
 | Task | Status | Notes |
 |---|---|---|
-| A — Layout width | Not started | |
+| A — Layout width | Done | Review clean. Manual visual check not performed (no dev server); pre-existing `npx vitest run` breakage in this checkout noted (`npm test --workspace=frontend` works and was used). |
 | B1 — trades.py backend | Not started | |
 | B2 — IncomingCardForm/trade page frontend | Not started | |
 | C1 — CosignorPicker + useCosigners | Not started | |
