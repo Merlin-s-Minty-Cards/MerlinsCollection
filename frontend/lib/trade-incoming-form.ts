@@ -74,6 +74,18 @@ export interface IncomingLeg {
   grade_label?: string
   language: string
   location: string
+  /**
+   * The catalog's Near Mint market figure for the picked card, if there is
+   * one — `POST /admin/trades/{id}/incoming` (and `/purchases/{id}/items`)
+   * both read this field, and it was collected on the picker but never sent
+   * (final-review Important 7), which is what left Split with nothing to
+   * split against. `undefined` for a manual entry (no catalog card) or a
+   * catalog card with no price yet (`detail: "brief"`, or `full` with no
+   * band — see CLAUDE.md's price-rendering rules; both are absent, not 0).
+   */
+  market_value?: number
+  /** The card's small image, when a catalog card supplied one. `undefined` for manual. */
+  image_url?: string
 }
 
 /** What the form holds — every money and grade field still raw text. */
@@ -93,6 +105,9 @@ export interface IncomingLegDraft {
   grade_label: string
   language: string
   location: string
+  /** Already through `parseMoney` by the caller, or `null` when absent. */
+  market_value?: number | null
+  image_url?: string | null
 }
 
 /**
@@ -120,6 +135,10 @@ export function buildIncomingLeg(draft: IncomingLegDraft): IncomingLeg {
     ...(draft.card_id === null && draft.card_number.trim()
       ? { card_number: draft.card_number.trim() }
       : {}),
+    ...(draft.market_value !== undefined && draft.market_value !== null
+      ? { market_value: draft.market_value }
+      : {}),
+    ...(draft.image_url ? { image_url: draft.image_url } : {}),
   }
 
   if (draft.kind === 'raw') {

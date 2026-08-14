@@ -8,7 +8,7 @@
  * @vitest-environment node
  */
 import { describe, it, expect } from 'vitest'
-import { buildIncomingLegBody } from '../trade-incoming-form'
+import { buildIncomingLegBody, buildIncomingLeg, type IncomingLegDraft } from '../trade-incoming-form'
 
 describe('buildIncomingLegBody', () => {
   const baseForm = {
@@ -85,5 +85,44 @@ describe('buildIncomingLegBody money parsing', () => {
       null,
     )
     expect(body.market_value).toBeUndefined()
+  })
+})
+
+// final-review Important 7 — market_value and image_url were collected on
+// the picker but never reached `POST /admin/trades/{id}/incoming`, which
+// reads both. buildIncomingLeg is what the live form actually calls.
+describe('buildIncomingLeg market_value/image_url (Important 7)', () => {
+  const baseDraft: IncomingLegDraft = {
+    card_id: 'en:base1-4',
+    name: 'Charizard',
+    agreed_value: 400,
+    kind: 'raw',
+    set_name: '',
+    card_number: '',
+    condition: 'NM',
+    finish: 'normal',
+    company: 'PSA',
+    grade: '',
+    cert_number: '',
+    grade_label: '',
+    language: 'EN',
+    location: 'glass',
+  }
+
+  it('carries market_value and image_url through when the draft has them', () => {
+    const leg = buildIncomingLeg({ ...baseDraft, market_value: 350, image_url: 'https://i/1.png' })
+    expect(leg.market_value).toBe(350)
+    expect(leg.image_url).toBe('https://i/1.png')
+  })
+
+  it('omits market_value and image_url when the draft is a manual entry with neither', () => {
+    const leg = buildIncomingLeg({ ...baseDraft, card_id: null, market_value: null, image_url: undefined })
+    expect(leg).not.toHaveProperty('market_value')
+    expect(leg).not.toHaveProperty('image_url')
+  })
+
+  it('a zero market_value is sent, not treated as absent', () => {
+    const leg = buildIncomingLeg({ ...baseDraft, market_value: 0 })
+    expect(leg.market_value).toBe(0)
   })
 })
