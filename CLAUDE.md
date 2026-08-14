@@ -62,14 +62,13 @@ would break every bookmark to fix a URL nobody types.
 |---|---|---|---|
 | — | `/admin` | Dashboard | Quick actions, needs-attention queues, position, today, coverage |
 | **At the show** | `/admin/inventory` | Inventory | Inventory CRUD, granular filters, ownership column |
-| | `/admin/sell` | Sell | Sale flow, large image preview |
-| | `/admin/buy` | Buy | Purchase flow, catalog-linked autocomplete, manual-entry mode |
-| | `/admin/trade` | Trade | Trade flow — Coming In / Going Out, basis modes (see below) |
+| | `/admin/trade` | **Buy / Sell / Trade** | One surface, three modes via `?mode=`. See "Buy / Sell / Trade" below |
 | | `/admin/slabs` | Slabs | Graded intake (cert → staged batch → commit → priced) + the slab list. See "Slabs" below |
 | **Back office** | `/admin/outgoing` | **Prep Queue** | See "Prep Queue" below — route path is unchanged, the UI/purpose is not |
 | | `/admin/show-prep` | Show Prep | Bulk-move to a show location, inline sticker/TCG-link editing, location filter + sort |
 | | `/admin/shows` | Shows | Show CRUD — see "Shows" below |
 | | `/admin/triage` | Triage | See "Triage" below — the `needs_review` queue + the four repair tools |
+| | `/admin/unmatched` | Unmatched | Cards TCGdex does not carry — parked from Triage, paired when the catalog catches up. See "Unmatched" below |
 | | `/admin/market` | Market | Prices, sync trigger, coverage/confidence, "check for new sets" |
 | | `/admin/vault` | Vault | Sortable inventory table, ownership column |
 | **Data** | `/admin/analytics` | Show Analytics | Tabbed Daily / Shows dashboard (see below) |
@@ -115,6 +114,30 @@ backend's sort fields, because `_sort_admin_results` splits on the LAST
 underscore — do not rename a `Column.key` on this page without re-checking that
 split.
 
+**Every inventory column is sortable and every column has its own filter**
+(RFC 0011). Both are registry-driven: `SORT_FIELDS`
+(`services/inventory_sort.py`) and `FILTERABLE_FIELDS`
+(`services/inventory_filters.py`) on the backend, `INVENTORY_COLUMNS` /
+`INVENTORY_FILTERS` on the frontend. Totality is enforced by tests on both
+sides, so a new model field fails a test rather than silently arriving
+without a sort or a filter.
+
+**Missing values sort LAST in both directions**, for every type — not just
+money. A column where the blanks bunch at whichever end you are not looking
+at is a column people stop clicking.
+
+**Condition sorts by rank, not alphabetically:** NM > LP+ > LP > LP- > MP >
+HP > DMG. Alphabetical sorting made `LP+` and `LP-` identical, which is the
+exact distinction RFC 0008 T2 stored in two fields.
+
+**An unknown `sort` field or `filter` triple is a 422, never a silent
+no-op** — same rule as `triage_reason`. Two spellings of a filter exist (the
+legacy named params and the generic `filter=`), but **one evaluator**: the
+named params build the same `FieldFilter` objects. Four of them stay
+hand-written because they do more than a field comparison — `name` searches
+notes, `condition` splits `LP+`, `min_price` falls back to cost, and the
+catalog filters join the catalog.
+
 **Triage** (`/admin/triage`) — the one place to correct data the automation got
 wrong. It **is** the `needs_review` queue, not a second flag: "Send to Triage"
 sets `needs_review = True`. Two things were added to that bare boolean —
@@ -154,11 +177,14 @@ exclusion is a money rule — the importer stored `Condition.NM`, the most
 expensive tier, for every blank condition, so bulk-clearing those would ratify an
 inflated customer price on cards nobody has graded. A human's free-text flag, and
 a bare flag with no reason at all, are never touched. "Send to Triage" lives in `CardDetailModal`, so it reaches the
-six pages that mount it (inventory, outgoing, sell, show-prep, vault, triage).
+five pages that mount it (inventory, outgoing, show-prep, vault, triage) —
+the old separate `/admin/sell` mounted it too, but that page was deleted in
+RFC 0011 T16 and the unified `/admin/trade` does not mount it.
 The row-level quick action with undo (`TriageRowAction`) is on **Prep Queue
-only**. Buy, Trade, Market, History, Cosigners and `/admin/card/[id]` do not
-mount the modal and have **no** send-to-triage path at all — the "every tab"
-goal is not met yet; see `docs/plans/rfc-0008/follow-ups.md` (T5 row 1).
+only**. `/admin/trade` (all three modes), Market, History, Cosigners and
+`/admin/card/[id]` do not mount the modal and have **no** send-to-triage path
+at all — the "every tab" goal is not met yet; see
+`docs/plans/rfc-0008/follow-ups.md` (T5 row 1).
 
 `display_name_override` is editable **only from the Triage page**, not from
 `CardDetailModal` — the modal's "Display Name" row still edits `display_name`,
@@ -169,6 +195,35 @@ item (follow-ups.md, T10 row 3).
 writes `display_name_override` and **never** `card_id`. Re-pointing a card is a
 separate, confirmed action with a before/after diff and warnings for trade
 lineage and cross-language links.
+
+**Unmatched** (`/admin/unmatched`) — the queue for cards the catalog does not
+have. RFC 0011. It exists because **`missing_card_id` is a DERIVED triage
+reason**, so before this an unmatchable card sat in Triage forever and the
+queue that is meant to reach zero had a floor it could never get under.
+
+**`no_catalog_match` is the stored fact, and `services/triage.is_missing_card_id`
+is the only place that reads it.** The list and the sidebar badge both route
+through that one function; adding the check anywhere else is how they start
+disagreeing.
+
+**The invariant: `no_catalog_match=True` implies `card_id is None`**, enforced
+by a model validator. Setting it on a linked item is a 422; assigning a
+`card_id` clears it automatically, because requiring a second write to leave a
+queue is how rows get stranded in one.
+
+**Nothing was backfilled and nothing auto-migrates** — owner requirement,
+2026-08-13: *"all cards that go there should only be moved under admin
+supervision."* There is a permanent test asserting the queue is empty on an
+untouched table. Do not write a migration for this later.
+
+**Unlinking clears `current_market_value`.** The card was pointed at a
+close-but-wrong promo, so the figure it inherited is that promo's price and no
+sync will ever correct it once the link is gone. A parked card is hand-valued
+and carries `HandValuedBadge`.
+
+A parked item that is **also** flagged or unnamed stays in Triage with its
+remaining chips. Parking answers one question; those are different, real
+errors.
 
 **Slabs** (`/admin/slabs`, sidebar position: **last in "At the show", after
 Trade**) — graded intake and the slab list, from RFC 0009. Intake is one cert
@@ -223,6 +278,36 @@ background. **Never ship an admin control without `vault-field`.**
 Two gaps remain live and deliberate — **no per-row editing in the staging table**
 (so its commit gating is unbuilt on purpose) and **no pin control**. Full list:
 `docs/plans/rfc-0009/follow-ups.md`.
+
+**Buy / Sell / Trade** (`/admin/trade?mode=buy|sell|trade`) — one surface,
+three modes. RFC 0011 Part 2. `/admin/buy` and `/admin/sell` were **removed**,
+not redirected (owner decision 10). That departs from the `/admin/outgoing`
+precedent recorded above, and the distinction is real: that precedent covers
+*renaming a page that still exists*, while these two genuinely stopped
+existing.
+
+**`mode` lives in the query string**, which is what lets one route serve the
+dashboard's three quick actions and keeps the toggle bookmarkable.
+
+**`lib/deal-session.ts` is the ONLY place that knows which API a mode
+drives.** `purchases.py`, `sales.py` and `trades.py` stay separate (decision
+16) because they are the highest-risk money paths in the repo. A
+`if (mode === 'buy')` at a call site is three code paths coming back in
+disguise.
+
+**Switching mode with a non-empty session confirms first.** A session
+belongs to one API and there is no migration between them.
+
+**A slab can now come IN through a trade.** Trading one OUT always worked —
+outgoing legs reference an existing `item_id` and never inspect `kind`.
+Incoming was hardcoded to `kind: "raw"`, so a PSA 10 arrived as a raw NM card
+with its cert gone. A graded incoming leg **requires a `card_id`**: graded
+pricing joins on `(card_id, company, grade)`, so an unlinked slab is
+unpriceable by construction. Consequence: **manual entry can only ever be
+raw.**
+
+**Condition and grade are never rendered together.** They are alternatives,
+and the backend 422s a raw leg carrying graded fields.
 
 **Shows** (`/admin/shows`) — CRUD for show/event days. Note this is a
 *different page* from Show Prep (`/admin/show-prep`, which moves inventory into
@@ -517,13 +602,24 @@ A staged row is not a receipt; it is a thing still being checked.
 `GET /admin/market/search` returns them via `model_dump`. A picker without art or
 a price is not missing data; it is discarding data it was handed.
 
-**`/admin/buy`'s catalog dropdown is the reference row**
-(`frontend/app/(admin)/admin/buy/page.tsx:418-440`): `CardImage size="sm"` beside
-a two-line block — name on line 1, `set · #number · rarity` on line 2, with
-`min-w-0 flex-1` + `truncate` so a long name shrinks instead of shoving the image.
-Use the shared `CardPickerRow` component; three of the five pickers were built
-from this pattern and dropped the image on the way, which is why this is a
-component and a rule rather than a habit.
+**`CardPickerRow` is the reference row**: `CardImage size="sm"` beside a
+two-line block — name on line 1, `set · #number · rarity` on line 2, with
+`min-w-0 flex-1` + `truncate` so a long name shrinks instead of shoving the
+image. Three of the five original pickers were built from this pattern and
+dropped the image on the way, which is why this is a component and a rule
+rather than a habit. (This used to point at `/admin/buy`'s inline dropdown —
+that page was deleted in RFC 0011 T16; `CardPickerRow` is now the only copy
+of the pattern.)
+
+**`CardSearchPanel` is the one card search** — name + card number + set
+combobox, adopted by Slabs intake, Triage re-point, Market and Unmatched, and
+**composed** by the deal page's `DealSearchPanel` rather than duplicated.
+`GET /admin/market/search` always accepted all three fields; the pickers just
+never sent them. **Manual entry is a permanent control**, not something that
+appears after a failed search — the owner's report was finding a card that
+exists whose catalog row is the wrong printing, at which point a gated button
+is unreachable. It is offered only where creating an off-catalog item is
+meaningful: the deal page (Buy/Trade modes) and Slabs.
 
 **Price rendering — the honest cases are the ones that get this wrong:**
 
@@ -561,6 +657,12 @@ misrepresents what the operator is comparing against; a card-less or failed id
 renders the **placeholder**, never a collapsed row, because rows that change height
 as art loads make the list jump under the cursor mid-click. Speed is the point:
 keep the debounce, keep the batching, never fire a request per row.
+
+**The three fields are required wherever a card appears, not only in
+pickers** — search results *and* staged/selected rows. **No hover may carry
+information.** A hover needs a mouse, shows one card at a time, shows nothing
+to someone reading the list, and vanishes. The Sell page's `onMouseEnter`
+preview panel was deleted rather than restyled (RFC 0011 §J).
 
 **Check this rule before writing any card-picking UI, and check it in review.**
 
@@ -723,6 +825,20 @@ cd backend
 Until it has run, `GET /admin/catalog/sets` honestly returns `[]` and the Set
 dropdown is empty. This is the one place a full catalog scan is acceptable —
 offline, once, from a CLI; never on a request path.
+
+**`CatalogCard.first_seen_at` answers "when did this row appear";
+`last_synced_at` does not** — it is bumped by any write, so a price refresh
+re-stamps a 2024 row. `None` means **predates the field**, not "new", and
+every reader counts only non-null values. It is written with a conditional
+`attribute_not_exists` update, **never in the item body**, because a full
+reseed whole-item `put_item`s every row and would otherwise reset all 31,603
+of them.
+
+**`sync_new_sets` now always walks the brief card list** for both languages,
+instead of only when a set is entirely absent. That early-out is why a promo
+catalogued into a set we already hold was invisible. The extra walk is the
+accepted cost; **restoring the early-out will look like an optimization and
+is the bug.**
 
 # Test Commands
 
