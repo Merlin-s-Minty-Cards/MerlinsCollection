@@ -1543,9 +1543,11 @@ class TestGradedIncoming:
         assert resp.status_code == 422
         assert "cert_number" in resp.json()["detail"]
 
-    def test_a_graded_leg_without_a_card_id_is_a_422(self, admin_client):
-        """Decision 14. Graded pricing joins on (card_id, company, grade), so an
-        unlinked slab is unpriceable by construction."""
+    def test_a_graded_leg_without_a_card_id_is_accepted(self, admin_client):
+        """RFC 0012: a graded incoming leg no longer requires a catalog card_id
+        (reverses Decision 14) — manual entry is now identical to how
+        /admin/slabs intake has always worked. The leg is accepted with
+        card_id: null."""
         client, _, token = admin_client
         trade_id = _start_trade(client, token)
 
@@ -1554,8 +1556,51 @@ class TestGradedIncoming:
                                  "kind": "graded", "company": "PSA", "grade": 10,
                                  "cert_number": "1"})
 
-        assert resp.status_code == 422
-        assert "catalog card" in resp.json()["detail"]
+        assert resp.status_code == 200
+        legs = resp.json()["incoming_legs"]
+        assert legs[-1]["card_id"] is None
+        assert legs[-1]["kind"] == "graded"
+        assert legs[-1]["company"] == "PSA"
+
+    def test_a_manually_entered_graded_item_self_routes_to_triage(self, admin_client):
+        """RFC 0012: no new triage-routing code exists for this — it relies
+        entirely on services/triage.py's is_missing_card_id(), which already
+        treats any card_id-less item (raw or graded) as needing Triage. This
+        test proves that reliance is correct for a graded item created via
+        this specific endpoint, not just in unit-tested isolation."""
+        client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="our-1"))
+
+        trade_id = _start_trade(client, token)
+        client.patch(f"/admin/trades/{trade_id}", json={
+            "basis_mode": "manual", "manual_basis": "20.00",
+        }, headers=_auth(token))
+        client.post(f"/admin/trades/{trade_id}/outgoing", json={
+            "item_id": "our-1", "agreed_value": "50.00",
+        }, headers=_auth(token))
+        client.post(f"/admin/trades/{trade_id}/incoming", headers=_auth(token), json={
+            "name": "Mystery Charizard", "agreed_value": "400.00",
+            "kind": "graded", "company": "PSA", "grade": 10, "cert_number": "99",
+        })
+        client.put(f"/admin/trades/{trade_id}/cash", json={
+            "direction": "they_pay", "amount": "0",
+        }, headers=_auth(token))
+
+        confirm = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
+        assert confirm.status_code == 200
+
+        new_items = [i for i in repo.list_inventory() if i.item_id != "our-1"]
+        assert len(new_items) == 1
+        created = new_items[0]
+        assert created.card_id is None
+
+        search = client.get("/admin/inventory/search", params={"triage": "true"},
+                            headers=_auth(token))
+        assert search.status_code == 200
+        rows = search.json()["items"]
+        matching = [r for r in rows if r["item_id"] == created.item_id]
+        assert len(matching) == 1
+        assert "missing_card_id" in matching[0]["triage_reasons"]
 
     def test_a_raw_leg_carrying_graded_fields_is_a_422(self, admin_client):
         """Silently dropping them is the defect this task fixes, one layer up."""

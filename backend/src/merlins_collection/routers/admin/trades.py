@@ -427,14 +427,11 @@ def add_incoming_leg(
                 status_code=422,
                 detail=f"A graded incoming leg needs {', '.join(missing)}.",
             )
-        # Decision 14: a graded leg is ALWAYS a catalog pick. Graded pricing joins on
-        # (card_id, company, grade), so a slab with no card_id is unpriceable by
-        # construction (RFC 0009) -- not a state to create by accident from a trade.
-        if not body.get("card_id"):
-            raise HTTPException(
-                status_code=422,
-                detail="A graded incoming leg must be linked to a catalog card.",
-            )
+        # RFC 0012: card_id is no longer required for a graded leg. A graded
+        # item with no card_id is unpriceable by construction (same state a
+        # JP slab is already in, see services/slab/pricing.py) and self-routes
+        # to Triage via services/triage.py's is_missing_card_id — no routing
+        # code needed here.
     else:
         present = [f for f in graded_fields if body.get(f) not in (None, "")]
         if present:
