@@ -102,7 +102,7 @@ function buyApi(api: AdminApi): DealSessionApi {
         condition: leg.kind === 'raw' ? (leg.condition ?? 'NM') : null,
         condition_modifier: null,
         buy_price: leg.agreed_value,
-        market_value: null,
+        market_value: leg.market_value ?? null,
         set_name: leg.set_name ?? null,
         location: leg.location,
         number: leg.card_number ?? null,

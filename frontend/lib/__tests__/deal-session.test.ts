@@ -50,6 +50,29 @@ describe('sessionApiFor', () => {
       expect.objectContaining({ kind: 'graded', cert_number: '12345678' }))
   })
 
+  it('sends the picked card market_value through on a buy incoming leg (final-review Important 7)', async () => {
+    // purchases.py reads market_value into market_value_at_purchase and
+    // current_market_value — dropping it left every Buy-mode item with no
+    // stored market figure even though the picker supplied one.
+    vi.mocked(api.post).mockResolvedValue({})
+    await sessionApiFor('buy', api).addIncoming('b1', {
+      card_id: 'en:base1-4', name: 'Charizard', agreed_value: 40,
+      kind: 'raw', condition: 'NM', market_value: 120, language: 'EN', location: 'glass',
+    })
+    expect(api.post).toHaveBeenCalledWith('/purchases/b1/items',
+      expect.objectContaining({ market_value: 120 }))
+  })
+
+  it('sends market_value: null on a buy incoming leg with no picked-card figure', async () => {
+    vi.mocked(api.post).mockResolvedValue({})
+    await sessionApiFor('buy', api).addIncoming('b1', {
+      card_id: null, name: 'Manual entry', agreed_value: 5,
+      kind: 'raw', condition: 'NM', language: 'EN', location: 'glass',
+    })
+    expect(api.post).toHaveBeenCalledWith('/purchases/b1/items',
+      expect.objectContaining({ market_value: null }))
+  })
+
   it('patches a staged sale item price through updateOutgoing, keyed by item_id', async () => {
     vi.mocked(api.post).mockResolvedValue({ sell_id: 's1' })
     const sell = sessionApiFor('sell', api)
