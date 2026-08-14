@@ -46,9 +46,14 @@ const defaults = {
     date: '2026-08-07', total_sold: '420.00', items_sold_count: 3,
     net_sales: '420.00', total_bought: '0', items_bought_count: 0, trades_count: 0,
   },
+  newCards: { count: 0, since: '2026-07-14', cards: [] },
+  suggestions: { items: [], items_with_candidates: 0 },
 }
 
-function mockBackend(over: Partial<typeof defaults> = {}) {
+function mockBackend(
+  over: Partial<typeof defaults> = {},
+  fails: { newCards?: boolean; suggestions?: boolean } = {},
+) {
   const d = { ...defaults, ...over }
   getMock.mockImplementation((path: string, params?: Record<string, unknown>) => {
     if (path === '/inventory/search') {
@@ -61,6 +66,14 @@ function mockBackend(over: Partial<typeof defaults> = {}) {
     if (path === '/triage/counts') return Promise.resolve(d.triage)
     if (path === '/market/coverage') return Promise.resolve(d.coverage)
     if (path === '/analytics/daily') return Promise.resolve(d.daily)
+    if (path === '/catalog/new-cards') {
+      return fails.newCards ? Promise.reject(new Error('boom')) : Promise.resolve(d.newCards)
+    }
+    if (path === '/unmatched/suggestions') {
+      return fails.suggestions
+        ? Promise.reject(new Error('boom'))
+        : Promise.resolve(d.suggestions)
+    }
     return Promise.resolve({})
   })
 }
@@ -210,5 +223,81 @@ describe("Dashboard today's date", () => {
       expect(getMock).toHaveBeenCalledWith('/analytics/daily', { date: '2026-08-10' }),
     )
     expect(getMock).not.toHaveBeenCalledWith('/analytics/daily', { date: '2026-08-11' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// RFC 0011 T10 — "New from TCGdex" widget
+// ---------------------------------------------------------------------------
+
+describe('New from TCGdex', () => {
+  it('counts pairable cards, not new catalog cards', async () => {
+    // The number that changes what the admin does next is M, not N.
+    mockBackend({
+      newCards: { count: 47, since: '2026-07-14', cards: [] },
+      suggestions: { items: [], items_with_candidates: 3 },
+    })
+    render(<AdminDashboardPage />)
+
+    const card = await screen.findByTestId('action-pairable')
+    expect(within(card).getByText('3')).toBeInTheDocument()
+    expect(within(card).getByText(/47 new catalog cards in 30 days/)).toBeInTheDocument()
+  })
+
+  it('links to the unmatched queue', async () => {
+    mockBackend({ suggestions: { items: [], items_with_candidates: 1 } })
+    render(<AdminDashboardPage />)
+    expect((await screen.findByTestId('action-pairable')).closest('a'))
+      .toHaveAttribute('href', '/admin/unmatched')
+  })
+
+  it('survives a dead endpoint without blanking the dashboard', async () => {
+    // soft(): one broken endpoint costs one panel, not the page.
+    mockBackend({}, { newCards: true, suggestions: true })
+    render(<AdminDashboardPage />)
+
+    expect(await screen.findByTestId('stat-on-hand')).toBeInTheDocument()
+    expect(within(await screen.findByTestId('action-pairable')).getByText('—')).toBeInTheDocument()
+  })
+
+  it('does not let new catalog cards suppress the all-clear panel', async () => {
+    // News is not work. A week where TCGdex published is not a week with a chore.
+    mockBackend({
+      triage: { total: 0, reasons: {} },
+      prepQueue: { items: [], total: 0 },
+      mispriced: { total_flagged: 0 },
+      newCards: { count: 47, since: '2026-07-14', cards: [] },
+      suggestions: { items: [], items_with_candidates: 0 },
+    })
+    render(<AdminDashboardPage />)
+
+    expect(await screen.findByText(/every queue is clear/i)).toBeInTheDocument()
+  })
+
+  it('does suppress the all-clear when cards are pairable', async () => {
+    mockBackend({
+      triage: { total: 0, reasons: {} },
+      prepQueue: { items: [], total: 0 },
+      mispriced: { total_flagged: 0 },
+      suggestions: { items: [], items_with_candidates: 2 },
+    })
+    render(<AdminDashboardPage />)
+
+    await screen.findByTestId('action-pairable')
+    expect(screen.queryByText(/every queue is clear/i)).not.toBeInTheDocument()
+  })
+
+  it('shows a calm zero rather than implying the feature is broken', async () => {
+    // Every pre-RFC-0011 catalog row has a null first_seen_at, so N is legitimately
+    // 0 until the next sync. That is the honest answer, not an error state.
+    mockBackend({
+      newCards: { count: 0, since: '2026-07-14', cards: [] },
+      suggestions: { items: [], items_with_candidates: 0 },
+    })
+    render(<AdminDashboardPage />)
+
+    const card = await screen.findByTestId('action-pairable')
+    expect(within(card).getByText('0')).toBeInTheDocument()
+    expect(within(card).queryByText(/check back/i)).not.toBeInTheDocument()
   })
 })

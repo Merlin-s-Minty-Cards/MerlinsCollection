@@ -16,6 +16,7 @@ import {
   CheckCircle2,
   Activity,
   Wallet,
+  Sparkles,
 } from 'lucide-react'
 import { useAdminApi } from '@/lib/admin-api'
 import { todayLocal } from '@/lib/dates'
@@ -24,6 +25,8 @@ import { summarizeHoldings, type HoldingsSummary, type HoldingItem } from '@/lib
 interface TriageCounts { total: number; reasons: Record<string, number> }
 interface Coverage { total_items: number; items_with_market_value: number }
 interface DailyMetrics { total_sold: string; items_sold_count: number }
+interface NewCards { count: number; since: string; cards: unknown[] }
+interface Suggestions { items: unknown[]; items_with_candidates: number }
 
 interface DashboardStats {
   holdings: HoldingsSummary
@@ -33,6 +36,8 @@ interface DashboardStats {
   prepQueueCount: number | null
   coveragePct: number | null
   today: DailyMetrics | null
+  newCardCount: number | null
+  pairableCount: number | null
 }
 
 const money = (n: number) =>
@@ -56,7 +61,7 @@ export default function AdminDashboardPage() {
       // broken endpoint costs one panel, not the whole dashboard — the
       // previous version wrapped all of them in one try and rendered nothing
       // when any single call rejected.
-      const [inventory, mispriced, locations, triage, prepQueue, coverage, daily] =
+      const [inventory, mispriced, locations, triage, prepQueue, coverage, daily, newCards, suggestions] =
         await Promise.all([
           soft(api.get<{ items: HoldingItem[]; total: number }>('/inventory/search')),
           soft(api.get<{ total_flagged: number }>('/show-prep/mispriced', { threshold: 20 })),
@@ -69,6 +74,8 @@ export default function AdminDashboardPage() {
           soft(api.get<DailyMetrics>('/analytics/daily', {
             date: todayLocal(),
           })),
+          soft(api.get<NewCards>('/catalog/new-cards', { since_days: 30 })),
+          soft(api.get<Suggestions>('/unmatched/suggestions')),
         ])
 
       setStats({
@@ -82,6 +89,8 @@ export default function AdminDashboardPage() {
             ? (coverage.items_with_market_value / coverage.total_items) * 100
             : null,
         today: daily,
+        newCardCount: newCards?.count ?? null,
+        pairableCount: suggestions?.items_with_candidates ?? null,
       })
       setLoading(false)
     }
@@ -93,7 +102,11 @@ export default function AdminDashboardPage() {
   const dash = '—'
 
   // An all-clear is only meaningful once the counts have actually arrived.
-  const actionCounts = [stats?.triageCount, stats?.prepQueueCount, stats?.flaggedCount]
+  // Pairable cards ARE work and belong here; new catalog cards are news, not
+  // work, and must never suppress this panel (see T10 design notes).
+  const actionCounts = [
+    stats?.triageCount, stats?.prepQueueCount, stats?.flaggedCount, stats?.pairableCount,
+  ]
   const allClear =
     !loading && actionCounts.every((c) => c !== null && c !== undefined && c === 0)
 
@@ -138,7 +151,7 @@ export default function AdminDashboardPage() {
             </span>
           </div>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             <ActionCard
               testId="action-triage" href="/admin/triage" label="Triage"
               hint="Data to correct" icon={<Stethoscope size={16} />}
@@ -153,6 +166,16 @@ export default function AdminDashboardPage() {
               testId="action-repricing" href="/admin/show-prep" label="Needs Repricing"
               hint="20%+ off market" icon={<AlertTriangle size={16} />}
               count={loading ? null : stats?.flaggedCount ?? null}
+            />
+            <ActionCard
+              testId="action-pairable" href="/admin/unmatched" label="Ready to pair"
+              hint={
+                stats?.newCardCount == null
+                  ? 'Unmatched cards with a match'
+                  : `${stats.newCardCount} new catalog card${stats.newCardCount === 1 ? '' : 's'} in 30 days`
+              }
+              icon={<Sparkles size={16} />}
+              count={loading ? null : stats?.pairableCount ?? null}
             />
           </div>
         )}
