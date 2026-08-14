@@ -10,6 +10,7 @@ import { useLocations } from '@/lib/use-locations'
 import PriceDisplay from './PriceDisplay'
 import PriceChart from './PriceChart'
 import HandValuedBadge from './HandValuedBadge'
+import CosignorPicker from './CosignorPicker'
 import { isHandValued } from '@/lib/valuation'
 import { adminItemName } from '@/lib/admin-item-name'
 import type { UpdatedItem } from '@/lib/item-update'
@@ -167,6 +168,12 @@ export default function CardDetailModal({
   const [triagePanel, setTriagePanel] = useState(false)
   const [triageNote, setTriageNote] = useState('')
   const [triageUndo, setTriageUndo] = useState(false)
+  // Consignment assign/unassign (RFC 0012 C3). `consignorPanel` is the
+  // inline assign form, matching `triagePanel`'s disclosure pattern.
+  const [consignorPanel, setConsignorPanel] = useState(false)
+  const [pendingConsignorId, setPendingConsignorId] = useState<string | null>(null)
+  const [consignorSaving, setConsignorSaving] = useState(false)
+  const [consignorError, setConsignorError] = useState<string | null>(null)
   /**
    * The item this modal DISPLAYS, which is not always the prop.
    *
@@ -204,6 +211,9 @@ export default function CardDetailModal({
     setTriagePanel(false)
     setTriageNote('')
     setTriageUndo(false)
+    setConsignorPanel(false)
+    setPendingConsignorId(null)
+    setConsignorError(null)
     // `item` is read to re-seed FROM, but depending on it is precisely what must
     // not happen — that is the rule this effect exists to enforce.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -287,6 +297,50 @@ export default function CardDetailModal({
     },
     [api, item, onUpdated],
   )
+
+  // Consignment assign/unassign (RFC 0012 C3). Declared here, alongside the
+  // other write handlers and above the early `return null` below, so the
+  // Rules of Hooks are not broken — the derived `consignment` read-only
+  // object (used by the render section further down) is computed AFTER that
+  // early return, so `unassignConsignor` reads `shown.consignment` directly
+  // (the same source that local is derived from) rather than closing over
+  // that later local. Neither endpoint returns a full item (see the module
+  // docstring on `onUpdated`), so both call `onUpdated()` with no argument on
+  // success — a refetch is the parent's job, the same "something changed,
+  // but I cannot tell you what" shape.
+  const assignConsignor = useCallback(async () => {
+    if (!item || !pendingConsignorId) return
+    setConsignorSaving(true)
+    setConsignorError(null)
+    try {
+      await api.post(`/cosigners/${pendingConsignorId}/link`, { item_ids: [item.item_id] })
+      setConsignorPanel(false)
+      setPendingConsignorId(null)
+      onUpdated?.()
+    } catch (e) {
+      setConsignorError(e instanceof AdminApiError ? e.message : 'Could not assign consignor.')
+    } finally {
+      setConsignorSaving(false)
+    }
+  }, [api, item, pendingConsignorId, onUpdated])
+
+  const unassignConsignor = useCallback(async () => {
+    const shownConsignment =
+      shown?.consignment && typeof shown.consignment === 'object'
+        ? (shown.consignment as Record<string, unknown>)
+        : null
+    if (!item || !shownConsignment) return
+    setConsignorSaving(true)
+    setConsignorError(null)
+    try {
+      await api.del(`/cosigners/${String(shownConsignment.consignor_id)}/assets/${item.item_id}`)
+      onUpdated?.()
+    } catch (e) {
+      setConsignorError(e instanceof AdminApiError ? e.message : 'Could not unassign consignor.')
+    } finally {
+      setConsignorSaving(false)
+    }
+  }, [api, item, shown, onUpdated])
 
   // `shown` is `item` whenever the two disagree, so the second half of this
   // guard only ever fires alongside the first — it is here to narrow the type.
@@ -755,49 +809,96 @@ export default function CardDetailModal({
             </section>
           ))}
 
-          {/* Consignment — read-only, see the note on `consignment` above */}
-          {consignment && (
-            <section>
-              <h3 className="text-[11px] font-semibold uppercase tracking-wider text-pine-400 mb-2">
-                Consignment
-              </h3>
-              {/* Same container-driven template as the field sections above —
-                  this grid had the identical viewport-keyed squeeze, and a
-                  consigned card is someone else's money to read accurately. */}
-              <div className="grid grid-cols-[repeat(auto-fit,minmax(min(17rem,100%),1fr))] gap-2">
-                {[
-                  { label: 'Consignor', value: String(consignment.consignor_id ?? '—') },
-                  {
-                    label: 'Our Cut',
-                    // Stored as a 0-1 fraction ("0.05 = a 5% cut" per
-                    // ConsignmentTerms), so render it as the percent an admin reads.
-                    // `!= null` first: Number(null) is 0, which would render a
-                    // missing split as a real "0.0%" cut.
-                    value:
-                      consignment.split_percent != null &&
-                      Number.isFinite(Number(consignment.split_percent))
-                        ? `${(Number(consignment.split_percent) * 100).toFixed(1)}%`
-                        : '—',
-                  },
-                  {
-                    label: 'Minimum Price',
-                    value: consignment.minimum_price != null ? String(consignment.minimum_price) : '—',
-                  },
-                  { label: 'Paid Out', value: consignment.paid_out ? 'Yes' : 'No' },
-                ].map(({ label, value }) => (
-                  <div
-                    key={label}
-                    className="flex items-center gap-2 px-3 py-2 rounded-lg bg-pine-800/30 border border-pine-700/20"
+          {/* Consignment — read-only rows, plus assign/unassign controls (RFC
+              0012 C3) calling the cosigner endpoints directly. See the note
+              on `consignment` above for why the rows themselves stay
+              read-only rather than routing through the generic field editor. */}
+          <section>
+            <h3 className="text-[11px] font-semibold uppercase tracking-wider text-pine-400 mb-2">
+              Consignment
+            </h3>
+            {consignment ? (
+              <>
+                {/* Same container-driven template as the field sections above —
+                    this grid had the identical viewport-keyed squeeze, and a
+                    consigned card is someone else's money to read accurately. */}
+                <div className="grid grid-cols-[repeat(auto-fit,minmax(min(17rem,100%),1fr))] gap-2">
+                  {[
+                    { label: 'Consignor', value: String(consignment.consignor_id ?? '—') },
+                    {
+                      label: 'Our Cut',
+                      // Stored as a 0-1 fraction ("0.05 = a 5% cut" per
+                      // ConsignmentTerms), so render it as the percent an admin reads.
+                      // `!= null` first: Number(null) is 0, which would render a
+                      // missing split as a real "0.0%" cut.
+                      value:
+                        consignment.split_percent != null &&
+                        Number.isFinite(Number(consignment.split_percent))
+                          ? `${(Number(consignment.split_percent) * 100).toFixed(1)}%`
+                          : '—',
+                    },
+                    {
+                      label: 'Minimum Price',
+                      value: consignment.minimum_price != null ? String(consignment.minimum_price) : '—',
+                    },
+                    { label: 'Paid Out', value: consignment.paid_out ? 'Yes' : 'No' },
+                  ].map(({ label, value }) => (
+                    <div
+                      key={label}
+                      className="flex items-center gap-2 px-3 py-2 rounded-lg bg-pine-800/30 border border-pine-700/20"
+                    >
+                      <span className="text-[10px] text-pine-500 uppercase tracking-wider w-24 flex-shrink-0">
+                        {label}
+                      </span>
+                      <span className="text-xs text-pine-200 truncate flex-1">{value}</span>
+                    </div>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  disabled={consignorSaving}
+                  onClick={unassignConsignor}
+                  className="mt-2 text-[11px] text-red-400 hover:text-red-300 disabled:opacity-50"
+                >
+                  Unassign consignor
+                </button>
+              </>
+            ) : consignorPanel ? (
+              <div className="flex flex-col gap-2">
+                <CosignorPicker value={pendingConsignorId} onChange={setPendingConsignorId} />
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={consignorSaving || !pendingConsignorId}
+                    onClick={assignConsignor}
+                    className="rounded-lg border border-mint/30 bg-mint/15 px-3 py-1.5 text-xs font-medium text-mint disabled:opacity-50"
                   >
-                    <span className="text-[10px] text-pine-500 uppercase tracking-wider w-24 flex-shrink-0">
-                      {label}
-                    </span>
-                    <span className="text-xs text-pine-200 truncate flex-1">{value}</span>
-                  </div>
-                ))}
+                    Save
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConsignorPanel(false)
+                      setPendingConsignorId(null)
+                      setConsignorError(null)
+                    }}
+                    className="text-[11px] text-pine-400 hover:text-pine-100"
+                  >
+                    Cancel
+                  </button>
+                </div>
+                {consignorError && <p role="status" className="text-xs text-red-300">{consignorError}</p>}
               </div>
-            </section>
-          )}
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConsignorPanel(true)}
+                className="text-[11px] text-mint hover:text-mint/80"
+              >
+                Assign consignor
+              </button>
+            )}
+          </section>
 
           {/* Quick Info */}
           <section className="flex flex-wrap gap-3 text-[10px] text-pine-500 border-t border-pine-700/30 pt-3">
