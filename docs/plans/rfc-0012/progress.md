@@ -1,0 +1,18 @@
+# RFC 0012 Progress
+
+| Task | Status | Notes |
+|---|---|---|
+| A — Layout width | Not started | |
+| B1 — trades.py backend | Not started | |
+| B2 — IncomingCardForm/trade page frontend | Not started | |
+| C1 — CosignorPicker + useCosigners | Not started | |
+| C2 — Inventory filter by cosigner | Not started | blocked on C1 |
+| C3 — CardDetailModal assign/unassign | Not started | blocked on C1 |
+| C4 — Buy/Trade assign + trades.py item_ids fix | Not started | blocked on C1 |
+| D — Lesson capture | Not started | blocked on A, B1, B2, C1-C4 |
+| Final full-suite run | Not started | blocked on all above |
+
+Update this table as each task lands (subagent or executor should flip
+"Not started" → "In progress" → "Done", with a one-line note on anything
+that deviated from the task file, e.g. a helper function name that didn't
+match what the plan guessed).
