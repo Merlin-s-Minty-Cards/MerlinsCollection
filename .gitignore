@@ -1,3 +1,6 @@
+# Git worktrees (local parallel-task scratch space)
+.worktrees/
+
 # Dependencies
 node_modules/
 .pnp
