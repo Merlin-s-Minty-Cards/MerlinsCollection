@@ -11,6 +11,7 @@ import PriceDisplay from './PriceDisplay'
 import PriceChart from './PriceChart'
 import HandValuedBadge from './HandValuedBadge'
 import CosignorPicker from './CosignorPicker'
+import MoneyInput from './MoneyInput'
 import { isHandValued } from '@/lib/valuation'
 import { adminItemName } from '@/lib/admin-item-name'
 import type { UpdatedItem } from '@/lib/item-update'
@@ -174,6 +175,14 @@ export default function CardDetailModal({
   const [pendingConsignorId, setPendingConsignorId] = useState<string | null>(null)
   const [consignorSaving, setConsignorSaving] = useState(false)
   const [consignorError, setConsignorError] = useState<string | null>(null)
+  // Collapsed "advanced" overrides (RFC 0012 §C.2) — both optional, both
+  // left out of the link body entirely when blank so the server's own
+  // defaults (from the consignor's `payout_percent`) still apply.
+  // `splitPercentAdvanced` gates the disclosure itself.
+  const [splitPercentAdvanced, setSplitPercentAdvanced] = useState(false)
+  const [splitPercentInput, setSplitPercentInput] = useState('')
+  const [minimumPriceInput, setMinimumPriceInput] = useState('')
+  const [minimumPriceParsed, setMinimumPriceParsed] = useState<number | null>(null)
   /**
    * The item this modal DISPLAYS, which is not always the prop.
    *
@@ -214,6 +223,10 @@ export default function CardDetailModal({
     setConsignorPanel(false)
     setPendingConsignorId(null)
     setConsignorError(null)
+    setSplitPercentAdvanced(false)
+    setSplitPercentInput('')
+    setMinimumPriceInput('')
+    setMinimumPriceParsed(null)
     // `item` is read to re-seed FROM, but depending on it is precisely what must
     // not happen — that is the rule this effect exists to enforce.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -313,16 +326,32 @@ export default function CardDetailModal({
     setConsignorSaving(true)
     setConsignorError(null)
     try {
-      await api.post(`/cosigners/${pendingConsignorId}/link`, { item_ids: [item.item_id] })
+      // Both overrides are OPTIONAL and left out of the body entirely when
+      // blank — `cosigners.py:221` defaults `split_percent` from the
+      // consignor's own `payout_percent` and treats an absent
+      // `minimum_price` as no override, so omitting the key (rather than
+      // sending an empty string) is what lets those server-side defaults
+      // still apply.
+      const payload: Record<string, unknown> = { item_ids: [item.item_id] }
+      const trimmedSplit = splitPercentInput.trim()
+      if (trimmedSplit !== '') payload.split_percent = trimmedSplit
+      // `!== null`, never falsiness: `parseMoney('0')` is `0`, and a
+      // legitimate $0 minimum price is a real answer a consignor can set.
+      if (minimumPriceParsed !== null) payload.minimum_price = String(minimumPriceParsed)
+      await api.post(`/cosigners/${pendingConsignorId}/link`, payload)
       setConsignorPanel(false)
       setPendingConsignorId(null)
+      setSplitPercentAdvanced(false)
+      setSplitPercentInput('')
+      setMinimumPriceInput('')
+      setMinimumPriceParsed(null)
       onUpdated?.()
     } catch (e) {
       setConsignorError(e instanceof AdminApiError ? e.message : 'Could not assign consignor.')
     } finally {
       setConsignorSaving(false)
     }
-  }, [api, item, pendingConsignorId, onUpdated])
+  }, [api, item, pendingConsignorId, splitPercentInput, minimumPriceParsed, onUpdated])
 
   const unassignConsignor = useCallback(async () => {
     const shownConsignment =
@@ -866,6 +895,50 @@ export default function CardDetailModal({
             ) : consignorPanel ? (
               <div className="flex flex-col gap-2">
                 <CosignorPicker value={pendingConsignorId} onChange={setPendingConsignorId} />
+                {/* Collapsed "advanced" overrides (RFC 0012 §C.2) — the
+                    endpoint already defaults split_percent from the
+                    consignor's payout_percent and treats minimum_price as
+                    optional, so these stay tucked away rather than demanded
+                    up front. */}
+                {splitPercentAdvanced ? (
+                  <div className="flex flex-col gap-2 rounded-lg border border-pine-700/40 bg-pine-900/40 p-2">
+                    <label
+                      htmlFor="consignor-split-percent"
+                      className="text-[10px] uppercase tracking-wider text-pine-500"
+                    >
+                      Split % override (fraction, e.g. 0.2 for a 20% cut)
+                    </label>
+                    <input
+                      id="consignor-split-percent"
+                      type="text"
+                      inputMode="decimal"
+                      value={splitPercentInput}
+                      onChange={(e) => setSplitPercentInput(e.target.value)}
+                      placeholder="defaults from consignor"
+                      className="vault-field w-full rounded-lg px-3 py-2 text-sm"
+                    />
+                    {/* Money, so it goes through MoneyInput per the repo's
+                        money-input rule — never parseFloat, never
+                        type="number". */}
+                    <MoneyInput
+                      label="Minimum price override"
+                      value={minimumPriceInput}
+                      onChange={(raw, parsed) => {
+                        setMinimumPriceInput(raw)
+                        setMinimumPriceParsed(parsed)
+                      }}
+                      placeholder="no override"
+                    />
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setSplitPercentAdvanced(true)}
+                    className="self-start text-[11px] text-pine-400 hover:text-pine-100"
+                  >
+                    Advanced: split % / minimum price override
+                  </button>
+                )}
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
@@ -881,6 +954,10 @@ export default function CardDetailModal({
                       setConsignorPanel(false)
                       setPendingConsignorId(null)
                       setConsignorError(null)
+                      setSplitPercentAdvanced(false)
+                      setSplitPercentInput('')
+                      setMinimumPriceInput('')
+                      setMinimumPriceParsed(null)
                     }}
                     className="text-[11px] text-pine-400 hover:text-pine-100"
                   >

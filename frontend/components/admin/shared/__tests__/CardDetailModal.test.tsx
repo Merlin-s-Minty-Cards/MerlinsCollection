@@ -818,6 +818,8 @@ describe('CardDetailModal — assign/unassign a cosigner (RFC 0012 C3)', () => {
     await user.click(screen.getByText('Alex'))
     await user.click(screen.getByRole('button', { name: /^save$/i }))
 
+    // Left blank, so the server's own defaults apply — omitted from the
+    // body entirely, not sent as empty strings.
     await waitFor(() => expect(postMock).toHaveBeenCalledWith('/cosigners/cos-1/link', { item_ids: ['i1'] }))
     expect(onUpdated).toHaveBeenCalledWith()
 
@@ -827,6 +829,66 @@ describe('CardDetailModal — assign/unassign a cosigner (RFC 0012 C3)', () => {
     // fires after this test's jsdom environment tears down and throws
     // "window is not defined" from inside React's setState machinery,
     // surfacing as an unhandled error at the end of the whole suite run.
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  })
+
+  // RFC 0012 §C.2 — the assign flow also has to surface split_percent and
+  // minimum_price as optional, collapsed "advanced" inputs. The endpoint
+  // (cosigners.py:209-243) already defaults split_percent from the
+  // consignor's own payout_percent and treats an absent minimum_price as no
+  // override, so both must be OMITTED from the body — not sent blank —
+  // when the admin never opens the disclosure (covered by the test above,
+  // which never touches it and asserts the bare `{ item_ids: ['i1'] }` body).
+  it('sends split_percent and minimum_price overrides when the admin fills in the advanced panel', async () => {
+    const user = userEvent.setup({ delay: null })
+    postMock.mockResolvedValue({ linked: 1, consignor_id: 'cos-1', failed_item_ids: [] })
+    const onUpdated = vi.fn()
+    render(<CardDetailModal item={{ item_id: 'i1', name: 'Charizard' }} onClose={vi.fn()} onUpdated={onUpdated} />)
+
+    await user.click(screen.getByRole('button', { name: /assign consignor/i }))
+    await user.click(screen.getByRole('combobox', { name: /consignor/i }))
+    await user.click(screen.getByText('Alex'))
+    await user.click(screen.getByRole('button', { name: /advanced: split % \/ minimum price override/i }))
+
+    await user.type(screen.getByLabelText(/split % override/i), '0.15')
+    await user.type(screen.getByLabelText(/minimum price override/i), '50')
+
+    await user.click(screen.getByRole('button', { name: /^save$/i }))
+
+    await waitFor(() =>
+      expect(postMock).toHaveBeenCalledWith('/cosigners/cos-1/link', {
+        item_ids: ['i1'],
+        split_percent: '0.15',
+        minimum_price: '50',
+      }),
+    )
+    expect(onUpdated).toHaveBeenCalledWith()
+
+    // Same leaked-timeout drain as the test above.
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  })
+
+  it('never sends minimum_price as $0 falling out of the body — a legitimate free consignment counts', async () => {
+    // parseMoney('0') is 0, not null — this must go through as an explicit
+    // override, not be treated as "nothing typed".
+    const user = userEvent.setup({ delay: null })
+    postMock.mockResolvedValue({ linked: 1, consignor_id: 'cos-1', failed_item_ids: [] })
+    render(<CardDetailModal item={{ item_id: 'i1', name: 'Charizard' }} onClose={vi.fn()} />)
+
+    await user.click(screen.getByRole('button', { name: /assign consignor/i }))
+    await user.click(screen.getByRole('combobox', { name: /consignor/i }))
+    await user.click(screen.getByText('Alex'))
+    await user.click(screen.getByRole('button', { name: /advanced: split % \/ minimum price override/i }))
+    await user.type(screen.getByLabelText(/minimum price override/i), '0')
+    await user.click(screen.getByRole('button', { name: /^save$/i }))
+
+    await waitFor(() =>
+      expect(postMock).toHaveBeenCalledWith('/cosigners/cos-1/link', {
+        item_ids: ['i1'],
+        minimum_price: '0',
+      }),
+    )
+
     await new Promise((resolve) => setTimeout(resolve, 200))
   })
 
