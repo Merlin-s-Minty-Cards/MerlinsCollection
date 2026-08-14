@@ -823,8 +823,10 @@ def confirm_trade_session(
             )
 
     # Process incoming legs (their cards becoming our inventory)
+    created_item_ids: list[str] = []
     for index, leg in enumerate(incoming):
         new_item_id = new_ulid()
+        created_item_ids.append(new_item_id)
         agreed_value = Decimal(str(leg.get("agreed_value") or 0))
         cost_basis = incoming_basis[index]
 
@@ -972,6 +974,10 @@ def confirm_trade_session(
         "transactions_created": txns_created,
         "items_created": items_created,
         "items_sold": items_sold,
+        # RFC 0012: index-aligned with the incoming legs that were sent, so a
+        # caller that staged per-leg metadata (e.g. a consignor to assign)
+        # can pair it back to the item id that resulted, after the fact.
+        "item_ids": created_item_ids,
     }
 
 
