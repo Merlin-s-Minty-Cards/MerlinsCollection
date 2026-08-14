@@ -1,3 +1,5 @@
+import { parseMoney } from './money'
+
 export type BasisMode = 'transfer' | 'split' | 'manual'
 
 const CASH_DISABLED_REASON = 'Unavailable while the trade includes cash — use Manual.'
@@ -53,7 +55,11 @@ export function canConfirmBasis(mode: BasisMode, hasCash: boolean, manualBasis: 
   }
   // mode === 'manual'
   if (manualBasis.trim() === '') return false
-  const parsed = Number(manualBasis)
-  // NaN and Infinity are not valid amounts; 0 IS valid
-  return Number.isFinite(parsed) && parsed >= 0
+  // `Number('1,300')` is `NaN` — `parseMoney` is the one parser for money
+  // text (CLAUDE.md's "MONEY INPUT" rule), so a legitimately comma-grouped
+  // basis no longer greys out Confirm (final-review Important 6).
+  const parsed = parseMoney(manualBasis)
+  // `=== null`, never falsiness: a zero-basis trade of worthless bulk is
+  // legitimate, so 0 must confirm.
+  return parsed !== null
 }

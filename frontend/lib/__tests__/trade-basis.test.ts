@@ -89,4 +89,9 @@ describe('canConfirmBasis', () => {
   it('manual without cash and a valid amount returns true', () => {
     expect(canConfirmBasis('manual', false, '10.50')).toBe(true)
   })
+
+  it('manual accepts a comma-grouped amount (Important 6 regression — Number("1,300") is NaN)', () => {
+    expect(canConfirmBasis('manual', false, '1,300')).toBe(true)
+    expect(canConfirmBasis('manual', false, '1,300.50')).toBe(true)
+  })
 })
