@@ -7,9 +7,9 @@
 | B2 — IncomingCardForm/trade page frontend | Done | Review clean after 1 fix round (added a page-level Buy-mode graded regression test — the brief's own prescribed test wasn't discriminating). |
 | C1 — CosignorPicker + useCosigners | Done | Review clean, no fix rounds needed. |
 | C2 — Inventory filter by cosigner | Done | Review clean, no fix rounds. |
-| C3 — CardDetailModal assign/unassign | Not started | blocked on C1 |
-| C4 — Buy/Trade assign + trades.py item_ids fix | Not started | blocked on C1 |
-| D — Lesson capture | Not started | blocked on A, B1, B2, C1-C4 |
+| C3 — CardDetailModal assign/unassign | Done | Review clean after 1 fix round (added RFC-mandated split_percent/minimum_price advanced overrides, dropped from the original brief). |
+| C4 — Buy/Trade assign + trades.py item_ids fix | Done | Review clean, no fix rounds. |
+| D — Lesson capture | Not started | blocked on A, B1, B2, C1-C4 (all now done) |
 | Final full-suite run | Not started | blocked on all above |
 
 Update this table as each task lands (subagent or executor should flip
