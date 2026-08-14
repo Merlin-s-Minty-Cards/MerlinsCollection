@@ -37,3 +37,107 @@ export function buildIncomingLegBody(
     image_url: selectedCard?.images?.small ?? undefined,
   }
 }
+
+/**
+ * One leg of a deal, as `IncomingCardForm` emits it and T15 dispatches it
+ * (RFC 0011 T14/T15). The keys mirror T13's
+ * `POST /admin/trades/{id}/incoming` exactly.
+ */
+export interface IncomingLeg {
+  /** `null` only for a manual entry, which is why a manual entry cannot be graded. */
+  card_id: string | null
+  name: string
+  agreed_value: number
+  kind: 'raw' | 'graded'
+  /**
+   * Manual entry only, and only when typed. A catalog pick carries its set and
+   * number inside `card_id`, so repeating them there would be a second, older
+   * copy of the same facts. Both keys are already read by
+   * `POST /admin/trades/{id}/incoming` (trades.py:451-452) — without them the
+   * set and number an operator types for an unmatched card are collected and
+   * silently dropped, which is worse than not offering the fields.
+   */
+  set_name?: string
+  /** Manual entry only. See `set_name`. */
+  card_number?: string
+  /** raw only */
+  condition?: string
+  /** raw only */
+  finish?: string
+  /** graded only */
+  company?: string
+  /** graded only */
+  grade?: number
+  /** graded only */
+  cert_number?: string
+  /** graded only */
+  grade_label?: string
+  language: string
+  location: string
+}
+
+/** What the form holds — every money and grade field still raw text. */
+export interface IncomingLegDraft {
+  card_id: string | null
+  name: string
+  /** Already through `parseMoney`. The caller gates on `=== null` first. */
+  agreed_value: number
+  kind: 'raw' | 'graded'
+  set_name: string
+  card_number: string
+  condition: string
+  finish: string
+  company: string
+  grade: string
+  cert_number: string
+  grade_label: string
+  language: string
+  location: string
+}
+
+/**
+ * Build the leg, with the two branches kept STRICTLY apart.
+ *
+ * This is decision 15 expressed in the builder rather than only in the form:
+ * T13 422s a raw leg that carries graded fields and a graded leg that carries
+ * a condition, so a leg assembled by spreading the whole draft would generate
+ * a rejection the operator cannot explain. A raw leg never learns the word
+ * `grade`; a graded leg never learns the word `condition`.
+ *
+ * `grade` is emitted only when it reads as a number. A blank or unreadable
+ * grade is omitted rather than sent as `NaN` — the backend's own required-field
+ * error is a better message than a silently mangled one.
+ */
+export function buildIncomingLeg(draft: IncomingLegDraft): IncomingLeg {
+  const base = {
+    card_id: draft.card_id,
+    name: draft.name.trim(),
+    agreed_value: draft.agreed_value,
+    language: draft.language,
+    location: draft.location,
+    // Only for a card with no catalog row behind it — see `set_name` above.
+    ...(draft.card_id === null && draft.set_name.trim() ? { set_name: draft.set_name.trim() } : {}),
+    ...(draft.card_id === null && draft.card_number.trim()
+      ? { card_number: draft.card_number.trim() }
+      : {}),
+  }
+
+  if (draft.kind === 'raw') {
+    return {
+      ...base,
+      kind: 'raw',
+      condition: draft.condition,
+      finish: draft.finish,
+    }
+  }
+
+  const grade = Number(draft.grade.trim())
+  return {
+    ...base,
+    kind: 'graded',
+    company: draft.company,
+    ...(Number.isFinite(grade) && draft.grade.trim() !== '' ? { grade } : {}),
+    ...(draft.cert_number.trim() ? { cert_number: draft.cert_number.trim() } : {}),
+    ...(draft.grade_label.trim() ? { grade_label: draft.grade_label.trim() } : {}),
+  }
+}

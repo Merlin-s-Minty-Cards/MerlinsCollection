@@ -8,6 +8,14 @@ interface CardImageProps {
   size?: 'xs' | 'sm' | 'md' | 'lg' | 'xl'
   className?: string
   loading?: 'lazy' | 'eager'
+  /**
+   * `data-testid` for the PLACEHOLDER branch only. Optional, and unset
+   * everywhere it was not asked for, so no existing caller changes shape. It
+   * exists because "did this row collapse, or did it render a placeholder at
+   * the same height?" is the assertion the deal rows have to make, and an
+   * `aria-label` query cannot distinguish a placeholder from a missing node.
+   */
+  placeholderTestId?: string
 }
 
 const SIZE_CLASSES = {
@@ -38,13 +46,14 @@ export const TABLE_THUMB_COLUMN = 'w-16'
  * Lazy-loaded card image with fallback placeholder.
  * Renders a Pokemon card thumbnail from TCGdex image URL.
  */
-export default function CardImage({ imageUrl, alt, size = 'sm', className = '', loading = 'lazy' }: CardImageProps) {
+export default function CardImage({ imageUrl, alt, size = 'sm', className = '', loading = 'lazy', placeholderTestId }: CardImageProps) {
   const [error, setError] = useState(false)
   const sizeClass = SIZE_CLASSES[size]
 
   if (!imageUrl || error) {
     return (
       <div
+        data-testid={placeholderTestId}
         className={`${sizeClass} rounded bg-pine-800/60 border border-pine-700/40 flex items-center justify-center flex-shrink-0 ${className}`}
         aria-label={`No image for ${alt}`}
       >
