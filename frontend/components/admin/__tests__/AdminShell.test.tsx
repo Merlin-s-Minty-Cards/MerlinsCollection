@@ -182,6 +182,7 @@ const ALL_DESTINATIONS: [string, RegExp][] = [
   ['/admin/show-prep', /^show prep$/i],
   ['/admin/shows', /^shows$/i],
   ['/admin/triage', /^triage$/i],
+  ['/admin/unmatched', /^unmatched$/i],
   ['/admin/market', /^market$/i],
   ['/admin/vault', /^vault$/i],
   ['/admin/analytics', /^show analytics$/i],
@@ -195,7 +196,7 @@ describe('AdminShell grouped navigation (RFC 0010 T13)', () => {
     window.localStorage.clear()
   })
 
-  it('still reaches all sixteen destinations, at their existing hrefs', async () => {
+  it('still reaches every destination, at its existing href', async () => {
     renderShell()
     await waitFor(() => expect(getMock).toHaveBeenCalled())
 
@@ -283,6 +284,33 @@ describe('AdminShell grouped navigation (RFC 0010 T13)', () => {
     const header = screen.getByRole('button', { name: 'Back office' })
     expect(header).toHaveAttribute('title', 'Back office')
     expect(header.textContent).not.toMatch(/Back office/)
+  })
+
+  it('puts Unmatched in Back office, directly after Triage (RFC 0011 T8)', () => {
+    // The two queues are read together — Triage is "this is wrong", Unmatched is
+    // "there is nothing to point at" — and a card moves from one to the other.
+    const wrapper = renderShell()
+    const aside = wrapper.querySelector('aside')
+    if (!aside) throw new Error('sidebar not found')
+    const labels = Array.from(aside.querySelectorAll('a')).map((a) => a.textContent)
+
+    expect(labels).toContain('Unmatched')
+    expect(labels.indexOf('Unmatched')).toBe(labels.indexOf('Triage') + 1)
+  })
+
+  it('does not give Unmatched a second badge (RFC 0011 T8)', async () => {
+    // Two amber counts in one group trains the eye to stop reading both. The
+    // Triage badge stays Triage's; Unmatched's count lives in its page header
+    // and on the dashboard widget.
+    getMock.mockResolvedValue({ total: 21, reasons: {} })
+    renderShell()
+    await waitFor(() => expect(getMock).toHaveBeenCalledWith('/triage/counts'))
+    // A badged link's accessible name is "Triage 21", so wait on the COUNT
+    // landing rather than on a bare-name match that only holds before it does.
+    const triage = await screen.findByRole('link', { name: /triage/i })
+    expect(triage).toHaveTextContent('21')
+
+    expect(screen.getByRole('link', { name: /^unmatched$/i })).not.toHaveTextContent('21')
   })
 
   it('gives the mobile nav five EXPLICIT entries, not a slice of the tree', () => {

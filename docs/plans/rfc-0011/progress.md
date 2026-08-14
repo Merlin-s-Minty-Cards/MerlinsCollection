@@ -6,21 +6,32 @@
 gitignored (`.gitignore:60`), so it is local-only and your edits to it will never appear
 in `git status` or reach anyone else. Record all RFC 0011 status **in this file**.
 
-**Last updated:** 2026-08-13 (**T1–T7 DONE**. Next up: T8)
+**Last updated:** 2026-08-13 (**T1–T8 DONE**. Next up: T9)
 **Branch:** `Polishing-For-Deployment`
 **RFC:** [`docs/rfcs/0011-inventory-column-controls-and-unmatched-queue.md`](../../rfcs/0011-inventory-column-controls-and-unmatched-queue.md)
 **Task index:** [`README.md`](README.md)
 **Source of the requests:** the owner's message of 2026-08-13, plus three design answers
 and two scope additions given the same day (recorded in the RFC under "Owner decisions").
 
-## Next: T8
+## Next: T9
 
-**The table track (T1–T4) is COMPLETE**, the unmatched queue can be **filled** (T5, T6),
-and T7 can now say **what each parked card might pair with** — but the queue still cannot
-be **read**: there is no `/admin/unmatched` page, so today a parked card is only reachable
-via `GET /admin/inventory/search?no_catalog_match=true`. That is the gap T8 closes.
+**The queue track is now readable end to end.** A card can be parked from Triage (T6),
+it appears on `/admin/unmatched` (T8) with ranked candidates (T7), and it can be paired
+back or sent to Triage. T9 is independent of all of that — it adds `first_seen_at` to the
+catalog and teaches the sync to notice new cards in sets it already knows, which is what
+T10's dashboard widget reads alongside T7's `items_with_candidates`.
 
 There is no merge blocker in this RFC and nothing is waiting on an owner action.
+
+### What T8 left behind that T10 needs to know
+
+- **`GET /admin/unmatched/suggestions` returns `items_with_candidates`**, and T8 renders
+  the same rows from the same call. The widget quotes that number; do not recount it.
+- **The page's own header count is `ordered.length`** — the size of the parked cohort,
+  which is a DIFFERENT number from `items_with_candidates` (cards you can act on). The
+  widget should be explicit about which one it is showing.
+- **Do not add a sidebar badge for this queue.** The Triage badge stays the only amber
+  number in the Back office group; T8 has a test pinning that.
 
 ### What T7 left behind that T8 and T10 need to know
 
@@ -98,7 +109,7 @@ permanently floored. Everything on the queue track is downstream of it.
 | T5 | `no_catalog_match` model | **DONE** | `e94b6da` | **T6, T7 and T8 are unblocked.** Two fields on `_ItemBase`, one suppression inside `is_missing_card_id`, one query param, one PUT transition helper. The queue is `GET /admin/inventory/search?no_catalog_match=true` — **no new list endpoint**, and **nothing backfilled** (pinned by `test_the_unmatched_queue_ships_empty`). The sealed/bulk guard has to live in the ROUTER, not the model validator: a sealed item has no `card_id` to be non-None, so the invariant cannot see it. `_apply_no_catalog_match_transition` **pops a client-sent `no_catalog_match_at`** before doing anything — the doc only said "server-stamped", which a client could otherwise satisfy by sending its own. Blast radius checked beyond the named selection: `backend/tests/{routers,services,models}` = **1483 passed**. |
 | T6 | Triage unlink + park | **DONE** | `c5686b8` | Both entry points, plus the `reasonsFor` mirror of T5's suppression. **The unlink is ONE `PUT`, not three** — three could half-succeed and leave a card unlinked but still carrying the wrong promo's price, which is worse than the state being repaired. `onRepointed` widens to `string \| null`; the `null` branch must fold `no_catalog_match: true` into its optimistic prediction or the row re-renders with a `missing_card_id` chip for a frame before dropping. The confirm copy **names the price** (`formatMoney`) and has a separate branch for a row with no stored value, so it never reads "its market value of $0.00 will be cleared". The "No match in TCGdex" action is hidden when `item.card_id` is already null — that row's action is the row-level button instead. Consumers of `reasonsFor` re-checked (outgoing, `CardDetailModal`, `TriageRowAction`): **127 passed**. |
 | T7 | Pairing suggestions endpoint | **DONE** | (this commit) | **T8 and T10 are unblocked.** `GET /admin/unmatched/suggestions?limit=3` (`ge=1, le=10`) → `{items: [{item_id, candidates[]}], items_with_candidates}`; a candidate carries `card_id, name, set_id, set_name, number, rarity, image_small, market_price, detail, last_synced_at, score, why`. **Two fields beyond the task doc's shape, both forced by `CardPickerRow`:** `detail` (T8 must keep `brief` = never fetched vs `full` = no provider covers it — CLAUDE.md calls collapsing them a lie) and `last_synced_at` (so a stale figure shows its age). Both are free; the catalog row is already in hand. **The doc's `_identity` reads a `card_number` field that DOES NOT EXIST on an inventory item** — the number is materialized inside `display_name` as `"Dragonair #181"`, so `identity_of` splits the trailing `#N` back off; without that, `normalize_name` yields `"dragonair 181"` and every lookup misses. A fourth tier was NOT added: an item with no number falls to the 0.7 name-only tier, which is number-blind and reads honestly. Tests live at `tests/routers/admin/test_unmatched.py`, not the doc's `tests/routers/test_admin_unmatched.py` — `admin_client` is defined in that package's conftest. Blast radius: `backend/tests/{routers/admin,services}` = **1255 passed**. |
-| T8 | Unmatched queue page | TODO | — | |
+| T8 | Unmatched queue page | **DONE** | (this commit) | **T10 is unblocked.** `/admin/unmatched`, sidebar entry in **Back office directly after Triage**, icon `Unlink`, **no badge** (the Triage count stays the group's only amber number) and **not** in `mobileItems`. The page reads `GET /inventory/search?no_catalog_match=true` + `GET /unmatched/suggestions?limit=3` in **one `Promise.all`** — not `allSettled`, because suggestions failing while the list succeeds renders every row silently claiming it has no candidates, a wrong answer wearing the shape of a right one. Pair sends **`{card_id}` alone**; Back to Triage sends `{no_catalog_match: false}`; both drop the row with no refetch. **The NM label lives on the COLUMN HEADER** (`Suggestions · Market (NM)`), once, rather than as a caption repeated per row. **The absent-price rendering is `CardPickerRow`'s "no price yet" / "not priced", NOT the task doc's bare `—`** — the doc predates the shared component, and the component keeps the `brief` vs `full` distinction CLAUDE.md forbids collapsing. `formatTimestamp` for the parked stamp (it is a datetime); tests pin `America/Los_Angeles` via `_timezone.ts` with **no fake timers at all**. Card art is the **placeholder by construction** and `useCardImages` is deliberately not called: a parked item has no `card_id`, so the lookup could never succeed. 36 passed (15 page + 21 shell); Triage's 56 unchanged; `tsc --noEmit` and lint clean. |
 | T9 | `first_seen_at` + sync | TODO | — | |
 | T10 | Dashboard widget | TODO | — | |
 | T11 | Shared card search panel | TODO | — | **RE-SCOPED by Part 2** — no longer adopted in Buy (deleted) or Trade (rebuilt). Adopt in Slabs, Triage, Market, +Unmatched. T14 composes it. |

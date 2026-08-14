@@ -16,6 +16,7 @@ import {
   CalendarDays,
   Lock,
   Stethoscope,
+  Unlink,
   Tags,
   BarChart3,
   History,
@@ -30,7 +31,9 @@ import { signOut } from 'next-auth/react'
 import { useAdminApi } from '@/lib/admin-api'
 
 /**
- * Sixteen flat tabs, grouped by WHEN you use them (RFC 0010 T13).
+ * The admin tabs, grouped by WHEN you use them (RFC 0010 T13). Sixteen at the
+ * time of that change; Unmatched (RFC 0011 T8) made seventeen, which is the
+ * point of the grouping — a flat list had already outgrown the viewport.
  *
  * Owner's choice of the three groupings offered: *At the show / Back office /
  * Data*. That is why Inventory sits with the transaction tabs rather than with
@@ -68,6 +71,13 @@ const navGroups = [
       { href: '/admin/show-prep', label: 'Show Prep', icon: MapPin },
       { href: '/admin/shows', label: 'Shows', icon: CalendarDays },
       { href: '/admin/triage', label: 'Triage', icon: Stethoscope, badge: true },
+      // Directly after Triage, because the two are read together and a card
+      // moves from one to the other: Triage is "this is wrong", Unmatched is
+      // "there is nothing to point at". Deliberately NO `badge` — the Triage
+      // count is the only amber number in this group, and two of them trains
+      // the eye to stop reading both. Unmatched's count lives in its own page
+      // header and on the dashboard widget.
+      { href: '/admin/unmatched', label: 'Unmatched', icon: Unlink },
       { href: '/admin/market', label: 'Market', icon: TrendingUp },
       { href: '/admin/vault', label: 'Vault', icon: Lock },
     ],
