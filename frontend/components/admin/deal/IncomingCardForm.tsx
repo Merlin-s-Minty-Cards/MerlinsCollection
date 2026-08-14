@@ -50,9 +50,21 @@ export interface IncomingCardFormProps {
   card: PickerCard | null
   onAdd: (leg: IncomingLeg) => void
   onCancel: () => void
+  /**
+   * Presentational gate only — which controls the form shows. It does not
+   * pick an API URL (`lib/deal-session.ts` still owns that), so setting it
+   * from `mode === 'buy'` in `page.tsx` does not violate decision 16.
+   * Buy's `/admin/purchases/{id}/items` DOES accept graded fields, but the
+   * page has no cert-ownership warning UI wired up for it yet — this stays
+   * off until that lands, per CLAUDE.md's escape-hatch rule (say why, one
+   * line, rather than leaving a control that silently fails or discards
+   * data). Defaults to `true` for backward compatibility with any other
+   * caller.
+   */
+  gradedAllowed?: boolean
 }
 
-export default function IncomingCardForm({ card, onAdd, onCancel }: IncomingCardFormProps) {
+export default function IncomingCardForm({ card, onAdd, onCancel, gradedAllowed = true }: IncomingCardFormProps) {
   const api = useAdminApi()
   // `options`, not `locations` — see lib/use-locations.ts:13.
   const { options: locationOptions } = useLocations()
@@ -110,6 +122,12 @@ export default function IncomingCardForm({ card, onAdd, onCancel }: IncomingCard
     }
   }, [cert, company, kind, api])
 
+  // Buy mode's toggle disable (below) already prevents `kind` reaching
+  // 'graded' from the UI, but `submit` re-derives from `manual`/`gradedAllowed`
+  // rather than trusting `kind` state alone — belt and braces, same reasoning
+  // T13 used for the manual/raw rule.
+  const gradedSelectable = !manual && gradedAllowed
+
   const submit = () => {
     if (!name.trim()) {
       setError('A name is required — it is what the row will say on the deal.')
@@ -133,7 +151,7 @@ export default function IncomingCardForm({ card, onAdd, onCancel }: IncomingCard
         name,
         agreed_value: parsed,
         // Belt and braces on the one rule T13 enforces with a 422.
-        kind: manual ? 'raw' : kind,
+        kind: gradedSelectable ? kind : 'raw',
         set_name: setName_,
         card_number: number,
         condition,
@@ -144,6 +162,11 @@ export default function IncomingCardForm({ card, onAdd, onCancel }: IncomingCard
         grade_label: gradeLabel,
         language,
         location,
+        // Absent for a manual entry (no catalog card) or an unpriced catalog
+        // card — never coerced to 0, per CLAUDE.md's "an absent price is
+        // never $0.00, never blank, and never a guess."
+        market_value: card ? parseMoney(String(card.display_price ?? '')) : null,
+        image_url: card?.images?.small ?? null,
       }),
     )
   }
@@ -207,8 +230,10 @@ export default function IncomingCardForm({ card, onAdd, onCancel }: IncomingCard
               value={k}
               checked={kind === k}
               // T13 422s a graded leg with no `card_id`, because graded pricing
-              // joins on `(card_id, company, grade)`.
-              disabled={manual && k === 'graded'}
+              // joins on `(card_id, company, grade)`. `!gradedAllowed` is the
+              // separate Buy-mode gate (final-review Critical 1) — Buy has no
+              // cert-ownership warning UI wired up yet.
+              disabled={k === 'graded' && !gradedSelectable}
               onChange={() => setKind(k)}
               className="accent-mint"
             />
@@ -222,9 +247,14 @@ export default function IncomingCardForm({ card, onAdd, onCancel }: IncomingCard
             Graded needs a catalog card — its price joins on the card id.
           </span>
         )}
+        {!manual && !gradedAllowed && (
+          <span className="text-[11px] text-pine-400">
+            Graded intake isn&apos;t available from Buy yet — use Slabs.
+          </span>
+        )}
       </div>
 
-      {kind === 'raw' ? (
+      {kind === 'raw' || !gradedSelectable ? (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           <label className="flex flex-col gap-1">
             <span className="text-[11px] uppercase tracking-wider text-pine-400">Condition</span>

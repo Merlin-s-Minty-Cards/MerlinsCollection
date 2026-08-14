@@ -47,14 +47,21 @@ export interface DealSessionApi {
   addIncoming(id: string, leg: IncomingLeg): Promise<void>
   addOutgoing(id: string, item: DealInventoryItem, value: number): Promise<void>
   removeIncoming(id: string, index: number): Promise<void>
-  removeOutgoing(id: string, index: number): Promise<void>
+  /**
+   * Takes the leg's real `item_id`, never a positional index. An adapter
+   * that tracked index -> item_id in a local Map lost that map whenever
+   * `sessionApiFor`'s memo re-ran with a fresh `api` identity (e.g. a
+   * next-auth token refresh mid-deal), silently no-opping remove/update
+   * while the page's own state still showed the row gone or edited.
+   */
+  removeOutgoing(id: string, itemId: string): Promise<void>
   /**
    * Patch a staged outgoing leg's negotiated price to the session, so a
    * price the operator edits on screen is the price Confirm actually sends
    * — not just the price the row happened to start with (RFC 0011 T15 fix
-   * round 1).
+   * round 1). Keyed by `item_id`, for the same reason as `removeOutgoing`.
    */
-  updateOutgoing(id: string, index: number, value: number): Promise<void>
+  updateOutgoing(id: string, itemId: string, value: number): Promise<void>
   setCash(id: string, components: CashComponent[]): Promise<void>
   confirm(id: string, meta: ConfirmMeta): Promise<ConfirmResult>
   supports: { incoming: boolean; outgoing: boolean; costBasisMode: boolean }
@@ -84,9 +91,15 @@ function buyApi(api: AdminApi): DealSessionApi {
       return res.buy_id
     },
     async addIncoming(id, leg) {
+      // `POST /admin/purchases/{id}/items` accepts the same graded fields
+      // `/trades/{id}/incoming` does (`kind`, `company`, `grade`,
+      // `cert_number`, `grade_label`) — see `_GRADED_REQUIRED_FIELDS` in
+      // `routers/admin/purchases.py`. Dropping them here silently downgraded
+      // every graded Buy-mode leg to raw NM (final-review Critical 1).
       await api.post(`/purchases/${id}/items`, {
         name: leg.name,
-        condition: leg.condition ?? 'NM',
+        kind: leg.kind,
+        condition: leg.kind === 'raw' ? (leg.condition ?? 'NM') : null,
         condition_modifier: null,
         buy_price: leg.agreed_value,
         market_value: null,
@@ -95,6 +108,10 @@ function buyApi(api: AdminApi): DealSessionApi {
         number: leg.card_number ?? null,
         card_id: leg.card_id,
         manual_entry: leg.card_id === null,
+        company: leg.kind === 'graded' ? leg.company : null,
+        grade: leg.kind === 'graded' ? leg.grade : null,
+        cert_number: leg.kind === 'graded' ? leg.cert_number : null,
+        grade_label: leg.kind === 'graded' ? leg.grade_label : null,
       })
     },
     async addOutgoing() {
@@ -126,16 +143,10 @@ function buyApi(api: AdminApi): DealSessionApi {
 }
 
 function sellApi(api: AdminApi): DealSessionApi {
-  // Purchases and trades delete by index/position; a sale item deletes by
-  // item_id. This tracks the order legs were added in, per session id, so
-  // `removeOutgoing`'s index (the only thing the interface hands it) can be
-  // turned back into the id the DELETE route needs.
-  const outgoingIds = new Map<string, string[]>()
   return {
     supports: { incoming: false, outgoing: true, costBasisMode: false },
     async create() {
       const res = await api.post<{ sell_id: string }>('/sales', { payment_method: 'cash' })
-      outgoingIds.set(res.sell_id, [])
       return res.sell_id
     },
     async addIncoming() {
@@ -148,24 +159,14 @@ function sellApi(api: AdminApi): DealSessionApi {
         agreed_price: value,
         original_price: item.current_market_value ?? null,
       })
-      const ids = outgoingIds.get(id) ?? []
-      ids.push(item.item_id)
-      outgoingIds.set(id, ids)
     },
     async removeIncoming() {
       throw new Error('A sell session has no incoming leg')
     },
-    async removeOutgoing(id, index) {
-      const ids = outgoingIds.get(id) ?? []
-      const itemId = ids[index]
-      if (!itemId) return
+    async removeOutgoing(id, itemId) {
       await api.del(`/sales/${id}/items/${itemId}`)
-      outgoingIds.set(id, ids.filter((_, i) => i !== index))
     },
-    async updateOutgoing(id, index, value) {
-      const ids = outgoingIds.get(id) ?? []
-      const itemId = ids[index]
-      if (!itemId) return
+    async updateOutgoing(id, itemId, value) {
       await api.patch(`/sales/${id}/items/${itemId}`, { agreed_price: value })
     },
     async setCash() {
@@ -184,14 +185,10 @@ function sellApi(api: AdminApi): DealSessionApi {
 }
 
 function tradeApi(api: AdminApi): DealSessionApi {
-  // Same reasoning as sell's — trade's outgoing leg also deletes by item_id
-  // (`/trades/{id}/outgoing/{item_id}`), while incoming deletes by position.
-  const outgoingIds = new Map<string, string[]>()
   return {
     supports: { incoming: true, outgoing: true, costBasisMode: true },
     async create() {
       const res = await api.post<{ trade_id: string }>('/trades', {})
-      outgoingIds.set(res.trade_id, [])
       return res.trade_id
     },
     async addIncoming(id, leg) {
@@ -205,24 +202,14 @@ function tradeApi(api: AdminApi): DealSessionApi {
         name: adminItemName(item, ''),
         agreed_value: value,
       })
-      const ids = outgoingIds.get(id) ?? []
-      ids.push(item.item_id)
-      outgoingIds.set(id, ids)
     },
     async removeIncoming(id, index) {
       await api.del(`/trades/${id}/incoming/${index}`)
     },
-    async removeOutgoing(id, index) {
-      const ids = outgoingIds.get(id) ?? []
-      const itemId = ids[index]
-      if (!itemId) return
+    async removeOutgoing(id, itemId) {
       await api.del(`/trades/${id}/outgoing/${itemId}`)
-      outgoingIds.set(id, ids.filter((_, i) => i !== index))
     },
-    async updateOutgoing(id, index, value) {
-      const ids = outgoingIds.get(id) ?? []
-      const itemId = ids[index]
-      if (!itemId) return
+    async updateOutgoing(id, itemId, value) {
       await api.patch(`/trades/${id}/outgoing/${itemId}`, { agreed_value: value })
     },
     async setCash(id, components) {

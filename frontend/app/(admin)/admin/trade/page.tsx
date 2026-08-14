@@ -78,6 +78,7 @@ export default function DealPage() {
   const [customerView, setCustomerView] = useState(false)
   const [date, setDate] = useState(todayLocal())
   const [counterparty, setCounterparty] = useState('')
+  const [paymentMethod, setPaymentMethod] = useState('cash')
   const [basisMode, setBasisMode] = useState<BasisMode>('transfer')
   const [manualBasis, setManualBasis] = useState('')
 
@@ -122,6 +123,7 @@ export default function DealPage() {
     setBasisMode('transfer')
     setManualBasis('')
     setCounterparty('')
+    setPaymentMethod('cash')
     setFormCard(undefined)
     setDate(todayLocal())
   }
@@ -208,17 +210,20 @@ export default function DealPage() {
    */
   const editOutgoingValue = (idx: number, _raw: string, parsed: number | null) => {
     if (parsed === null) return
+    const itemId = outgoing[idx]?.itemId
     setOutgoing((prev) => prev.map((row, i) => (i === idx ? { ...row, price: parsed, agreedValue: parsed } : row)))
-    if (!sessionId) return
-    session.updateOutgoing(sessionId, idx, parsed).catch((err) => {
+    if (!sessionId || !itemId) return
+    session.updateOutgoing(sessionId, itemId, parsed).catch((err) => {
       alert(err instanceof AdminApiError ? err.detail : 'Failed to update price')
     })
   }
 
   const removeOutgoing = async (idx: number) => {
     if (!sessionId) return
+    const itemId = outgoing[idx]?.itemId
+    if (!itemId) return
     try {
-      await session.removeOutgoing(sessionId, idx)
+      await session.removeOutgoing(sessionId, itemId)
       setOutgoing((prev) => prev.filter((_, i) => i !== idx))
     } catch (err) {
       alert(err instanceof AdminApiError ? err.detail : 'Failed to remove card')
@@ -255,7 +260,11 @@ export default function DealPage() {
       await session.confirm(sessionId, {
         counterparty: counterparty || null,
         date,
-        payment_method: cashComponents[0]?.payment_method ?? 'cash',
+        // Trade has no single payment method (its cash legs each carry their
+        // own); Buy/Sell book under exactly one, chosen in `DealSummary`'s
+        // payment-method select — never derived from the cash-component list,
+        // which is a different concept (final-review Critical 2).
+        payment_method: session.supports.costBasisMode ? undefined : paymentMethod,
         basis_mode: session.supports.costBasisMode ? basisMode : undefined,
         manual_basis:
           session.supports.costBasisMode && basisMode === 'manual'
@@ -360,6 +369,7 @@ export default function DealPage() {
             onPickCatalog={(card) => setFormCard(card)}
             onPickInventory={handlePickInventory}
             onManualEntry={() => setFormCard(null)}
+            manualEntryAllowed={session.supports.incoming}
           />
         ) : (
           <div data-testid="incoming-form">
@@ -367,6 +377,7 @@ export default function DealPage() {
               card={formCard}
               onAdd={handleAddIncoming}
               onCancel={() => setFormCard(undefined)}
+              gradedAllowed={mode !== 'buy'}
             />
           </div>
         )}
@@ -413,6 +424,8 @@ export default function DealPage() {
           onDateChange={setDate}
           counterparty={counterparty}
           onCounterpartyChange={setCounterparty}
+          paymentMethod={paymentMethod}
+          onPaymentMethodChange={setPaymentMethod}
           onConfirm={() => setShowConfirm(true)}
           confirmDisabled={isEmpty}
         />

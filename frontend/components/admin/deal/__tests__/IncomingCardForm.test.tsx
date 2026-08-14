@@ -188,6 +188,21 @@ describe('IncomingCardForm', () => {
     )
   })
 
+  it('disables Graded and says why when gradedAllowed is false (Buy mode, Critical 1 regression)', async () => {
+    const user = userEvent.setup({ delay: null })
+    const onAdd = vi.fn()
+    render(<IncomingCardForm card={card()} onAdd={onAdd} onCancel={vi.fn()} gradedAllowed={false} />)
+
+    expect(screen.getByRole('radio', { name: /graded/i })).toBeDisabled()
+    expect(screen.getByText(/graded intake isn't available from buy/i)).toBeInTheDocument()
+
+    // Even if `kind` state were somehow 'graded', submit must still emit raw
+    // — the toggle disable is not the only line of defense.
+    await user.type(screen.getByLabelText(/value/i), '40')
+    await user.click(screen.getByRole('button', { name: /^add$/i }))
+    expect(onAdd).toHaveBeenCalledWith(expect.objectContaining({ kind: 'raw' }))
+  })
+
   it('cancels without emitting', async () => {
     const user = userEvent.setup({ delay: null })
     const onAdd = vi.fn()

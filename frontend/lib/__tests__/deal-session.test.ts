@@ -50,27 +50,59 @@ describe('sessionApiFor', () => {
       expect.objectContaining({ kind: 'graded', cert_number: '12345678' }))
   })
 
-  it('patches a staged sale item price through updateOutgoing', async () => {
+  it('patches a staged sale item price through updateOutgoing, keyed by item_id', async () => {
     vi.mocked(api.post).mockResolvedValue({ sell_id: 's1' })
     const sell = sessionApiFor('sell', api)
     await sell.create()
     await sell.addOutgoing('s1', { item_id: 'item-1', current_market_value: '20.00' } as never, 20)
-    await sell.updateOutgoing('s1', 0, 15)
+    await sell.updateOutgoing('s1', 'item-1', 15)
     expect(api.patch).toHaveBeenCalledWith('/sales/s1/items/item-1', { agreed_price: 15 })
   })
 
-  it('patches a staged trade outgoing leg price through updateOutgoing', async () => {
+  it('patches a staged trade outgoing leg price through updateOutgoing, keyed by item_id', async () => {
     vi.mocked(api.post).mockResolvedValue({ trade_id: 't1' })
     const trade = sessionApiFor('trade', api)
     await trade.create()
     await trade.addOutgoing('t1', { item_id: 'item-2', current_market_value: '20.00' } as never, 20)
-    await trade.updateOutgoing('t1', 0, 12.5)
+    await trade.updateOutgoing('t1', 'item-2', 12.5)
     expect(api.patch).toHaveBeenCalledWith('/trades/t1/outgoing/item-2', { agreed_value: 12.5 })
   })
 
+  it('removes a staged sale item by item_id, without needing a prior addOutgoing in the same closure', async () => {
+    // Regression for final-review Critical 3: the adapter used to keep a
+    // local index -> item_id Map that was lost whenever `sessionApiFor`'s
+    // memo re-ran with a fresh `api` (e.g. a token refresh). A fresh
+    // `sellApi(api)` here simulates exactly that — it has never seen
+    // `addOutgoing` for this item, yet remove/update must still work because
+    // the caller now hands over the real id directly.
+    const freshSell = sessionApiFor('sell', api)
+    await freshSell.removeOutgoing('s1', 'item-9')
+    expect(api.del).toHaveBeenCalledWith('/sales/s1/items/item-9')
+    await freshSell.updateOutgoing('s1', 'item-9', 7)
+    expect(api.patch).toHaveBeenCalledWith('/sales/s1/items/item-9', { agreed_price: 7 })
+  })
+
+  it('removes a staged trade outgoing leg by item_id on a fresh adapter instance', async () => {
+    const freshTrade = sessionApiFor('trade', api)
+    await freshTrade.removeOutgoing('t1', 'item-9')
+    expect(api.del).toHaveBeenCalledWith('/trades/t1/outgoing/item-9')
+  })
+
   it('refuses updateOutgoing on a buy session, which has no outgoing leg', async () => {
-    await expect(sessionApiFor('buy', api).updateOutgoing('b1', 0, 5)).rejects.toThrow(
+    await expect(sessionApiFor('buy', api).updateOutgoing('b1', 'item-1', 5)).rejects.toThrow(
       'A buy session has no outgoing leg',
     )
+  })
+
+  it('sends graded fields through to the purchases items API (Critical 1 regression)', async () => {
+    vi.mocked(api.post).mockResolvedValue({})
+    await sessionApiFor('buy', api).addIncoming('b1', {
+      card_id: 'en:base1-4', name: 'Charizard', agreed_value: 400,
+      kind: 'graded', company: 'PSA', grade: 10, cert_number: '12345678',
+      language: 'EN', location: 'glass',
+    })
+    expect(api.post).toHaveBeenCalledWith('/purchases/b1/items', expect.objectContaining({
+      kind: 'graded', company: 'PSA', grade: 10, cert_number: '12345678',
+    }))
   })
 })
