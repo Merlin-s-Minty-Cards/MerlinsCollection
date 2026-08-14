@@ -377,7 +377,7 @@ export default function DealPage() {
               card={formCard}
               onAdd={handleAddIncoming}
               onCancel={() => setFormCard(undefined)}
-              gradedAllowed={mode !== 'buy'}
+              gradedAllowed={true}
             />
           </div>
         )}

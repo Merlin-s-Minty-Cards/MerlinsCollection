@@ -170,10 +170,34 @@ describe('IncomingCardForm', () => {
     expect(screen.getByRole('button', { name: /^add$/i })).toBeEnabled()
   })
 
-  it('forces manual entry to raw, and says why', () => {
+  it('allows Graded to be selected on a manual (no catalog match) entry', () => {
     render(<IncomingCardForm card={null} onAdd={vi.fn()} onCancel={vi.fn()} />)
-    expect(screen.getByRole('radio', { name: /graded/i })).toBeDisabled()
-    expect(screen.getByText(/needs a catalog card/i)).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: /graded/i })).toBeEnabled()
+    expect(screen.queryByText(/needs a catalog card/i)).not.toBeInTheDocument()
+  })
+
+  it('emits a manual GRADED leg with a null card_id when Graded is picked', async () => {
+    const user = userEvent.setup({ delay: null })
+    const onAdd = vi.fn()
+    render(<IncomingCardForm card={null} onAdd={onAdd} onCancel={vi.fn()} />)
+    await user.click(screen.getByRole('radio', { name: /graded/i }))
+    await user.type(screen.getByLabelText(/card name/i), 'Mystery Charizard')
+    await user.type(screen.getByLabelText(/^grade$/i), '10')
+    await user.type(screen.getByLabelText(/cert number/i), '99')
+    await user.type(screen.getByLabelText(/value/i), '400')
+    await user.click(screen.getByRole('button', { name: /^add$/i }))
+    expect(onAdd).toHaveBeenCalledWith(
+      expect.objectContaining({ card_id: null, kind: 'graded', company: 'PSA', grade: 10 }),
+    )
+  })
+
+  it('runs the cert-owned check for a manual graded entry (it was already wired, just unreachable)', async () => {
+    const user = userEvent.setup({ delay: null })
+    mockCertOwned('99')
+    render(<IncomingCardForm card={null} onAdd={vi.fn()} onCancel={vi.fn()} />)
+    await user.click(screen.getByRole('radio', { name: /graded/i }))
+    await user.type(screen.getByLabelText(/cert number/i), '99')
+    expect(await screen.findByText(/you already own cert/i)).toBeInTheDocument()
   })
 
   it('emits a manual leg with a null card_id', async () => {
@@ -188,19 +212,20 @@ describe('IncomingCardForm', () => {
     )
   })
 
-  it('disables Graded and says why when gradedAllowed is false (Buy mode, Critical 1 regression)', async () => {
+  it('allows Graded to be selected in Buy mode too (RFC 0012 reverses the prior Buy-mode block)', async () => {
     const user = userEvent.setup({ delay: null })
     const onAdd = vi.fn()
-    render(<IncomingCardForm card={card()} onAdd={onAdd} onCancel={vi.fn()} gradedAllowed={false} />)
+    render(<IncomingCardForm card={card()} onAdd={onAdd} onCancel={vi.fn()} gradedAllowed={true} />)
 
-    expect(screen.getByRole('radio', { name: /graded/i })).toBeDisabled()
-    expect(screen.getByText(/graded intake isn't available from buy/i)).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: /graded/i })).toBeEnabled()
+    expect(screen.queryByText(/graded intake isn't available from buy/i)).not.toBeInTheDocument()
 
-    // Even if `kind` state were somehow 'graded', submit must still emit raw
-    // — the toggle disable is not the only line of defense.
+    await user.click(screen.getByRole('radio', { name: /graded/i }))
+    await user.type(screen.getByLabelText(/^grade$/i), '9')
+    await user.type(screen.getByLabelText(/cert number/i), '55')
     await user.type(screen.getByLabelText(/value/i), '40')
     await user.click(screen.getByRole('button', { name: /^add$/i }))
-    expect(onAdd).toHaveBeenCalledWith(expect.objectContaining({ kind: 'raw' }))
+    expect(onAdd).toHaveBeenCalledWith(expect.objectContaining({ kind: 'graded' }))
   })
 
   it('cancels without emitting', async () => {

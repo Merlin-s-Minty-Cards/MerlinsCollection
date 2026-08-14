@@ -13,10 +13,11 @@ import DealCardRow from './DealCardRow'
 /**
  * Add one card to a deal: catalog pick FIRST, then kind (RFC 0011 T14, §K).
  *
- * Decision 14: "regardless you should be picking a card from the catalog, it's
- * just that graded cards have more values." So identity is settled before the
- * form asks anything, and it stays on screen while the operator fills the rest
- * in — they are re-checking against the physical card in their hand.
+ * RFC 0012 reverses Decision 14: a graded leg no longer requires a catalog
+ * pick. Manual entry (no catalog match) can now be graded, matching how
+ * `/admin/slabs` intake has always worked — an unmatched graded item lands
+ * unpriced and self-routes to Triage (services/triage.py's
+ * is_missing_card_id), the same state a JP slab is already in.
  *
  * Decision 15 is STRUCTURAL, not cosmetic: condition and grade are never both
  * rendered. They are alternatives — a graded card's condition IS its grade.
@@ -46,20 +47,18 @@ interface OwnedCheck {
 }
 
 export interface IncomingCardFormProps {
-  /** `null` == manual entry. A manual entry can only ever be RAW. */
+  /** `null` == manual entry (no catalog match). */
   card: PickerCard | null
   onAdd: (leg: IncomingLeg) => void
   onCancel: () => void
   /**
-   * Presentational gate only — which controls the form shows. It does not
-   * pick an API URL (`lib/deal-session.ts` still owns that), so setting it
-   * from `mode === 'buy'` in `page.tsx` does not violate decision 16.
-   * Buy's `/admin/purchases/{id}/items` DOES accept graded fields, but the
-   * page has no cert-ownership warning UI wired up for it yet — this stays
-   * off until that lands, per CLAUDE.md's escape-hatch rule (say why, one
-   * line, rather than leaving a control that silently fails or discards
-   * data). Defaults to `true` for backward compatibility with any other
-   * caller.
+   * Presentational gate only — which controls the form shows. Defaults to
+   * `true`. RFC 0012 removed the Buy-mode-specific block this used to carry
+   * (the cert-ownership warning it was "pending" already existed and is
+   * gated on `kind === 'graded'` alone, at lines ~101-123 below — it just
+   * wasn't reachable while this defaulted to `false` for Buy). Kept as a
+   * prop, not deleted, in case a future caller needs to withhold graded for
+   * a reason unrelated to this one.
    */
   gradedAllowed?: boolean
 }
@@ -122,11 +121,12 @@ export default function IncomingCardForm({ card, onAdd, onCancel, gradedAllowed 
     }
   }, [cert, company, kind, api])
 
-  // Buy mode's toggle disable (below) already prevents `kind` reaching
-  // 'graded' from the UI, but `submit` re-derives from `manual`/`gradedAllowed`
-  // rather than trusting `kind` state alone — belt and braces, same reasoning
-  // T13 used for the manual/raw rule.
-  const gradedSelectable = !manual && gradedAllowed
+  // RFC 0012: manual entry (no catalog match) can be graded — Slabs intake
+  // never gated this, and the Trade-specific backend rule that used to
+  // require a card_id for a graded leg (Decision 14) is gone (see
+  // routers/admin/trades.py). gradedAllowed itself now only reflects
+  // whatever a specific caller still wants to withhold, if anything.
+  const gradedSelectable = gradedAllowed
 
   const submit = () => {
     if (!name.trim()) {
@@ -229,10 +229,10 @@ export default function IncomingCardForm({ card, onAdd, onCancel, gradedAllowed 
               name="incoming-kind"
               value={k}
               checked={kind === k}
-              // T13 422s a graded leg with no `card_id`, because graded pricing
-              // joins on `(card_id, company, grade)`. `!gradedAllowed` is the
-              // separate Buy-mode gate (final-review Critical 1) — Buy has no
-              // cert-ownership warning UI wired up yet.
+              // T13 422s a raw leg carrying graded fields, but a graded leg no
+              // longer needs a card_id (RFC 0012) — `gradedSelectable` now
+              // just mirrors `gradedAllowed`, which defaults to true and is
+              // only false if a future caller explicitly withholds graded.
               disabled={k === 'graded' && !gradedSelectable}
               onChange={() => setKind(k)}
               className="accent-mint"
@@ -240,18 +240,6 @@ export default function IncomingCardForm({ card, onAdd, onCancel, gradedAllowed 
             {k === 'raw' ? 'Raw' : 'Graded'}
           </label>
         ))}
-        {manual && (
-          // A disabled control with no explanation is the thing this codebase
-          // deletes. One line, right next to it.
-          <span className="text-[11px] text-pine-400">
-            Graded needs a catalog card — its price joins on the card id.
-          </span>
-        )}
-        {!manual && !gradedAllowed && (
-          <span className="text-[11px] text-pine-400">
-            Graded intake isn&apos;t available from Buy yet — use Slabs.
-          </span>
-        )}
       </div>
 
       {kind === 'raw' || !gradedSelectable ? (
