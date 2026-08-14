@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useCosigners } from '@/lib/use-cosigners'
 
 export interface CosignorPickerProps {
@@ -24,6 +24,15 @@ export default function CosignorPicker({
   const { options } = useCosigners()
   const [query, setQuery] = useState('')
   const [open, setOpen] = useState(false)
+  const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (blurTimeoutRef.current !== null) {
+        clearTimeout(blurTimeoutRef.current)
+      }
+    }
+  }, [])
 
   const selected = options.find((o) => o.value === value) ?? null
 
@@ -49,7 +58,9 @@ export default function CosignorPicker({
             setQuery('')
           }}
           onChange={(e) => setQuery(e.target.value)}
-          onBlur={() => setTimeout(() => setOpen(false), 150)}
+          onBlur={() => {
+            blurTimeoutRef.current = setTimeout(() => setOpen(false), 150)
+          }}
         />
         {allowClear && selected && (
           <button

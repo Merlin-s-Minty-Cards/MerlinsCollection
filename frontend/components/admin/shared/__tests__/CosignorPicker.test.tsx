@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { render, screen, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import CosignorPicker from '../CosignorPicker'
 
@@ -38,5 +38,34 @@ describe('CosignorPicker', () => {
     render(<CosignorPicker value="c1" onChange={onChange} />)
     await user.click(screen.getByRole('button', { name: /clear consignor/i }))
     expect(onChange).toHaveBeenCalledWith(null)
+  })
+
+  describe('blur-then-unmount', () => {
+    it('clears the blur-close timeout on unmount so it never fires afterward', () => {
+      const clearSpy = vi.spyOn(window, 'clearTimeout')
+
+      const { unmount } = render(<CosignorPicker value={null} onChange={vi.fn()} />)
+      const input = screen.getByRole('combobox', { name: /consignor/i })
+
+      fireEvent.blur(input)
+      unmount()
+
+      expect(clearSpy).toHaveBeenCalled()
+      clearSpy.mockRestore()
+    })
+
+    it('does not touch state after unmounting during the blur-close delay', async () => {
+      const { unmount } = render(<CosignorPicker value={null} onChange={vi.fn()} />)
+      const input = screen.getByRole('combobox', { name: /consignor/i })
+
+      fireEvent.blur(input)
+      // Unmount before the real 150ms blur-close timeout fires.
+      unmount()
+
+      // Wait past the 150ms delay with real timers, matching how other
+      // suites (CardDetailModal, Trade page) already have to work around
+      // this exact leak. Nothing should throw here.
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    })
   })
 })
