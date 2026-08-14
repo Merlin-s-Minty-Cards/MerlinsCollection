@@ -158,7 +158,7 @@ export default function AdminCardDetailPage() {
 
   if (loading) {
     return (
-      <div className="p-6 lg:p-8 max-w-5xl">
+      <div className="p-6 lg:p-8">
         <div className="text-xs text-pine-400">Loading…</div>
       </div>
     )
@@ -166,7 +166,7 @@ export default function AdminCardDetailPage() {
 
   if (!item) {
     return (
-      <div className="p-6 lg:p-8 max-w-5xl">
+      <div className="p-6 lg:p-8">
         <button
           type="button"
           onClick={() => router.back()}
@@ -183,7 +183,7 @@ export default function AdminCardDetailPage() {
   }
 
   return (
-    <div className="p-6 lg:p-8 max-w-5xl">
+    <div className="p-6 lg:p-8">
       {/* Back button */}
       <button
         type="button"

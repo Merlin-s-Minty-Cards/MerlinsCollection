@@ -111,7 +111,7 @@ export default function AdminDashboardPage() {
     !loading && actionCounts.every((c) => c !== null && c !== undefined && c === 0)
 
   return (
-    <div className="p-6 lg:p-8 max-w-6xl">
+    <div className="p-6 lg:p-8">
       <header className="mb-8">
         <span className="font-mono text-[11px] uppercase tracking-[0.22em] text-mint/70">
           Dashboard

@@ -321,7 +321,7 @@ export default function AdminAnalyticsPage() {
 
   if (activeTab === 'shows' && showViewMode === 'detail' && selectedShow) {
     return (
-      <div className="p-6 lg:p-8 max-w-5xl">
+      <div className="p-6 lg:p-8">
         {/* Back button */}
         <button
           type="button"
@@ -422,7 +422,7 @@ export default function AdminAnalyticsPage() {
   // ---------------------------------------------------------------------------
 
   return (
-    <div className="p-6 lg:p-8 max-w-6xl">
+    <div className="p-6 lg:p-8">
       <header className="mb-6">
         <span className="font-mono text-[11px] uppercase tracking-[0.22em] text-mint/70">
           Analytics

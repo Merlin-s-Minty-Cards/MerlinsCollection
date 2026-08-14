@@ -103,7 +103,7 @@ export default function AdminLocationsPage() {
   ]
 
   return (
-    <div className="p-6 lg:p-8 max-w-3xl">
+    <div className="p-6 lg:p-8">
       {/*
         aria-hidden while the delete confirmation is open: the row-level
         "Delete {label}" button and the dialog's "Delete" confirm button both

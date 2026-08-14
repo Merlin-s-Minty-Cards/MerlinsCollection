@@ -287,7 +287,7 @@ export default function DealPage() {
 
   if (confirmed) {
     return (
-      <div className="p-6 lg:p-8 max-w-3xl">
+      <div className="p-6 lg:p-8">
         <div className="vault-panel rounded-xl p-8 text-center">
           <div className="inline-flex items-center justify-center w-14 h-14 rounded-full bg-spriggatito-300/15 text-spriggatito-300 mb-4">
             <Check size={28} />
@@ -314,7 +314,7 @@ export default function DealPage() {
     rows.map((r) => ({ ...r, imageUrl: r.card_id ? getImageUrl(r.card_id) : null }))
 
   return (
-    <div className="p-6 lg:p-8 max-w-7xl">
+    <div className="p-6 lg:p-8">
       <header className="flex flex-wrap items-center justify-between gap-3 mb-6">
         <div className="flex items-center gap-4">
           <div>

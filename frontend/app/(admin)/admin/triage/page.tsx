@@ -379,7 +379,7 @@ export default function AdminTriagePage() {
   ]
 
   return (
-    <div className="p-6 lg:p-8 max-w-7xl">
+    <div className="p-6 lg:p-8">
       <header className="mb-6">
         <span className="font-mono text-[11px] uppercase tracking-[0.22em] text-mint/70">
           Triage
