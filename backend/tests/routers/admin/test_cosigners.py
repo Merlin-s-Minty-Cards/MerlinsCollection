@@ -504,6 +504,34 @@ class TestCosignerLinkErrors:
         assert data["linked"] == 1
         assert data["failed_item_ids"] == ["does-not-exist"]
 
+    def test_link_non_numeric_split_percent_is_422(self, admin_client):
+        """A garbage split_percent must 422, never propagate to an uncaught 500."""
+        client, repo, token = admin_client
+        cosigner_resp = client.post("/admin/cosigners", json={"name": "Alice"}, headers=_auth(token))
+        consignor_id = cosigner_resp.json()["consignor_id"]
+        repo.put_inventory_item(_raw(item_id="item-1"))
+
+        resp = client.post(
+            f"/admin/cosigners/{consignor_id}/link",
+            json={"item_ids": ["item-1"], "split_percent": "not-a-number"},
+            headers=_auth(token),
+        )
+        assert resp.status_code == 422
+
+    def test_link_out_of_range_split_percent_is_422(self, admin_client):
+        """split_percent is stored as a 0-1 fraction; 20 (a raw percent, not /100'd) must 422."""
+        client, repo, token = admin_client
+        cosigner_resp = client.post("/admin/cosigners", json={"name": "Alice"}, headers=_auth(token))
+        consignor_id = cosigner_resp.json()["consignor_id"]
+        repo.put_inventory_item(_raw(item_id="item-1"))
+
+        resp = client.post(
+            f"/admin/cosigners/{consignor_id}/link",
+            json={"item_ids": ["item-1"], "split_percent": "20"},
+            headers=_auth(token),
+        )
+        assert resp.status_code == 422
+
 
 class TestCosignerUnlink:
     def test_unlink_clears_consignment(self, admin_client):

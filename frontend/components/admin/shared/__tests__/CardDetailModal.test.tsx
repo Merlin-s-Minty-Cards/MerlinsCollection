@@ -850,7 +850,11 @@ describe('CardDetailModal — assign/unassign a cosigner (RFC 0012 C3)', () => {
     await user.click(screen.getByText('Alex'))
     await user.click(screen.getByRole('button', { name: /advanced: split % \/ minimum price override/i }))
 
-    await user.type(screen.getByLabelText(/split % override/i), '0.15')
+    // The admin types a PERCENT (matching cosigners/page.tsx's convention),
+    // and the code divides by 100 before sending — final-review Fix 1. Typing
+    // '0.15' here (a fraction, the OLD convention) used to be sent raw, which
+    // is exactly the two-surface mismatch that fix closed.
+    await user.type(screen.getByLabelText(/split % override/i), '20')
     await user.type(screen.getByLabelText(/minimum price override/i), '50')
 
     await user.click(screen.getByRole('button', { name: /^save$/i }))
@@ -858,7 +862,7 @@ describe('CardDetailModal — assign/unassign a cosigner (RFC 0012 C3)', () => {
     await waitFor(() =>
       expect(postMock).toHaveBeenCalledWith('/cosigners/cos-1/link', {
         item_ids: ['i1'],
-        split_percent: '0.15',
+        split_percent: 0.2,
         minimum_price: '50',
       }),
     )
@@ -866,6 +870,62 @@ describe('CardDetailModal — assign/unassign a cosigner (RFC 0012 C3)', () => {
 
     // Same leaked-timeout drain as the test above.
     await new Promise((resolve) => setTimeout(resolve, 200))
+  })
+
+  // final-review Fix 1 (Critical) — this modal used to send split_percent
+  // raw (an admin typing '20' meaning 20% produced a payload of 20 — a
+  // 2000% split), while cosigners/page.tsx's convention is to divide the
+  // typed percent by 100. This pins the corrected convention and its guard.
+  it('divides a typed split percent by 100 before sending, matching cosigners/page.tsx', async () => {
+    const user = userEvent.setup({ delay: null })
+    postMock.mockResolvedValue({ linked: 1, consignor_id: 'cos-1', failed_item_ids: [] })
+    render(<CardDetailModal item={{ item_id: 'i1', name: 'Charizard' }} onClose={vi.fn()} />)
+
+    await user.click(screen.getByRole('button', { name: /assign consignor/i }))
+    await user.click(screen.getByRole('combobox', { name: /consignor/i }))
+    await user.click(screen.getByText('Alex'))
+    await user.click(screen.getByRole('button', { name: /advanced: split % \/ minimum price override/i }))
+    await user.type(screen.getByLabelText(/split % override/i), '20')
+    await user.click(screen.getByRole('button', { name: /^save$/i }))
+
+    await waitFor(() =>
+      expect(postMock).toHaveBeenCalledWith('/cosigners/cos-1/link', {
+        item_ids: ['i1'],
+        split_percent: 0.2,
+      }),
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  })
+
+  it('rejects a non-numeric split percent without POSTing', async () => {
+    const user = userEvent.setup({ delay: null })
+    render(<CardDetailModal item={{ item_id: 'i1', name: 'Charizard' }} onClose={vi.fn()} />)
+
+    await user.click(screen.getByRole('button', { name: /assign consignor/i }))
+    await user.click(screen.getByRole('combobox', { name: /consignor/i }))
+    await user.click(screen.getByText('Alex'))
+    await user.click(screen.getByRole('button', { name: /advanced: split % \/ minimum price override/i }))
+    await user.type(screen.getByLabelText(/split % override/i), 'abc')
+    await user.click(screen.getByRole('button', { name: /^save$/i }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent(/split/i)
+    expect(postMock).not.toHaveBeenCalledWith(expect.stringContaining('/link'), expect.anything())
+  })
+
+  it('rejects an out-of-range split percent (over 100) without POSTing', async () => {
+    const user = userEvent.setup({ delay: null })
+    render(<CardDetailModal item={{ item_id: 'i1', name: 'Charizard' }} onClose={vi.fn()} />)
+
+    await user.click(screen.getByRole('button', { name: /assign consignor/i }))
+    await user.click(screen.getByRole('combobox', { name: /consignor/i }))
+    await user.click(screen.getByText('Alex'))
+    await user.click(screen.getByRole('button', { name: /advanced: split % \/ minimum price override/i }))
+    await user.type(screen.getByLabelText(/split % override/i), '150')
+    await user.click(screen.getByRole('button', { name: /^save$/i }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent(/split/i)
+    expect(postMock).not.toHaveBeenCalledWith(expect.stringContaining('/link'), expect.anything())
   })
 
   it('never sends minimum_price as $0 falling out of the body — a legitimate free consignment counts', async () => {
@@ -908,5 +968,40 @@ describe('CardDetailModal — assign/unassign a cosigner (RFC 0012 C3)', () => {
 
     await waitFor(() => expect(delMock).toHaveBeenCalledWith('/cosigners/cos-1/assets/i1'))
     expect(onUpdated).toHaveBeenCalledWith()
+  })
+
+  // final-review Fix 3 (Important) — `consignorError` used to be rendered only
+  // inside the "no consignment yet" branch's picker panel, so a failure on
+  // UNASSIGN (which only fires when a consignment DOES exist — the opposite
+  // branch) had nowhere to render. The DELETE failed silently: no error, no
+  // change, nothing the admin could see.
+  it('shows an error when assigning a consignor fails', async () => {
+    const user = userEvent.setup({ delay: null })
+    postMock.mockRejectedValue(new AdminApiError(400, 'Consignor not found'))
+    render(<CardDetailModal item={{ item_id: 'i1', name: 'Charizard' }} onClose={vi.fn()} />)
+
+    await user.click(screen.getByRole('button', { name: /assign consignor/i }))
+    await user.click(screen.getByRole('combobox', { name: /consignor/i }))
+    await user.click(screen.getByText('Alex'))
+    await user.click(screen.getByRole('button', { name: /^save$/i }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Consignor not found')
+
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  })
+
+  it('shows an error when unassigning a consignor fails — the currently-broken case', async () => {
+    const user = userEvent.setup({ delay: null })
+    delMock.mockRejectedValue(new AdminApiError(500, 'Could not unlink'))
+    render(
+      <CardDetailModal
+        item={{ item_id: 'i1', name: 'Charizard', consignment: { consignor_id: 'cos-1', split_percent: '0.5' } }}
+        onClose={vi.fn()}
+      />,
+    )
+
+    await user.click(screen.getByRole('button', { name: /unassign consignor/i }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Could not unlink')
   })
 })

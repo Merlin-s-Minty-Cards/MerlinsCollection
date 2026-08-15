@@ -334,7 +334,20 @@ export default function CardDetailModal({
       // still apply.
       const payload: Record<string, unknown> = { item_ids: [item.item_id] }
       const trimmedSplit = splitPercentInput.trim()
-      if (trimmedSplit !== '') payload.split_percent = trimmedSplit
+      if (trimmedSplit !== '') {
+        // The admin types a PERCENT (e.g. `20` for 20%), matching
+        // cosigners/page.tsx:251's convention exactly — divide by 100 before
+        // sending. `split_percent` is a bounded percent, not money (no
+        // thousands separator is possible), so a plain numeric parse with an
+        // explicit range check is correct here, not MoneyInput/parseMoney.
+        const splitPercentTyped = Number(trimmedSplit)
+        if (!Number.isFinite(splitPercentTyped) || splitPercentTyped < 0 || splitPercentTyped > 100) {
+          setConsignorError('Split % must be a number between 0 and 100.')
+          setConsignorSaving(false)
+          return
+        }
+        payload.split_percent = splitPercentTyped / 100
+      }
       // `!== null`, never falsiness: `parseMoney('0')` is `0`, and a
       // legitimate $0 minimum price is a real answer a consignor can set.
       if (minimumPriceParsed !== null) payload.minimum_price = String(minimumPriceParsed)
@@ -906,7 +919,7 @@ export default function CardDetailModal({
                       htmlFor="consignor-split-percent"
                       className="text-[10px] uppercase tracking-wider text-pine-500"
                     >
-                      Split % override (fraction, e.g. 0.2 for a 20% cut)
+                      Split % override (percent, e.g. 20 for a 20% cut)
                     </label>
                     <input
                       id="consignor-split-percent"
@@ -964,7 +977,6 @@ export default function CardDetailModal({
                     Cancel
                   </button>
                 </div>
-                {consignorError && <p role="status" className="text-xs text-red-300">{consignorError}</p>}
               </div>
             ) : (
               <button
@@ -975,6 +987,14 @@ export default function CardDetailModal({
                 Assign consignor
               </button>
             )}
+            {/* Section-level, not nested in one branch of the ternary above —
+                final-review Fix 3 (Important). `consignorError` is set on
+                BOTH assign and unassign failure, but an unassign only fires
+                from the "has consignment" branch, which used to have no
+                error output at all: the DELETE would fail with nothing
+                visible to the admin. Rendering it here means it shows
+                regardless of which of the three branches is active. */}
+            {consignorError && <p role="status" className="text-xs text-red-300">{consignorError}</p>}
           </section>
 
           {/* Quick Info */}

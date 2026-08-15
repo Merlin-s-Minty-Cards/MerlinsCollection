@@ -6,7 +6,7 @@ analytics (total items, value, items sold).
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -219,7 +219,15 @@ def link_items_to_cosigner(
 
     item_ids = body.get("item_ids", [])
     default_split = (Decimal("100") - consignor.payout_percent) / Decimal("100")
-    split_percent = Decimal(str(body.get("split_percent", str(default_split))))
+    try:
+        split_percent = Decimal(str(body.get("split_percent", str(default_split))))
+    except InvalidOperation:
+        raise HTTPException(status_code=422, detail="split_percent must be a number")
+    if not (Decimal("0") <= split_percent <= Decimal("1")):
+        raise HTTPException(
+            status_code=422,
+            detail="split_percent must be a fraction between 0 and 1 (e.g. 0.2 for a 20% cut)",
+        )
     minimum_price = Decimal(str(body["minimum_price"])) if body.get("minimum_price") else None
 
     linked = 0
