@@ -323,4 +323,93 @@ describe('the unified deal page', () => {
       expect(apiPost).toHaveBeenCalledWith('/cosigners/cos-1/link', { item_ids: ['new-item-1'] }),
     )
   })
+
+  // final-review Fix 5 (Important) — `StagedIncoming.consignorId` was stored
+  // when staging but never rendered on the row, so the operator had no way to
+  // verify what they staged before confirming.
+  it('shows the staged consignor name on the Coming In row', async () => {
+    const user = userEvent.setup({ delay: null })
+    render(<DealPage />)
+
+    const nameInput = await screen.findByLabelText('Card name')
+    await user.type(nameInput, CARD.name)
+    const row = await screen.findByTestId('card-picker-row')
+    await user.click(within(row).getByRole('button', { name: new RegExp(CARD.name) }))
+    const form = screen.getByTestId('incoming-form')
+
+    await user.click(within(form).getByRole('button', { name: /consignor/i }))
+    await user.click(within(form).getByRole('combobox', { name: /consignor/i }))
+    await user.click(within(form).getByText('Alex'))
+
+    const valueInput = within(form).getByLabelText('Value')
+    await user.type(valueInput, '10.00')
+    await user.click(within(form).getByRole('button', { name: 'Add' }))
+
+    await new Promise((resolve) => setTimeout(resolve, 200))
+
+    const comingIn = screen.getByTestId('coming-in')
+    expect(within(comingIn).getByText(/consignor:\s*alex/i)).toBeInTheDocument()
+  })
+
+  // final-review Fix 4 (Important) — the post-confirm consignor-link calls
+  // ended in `.catch(() => {})` with no visible trace of the outcome, success
+  // or failure. This pins the un-awaited, "own status line" shape RFC 0012
+  // specified but never built.
+  it('reports a partial consignor-link failure on the confirmed panel without affecting deal success', async () => {
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/cosigners') {
+        return Promise.resolve([
+          { consignor_id: 'cos-1', name: 'Alex' },
+          { consignor_id: 'cos-2', name: 'Sam' },
+        ])
+      }
+      return defaultGet(path)
+    })
+    apiPost.mockImplementation((path: string) => {
+      if (path === '/trades/deal-1/confirm') {
+        return Promise.resolve({ item_ids: ['new-item-1', 'new-item-2'] })
+      }
+      if (path === '/cosigners/cos-1/link') return Promise.resolve({})
+      if (path === '/cosigners/cos-2/link') return Promise.reject(new Error('link failed'))
+      return defaultPost(path)
+    })
+
+    const user = userEvent.setup({ delay: null })
+    render(<DealPage />)
+
+    // First incoming leg, consigned to Alex.
+    let nameInput = await screen.findByLabelText('Card name')
+    await user.type(nameInput, CARD.name)
+    let row = await screen.findByTestId('card-picker-row')
+    await user.click(within(row).getByRole('button', { name: new RegExp(CARD.name) }))
+    let form = screen.getByTestId('incoming-form')
+    await user.click(within(form).getByRole('button', { name: /consignor/i }))
+    await user.click(within(form).getByRole('combobox', { name: /consignor/i }))
+    await user.click(within(form).getByText('Alex'))
+    await user.type(within(form).getByLabelText('Value'), '10.00')
+    await user.click(within(form).getByRole('button', { name: 'Add' }))
+    await new Promise((resolve) => setTimeout(resolve, 200))
+
+    // Second incoming leg, consigned to Sam (whose link will fail).
+    nameInput = await screen.findByLabelText('Card name')
+    await user.type(nameInput, CARD.name)
+    row = await screen.findByTestId('card-picker-row')
+    await user.click(within(row).getByRole('button', { name: new RegExp(CARD.name) }))
+    form = screen.getByTestId('incoming-form')
+    await user.click(within(form).getByRole('button', { name: /consignor/i }))
+    await user.click(within(form).getByRole('combobox', { name: /consignor/i }))
+    await user.click(within(form).getByText('Sam'))
+    await user.type(within(form).getByLabelText('Value'), '10.00')
+    await user.click(within(form).getByRole('button', { name: 'Add' }))
+    await new Promise((resolve) => setTimeout(resolve, 200))
+
+    await user.click(screen.getByRole('button', { name: /confirm trade/i }))
+    await user.click(screen.getByRole('button', { name: /execute trade/i }))
+
+    // The deal itself succeeded regardless of the consignor-link outcome.
+    expect(await screen.findByText('Trade Confirmed')).toBeInTheDocument()
+
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith('/cosigners/cos-2/link', { item_ids: ['new-item-2'] }))
+    expect(await screen.findByText(/linked 1 of 2/i)).toBeInTheDocument()
+  })
 })

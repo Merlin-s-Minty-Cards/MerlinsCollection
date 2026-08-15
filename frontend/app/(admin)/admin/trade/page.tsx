@@ -44,6 +44,9 @@ interface StagedIncoming extends DealRowCard {
   agreedValue: number
   consignorId: string | null
 }
+// `consignorLabel` is inherited from `DealRowCard` itself (final-review Fix
+// 5) — no separate field needed here, since `DealCardRow` reads it directly
+// off the row it is handed.
 
 interface StagedOutgoing extends DealRowCard {
   itemId: string
@@ -90,6 +93,11 @@ export default function DealPage() {
   const [showConfirm, setShowConfirm] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const [confirmed, setConfirmed] = useState(false)
+  // Purely informational (final-review Fix 4) — reports the settled outcome
+  // of the post-confirm consignor-link calls below. `null` means either
+  // nothing was staged to link, or the calls are still in flight; it never
+  // affects the deal's own success/failure state or message.
+  const [consignorLinkStatus, setConsignorLinkStatus] = useState<string | null>(null)
 
   // Create the session for the current mode. Re-runs whenever `session`
   // changes identity, which happens exactly when `mode` changes.
@@ -127,6 +135,7 @@ export default function DealPage() {
     setPaymentMethod('cash')
     setFormCard(undefined)
     setDate(todayLocal())
+    setConsignorLinkStatus(null)
   }
 
   const applyModeSwitch = (next: DealMode) => {
@@ -160,6 +169,7 @@ export default function DealPage() {
         priceLabel: 'value',
         agreedValue: leg.agreed_value,
         consignorId: leg.consignor_id ?? null,
+        consignorLabel: leg.consignor_label ?? null,
       }])
       setFormCard(undefined)
     } catch (err) {
@@ -286,17 +296,32 @@ export default function DealPage() {
       // refresh. item_ids is index-aligned with the incoming legs that were
       // sent (trades.py's enumerate loop, purchases.py's append-in-order
       // items list), which is the same order `incoming` was built in above.
+      //
+      // final-review Fix 4: this used to end in `.catch(() => {})` — every
+      // failure vanished with no visible trace and there was no success
+      // indication either. `Promise.allSettled` tracks the outcome of every
+      // staged link and reports it on its OWN status line (set below, after
+      // the deal's own confirmed state above) — it never touches `confirmed`
+      // or blocks on the deal, which has already committed by this point.
       const itemIds = result.item_ids ?? []
-      incoming.forEach((leg, i) => {
-        const itemId = itemIds[i]
-        if (leg.consignorId && itemId) {
-          api.post(`/cosigners/${leg.consignorId}/link`, { item_ids: [itemId] }).catch(() => {
-            // A link failure here must not read back as "the deal failed" —
-            // it already committed. Recoverable after the fact from
-            // CardDetailModal (Task C3).
-          })
-        }
-      })
+      const consignorLinks = incoming
+        .map((leg, i) => ({ consignorId: leg.consignorId, itemId: itemIds[i] }))
+        .filter((l): l is { consignorId: string; itemId: string } => Boolean(l.consignorId && l.itemId))
+
+      if (consignorLinks.length > 0) {
+        Promise.allSettled(
+          consignorLinks.map(({ consignorId, itemId }) =>
+            api.post(`/cosigners/${consignorId}/link`, { item_ids: [itemId] }),
+          ),
+        ).then((settled) => {
+          const succeeded = settled.filter((s) => s.status === 'fulfilled').length
+          setConsignorLinkStatus(
+            succeeded === 0
+              ? 'Consignor link failed — assign from the card detail page'
+              : `Linked ${succeeded} of ${consignorLinks.length} consignor${consignorLinks.length !== 1 ? 's' : ''}`,
+          )
+        })
+      }
     } catch (err) {
       alert(err instanceof AdminApiError ? err.detail : 'Failed to confirm')
     } finally {
@@ -322,6 +347,13 @@ export default function DealPage() {
           <p className="text-sm text-pine-300 mb-4">
             {mode === 'buy' ? 'Purchase' : mode === 'sell' ? 'Sale' : 'Trade'} executed successfully.
           </p>
+          {/* Purely informational — never the deal's own success/failure
+              message, which is fixed above regardless of this outcome. */}
+          {consignorLinkStatus && (
+            <p role="status" className="text-xs text-pine-400 mb-4">
+              {consignorLinkStatus}
+            </p>
+          )}
           <button
             type="button"
             onClick={startNew}

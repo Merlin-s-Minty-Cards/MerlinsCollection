@@ -41,6 +41,14 @@ export interface DealRowCard {
    * a sale price.
    */
   priceLabel?: string
+  /**
+   * The staged consignor's display name, when this row is a staged incoming
+   * leg with one attached (final-review Fix 5). `consignorId` alone used to
+   * be carried on `StagedIncoming` with nothing rendered from it, so the
+   * operator had no way to verify what they staged before Confirm.
+   * `null`/`undefined` omits the line entirely rather than showing a blank one.
+   */
+  consignorLabel?: string | null
 }
 
 function priceText(value: DealRowCard['price']): string | null {
@@ -89,6 +97,9 @@ export default function DealCardRow({
       <div className="min-w-0 flex-1">
         <div className="truncate text-xs text-pine-100">{card.name}</div>
         {card.meta && <div className="truncate text-[10px] text-pine-400">{card.meta}</div>}
+        {card.consignorLabel && (
+          <div className="truncate text-[10px] text-mint">Consignor: {card.consignorLabel}</div>
+        )}
       </div>
 
       {/* Never shrinks and never truncates — a truncated price is worse than

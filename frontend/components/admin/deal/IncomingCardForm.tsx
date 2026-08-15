@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useAdminApi } from '@/lib/admin-api'
 import { useLocations } from '@/lib/use-locations'
+import { useCosigners } from '@/lib/use-cosigners'
 import { parseMoney } from '@/lib/money'
 import { CONDITION_OPTIONS } from '@/lib/constants'
 import { buildIncomingLeg, type IncomingLeg } from '@/lib/trade-incoming-form'
@@ -68,6 +69,10 @@ export default function IncomingCardForm({ card, onAdd, onCancel, gradedAllowed 
   const api = useAdminApi()
   // `options`, not `locations` — see lib/use-locations.ts:13.
   const { options: locationOptions } = useLocations()
+  // Same list CosignorPicker itself reads (final-review Fix 5) — the picker's
+  // onChange hands back only an id, and the staged row needs the LABEL to
+  // show "Consignor: <name>" without a second lookup after Confirm.
+  const { options: cosignorOptions } = useCosigners()
 
   const manual = card === null
 
@@ -174,6 +179,9 @@ export default function IncomingCardForm({ card, onAdd, onCancel, gradedAllowed 
       // Client-side only — see IncomingLeg.consignor_id. Omitted entirely
       // (never `null`) when no consignor was staged.
       ...(consignorId ? { consignor_id: consignorId } : {}),
+      ...(consignorId
+        ? { consignor_label: cosignorOptions.find((o) => o.value === consignorId)?.label ?? consignorId }
+        : {}),
     })
   }
 

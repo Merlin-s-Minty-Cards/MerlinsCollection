@@ -72,4 +72,17 @@ describe('DealCardRow', () => {
     expect(screen.queryByRole('button')).not.toBeInTheDocument()
     expect(screen.getByText('Charizard')).toBeInTheDocument()
   })
+
+  // final-review Fix 5 (Important) — a staged consignor was stored on
+  // `StagedIncoming.consignorId` but never rendered, so the operator had no
+  // way to verify what they staged before confirming.
+  it('renders the staged consignor label when present', () => {
+    render(<DealCardRow card={card({ consignorLabel: 'Alex' })} onAdd={vi.fn()} />)
+    expect(screen.getByText(/consignor:\s*alex/i)).toBeInTheDocument()
+  })
+
+  it('omits the consignor line entirely when none is staged', () => {
+    render(<DealCardRow card={card({ consignorLabel: null })} onAdd={vi.fn()} />)
+    expect(screen.queryByText(/consignor:/i)).not.toBeInTheDocument()
+  })
 })

@@ -94,6 +94,13 @@ export interface IncomingLeg {
    * response's item_ids.
    */
   consignor_id?: string
+  /**
+   * The consignor's display label, captured at selection time alongside
+   * `consignor_id` (final-review Fix 5) — never sent to the backend, purely
+   * so the staged row can show what was picked ("Consignor: <name>") before
+   * the operator presses Confirm.
+   */
+  consignor_label?: string
 }
 
 /** What the form holds — every money and grade field still raw text. */
