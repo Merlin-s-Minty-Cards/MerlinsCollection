@@ -124,6 +124,11 @@ split.
 sides, so a new model field fails a test rather than silently arriving
 without a sort or a filter.
 
+**A `consignor_id` filter joined this registry in RFC 0012** — same
+`services/inventory_filters.py` / `INVENTORY_FILTERS` +
+`admin-inventory-columns.tsx` shape as any other field, letting an admin scope
+the inventory table to one consignor's items.
+
 **Missing values sort LAST in both directions**, for every type — not just
 money. A column where the blanks bunch at whichever end you are not looking
 at is a column people stop clicking.
@@ -300,13 +305,23 @@ disguise.
 **Switching mode with a non-empty session confirms first.** A session
 belongs to one API and there is no migration between them.
 
+**`POST /admin/trades/{id}/confirm` and `POST /admin/purchases/{id}/confirm`
+now return `item_ids` in the response** (RFC 0012), the same shape the Slabs
+commit has always returned — it is what lets a post-confirm step (e.g. linking
+a staged consignor) target the exact items a deal just created without a
+second lookup.
+
 **A slab can now come IN through a trade.** Trading one OUT always worked —
 outgoing legs reference an existing `item_id` and never inspect `kind`.
 Incoming was hardcoded to `kind: "raw"`, so a PSA 10 arrived as a raw NM card
-with its cert gone. A graded incoming leg **requires a `card_id`**: graded
-pricing joins on `(card_id, company, grade)`, so an unlinked slab is
-unpriceable by construction. Consequence: **manual entry can only ever be
-raw.**
+with its cert gone. Graded pricing joins on `(card_id, company, grade)`, so a
+graded leg with no `card_id` is unpriceable by construction — but as of RFC
+0012, that no longer makes it a rejected leg. **A manually entered graded item
+is now accepted**, the same backend 422 and frontend raw-only gate that used to
+enforce "manual entry can only ever be raw" were both removed, and the item
+lands unpriceable and self-routes to Triage via the existing
+`services/triage.is_missing_card_id` check — the same path an unmatched slab
+already takes.
 
 **Condition and grade are never rendered together.** They are alternatives,
 and the backend 422s a raw leg carrying graded fields.
@@ -450,7 +465,13 @@ exists nowhere.
 
 **Cosigners** (`/admin/cosigners`) — CRUD + payout-link tool for consignors;
 card assignment is still raw item-ID entry (no picker UI, deliberately out of
-scope). "Delete" is an **archive** on the six-part contract above, and
+scope) on this page specifically. RFC 0012 added assign/unassign elsewhere
+too: `CardDetailModal.tsx` (a per-item panel calling
+`POST /admin/cosigners/{id}/link` and `DELETE .../assets/{item_id}` directly)
+and, on the incoming side of Buy/Trade, `IncomingCardForm.tsx` via
+`CosignorPicker` — both share the same `split_percent` convention as this
+page's link form (typed as a percent, divided by 100 before the request).
+"Delete" is an **archive** on the six-part contract above, and
 `Consignor.archived` **replaced `Consignor.active`** in RFC 0010 T2 — a
 `model_validator(mode="before")` reads a legacy stored `active: False` as
 `archived: True`, because the owner had already soft-deleted one. There is no
@@ -698,8 +719,9 @@ person using it.
 A disabled escape hatch is worse than none: it implies a roadmap. Either it works,
 or it is gone (RFC 0010 T12 deleted three buttons on exactly this reasoning). If
 it must be unavailable in some state, **say why in one line beside it** — e.g.
-manual entry forces Raw, because a graded item needs a `card_id` for pricing to
-join on.
+(historically) manual entry forcing Raw because a graded item needs a `card_id`
+for pricing to join on, which is exactly the example the next paragraph shows
+going stale.
 
 **That one-line "say why" comment is a promise, and promises go stale.** RFC
 0012 found the promise above already broken: `IncomingCardForm.tsx`'s comment
@@ -709,7 +731,9 @@ firing on `kind === 'graded'` alone) had *already been built*, in the same
 file, and nobody had come back to remove the gate it was blocking. The safety
 check and the restriction waiting on it were two separate pieces of code with
 no link between them but a sentence, so they drifted: one got finished, the
-other didn't notice.
+other didn't notice. RFC 0012 then removed the gate itself — a manually
+entered graded item is accepted now, not just found stale (see "Buy / Sell /
+Trade" above for the current behavior).
 
 > **When a gate's own comment names the specific thing it's waiting on, that
 > named thing can be built later without the gate ever being revisited** —
