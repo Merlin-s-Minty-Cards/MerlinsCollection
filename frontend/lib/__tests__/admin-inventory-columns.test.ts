@@ -44,6 +44,13 @@ describe('the registry itself', () => {
     }
   })
 
+  it('offers a Consignor column, off by default', () => {
+    const consignor = INVENTORY_COLUMNS.find((c) => c.key === 'consignor_name')
+    expect(consignor).toBeDefined()
+    expect(consignor?.defaultVisible).toBe(false)
+    expect(DEFAULT_VISIBLE_COLUMN_KEYS).not.toContain('consignor_name')
+  })
+
   it('derives DEFAULT_VISIBLE_COLUMN_KEYS from defaultVisible, in registry order', () => {
     expect(DEFAULT_VISIBLE_COLUMN_KEYS).toEqual(
       INVENTORY_COLUMNS.filter((c) => c.defaultVisible).map((c) => c.key),
@@ -165,10 +172,12 @@ describe('storage access that throws is survivable', () => {
 // model field. These pin the frontend half: that we actually MARK the columns,
 // and that the keys stay parseable as `{field}_{direction}`.
 
-describe('every column is sortable except the two that cannot be', () => {
+describe('every column is sortable except the three that cannot be', () => {
   // `_image` renders art resolved client-side from card_id — there is no
   // server-side value to order by. `_actions` is a pinned button cell.
-  const UNSORTABLE = new Set(['_image', '_actions'])
+  // `consignor_name` resolves a name client-side from consignor_id via
+  // useCosigners(); inventory_sort.py has no join to order by that label yet.
+  const UNSORTABLE = new Set(['_image', '_actions', 'consignor_name'])
 
   it('marks every data column sortable', () => {
     const unmarked = INVENTORY_COLUMNS
@@ -241,12 +250,15 @@ describe('every column has a filter', () => {
     }
   })
 
-  it('has a consignor filter that sends consignor_id and sources cosigners', () => {
+  it('has a consignor filter that sends consignor_id, sources cosigners, and follows the Consignor column\'s visibility', () => {
     const consignorFilter = INVENTORY_FILTERS.find((f) => f.id === 'consignor')
     expect(consignorFilter).toBeDefined()
     expect(consignorFilter?.legacyParam).toBe('consignor_id')
     expect(consignorFilter?.optionSource).toBe('cosigners')
-    expect(consignorFilter?.columnKey).toBeNull()
+    // Not null: unlike Set/Card #/Artist, Consignor rides the "filters follow
+    // visible columns" mechanism instead of the "Show all filters" toggle, so
+    // turning the column on in the picker is what reveals this filter.
+    expect(consignorFilter?.columnKey).toBe('consignor_name')
   })
 })
 

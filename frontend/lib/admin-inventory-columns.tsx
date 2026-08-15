@@ -79,6 +79,8 @@ export interface ColumnRenderContext {
   getImageUrl: (cardId?: string | null) => string | null
   onRefresh: () => void
   onDelete: (item: InventoryItem) => void
+  /** `useCosigners()` id->name lookup. Undefined for an unassigned/unknown id. */
+  consignorName: (consignorId: string | undefined | null) => string | undefined
 }
 
 export interface InventoryColumnDef {
@@ -283,6 +285,18 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
     // column asks, and ConsignmentTerms is not a comparable value.
     sortable: true,
     render: (item) => <OwnershipBadge consigned={item.consignment != null} />,
+  },
+  {
+    key: 'consignor_name',
+    label: 'Consignor',
+    defaultVisible: false,
+    // No backend sort key: the item stores consignor_id, not a name, and there's
+    // no join in inventory_sort.py yet to order by the resolved label.
+    sortable: false,
+    render: (item, ctx) => {
+      const id = (item.consignment as { consignor_id?: string } | null)?.consignor_id
+      return text(ctx.consignorName(id))
+    },
   },
 
   // --- Off by default: the fields that existed but were never displayable ---
@@ -682,7 +696,7 @@ export const INVENTORY_FILTERS: InventoryFilterDef[] = [
   { id: 'cardNumber', label: 'Card #', columnKey: null, kind: 'text', legacyParam: 'card_number' },
   { id: 'artist', label: 'Artist', columnKey: null, kind: 'text', legacyParam: 'artist' },
   {
-    id: 'consignor', label: 'Consignor', columnKey: null, kind: 'select',
+    id: 'consignor', label: 'Consignor', columnKey: 'consignor_name', kind: 'select',
     legacyParam: 'consignor_id', optionSource: 'cosigners',
   },
 ]

@@ -15,6 +15,7 @@ with no prefix under ``/admin``, so ``/shows`` and ``/transactions`` resolve to
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -37,6 +38,7 @@ from merlins_collection.services.dynamodb import (
 from merlins_collection.services.ledger import countable
 
 router = APIRouter(tags=["admin-analytics"])
+logger = logging.getLogger(__name__)
 
 # Default lookback for the range-defaulted feeds (~6 months).
 _DEFAULT_LOOKBACK_DAYS = 183
@@ -250,8 +252,24 @@ def archive_show(
     repo: InventoryRepository = Depends(get_repo),
 ) -> dict[str, Any]:
     """Hide a show from the default listing. Idempotent, and non-destructive:
-    there is deliberately no in-use guard, because nothing is being destroyed."""
-    return _save_show(repo, _require_show(repo, show_id), {"archived": True})
+    there is deliberately no in-use guard, because nothing is being destroyed.
+
+    RFC 0013: archiving is also the moment a show's numbers stop changing, so
+    it's when the analytics snapshot gets generated — without this, every show
+    read 0 on the Shows tab until a human pressed "Generate" by hand. The
+    snapshot is a CACHE, not the durable state change: a generation failure
+    must never turn a successful archive into a failed request, so it's caught
+    and logged rather than allowed to propagate. The manual "Generate" button
+    (below) stays as the recovery path.
+    """
+    result = _save_show(repo, _require_show(repo, show_id), {"archived": True})
+    try:
+        generate_show_analytics(show_id, repo=repo)
+    except Exception:
+        logger.exception(
+            "Failed to auto-generate analytics for show %s on archive", show_id
+        )
+    return result
 
 
 @router.post("/shows/{show_id}/unarchive")

@@ -1,4 +1,5 @@
 {
+  "agent": "lesson-capture-reminder",
   "hooks": {
     "PostToolUse": [
       {

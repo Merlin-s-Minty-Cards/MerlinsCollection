@@ -233,6 +233,27 @@ describe('the unified deal page', () => {
       .toBeInTheDocument()
   })
 
+  it('nets a cash top-up against the balance instead of adding to it', async () => {
+    // Owner-reported bug: $125 card in, $1025 card out, customer pays $900
+    // cash to cover the $900 difference — the deal is fully settled and the
+    // balance must read $0.00. It was reading +$1800.00 (1025 - 125 + 900)
+    // because the cash term was added instead of subtracted.
+    const user = userEvent.setup({ delay: null })
+    render(<DealPage />)
+    await addOneIncoming(user, { price: '125.00' })
+    await addOneOutgoing(user, { price: '1025.00' })
+
+    const summary = screen.getByTestId('deal-summary')
+    await user.click(within(summary).getByRole('button', { name: 'Add' }))
+    const amountInput = within(summary).getByLabelText('Cash amount 1')
+    await user.clear(amountInput)
+    await user.type(amountInput, '900.00')
+    await user.tab()
+
+    expect(within(screen.getByTestId('deal-balance')).getByText('+$0.00'))
+      .toBeInTheDocument()
+  })
+
   it('patches the negotiated Going Out price to the session before confirm', async () => {
     const user = userEvent.setup({ delay: null })
     render(<DealPage />)

@@ -304,6 +304,57 @@ class TestArchiveShow:
         assert resp.json()["archived"] is True
         assert len(repo.list_transactions_for_show(created["show_id"])) == 1
 
+    def test_archiving_a_show_generates_its_analytics_snapshot(self, admin_client):
+        """RFC 0013: archiving is the moment a show's numbers stop changing, so
+        it's when the ShowAnalyticsSnapshot gets generated automatically —
+        without this, /shows/{id}/analytics 404s until a human presses the
+        manual "Generate" button, which is why every show used to read 0."""
+        client, repo, token = admin_client
+        created = _create(client, token, date="2025-06-01")
+        repo.put_transaction(Transaction(
+            type=TransactionType.SALE,
+            item_id="item-1",
+            category=ItemCategory.RAW,
+            date=date(2025, 6, 1),
+            amount=Decimal("40.00"),
+            payment_method="cash",
+            show_id=created["show_id"],
+        ))
+
+        resp = client.post(
+            f"/admin/shows/{created['show_id']}/archive", headers=_auth(token)
+        )
+        assert resp.status_code == 200, resp.text
+
+        analytics = client.get(
+            f"/admin/shows/{created['show_id']}/analytics", headers=_auth(token)
+        )
+        assert analytics.status_code == 200, (
+            "archiving must generate a snapshot, not leave /analytics 404ing"
+        )
+        assert analytics.json()["total_sold"] == "40.00"
+
+    def test_archive_still_succeeds_when_snapshot_generation_fails(
+        self, admin_client, monkeypatch
+    ):
+        """The snapshot is a cache; the archive is the durable state change.
+        A generation failure must not turn a successful archive into a 500."""
+        client, repo, token = admin_client
+        created = _create(client, token)
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("simulated snapshot generation failure")
+
+        monkeypatch.setattr(repo, "put_show_analytics", _boom)
+
+        resp = client.post(
+            f"/admin/shows/{created['show_id']}/archive", headers=_auth(token)
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["archived"] is True
+        assert repo.get_show(created["show_id"]).archived is True
+
     def test_unarchive_restores_the_show(self, admin_client):
         client, repo, token = admin_client
         created = _create(client, token)

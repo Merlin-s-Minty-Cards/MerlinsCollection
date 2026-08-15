@@ -253,10 +253,20 @@ export default function DealPage() {
   const outgoingCostBasisTotal = outgoing.reduce((s, o) => s + (o.costBasis ?? o.agreedValue), 0)
   const cashNet = cashComponents.reduce((s, c) => s + (c.direction === 'they_pay' ? c.amount : -c.amount), 0)
 
-  // The balance is what changes hands: positive means the counterparty owes
-  // us (a sale, or a trade weighted toward us), negative means we owe them (a
-  // buy). Net, never summed magnitudes — a $50-for-$30 trade is +$20, not $80.
-  const balance = outgoingTotal - incomingTotal + cashNet
+  // The balance is what STILL changes hands after cards and cash are netted:
+  // positive means the counterparty owes us, negative means we owe them. Net,
+  // never summed magnitudes — a $50-for-$30 trade is +$20, not $80.
+  //
+  // cashNet is positive when THEY pay US (see above) — cash already received
+  // reduces what they still owe, so it is SUBTRACTED here. A $1025 card out
+  // for a $125 card in plus $900 cash they_pay is a fully settled $0 balance
+  // (1025 - 125 - 900), not +$1800 — the bug this comment replaces added
+  // cashNet instead of subtracting it. The backend's own (parallel, unused by
+  // this page) balance calculation at routers/admin/trades.py's
+  // `is_balanced = abs(total_out - total_in - cash_delta) < 0.01` already had
+  // the correct sign, which is how this was caught: two independent
+  // implementations of the same figure had drifted.
+  const balance = outgoingTotal - incomingTotal - cashNet
 
   let profit: number | null = null
   if (mode === 'sell') profit = outgoingTotal - outgoingCostBasisTotal

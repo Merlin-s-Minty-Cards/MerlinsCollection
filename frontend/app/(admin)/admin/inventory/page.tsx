@@ -242,6 +242,7 @@ export default function AdminInventoryPage() {
     locationOptions, getImageUrl,
     onRefresh: fetchItems,
     onDelete: setDeleteTarget,
+    consignorName: (id) => cosignorOptions.find((o) => o.value === id)?.label,
   })
 
   // --- Filters ------------------------------------------------------------
