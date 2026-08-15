@@ -107,6 +107,64 @@ describe('AdminInventoryPage location pickers use the live location list', () =>
   })
 })
 
+// ===========================================================================
+// final-review Fix 6 — the C2 plan (docs/plans/rfc-0012/c2-inventory-filter.md)
+// specified this page-level test and it was never written. The registry test
+// (lib/__tests__/admin-inventory-columns.test.ts) only asserts the entry's
+// SHAPE — it would still pass even if page.tsx's `selectOptions()`
+// 'cosigners' branch (which sources the options from `useCosigners()`) or the
+// filter's wiring into the search request were deleted outright.
+// ===========================================================================
+describe('AdminInventoryPage Consignor filter (RFC 0012 C2)', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    putMock.mockReset()
+    getMock.mockImplementation((path: string) => {
+      if (path === '/cosigners') {
+        return Promise.resolve([{ consignor_id: 'cos-1', name: 'Alex' }])
+      }
+      if (path === '/inventory/search') {
+        return Promise.resolve({ items: [], total: 0 })
+      }
+      // "Show all filters" renders every registry entry, not just Consignor —
+      // useLocations()/useShows()/catalog-sets all expect an array back, so
+      // these need explicit empty-array responses rather than falling through
+      // to the bare `{}` default (which crashes ColumnFilter's `options.map`).
+      if (path === '/locations') return Promise.resolve([])
+      if (path === '/shows') return Promise.resolve([])
+      if (path === '/catalog/sets') return Promise.resolve([])
+      return Promise.resolve({})
+    })
+  })
+
+  it('renders the Consignor filter sourced from useCosigners(), with the cosigner option', async () => {
+    render(<AdminInventoryPage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.click(screen.getByRole('button', { name: /show all filters/i }))
+
+    const select = await screen.findByLabelText('Consignor')
+    expect(within(select).getByRole('option', { name: 'Alex' })).toBeInTheDocument()
+  })
+
+  it('sends consignor_id on the search request when a consignor option is selected', async () => {
+    render(<AdminInventoryPage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.click(screen.getByRole('button', { name: /show all filters/i }))
+    const select = await screen.findByLabelText('Consignor')
+    fireEvent.change(select, { target: { value: 'cos-1' } })
+
+    await waitFor(() =>
+      expect(getMock).toHaveBeenCalledWith(
+        '/inventory/search',
+        expect.objectContaining({ consignor_id: 'cos-1' }),
+      ),
+    )
+  })
+})
+
 describe('AdminInventoryPage inline location edit no-op guard', () => {
   beforeEach(() => {
     getMock.mockReset()
