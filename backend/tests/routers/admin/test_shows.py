@@ -49,8 +49,12 @@ def _create(client, token, **overrides) -> dict:
     return resp.json()
 
 
-def _listing(client, token, *, include_archived=None) -> list[dict]:
-    params = {} if include_archived is None else {"include_archived": include_archived}
+def _listing(client, token, *, include_archived=None, sort=None) -> list[dict]:
+    params = {}
+    if include_archived is not None:
+        params["include_archived"] = include_archived
+    if sort is not None:
+        params["sort"] = sort
     resp = client.get("/admin/shows", params=params, headers=_auth(token))
     assert resp.status_code == 200, resp.text
     return resp.json()
@@ -428,6 +432,51 @@ class TestListShows:
         entry = next(s for s in listing if s["show_id"] == "legacy-1")
         assert entry["archived"] is False
         assert repo.get_show("legacy-1").archived is False
+
+
+class TestListShowsSort:
+    """RFC 0013 T4b — ``?sort=`` on ``GET /admin/shows``, via ``services.shows_sort``."""
+
+    def test_sort_by_name_ascending(self, admin_client):
+        """Dates are deliberately the OPPOSITE of what name order wants, so the
+        default date-desc order (Beaverton first) cannot accidentally satisfy
+        this assertion — only real name sorting can."""
+        client, _repo, token = admin_client
+        _create(client, token, name="Beaverton Show", date="2025-12-01")
+        _create(client, token, name="Albany Show", date="2025-01-01")
+
+        names = [s["name"] for s in _listing(client, token, sort="name_asc")]
+        assert names.index("Albany Show") < names.index("Beaverton Show")
+
+    def test_default_order_is_still_date_descending_when_no_sort_given(
+        self, admin_client
+    ):
+        """The pre-existing default (most recent first) must not change for the
+        caller that sends no ``sort`` at all."""
+        client, _repo, token = admin_client
+        _create(client, token, name="Earlier", date="2025-01-01")
+        _create(client, token, name="Later", date="2025-12-01")
+
+        names = [s["name"] for s in _listing(client, token)]
+        assert names.index("Later") < names.index("Earlier")
+
+    def test_unknown_sort_field_is_422(self, admin_client):
+        client, _repo, token = admin_client
+        _create(client, token)
+
+        resp = client.get(
+            "/admin/shows", params={"sort": "location_asc"}, headers=_auth(token)
+        )
+        assert resp.status_code == 422
+
+    def test_unknown_direction_is_422(self, admin_client):
+        client, _repo, token = admin_client
+        _create(client, token)
+
+        resp = client.get(
+            "/admin/shows", params={"sort": "date_sideways"}, headers=_auth(token)
+        )
+        assert resp.status_code == 422
 
 
 # ===========================================================================

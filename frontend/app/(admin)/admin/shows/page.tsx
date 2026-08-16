@@ -41,6 +41,11 @@ export default function AdminShowsPage() {
   const [shows, setShows] = useState<Show[]>([])
   const [loading, setLoading] = useState(true)
   const [includeArchived, setIncludeArchived] = useState(false)
+  // RFC 0013 T4b — server-side sort via services/shows_sort.py. `null` keeps
+  // the endpoint's existing date-desc default untouched (`GET /shows`
+  // preserves that when no `sort` is sent).
+  const [sortKey, setSortKey] = useState<string | null>(null)
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
   const [formOpen, setFormOpen] = useState(false)
   const [editing, setEditing] = useState<Show | null>(null)
@@ -66,13 +71,15 @@ export default function AdminShowsPage() {
     if (!api.isAuthenticated) return () => {}
     let cancelled = false
     setLoading(true)
+    const params: Record<string, string | boolean> = { include_archived: includeArchived }
+    if (sortKey) params.sort = `${sortKey}_${sortDir}`
     api
-      .get<Show[]>('/shows', { include_archived: includeArchived })
+      .get<Show[]>('/shows', params)
       .then((res) => { if (!cancelled) setShows(Array.isArray(res) ? res : []) })
       .catch(() => { if (!cancelled) setShows([]) })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [api, includeArchived])
+  }, [api, includeArchived, sortKey, sortDir])
 
   useEffect(() => fetchShows(), [fetchShows])
 
@@ -164,11 +171,21 @@ export default function AdminShowsPage() {
   // Columns
   // ---------------------------------------------------------------------------
 
+  const handleSort = (key: string) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setSortKey(key)
+      setSortDir('desc')
+    }
+  }
+
   const columns: Column<Show>[] = [
     {
       key: 'date',
       label: 'Date',
       className: 'w-28',
+      sortable: true,
       render: (show) => (
         <span className="text-xs font-mono text-pine-300">{show.date}</span>
       ),
@@ -177,6 +194,7 @@ export default function AdminShowsPage() {
       key: 'name',
       label: 'Show',
       className: 'min-w-[160px]',
+      sortable: true,
       render: (show) => (
         <span className="flex items-center gap-2">
           <span className="text-pine-100 text-sm font-medium">{show.name}</span>
@@ -191,6 +209,7 @@ export default function AdminShowsPage() {
     {
       key: 'venue',
       label: 'Venue',
+      sortable: true,
       render: (show) => (
         <span className="text-xs text-pine-300">{show.venue || '—'}</span>
       ),
@@ -198,6 +217,7 @@ export default function AdminShowsPage() {
     {
       key: 'city',
       label: 'City',
+      sortable: true,
       render: (show) => (
         <span className="text-xs text-pine-300">{show.city || '—'}</span>
       ),
@@ -206,6 +226,7 @@ export default function AdminShowsPage() {
       key: 'sales_goal',
       label: 'Goal',
       className: 'text-right',
+      sortable: true,
       render: (show) => <PriceDisplay value={show.sales_goal} className="text-xs" />,
     },
     {
@@ -289,6 +310,9 @@ export default function AdminShowsPage() {
         keyField="show_id"
         loading={loading}
         emptyMessage="No shows yet"
+        sortKey={sortKey}
+        sortDir={sortDir}
+        onSort={handleSort}
       />
 
       {/* Create/Edit modal */}

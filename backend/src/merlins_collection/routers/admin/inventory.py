@@ -40,7 +40,8 @@ from merlins_collection.services.inventory_filters import (
     validate_filters,
 )
 from merlins_collection.services.inventory_sort import (
-    SORT_FIELDS,
+    CONSIGNOR_NAME_FIELD,
+    all_sort_field_names,
     parse_sort,
     sort_items,
 )
@@ -319,7 +320,7 @@ def admin_search_inventory(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     # Sort
-    items = _sort_admin_results(items, sort)
+    items = _sort_admin_results(items, sort, repo)
 
     # Serialize with full fields
     serialized = [_serialize_item(i) for i in items]
@@ -928,6 +929,59 @@ def admin_resolve_card_images(
     return result
 
 
+@router.post("/items-brief")
+def admin_resolve_items_brief(
+    body: dict[str, Any],
+    repo: InventoryRepository = Depends(get_repo),
+) -> dict[str, dict[str, Any] | None]:
+    """Resolve item_ids to ``{"name": ..., "card_id": ...}`` for card identity.
+
+    Built for the Show Analytics sale-detail popup: the transaction archive
+    (``GET /admin/transactions``) carries only ``item_id`` — ``Transaction``
+    (models/business.py) has no name or card_id field — so a caller that
+    wants to show a sold card's name and art needs this lookup. Same batching
+    shape as ``/card-images`` above (one POST, capped at 100, a null rather
+    than an omitted key for an id that no longer resolves) rather than a
+    request per row (CLAUDE.md: "never fire a request per row").
+
+    Deliberately does NOT return a price: the transaction leg's own
+    ``amount`` is the authoritative sold/bought figure the caller already
+    has, and echoing a second copy here (current_market_value? cost_basis?)
+    would just be a figure that can drift from the one that matters.
+
+    Name resolution goes through ``admin_item_name`` — the one shared
+    authority (CLAUDE.md, "Name resolution: display_name_override wins
+    EVERYWHERE") — with the same catalog-name fallback ``/certs/{cert}`` and
+    the slab list already use for a card with no display name of its own.
+    ``card_id`` is read with ``getattr``, not ``item.card_id``: sealed and
+    bulk kinds have no such attribute at all, and reaching for it directly
+    raises ``AttributeError`` instead of returning ``None``.
+    """
+    item_ids = body.get("item_ids", [])
+    if not isinstance(item_ids, list):
+        raise HTTPException(status_code=422, detail="item_ids must be a list")
+    item_ids = item_ids[:100]  # cap to prevent abuse
+
+    result: dict[str, dict[str, Any] | None] = {}
+    for item_id in item_ids:
+        if not isinstance(item_id, str):
+            continue
+        item = repo.get_inventory_item(item_id)
+        if item is None:
+            result[item_id] = None
+            continue
+
+        name = admin_item_name(item)
+        card_id = getattr(item, "card_id", None)
+        if not name and card_id:
+            card = repo.get_catalog_card(card_id)
+            if card:
+                name = card.name
+
+        result[item_id] = {"name": name or None, "card_id": card_id}
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -1199,7 +1253,7 @@ def _item_matches_name(item: InventoryItem, name_lower: str) -> bool:
 
 
 def _sort_admin_results(
-    items: list[InventoryItem], sort: str | None
+    items: list[InventoryItem], sort: str | None, repo: InventoryRepository
 ) -> list[InventoryItem]:
     """Sort items by the requested criteria — see ``services.inventory_sort``.
 
@@ -1211,7 +1265,19 @@ def _sort_admin_results(
     reads as "sorting is broken" (RFC 0011 §A). The registry now covers every model
     field, missing values sort last in both directions, and ``condition`` orders by
     rank rather than alphabetically.
+
+    ``consignor_name`` is the one field the registry cannot resolve alone — it
+    orders by the consignor's NAME, not the opaque ``consignor_id`` the item
+    stores, and there is no DynamoDB join. Only when that field is actually
+    requested do we pay for ``repo.list_consignors()`` (one bounded `Query`
+    against the `CONSIGNORLIST` partition, not a table Scan) to build the
+    id->name map — every other sort, and every unsorted search, costs nothing
+    extra here.
     """
+    parsed = parse_sort(sort) if sort else None
+    if parsed is not None and parsed[0] == CONSIGNOR_NAME_FIELD:
+        consignor_names = {c.consignor_id: c.name for c in repo.list_consignors()}
+        return sort_items(items, sort, consignor_names=consignor_names)
     return sort_items(items, sort)
 
 
@@ -1263,7 +1329,7 @@ def _validate_sort(sort: str | None) -> None:
             status_code=422,
             detail=(
                 f"Unknown sort {sort!r}. Expected {{field}}_asc or {{field}}_desc, "
-                f"where field is one of: {', '.join(sorted(SORT_FIELDS))}."
+                f"where field is one of: {', '.join(all_sort_field_names())}."
             ),
         )
 

@@ -20,6 +20,11 @@ export interface ShowOption {
  *
  * An empty list on failure, like `useCatalogSets`: one optional filter that
  * cannot load must not take the rest of the panel with it.
+ *
+ * Gated on `api.isAuthenticated` and re-runs when it flips — see
+ * `useCosigners`'s docstring (lib/use-cosigners.ts) for why: a `[]`-deps
+ * fetch effect can race NextAuth's client session hydration, fail once
+ * before the token exists, and never get a second chance to retry.
  */
 export function useShows(): { options: { value: string; label: string }[]; loading: boolean } {
   const api = useAdminApi()
@@ -27,6 +32,7 @@ export function useShows(): { options: { value: string; label: string }[]; loadi
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
+    if (!api.isAuthenticated) return
     let cancelled = false
 
     api
@@ -53,7 +59,7 @@ export function useShows(): { options: { value: string; label: string }[]; loadi
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [api.isAuthenticated])
 
   return { options, loading }
 }

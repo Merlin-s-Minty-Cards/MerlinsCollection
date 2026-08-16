@@ -1,5 +1,7 @@
 {
   "agent": "lesson-capture-reminder",
+  "totalTokensReminder": "countdown",
+  "totalTokensReminderAfterUserTurn": true,
   "hooks": {
     "PostToolUse": [
       {

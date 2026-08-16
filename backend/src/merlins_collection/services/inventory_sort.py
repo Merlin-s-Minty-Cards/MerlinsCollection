@@ -33,6 +33,7 @@ from merlins_collection.models.inventory import (
     InventoryItem,
 )
 from merlins_collection.services.card_text import admin_item_name
+from merlins_collection.services.table_sort import build_sort_registry
 
 #: Worst-to-best, so a bigger rank is a better card and ``asc`` means worst-first — the
 #: same direction money sorts in. Modifier offsets apply WITHIN a tier, which is the
@@ -201,10 +202,40 @@ SORT_ALIASES: dict[str, str] = {
 }
 
 
+#: The one registry instance for this table. Built via the shared factory
+#: (RFC 0013 T4a) so the missing-last / unknown-field-is-None / last-underscore
+#: behaviors live in one place across all six admin sort registries; this
+#: table's own ``SORT_FIELDS``/``SORT_ALIASES`` dicts above are still the
+#: source of truth for what it can sort by.
+_REGISTRY = build_sort_registry(SORT_FIELDS, SORT_ALIASES)
+
+
+#: ``consignor_name`` orders by the consignor's NAME, resolved from the item's
+#: stored ``consignor_id`` — and it deliberately does NOT live in ``SORT_FIELDS``
+#: above. Every entry there is a pure ``Callable[[InventoryItem], Any]``: it can
+#: answer the question from one item alone. This field cannot — DynamoDB has no
+#: join, so "what is this consignor's name" needs the caller (the router) to
+#: supply an id->name map built from ``repo.list_consignors()`` (itself one
+#: bounded `Query` against the `CONSIGNORLIST` partition, the same call
+#: `routers/admin/cosigners.py` already makes per request — not a table Scan).
+#:
+#: A prior session left this column unsortable rather than build that plumbing,
+#: silently shipping an unconsulted exception to "every column is sortable."
+#: Extending the shared ``services/table_sort.py`` factory to support
+#: context-aware extractors would ripple across all six registries it backs
+#: (Shows/Transactions/Consignors/Locations/Slabs) for a need exactly one field
+#: on exactly one table has today — so this is handled as a small special case
+#: in ``parse_sort``/``resolve_sort_field``/``sort_items`` instead, and the
+#: factory stays untouched.
+CONSIGNOR_NAME_FIELD = "consignor_name"
+
+
 def resolve_sort_field(field: str) -> str | None:
     """The registry key this field means, or ``None`` if it means nothing."""
-    resolved = SORT_ALIASES.get(field, field)
-    return resolved if resolved in SORT_FIELDS else None
+    resolved = _REGISTRY.resolve_sort_field(field)
+    if resolved is not None:
+        return resolved
+    return CONSIGNOR_NAME_FIELD if field == CONSIGNOR_NAME_FIELD else None
 
 
 def parse_sort(sort: str) -> tuple[str, bool] | None:
@@ -213,18 +244,36 @@ def parse_sort(sort: str) -> tuple[str, bool] | None:
     ``rsplit`` on the LAST underscore, because field names contain underscores and
     directions do not. **Do not change this without re-checking every ``Column.key``**
     on the frontend — the two are the same string by design.
+
+    Tries the shared registry first, then falls back to the one field the
+    registry cannot know about (`consignor_name` — see its own constant above).
+    Splitting here mirrors ``SortRegistry.parse_sort`` exactly rather than
+    reusing it, because that method is bound to `_REGISTRY.fields`, which
+    `consignor_name` is deliberately not a member of.
     """
+    resolved = _REGISTRY.parse_sort(sort)
+    if resolved is not None:
+        return resolved
     parts = sort.rsplit("_", 1)
-    if len(parts) != 2 or parts[1] not in ("asc", "desc"):
-        return None
-    resolved = resolve_sort_field(parts[0])
-    if resolved is None:
-        return None
-    return resolved, parts[1] == "desc"
+    if len(parts) == 2 and parts[0] == CONSIGNOR_NAME_FIELD and parts[1] in ("asc", "desc"):
+        return CONSIGNOR_NAME_FIELD, parts[1] == "desc"
+    return None
+
+
+def all_sort_field_names() -> list[str]:
+    """Every field name this module accepts, sorted — for a 422's error message.
+
+    `SORT_FIELDS` alone would omit `consignor_name`, which is real and
+    accepted but deliberately absent from that dict (see its docstring).
+    """
+    return sorted({*SORT_FIELDS, CONSIGNOR_NAME_FIELD})
 
 
 def sort_items(
-    items: list[InventoryItem], sort: str | None
+    items: list[InventoryItem],
+    sort: str | None,
+    *,
+    consignor_names: dict[str, str] | None = None,
 ) -> list[InventoryItem]:
     """Sort by the requested field. **Missing values sort LAST in both directions.**
 
@@ -234,16 +283,35 @@ def sort_items(
 
     Callers reach this through the router, which validates first; the ``None`` guard
     below is belt to that's braces rather than a second policy.
+
+    ``consignor_names`` is consulted ONLY when the requested field is
+    `consignor_name` — see that constant's docstring for why this one field
+    needs data no single item carries. A caller that omits it while sorting by
+    `consignor_name` degrades to "every row missing" (stable, unchanged order)
+    rather than raising: the router only bothers building the map when this
+    field is actually requested, and a direct caller that forgets it should not
+    crash over what is, functionally, an unresolvable name.
     """
     if sort is None:
         return items
     parsed = parse_sort(sort)
     if parsed is None:
         return items
-    field, reverse = parsed
-    extract = SORT_FIELDS[field]
+    field_name, reverse = parsed
 
-    present = [i for i in items if extract(i) is not None]
-    missing = [i for i in items if extract(i) is None]
-    present.sort(key=extract, reverse=reverse)
-    return present + missing
+    if field_name == CONSIGNOR_NAME_FIELD:
+        names = consignor_names or {}
+
+        def _consignor_name(item: InventoryItem) -> str | None:
+            consignment = getattr(item, "consignment", None)
+            if consignment is None:
+                return None
+            name = names.get(consignment.consignor_id)
+            return name.lower() if name else None
+
+        present = [i for i in items if _consignor_name(i) is not None]
+        missing = [i for i in items if _consignor_name(i) is None]
+        present.sort(key=_consignor_name, reverse=reverse)
+        return present + missing
+
+    return _REGISTRY.sort_items(items, sort)

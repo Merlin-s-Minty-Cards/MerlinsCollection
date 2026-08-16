@@ -14,12 +14,17 @@ concurrent admin surfaces as a 409 to retry, never a silently dropped write.
 from __future__ import annotations
 
 from botocore.exceptions import ClientError
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 
 from merlins_collection.dependencies import get_repo
 from merlins_collection.services import locations as locations_service
 from merlins_collection.services.dynamodb import InventoryRepository
+from merlins_collection.services.locations_sort import (
+    SORT_FIELDS,
+    parse_sort,
+    sort_locations,
+)
 
 router = APIRouter(prefix="/locations", tags=["admin-locations"])
 
@@ -34,10 +39,29 @@ class LocationCreate(BaseModel):
 
 @router.get("")
 def list_locations(
+    sort: str | None = Query(None),
     repo: InventoryRepository = Depends(get_repo),
 ) -> list[dict[str, str]]:
-    """Return the canonical list of inventory location choices for dropdowns."""
-    return locations_service.get_locations(repo)
+    """Return the canonical list of inventory location choices for dropdowns.
+
+    ``sort`` (RFC 0013 T4e) orders the result via ``services.locations_sort`` —
+    same ``{field}_{direction}`` convention and 422-on-unknown rule as every
+    other admin list endpoint. No order was ever guaranteed here before, so
+    omitting it keeps today's storage order.
+    """
+    if sort is not None and parse_sort(sort) is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Unknown sort {sort!r}. Expected {{field}}_asc or {{field}}_desc, "
+                f"where field is one of: {', '.join(sorted(SORT_FIELDS))}."
+            ),
+        )
+
+    rows = locations_service.get_locations(repo)
+    if sort is not None:
+        rows = sort_locations(rows, sort)
+    return rows
 
 
 @router.post("", status_code=201)

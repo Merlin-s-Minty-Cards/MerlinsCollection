@@ -1,11 +1,12 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { ChevronRight, ChevronDown, Undo2, RotateCcw } from 'lucide-react'
+import { Undo2, RotateCcw, ArrowUpDown } from 'lucide-react'
 import { formatISODate, formatTimestamp } from '@/lib/dates'
 import SignedAmount from './SignedAmount'
 import StatusBadge from './StatusBadge'
 import VoidDialog from './VoidDialog'
+import SaleDetailModal from './SaleDetailModal'
 
 /**
  * The transaction archive, grouped so one real transaction reads as one line.
@@ -175,18 +176,52 @@ export default function TransactionGroups({
   onRestore?: (target: VoidTarget) => Promise<unknown>
 }) {
   const groups = useMemo(() => groupTransactions(transactions), [transactions])
-  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  // Which group's cards are showing in SaleDetailModal — `null` closes it.
+  // A KEY, not the group object itself: voiding/restoring a leg FROM the
+  // modal triggers the page's own `refetchDay()`, which rebuilds `groups`
+  // with brand-new objects on the next render. Storing the object would
+  // freeze the modal on stale data (a leg just voided would keep showing as
+  // live) until it was closed and reopened — the same trap the old
+  // `expanded: Set<string>` toggle already avoided by keying on `group.key`
+  // and re-deriving rows fresh every render, which this mirrors.
+  const [modalGroupKey, setModalGroupKey] = useState<string | null>(null)
+  const modalGroup = modalGroupKey
+    ? groups.find((g) => g.key === modalGroupKey) ?? null
+    : null
   const [pending, setPending] = useState<{ target: VoidTarget; label: string } | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const toggle = (key: string) =>
-    setExpanded((prev) => {
-      const next = new Set(prev)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
+  // RFC 0013 T4f — a lightweight sort control, deliberately NOT a DataTable
+  // header: this is a GROUP-level reorder (by group date or group total),
+  // never a flatten of the legs underneath a group. `null` (the default)
+  // keeps `groupTransactions`'s own guarantee — "grouping must not reorder
+  // the archive" — untouched; only a click opts a viewer OUT of that.
+  const [groupSortKey, setGroupSortKey] = useState<'date' | 'total' | null>(null)
+  const [groupSortDir, setGroupSortDir] = useState<'asc' | 'desc'>('desc')
+
+  const sortedGroups = useMemo(() => {
+    if (!groupSortKey) return groups
+    const sign = groupSortDir === 'asc' ? 1 : -1
+    return [...groups].sort((a, b) => {
+      if (groupSortKey === 'date') return sign * a.date.localeCompare(b.date)
+      // The figure the row actually SHOWS — an all-voided group displays
+      // what it withdrew (`voidedTotal`), not the zero it now contributes —
+      // so "highest first" matches what a viewer sees on screen, not a
+      // number that never renders anywhere.
+      const value = (g: TransactionGroup) => (g.liveRows.length === 0 ? g.voidedTotal : g.total)
+      return sign * (value(a) - value(b))
     })
+  }, [groups, groupSortKey, groupSortDir])
+
+  const handleGroupSort = (key: 'date' | 'total') => {
+    if (groupSortKey === key) {
+      setGroupSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setGroupSortKey(key)
+      setGroupSortDir('desc')
+    }
+  }
 
   const message = (err: unknown) =>
     err instanceof Error ? err.message : 'Void failed'
@@ -217,12 +252,51 @@ export default function TransactionGroups({
     }
   }
 
-  const columns = ['', 'Date', 'Type', 'Amount', 'Cards', 'Payment Method', 'Trade', '']
+  const columns = ['Date', 'Type', 'Amount', 'Cards', 'Payment Method', 'Trade', '']
 
   return (
     <div className="overflow-x-auto vault-scroll rounded-xl border border-pine-700/40">
       {error && !pending && (
         <p role="alert" className="px-3 py-2 text-xs text-red-400">{error}</p>
+      )}
+      {groups.length > 0 && (
+        <div className="flex items-center gap-2 px-3 py-2 border-b border-pine-700/40 bg-pine-800/20">
+          <ArrowUpDown size={11} className="text-pine-500" />
+          <span className="text-[10px] text-pine-400 font-medium">Sort by:</span>
+          <button
+            type="button"
+            onClick={() => handleGroupSort('date')}
+            aria-pressed={groupSortKey === 'date'}
+            className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
+              groupSortKey === 'date'
+                ? 'bg-mint/15 text-mint border border-mint/30'
+                : 'text-pine-400 hover:text-pine-200 border border-pine-700/40'
+            }`}
+          >
+            Date{groupSortKey === 'date' && (groupSortDir === 'asc' ? ' ↑' : ' ↓')}
+          </button>
+          <button
+            type="button"
+            onClick={() => handleGroupSort('total')}
+            aria-pressed={groupSortKey === 'total'}
+            className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
+              groupSortKey === 'total'
+                ? 'bg-mint/15 text-mint border border-mint/30'
+                : 'text-pine-400 hover:text-pine-200 border border-pine-700/40'
+            }`}
+          >
+            Total{groupSortKey === 'total' && (groupSortDir === 'asc' ? ' ↑' : ' ↓')}
+          </button>
+          {groupSortKey && (
+            <button
+              type="button"
+              onClick={() => setGroupSortKey(null)}
+              className="text-[10px] text-pine-500 hover:text-pine-300 transition-colors"
+            >
+              Clear
+            </button>
+          )}
+        </div>
       )}
       <table className="w-full text-left text-sm">
         <thead>
@@ -240,21 +314,20 @@ export default function TransactionGroups({
         <tbody className="divide-y divide-pine-700/25">
           {loading ? (
             <tr>
-              <td colSpan={8} className="px-3 py-8 text-center text-pine-400 text-xs">Loading…</td>
+              <td colSpan={7} className="px-3 py-8 text-center text-pine-400 text-xs">Loading…</td>
             </tr>
           ) : groups.length === 0 ? (
             <tr>
-              <td colSpan={8} className="px-3 py-8 text-center text-pine-500 text-xs">{emptyMessage}</td>
+              <td colSpan={7} className="px-3 py-8 text-center text-pine-500 text-xs">{emptyMessage}</td>
             </tr>
           ) : (
-            groups.flatMap((group) => {
-              const isOpen = expanded.has(group.key)
+            sortedGroups.map((group) => {
               const multi = group.rows.length > 1
               const allVoided = group.liveRows.length === 0
               const target: VoidTarget = group.batchId
                 ? { scope: 'batch', id: group.batchId, count: group.rows.length }
                 : { scope: 'row', id: group.rows[0].txn_id, count: 1 }
-              const rows = [
+              return (
                 <tr
                   key={group.key}
                   data-testid="txn-group"
@@ -262,21 +335,6 @@ export default function TransactionGroups({
                     allVoided ? 'line-through opacity-60' : ''
                   }`}
                 >
-                  <td className="w-8 px-3 py-2">
-                    {/* A twisty that reveals the same row is noise, so a group
-                        of one renders no disclosure control at all. */}
-                    {multi && (
-                      <button
-                        type="button"
-                        onClick={() => toggle(group.key)}
-                        aria-expanded={isOpen}
-                        aria-label={`${isOpen ? 'Hide' : 'Show'} the ${group.rows.length} cards in this transaction`}
-                        className="p-0.5 rounded text-pine-400 hover:text-mint transition-colors"
-                      >
-                        {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                      </button>
-                    )}
-                  </td>
                   <td className="px-3 py-2 text-[13px] text-pine-200">
                     <span className="font-mono text-xs">{formatISODate(group.date)}</span>
                   </td>
@@ -300,7 +358,21 @@ export default function TransactionGroups({
                     })()}
                   </td>
                   <td className="px-3 py-2 text-xs text-pine-300">
-                    {group.rows.length} {group.rows.length === 1 ? 'card' : 'cards'}
+                    {/* The bundled-sale trigger. Owner report: a raw item_id
+                        behind a chevron was not real disclosure — clicking
+                        this opens SaleDetailModal, which resolves each leg's
+                        image, name and price, "similar to how you would
+                        click on an inventory item." Every group gets this,
+                        not just multi-leg ones: even a one-card sale's row
+                        otherwise shows no card identity at all. */}
+                    <button
+                      type="button"
+                      onClick={() => setModalGroupKey(group.key)}
+                      aria-label={`View the ${group.rows.length} card${group.rows.length === 1 ? '' : 's'} in this transaction`}
+                      className="underline decoration-dotted underline-offset-2 text-pine-300 hover:text-mint transition-colors"
+                    >
+                      {group.rows.length} {group.rows.length === 1 ? 'card' : 'cards'}
+                    </button>
                     {allVoided && group.voidedRows[0] && (
                       <div className="no-underline">
                         <VoidedNote row={group.voidedRows[0]} />
@@ -357,72 +429,25 @@ export default function TransactionGroups({
                       </button>
                     )}
                   </td>
-                </tr>,
-              ]
-
-              if (isOpen) {
-                for (const leg of group.rows) {
-                  const legVoided = !isCountable(leg)
-                  const legTarget: VoidTarget = {
-                    scope: 'row', id: leg.txn_id, count: 1,
-                  }
-                  rows.push(
-                    <tr
-                      key={leg.txn_id}
-                      data-testid="txn-leg"
-                      className={`bg-pine-900/30 ${legVoided ? 'line-through opacity-60' : ''}`}
-                    >
-                      <td className="px-3 py-1.5" />
-                      <td className="px-3 py-1.5 font-mono text-[11px] text-pine-500" colSpan={2}>
-                        {leg.item_id}
-                        {legVoided && (
-                          <div className="no-underline"><VoidedNote row={leg} /></div>
-                        )}
-                      </td>
-                      <td className="px-3 py-1.5 text-right">
-                        <SignedAmount value={leg.amount} type={leg.type} className="text-xs" />
-                      </td>
-                      <td className="px-3 py-1.5 text-[11px] text-pine-500" colSpan={2}>
-                        {leg.payment_method}
-                      </td>
-                      <td className="px-3 py-1.5 text-right whitespace-nowrap no-underline">
-                        {legVoided
-                          ? onRestore && (
-                            <button
-                              type="button"
-                              aria-label={`Restore this card (${leg.item_id})`}
-                              onClick={() => restore(legTarget)}
-                              className="px-2 py-0.5 rounded text-[10px] text-mint hover:bg-mint/10 transition-colors"
-                            >
-                              Restore
-                            </button>
-                          )
-                          : leg.type === 'sale' && onVoid && (
-                            <button
-                              type="button"
-                              aria-label={`Void this card (${leg.item_id})`}
-                              onClick={() => {
-                                setError(null)
-                                setPending({
-                                  target: legTarget,
-                                  label: 'Void this one card?',
-                                })
-                              }}
-                              className="px-2 py-0.5 rounded text-[10px] text-red-400 hover:bg-red-500/10 transition-colors"
-                            >
-                              Void
-                            </button>
-                          )}
-                      </td>
-                    </tr>,
-                  )
-                }
-              }
-              return rows
+                </tr>
+              )
             })
           )}
         </tbody>
       </table>
+
+      <SaleDetailModal
+        rows={modalGroup?.rows ?? null}
+        onClose={() => setModalGroupKey(null)}
+        onVoidLeg={(leg) => {
+          setError(null)
+          setPending({
+            target: { scope: 'row', id: leg.txn_id, count: 1 },
+            label: 'Void this one card?',
+          })
+        }}
+        onRestoreLeg={(leg) => restore({ scope: 'row', id: leg.txn_id, count: 1 })}
+      />
 
       <VoidDialog
         open={pending !== null}

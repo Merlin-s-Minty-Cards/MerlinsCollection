@@ -18,6 +18,11 @@ export default function AdminLocationsPage() {
   const [locations, setLocations] = useState<LocationOption[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // RFC 0013 T4b — server-side sort via services/locations_sort.py. `null`
+  // keeps today's storage order, which is what `GET /locations` has always
+  // returned with no `sort` sent.
+  const [sortKey, setSortKey] = useState<string | null>(null)
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
   const [newValue, setNewValue] = useState('')
   const [newLabel, setNewLabel] = useState('')
@@ -29,14 +34,16 @@ export default function AdminLocationsPage() {
     if (!api.isAuthenticated) return
     setLoading(true)
     try {
-      const res = await api.get<LocationOption[]>('/locations')
+      const params: Record<string, string> = {}
+      if (sortKey) params.sort = `${sortKey}_${sortDir}`
+      const res = await api.get<LocationOption[]>('/locations', params)
       setLocations(Array.isArray(res) ? res : [])
     } catch {
       setLocations([])
     } finally {
       setLoading(false)
     }
-  }, [api])
+  }, [api, sortKey, sortDir])
 
   useEffect(() => {
     fetchLocations()
@@ -74,15 +81,26 @@ export default function AdminLocationsPage() {
     }
   }
 
+  const handleSort = (key: string) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setSortKey(key)
+      setSortDir('desc')
+    }
+  }
+
   const columns: Column<LocationOption>[] = [
     {
       key: 'label',
       label: 'Label',
+      sortable: true,
       render: (loc) => <span className="text-pine-100 text-sm font-medium">{loc.label}</span>,
     },
     {
       key: 'value',
       label: 'Value',
+      sortable: true,
       render: (loc) => <span className="text-xs text-pine-400 font-mono">{loc.value}</span>,
     },
     {
@@ -170,6 +188,9 @@ export default function AdminLocationsPage() {
           keyField="value"
           loading={loading}
           emptyMessage="No locations found"
+          sortKey={sortKey}
+          sortDir={sortDir}
+          onSort={handleSort}
         />
       </div>
 

@@ -62,6 +62,45 @@ class TestListLocations:
         assert resp.status_code in (401, 403)
 
 
+class TestListLocationsSort:
+    """RFC 0013 T4e — ``?sort=`` on ``GET /admin/locations``, via
+    ``services.locations_sort``."""
+
+    def test_sort_by_label_ascending(self, admin_client):
+        client, _repo, token = admin_client
+        client.post(
+            "/admin/locations",
+            json={"value": "zzz_box", "label": "Zzz Box"},
+            headers=_auth(token),
+        )
+        client.post(
+            "/admin/locations",
+            json={"value": "aaa_box", "label": "Aaa Box"},
+            headers=_auth(token),
+        )
+
+        resp = client.get(
+            "/admin/locations", params={"sort": "label_asc"}, headers=_auth(token)
+        )
+        assert resp.status_code == 200
+        labels = [row["label"] for row in resp.json()]
+        assert labels.index("Aaa Box") < labels.index("Zzz Box")
+
+    def test_unknown_sort_field_is_422(self, admin_client):
+        client, _repo, token = admin_client
+        resp = client.get(
+            "/admin/locations", params={"sort": "item_count_asc"}, headers=_auth(token)
+        )
+        assert resp.status_code == 422
+
+    def test_unknown_direction_is_422(self, admin_client):
+        client, _repo, token = admin_client
+        resp = client.get(
+            "/admin/locations", params={"sort": "label_sideways"}, headers=_auth(token)
+        )
+        assert resp.status_code == 422
+
+
 class TestLocationsAdminManaged:
     """DB-backed, admin-managed locations: seeding, add, delete, validation."""
 

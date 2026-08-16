@@ -103,6 +103,13 @@ export default function AdminUnmatchedPage() {
   // Raw text per row, so `MoneyInput` can hold a half-typed `1,` without the
   // page trying to parse it. Seeded lazily from the stored value.
   const [valueDrafts, setValueDrafts] = useState<Record<string, string>>({})
+  // RFC 0013 T4b. `null` (the default) means "let the candidate-count/park-
+  // date ordering below decide" — this page's whole point is surfacing the
+  // most actionable row first, and a plain column sort would fight that.
+  // Clicking a header opts OUT of that ordering in favor of the requested
+  // column, same as any other admin list.
+  const [sortKey, setSortKey] = useState<string | null>(null)
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
   const fetchQueue = useCallback(async () => {
     if (!api.isAuthenticated) return
@@ -113,10 +120,10 @@ export default function AdminUnmatchedPage() {
       // suggestions failing while the list succeeds would render a queue with
       // every row silently claiming it has no candidates, which is a wrong
       // answer wearing the shape of a right one.
+      const listParams: Record<string, string> = { no_catalog_match: 'true' }
+      if (sortKey) listParams.sort = `${sortKey}_${sortDir}`
       const [list, ranked] = await Promise.all([
-        api.get<{ items: TriageItem[] }>('/inventory/search', {
-          no_catalog_match: 'true',
-        }),
+        api.get<{ items: TriageItem[] }>('/inventory/search', listParams),
         api.get<SuggestionsResponse>('/unmatched/suggestions', { limit: '3' }),
       ])
       setItems(list?.items ?? [])
@@ -130,7 +137,7 @@ export default function AdminUnmatchedPage() {
     } finally {
       setLoading(false)
     }
-  }, [api])
+  }, [api, sortKey, sortDir])
 
   useEffect(() => { fetchQueue() }, [fetchQueue])
 
@@ -221,18 +228,38 @@ export default function AdminUnmatchedPage() {
    *
    * Sorted on a COPY. `Array.prototype.sort` mutates, and sorting the state
    * array in place edits React's own reference.
+   *
+   * Only applies when no column sort is active — the moment an admin clicks
+   * a header, `items` already arrived in the server's requested order (RFC
+   * 0013 T4b) and this re-sort would silently override that choice.
    */
-  const ordered = useMemo(() => [...items].sort((a, b) => {
-    const byCandidates = candidatesFor(b).length - candidatesFor(a).length
-    if (byCandidates !== 0) return byCandidates
-    return String(a.no_catalog_match_at ?? '')
-      .localeCompare(String(b.no_catalog_match_at ?? ''))
-  }), [items, candidatesFor])
+  const ordered = useMemo(() => {
+    if (sortKey) return items
+    return [...items].sort((a, b) => {
+      const byCandidates = candidatesFor(b).length - candidatesFor(a).length
+      if (byCandidates !== 0) return byCandidates
+      return String(a.no_catalog_match_at ?? '')
+        .localeCompare(String(b.no_catalog_match_at ?? ''))
+    })
+  }, [items, candidatesFor, sortKey])
+
+  const handleSort = (key: string) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setSortKey(key)
+      setSortDir('desc')
+    }
+  }
 
   const columns: Column<TriageItem>[] = [
     {
-      key: 'card',
+      // `name` (not `card`) so it round-trips through inventory_sort.py's
+      // `name` -> `display_name` alias when clicked — see the sortKey
+      // comment on `ordered` above for why the default stays candidate-first.
+      key: 'name',
       label: 'Card',
+      sortable: true,
       render: (item) => (
         <div className="flex items-center gap-2.5">
           {/* Always the placeholder, and deliberately NOT `useCardImages`: a
@@ -258,8 +285,11 @@ export default function AdminUnmatchedPage() {
       ),
     },
     {
-      key: 'parked',
+      // `no_catalog_match_at`, the real SORT_FIELDS key — matches what this
+      // column actually renders (the park timestamp).
+      key: 'no_catalog_match_at',
       label: 'Parked',
+      sortable: true,
       render: (item) => (
         // `formatTimestamp`, because `no_catalog_match_at` is a DATETIME. Never
         // `new Date()` on a date-only string, and never `toISOString()` here.
@@ -418,6 +448,9 @@ export default function AdminUnmatchedPage() {
           keyField="item_id"
           loading={loading}
           emptyMessage="Nothing is waiting on the catalog"
+          sortKey={sortKey}
+          sortDir={sortDir}
+          onSort={handleSort}
         />
       )}
 

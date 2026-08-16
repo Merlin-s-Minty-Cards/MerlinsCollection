@@ -36,6 +36,16 @@ from merlins_collection.services.dynamodb import (
     LedgerReversalConflictError,
 )
 from merlins_collection.services.ledger import countable
+from merlins_collection.services.shows_sort import SORT_FIELDS as SHOW_SORT_FIELDS
+from merlins_collection.services.shows_sort import parse_sort as parse_show_sort
+from merlins_collection.services.shows_sort import sort_shows
+from merlins_collection.services.transactions_sort import (
+    SORT_FIELDS as TXN_SORT_FIELDS,
+)
+from merlins_collection.services.transactions_sort import (
+    parse_sort as parse_txn_sort,
+)
+from merlins_collection.services.transactions_sort import sort_transactions
 
 router = APIRouter(tags=["admin-analytics"])
 logger = logging.getLogger(__name__)
@@ -183,13 +193,32 @@ def _default_range(start: date | None, end: date | None) -> tuple[date, date]:
 @router.get("/shows")
 def list_shows(
     include_archived: bool = Query(False),
+    sort: str | None = Query(None),
     repo: InventoryRepository = Depends(get_repo),
 ) -> list[dict[str, Any]]:
-    """Every show, most recent first. Archived shows are excluded by default."""
+    """Every show, most recent first. Archived shows are excluded by default.
+
+    ``sort`` (RFC 0013 T4b) overrides the default date-descending order via
+    ``services.shows_sort`` — same ``{field}_{direction}`` convention and same
+    422-on-unknown-field rule as every other admin list endpoint; a caller
+    that sends nothing keeps today's date-desc behavior unchanged.
+    """
+    if sort is not None and parse_show_sort(sort) is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Unknown sort {sort!r}. Expected {{field}}_asc or {{field}}_desc, "
+                f"where field is one of: {', '.join(sorted(SHOW_SORT_FIELDS))}."
+            ),
+        )
+
     shows = repo.list_shows()
     if not include_archived:
         shows = [s for s in shows if not s.archived]
-    shows.sort(key=lambda s: s.date, reverse=True)
+    if sort is None:
+        shows.sort(key=lambda s: s.date, reverse=True)
+    else:
+        shows = sort_shows(shows, sort)
     return [s.model_dump(mode="json") for s in shows]
 
 
@@ -431,6 +460,7 @@ def list_transactions_archive(
     start: date | None = Query(None),
     end: date | None = Query(None),
     type: TransactionType | None = Query(None),
+    sort: str | None = Query(None),
     repo: InventoryRepository = Depends(get_repo),
 ) -> dict[str, Any]:
     """Raw ledger rows in a date range, most recent first.
@@ -444,7 +474,21 @@ def list_transactions_archive(
     its ``voided_at`` / ``voided_by`` / ``void_reason``, because a void is a
     thing that was written — hiding it would make the correction untraceable and
     would leave the operator no way to restore it.
+
+    ``sort`` (RFC 0013 T4c) overrides the default ``(date, txn_id)``-descending
+    order via ``services.transactions_sort`` — same convention and 422-on-unknown
+    rule as ``list_shows`` above. The History page's grouped rendering sorts
+    GROUP order on top of these rows; this endpoint only ever returns flat rows.
     """
+    if sort is not None and parse_txn_sort(sort) is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Unknown sort {sort!r}. Expected {{field}}_asc or {{field}}_desc, "
+                f"where field is one of: {', '.join(sorted(TXN_SORT_FIELDS))}."
+            ),
+        )
+
     start, end = _default_range(start, end)
     if start > end:
         raise HTTPException(status_code=422, detail="start must be <= end")
@@ -452,7 +496,10 @@ def list_transactions_archive(
     txns = repo.list_transactions(start, end)
     if type is not None:
         txns = [t for t in txns if t.type == type]
-    txns.sort(key=lambda t: (t.date, t.txn_id), reverse=True)
+    if sort is None:
+        txns.sort(key=lambda t: (t.date, t.txn_id), reverse=True)
+    else:
+        txns = sort_transactions(txns, sort)
 
     return {
         "items": [t.model_dump(mode="json") for t in txns[:_ARCHIVE_LIMIT]],

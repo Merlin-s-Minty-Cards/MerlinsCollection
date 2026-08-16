@@ -289,10 +289,15 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
   {
     key: 'consignor_name',
     label: 'Consignor',
-    defaultVisible: false,
-    // No backend sort key: the item stores consignor_id, not a name, and there's
-    // no join in inventory_sort.py yet to order by the resolved label.
-    sortable: false,
+    // Was `false` — which is also why the Consignor FILTER never appeared by
+    // default: `isFilterVisible` gates a filter on its own column being
+    // visible, so an off-by-default column silently hid a filter that
+    // otherwise looked fully wired.
+    defaultVisible: true,
+    // Backend orders by the RESOLVED NAME via a router-supplied id->name map —
+    // see services/inventory_sort.py's CONSIGNOR_NAME_FIELD docstring for why
+    // this couldn't be a plain per-item extractor like every other column.
+    sortable: true,
     render: (item, ctx) => {
       const id = (item.consignment as { consignor_id?: string } | null)?.consignor_id
       return text(ctx.consignorName(id))

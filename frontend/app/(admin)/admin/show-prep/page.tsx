@@ -1,10 +1,11 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { MapPin, AlertTriangle, ArrowRight, Check, ExternalLink, Tag, TrendingUp, TrendingDown } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { useCardImages } from '@/lib/use-card-images'
 import { useLocations } from '@/lib/use-locations'
+import { sortRows, type FieldExtractor } from '@/lib/client-table-sort'
 import DataTable, { Column } from '@/components/admin/shared/DataTable'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import CardImage, { TABLE_THUMB_SIZE, TABLE_THUMB_COLUMN } from '@/components/admin/shared/CardImage'
@@ -33,6 +34,25 @@ interface MispricedItem {
 interface LocationData {
   locations: Record<string, number>
   total: number
+}
+
+// Module scope, not inside the component: a fresh object per render would
+// give `sortRows`'s `useMemo` below a new `fields` reference every time,
+// which is harmless functionally but would defeat memoization entirely.
+function numericField(field: keyof MispricedItem): FieldExtractor<MispricedItem> {
+  return (item) => {
+    const raw = item[field]
+    if (raw === undefined || raw === null || raw === '') return null
+    const parsed = parseFloat(String(raw))
+    return Number.isNaN(parsed) ? null : parsed
+  }
+}
+
+const MISPRICED_SORT_FIELDS: Record<string, FieldExtractor<MispricedItem>> = {
+  delta_pct: numericField('delta_pct'),
+  delta_dollar: numericField('delta_dollar'),
+  current_market_value: numericField('current_market_value'),
+  cost_basis: numericField('cost_basis'),
 }
 
 export default function AdminShowPrepPage() {
@@ -210,33 +230,29 @@ export default function AdminShowPrepPage() {
     }
   }
 
-  // Apply local sort. The parseFloat calls below read server-sent Decimal
-  // strings, which are never comma-grouped — that is the one place parseFloat
-  // stays safe. Anything a human typed goes through parseMoney (lib/money.ts).
-  const sortedMispriced = [...mispriced].sort((a, b) => {
-    if (!sortKey) return 0
-    if (sortKey === 'delta_pct') {
-      const aVal = parseFloat(a.delta_pct) || 0
-      const bVal = parseFloat(b.delta_pct) || 0
-      return sortDir === 'asc' ? aVal - bVal : bVal - aVal
-    }
-    if (sortKey === 'delta_dollar') {
-      const aVal = a.delta_dollar ? parseFloat(a.delta_dollar) : 0
-      const bVal = b.delta_dollar ? parseFloat(b.delta_dollar) : 0
-      return sortDir === 'asc' ? aVal - bVal : bVal - aVal
-    }
-    if (sortKey === 'current_market_value') {
-      const aVal = parseFloat(a.current_market_value) || 0
-      const bVal = parseFloat(b.current_market_value) || 0
-      return sortDir === 'asc' ? aVal - bVal : bVal - aVal
-    }
-    if (sortKey === 'cost_basis') {
-      const aVal = parseFloat(a.cost_basis) || 0
-      const bVal = parseFloat(b.cost_basis) || 0
-      return sortDir === 'asc' ? aVal - bVal : bVal - aVal
-    }
-    return 0
-  })
+  // Client-side sort — deliberately, not a RFC 0013 T4c regression. This
+  // list is `/show-prep/mispriced`, which (like `/vault`) returns its FULL
+  // match set with no `limit`/pagination, so there is no page-boundary for a
+  // server sort to protect the way there is on Inventory/Prep Queue (where a
+  // `limit` truncates BEFORE sort and a client-side sort would silently sort
+  // the wrong, already-cut page). Client vs. server produces an IDENTICAL
+  // result here, so this stays client-side rather than inventing a new
+  // backend sort registry for a bespoke, computed response shape
+  // (`delta_pct`/`delta_dollar`) that is not one of the RFC's five named
+  // tables (`services/table_sort.py`'s docstring). See CLAUDE.md/RFC 0013
+  // sync-docs notes for this deviation, mirroring the Locations `item_count`
+  // one.
+  //
+  // Missing-last in BOTH directions, same invariant every backend registry
+  // enforces (`services/table_sort.py`) and `lib/vault-sort.ts` already
+  // matches — the previous version here used `|| 0`, which sorted an absent
+  // value into the middle of the range instead of to the end. Routed through
+  // the shared `sortRows` helper (`lib/client-table-sort.ts`) rather than a
+  // fourth hand-rolled copy of the same partition.
+  const sortedMispriced = useMemo(
+    () => sortRows(mispriced, MISPRICED_SORT_FIELDS, sortKey, sortDir),
+    [mispriced, sortKey, sortDir],
+  )
 
   const columns: Column<MispricedItem>[] = [
     ...(showImages

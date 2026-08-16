@@ -22,6 +22,7 @@ import TransactionGroups, {
   type ArchiveTransaction,
   type VoidTarget,
 } from '@/components/admin/shared/TransactionGroups'
+import DataTable, { type Column } from '@/components/admin/shared/DataTable'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -71,6 +72,15 @@ interface DailyAnalytics {
 type Tab = 'daily' | 'shows'
 type ShowViewMode = 'list' | 'detail'
 
+/** One row of the Shows-tab table — a `Show` joined to its (possibly
+ * missing) analytics snapshot. Extends `Show` (which already carries the
+ * `[key: string]: unknown` index signature `DataTable`'s generic needs)
+ * rather than wrapping it in `{ show, analytics }`, so `keyField="show_id"`
+ * and `onRowClick` can both work off the row directly. */
+interface ShowRow extends Show {
+  analytics?: ShowAnalytics
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -117,6 +127,12 @@ export default function AdminAnalyticsPage() {
   const [showDetail, setShowDetail] = useState<ShowAnalytics | null>(null)
   const [loadingDetail, setLoadingDetail] = useState(false)
   const [generatingId, setGeneratingId] = useState<string | null>(null)
+  // RFC 0013 T4e — server-side sort via services/shows_sort.py, the same
+  // registry `/admin/shows` uses. `null` keeps this tab's existing
+  // date-descending default (applied client-side below, in
+  // `showsWithAnalytics`) untouched.
+  const [sortKey, setSortKey] = useState<string | null>(null)
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
   // Shared
   const [message, setMessage] = useState<string | null>(null)
@@ -176,7 +192,9 @@ export default function AdminAnalyticsPage() {
     if (!api.isAuthenticated) return
     setLoadingShows(true)
     try {
-      const res = await api.get<{ shows: Show[] } | Show[]>('/shows')
+      const params: Record<string, string> = {}
+      if (sortKey) params.sort = `${sortKey}_${sortDir}`
+      const res = await api.get<{ shows: Show[] } | Show[]>('/shows', params)
       const showsList = Array.isArray(res) ? res : res.shows ?? []
       setShows(showsList)
     } catch {
@@ -184,7 +202,7 @@ export default function AdminAnalyticsPage() {
     } finally {
       setLoadingShows(false)
     }
-  }, [api])
+  }, [api, sortKey, sortDir])
 
   const fetchAnalyticsByDate = useCallback(async () => {
     if (!api.isAuthenticated || !startDate || !endDate) return
@@ -304,16 +322,131 @@ export default function AdminAnalyticsPage() {
   const netProfit = analytics.reduce((sum, a) => sum + (parseFloat(a.net_sales) || 0), 0)
   const totalShows = analytics.length
 
+  const handleSort = (key: string) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setSortKey(key)
+      setSortDir('desc')
+    }
+  }
+
   const showsWithAnalytics = shows
     .filter((show) => {
       if (!show.date) return false
       return show.date >= startDate && show.date <= endDate
     })
-    .sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''))
-    .map((show) => {
-      const showAnalytic = analytics.find((a) => a.show_id === show.show_id)
-      return { show, analytics: showAnalytic }
-    })
+    // Only when no column sort is active — `shows` already arrived in the
+    // server's requested order (RFC 0013 T4e) once `sortKey` is set, and
+    // re-sorting here would silently override that choice, the same rule
+    // Unmatched's `ordered` follows (task 4a above).
+    .sort((a, b) => (sortKey ? 0 : (b.date ?? '').localeCompare(a.date ?? '')))
+    .map((show): ShowRow => ({
+      ...show,
+      analytics: analytics.find((a) => a.show_id === show.show_id),
+    }))
+
+  const showColumns: Column<ShowRow>[] = [
+    {
+      key: 'date',
+      label: 'Date',
+      sortable: true,
+      className: 'w-28',
+      render: (row) => <span className="text-xs font-mono text-pine-300">{formatISODate(row.date)}</span>,
+    },
+    {
+      key: 'name',
+      label: 'Show',
+      sortable: true,
+      className: 'min-w-[160px]',
+      render: (row) => (
+        <div className="min-w-0">
+          <div className="text-sm text-pine-100 font-medium truncate">{row.name}</div>
+          {row.location != null && (
+            <div className="text-[10px] text-pine-500 mt-0.5">{String(row.location)}</div>
+          )}
+          {row.analytics?.stale && (
+            <div className="mt-1 inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium border border-amber-500/30 bg-amber-500/10 text-amber-300">
+              Out of date — regenerate
+            </div>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: '_sold',
+      label: 'Sold',
+      className: 'text-right',
+      render: (row) =>
+        row.analytics ? (
+          <PriceDisplay value={row.analytics.total_sold} className="text-xs text-mint" />
+        ) : (
+          <span className="text-[10px] text-pine-600">—</span>
+        ),
+    },
+    {
+      key: '_bought',
+      label: 'Bought',
+      className: 'text-right',
+      render: (row) =>
+        row.analytics ? (
+          <PriceDisplay value={row.analytics.total_bought} className="text-xs text-blue-400" />
+        ) : (
+          <span className="text-[10px] text-pine-600">—</span>
+        ),
+    },
+    {
+      key: '_net',
+      label: 'Net',
+      className: 'text-right',
+      render: (row) =>
+        row.analytics ? (
+          <SignedAmount value={row.analytics.net_sales} fromValue className="text-xs" />
+        ) : (
+          <span className="text-[10px] text-pine-600">—</span>
+        ),
+    },
+    {
+      key: '_items',
+      label: 'Items S/B/T',
+      className: 'text-right hidden sm:table-cell',
+      render: (row) =>
+        row.analytics ? (
+          <span className="text-xs font-mono text-pine-300">
+            {row.analytics.items_sold_count}/{row.analytics.items_bought_count}/{row.analytics.trades_count}
+          </span>
+        ) : (
+          <span className="text-[10px] text-pine-600 italic">No analytics</span>
+        ),
+    },
+    {
+      key: '_actions',
+      label: '',
+      className: 'text-right w-24',
+      render: (row) => (
+        <div
+          className="flex items-center justify-end gap-2"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            onClick={() => generateAnalytics(row.show_id)}
+            disabled={generatingId === row.show_id}
+            className={
+              row.analytics
+                ? 'p-1.5 rounded text-pine-500 hover:text-mint hover:bg-mint/10 disabled:opacity-40 transition-colors'
+                : 'inline-flex items-center gap-1 px-2.5 py-1 rounded text-[10px] font-medium bg-mint/10 text-mint border border-mint/20 hover:bg-mint/20 disabled:opacity-40 transition-colors'
+            }
+            title={row.analytics ? 'Regenerate analytics' : undefined}
+          >
+            <RefreshCw size={row.analytics ? 13 : 11} className={generatingId === row.show_id ? 'animate-spin' : ''} />
+            {!row.analytics && 'Generate'}
+          </button>
+          <ChevronRight size={14} className="text-pine-600" />
+        </div>
+      ),
+    },
+  ]
 
   // ---------------------------------------------------------------------------
   // Shows detail view (rendered early return)
@@ -626,99 +759,17 @@ export default function AdminAnalyticsPage() {
             <h2 className="text-xs font-semibold text-pine-200 uppercase tracking-wider mb-3">
               Shows in Period
             </h2>
-            {loadingShows || loadingAnalytics ? (
-              <div className="vault-panel rounded-xl p-6 text-center text-xs text-pine-400">
-                Loading…
-              </div>
-            ) : showsWithAnalytics.length === 0 ? (
-              <div className="vault-panel rounded-xl p-6 text-center text-xs text-pine-500">
-                No shows found in the selected date range
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {showsWithAnalytics.map(({ show, analytics: showAnalytic }) => (
-                  <div
-                    key={show.show_id}
-                    className="vault-panel rounded-xl px-4 py-3 border border-pine-700/30 hover:border-pine-600/50 transition-colors cursor-pointer"
-                    onClick={() => openShowDetail(show)}
-                    role="button"
-                    tabIndex={0}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') openShowDetail(show)
-                    }}
-                  >
-                    <div className="flex items-center justify-between gap-4">
-                      <div className="flex items-center gap-4 min-w-0 flex-1">
-                        <div className="min-w-0">
-                          <div className="text-sm text-pine-100 font-medium truncate">{show.name}</div>
-                          <div className="text-[10px] text-pine-500 mt-0.5">
-                            {formatISODate(show.date)} {show.location && `• ${show.location}`}
-                          </div>
-                          {showAnalytic?.stale && (
-                            <div className="mt-1 inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium border border-amber-500/30 bg-amber-500/10 text-amber-300">
-                              Out of date — regenerate
-                            </div>
-                          )}
-                        </div>
-                      </div>
-
-                      {showAnalytic ? (
-                        <div className="flex items-center gap-4 flex-shrink-0">
-                          <div className="text-right">
-                            <div className="text-[10px] text-pine-500">Sold</div>
-                            <PriceDisplay value={showAnalytic.total_sold} className="text-xs text-mint" />
-                          </div>
-                          <div className="text-right">
-                            <div className="text-[10px] text-pine-500">Bought</div>
-                            <PriceDisplay value={showAnalytic.total_bought} className="text-xs text-blue-400" />
-                          </div>
-                          <div className="text-right">
-                            <div className="text-[10px] text-pine-500">Net</div>
-                            <SignedAmount value={showAnalytic.net_sales} fromValue className="text-xs" />
-                          </div>
-                          <div className="text-right hidden sm:block">
-                            <div className="text-[10px] text-pine-500">Items S/B/T</div>
-                            <span className="text-xs font-mono text-pine-300">
-                              {showAnalytic.items_sold_count}/{showAnalytic.items_bought_count}/{showAnalytic.trades_count}
-                            </span>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              generateAnalytics(show.show_id)
-                            }}
-                            disabled={generatingId === show.show_id}
-                            className="p-1.5 rounded text-pine-500 hover:text-mint hover:bg-mint/10 disabled:opacity-40 transition-colors"
-                            title="Regenerate analytics"
-                          >
-                            <RefreshCw size={13} className={generatingId === show.show_id ? 'animate-spin' : ''} />
-                          </button>
-                          <ChevronRight size={14} className="text-pine-600" />
-                        </div>
-                      ) : (
-                        <div className="flex items-center gap-3 flex-shrink-0">
-                          <span className="text-[10px] text-pine-600 italic">No analytics</span>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              generateAnalytics(show.show_id)
-                            }}
-                            disabled={generatingId === show.show_id}
-                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-[10px] font-medium bg-mint/10 text-mint border border-mint/20 hover:bg-mint/20 disabled:opacity-40 transition-colors"
-                          >
-                            <RefreshCw size={11} className={generatingId === show.show_id ? 'animate-spin' : ''} />
-                            Generate
-                          </button>
-                          <ChevronRight size={14} className="text-pine-600" />
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
+            <DataTable
+              columns={showColumns}
+              data={showsWithAnalytics}
+              keyField="show_id"
+              loading={loadingShows || loadingAnalytics}
+              emptyMessage="No shows found in the selected date range"
+              onRowClick={(row) => openShowDetail(row)}
+              sortKey={sortKey}
+              sortDir={sortDir}
+              onSort={handleSort}
+            />
           </section>
         </>
       )}

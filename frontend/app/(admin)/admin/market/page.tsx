@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { TrendingUp, Trash2, Star, RefreshCw, PackagePlus } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { describeApiError, type ApiErrorDescription } from '@/lib/admin-error'
@@ -11,6 +11,10 @@ import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import CardPickerRow, { type PickerCard } from '@/components/admin/shared/CardPickerRow'
 import SetCombobox from '@/components/shared/SetCombobox'
 import { useCatalogSets, toComboboxSets } from '@/lib/use-catalog-sets'
+import DataTable, { type Column } from '@/components/admin/shared/DataTable'
+import { sortRows, type FieldExtractor } from '@/lib/client-table-sort'
+import CardImage, { TABLE_THUMB_SIZE, TABLE_THUMB_COLUMN } from '@/components/admin/shared/CardImage'
+import { useCardImages } from '@/lib/use-card-images'
 
 interface CatalogCard extends PickerCard {
   prices?: Record<string, unknown>
@@ -31,6 +35,29 @@ interface WatchlistEntry {
   target_buy_price?: string | null
   notes?: string | null
   added_at: string
+  // DataTable's generic constraint is `Record<string, unknown>` — every other
+  // row type it renders (Show, Cosigner, ShowRow, …) carries this signature
+  // for the same reason. `next build` typechecks this; `vitest` does not, so
+  // this is the kind of gap CLAUDE.md's Ops section already warns about.
+  [key: string]: unknown
+}
+
+// Module scope, mirroring `show-prep/page.tsx`'s `MISPRICED_SORT_FIELDS` — a
+// stable object so `sortRows`'s memoization below is not defeated by a fresh
+// object every render. `GET /watchlist` (RFC 0013 T4c) returns its FULL list
+// with no `limit`/pagination, same bounded-by-business-reality category as
+// `/vault` and `/show-prep/mispriced`, so a client-side sort over the
+// complete response is equivalent to a server-side one — see the longer note
+// in `lib/client-table-sort.ts`.
+const WATCHLIST_SORT_FIELDS: Record<string, FieldExtractor<WatchlistEntry>> = {
+  name: (e) => e.name?.toLowerCase() ?? null,
+  set_name: (e) => e.set_name?.toLowerCase() ?? null,
+  target_buy_price: (e) => {
+    if (e.target_buy_price === null || e.target_buy_price === undefined) return null
+    const parsed = parseFloat(String(e.target_buy_price))
+    return Number.isNaN(parsed) ? null : parsed
+  },
+  added_at: (e) => e.added_at ?? null,
 }
 
 type Tab = 'search' | 'watchlist'
@@ -150,6 +177,14 @@ export default function AdminMarketPage() {
   // Watchlist
   const [watchlist, setWatchlist] = useState<WatchlistEntry[]>([])
   const [loadingWatchlist, setLoadingWatchlist] = useState(false)
+  const [watchlistSortKey, setWatchlistSortKey] = useState<string | null>(null)
+  const [watchlistSortDir, setWatchlistSortDir] = useState<'asc' | 'desc'>('desc')
+  // "A card is never identified by name alone" (CLAUDE.md) — the watchlist
+  // is a list of cards an admin picked out to track, so it needs art the
+  // same as every other admin card list. Found missing during RFC 0013's
+  // adversarial-review pass; the DataTable conversion was the first time
+  // this list had a place to put a thumbnail column at all.
+  const { getImageUrl: getWatchlistImageUrl } = useCardImages(watchlist.map((e) => e.card_id))
 
   // Coverage banner
   const [coverage, setCoverage] = useState<MarketCoverage | null>(null)
@@ -357,6 +392,95 @@ export default function AdminMarketPage() {
       alert(err instanceof AdminApiError ? err.detail : 'Failed to remove')
     }
   }
+
+  const handleWatchlistSort = (key: string) => {
+    if (watchlistSortKey === key) {
+      setWatchlistSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setWatchlistSortKey(key)
+      setWatchlistSortDir('desc')
+    }
+  }
+
+  const sortedWatchlist = useMemo(
+    () => sortRows(watchlist, WATCHLIST_SORT_FIELDS, watchlistSortKey, watchlistSortDir),
+    [watchlist, watchlistSortKey, watchlistSortDir],
+  )
+
+  const watchlistColumns: Column<WatchlistEntry>[] = [
+    {
+      key: '_image',
+      label: '',
+      className: TABLE_THUMB_COLUMN,
+      render: (entry) => (
+        <CardImage
+          imageUrl={getWatchlistImageUrl(entry.card_id)}
+          alt={entry.name}
+          size={TABLE_THUMB_SIZE}
+        />
+      ),
+    },
+    {
+      key: 'name',
+      label: 'Card',
+      sortable: true,
+      className: 'min-w-[160px]',
+      render: (entry) => <span className="text-xs text-pine-100 font-medium">{entry.name}</span>,
+    },
+    {
+      key: 'set_name',
+      label: 'Set',
+      sortable: true,
+      render: (entry) => <span className="text-xs text-pine-300">{entry.set_name || '—'}</span>,
+    },
+    {
+      key: 'target_buy_price',
+      label: 'Target',
+      sortable: true,
+      className: 'text-right',
+      render: (entry) =>
+        entry.target_buy_price ? (
+          <PriceDisplay value={entry.target_buy_price} className="text-[11px] text-amber-400" />
+        ) : (
+          <span className="text-xs text-pine-600">—</span>
+        ),
+    },
+    {
+      key: 'added_at',
+      label: 'Added',
+      sortable: true,
+      render: (entry) => (
+        <span className="text-[11px] text-pine-400 font-mono">
+          {entry.added_at ? entry.added_at.slice(0, 10) : '—'}
+        </span>
+      ),
+    },
+    {
+      key: '_notes',
+      label: 'Notes',
+      render: (entry) => (
+        <span className="text-[11px] text-pine-500 truncate block max-w-[200px]">
+          {entry.notes || '—'}
+        </span>
+      ),
+    },
+    {
+      key: '_actions',
+      label: '',
+      className: 'text-right w-10',
+      render: (entry) => (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); removeFromWatchlist(entry.entry_id) }}
+          className="p-1.5 rounded text-pine-500 hover:text-red-400 transition-colors"
+          title="Remove"
+          aria-label={`Remove ${entry.name} from watchlist`}
+        >
+          <Trash2 size={13} />
+        </button>
+      ),
+    },
+  ]
 
   return (
     <div className="p-6 lg:p-8">
@@ -617,31 +741,22 @@ export default function AdminMarketPage() {
 
       {activeTab === 'watchlist' && (
         <div className="vault-panel rounded-xl overflow-hidden">
-          {loadingWatchlist ? (
-            <div className="p-6 text-center text-xs text-pine-400">Loading watchlist…</div>
-          ) : watchlist.length === 0 ? (
+          {!loadingWatchlist && watchlist.length === 0 ? (
             <div className="p-6 text-center text-xs text-pine-500">
               <Star size={24} className="text-pine-600 mx-auto mb-2" />
               No cards on your watchlist yet. Search the catalog and add cards to watch.
             </div>
           ) : (
-            <div className="divide-y divide-pine-700/25">
-              {watchlist.map((entry) => (
-                <div key={entry.entry_id} className="flex items-center justify-between px-4 py-3">
-                  <div className="min-w-0">
-                    <div className="text-xs text-pine-100 font-medium">{entry.name}</div>
-                    <div className="text-[10px] text-pine-400">
-                      {entry.set_name}
-                      {entry.target_buy_price && <> · Target: <PriceDisplay value={entry.target_buy_price} className="text-[10px] text-amber-400 inline" /></>}
-                    </div>
-                    {entry.notes && <div className="text-[10px] text-pine-500 mt-0.5">{entry.notes}</div>}
-                  </div>
-                  <button type="button" onClick={() => removeFromWatchlist(entry.entry_id)} className="p-1.5 rounded text-pine-500 hover:text-red-400 transition-colors" title="Remove">
-                    <Trash2 size={13} />
-                  </button>
-                </div>
-              ))}
-            </div>
+            <DataTable
+              columns={watchlistColumns}
+              data={sortedWatchlist}
+              keyField="entry_id"
+              loading={loadingWatchlist}
+              emptyMessage="No cards on your watchlist yet."
+              sortKey={watchlistSortKey}
+              sortDir={watchlistSortDir}
+              onSort={handleWatchlistSort}
+            />
           )}
         </div>
       )}

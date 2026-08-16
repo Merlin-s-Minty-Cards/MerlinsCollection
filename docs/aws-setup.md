@@ -516,6 +516,39 @@ aws scheduler create-schedule \
   }'
 ```
 
+**DONE — applied against account 560151615792 on 2026-08-12.** Both
+`merlins-scheduler-role` and both schedules already exist and are `ENABLED`
+(verified live via `aws iam get-role` / `aws scheduler get-schedule`
+2026-08-15). Real values, for the record — `deploy/scheduled-sync-*.json`
+deliberately keep the placeholder form above rather than being edited to match,
+the same template-vs-applied split every other `deploy/*.json` file in this
+repo follows:
+
+- `<CLUSTER_ARN>` = `arn:aws:ecs:us-east-1:560151615792:cluster/merlins`
+- `<TASK_DEF_ARN>` = `arn:aws:ecs:us-east-1:560151615792:task-definition/merlins-merlins-backend`
+  (the bare family, no `:revision` — so a future deploy's new revision is
+  picked up automatically; a pinned revision would silently go stale)
+- `<SUBNET_IDS>` = `subnet-02c58dac47f3ef1a9,subnet-0db51619531f5ed05,subnet-05d7f7cf7c1ebac08`
+  (3 of the cluster's 6 available subnets — any subnet reachable by
+  `sg-0eaae8e456e45b31e` works for a Fargate `RunTask`)
+- `<SECURITY_GROUP_ID>` = `sg-0eaae8e456e45b31e`
+
+**Confirmed actually firing, not just created:** `aws ecs describe-tasks` on
+the most recent stopped task in the cluster shows `startedBy:
+"chronos-schedule/merlins-price-sync"`, `createdAt`
+`2026-08-15T02:12:54-07:00` (= 09:12 UTC, inside the cron's 09:00 UTC +
+15-minute flexible window), and container `Main` exited `0`. This is a real,
+unattended, successful price-sync run — the exact gap RFC 0013 item 5 set out
+to close.
+
+**A prior version of RFC 0013's own tracking file (`claude-progress.txt`)
+still listed this item as not-yet-deployed** after the schedules had already
+gone live two days earlier — the file was never updated with a "DONE" line
+the way this section now is, so a later session re-diagnosed a solved problem
+as still open. Always check live AWS state (`aws scheduler list-schedules`)
+before re-attempting a deploy step a progress file marks as pending; the file
+can lag reality in either direction.
+
 ### Monitoring
 
 Both jobs log a single structured JSON summary line to stdout, which lands in

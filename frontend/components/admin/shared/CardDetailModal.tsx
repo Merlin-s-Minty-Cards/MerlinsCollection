@@ -7,6 +7,7 @@ import { clearTriageBody, sendToTriageBody } from '@/lib/triage'
 import { CONDITION_OPTIONS, parseCondition, formatCondition } from '@/lib/constants'
 import { useCardImages } from '@/lib/use-card-images'
 import { useLocations } from '@/lib/use-locations'
+import { useCosigners } from '@/lib/use-cosigners'
 import PriceDisplay from './PriceDisplay'
 import PriceChart from './PriceChart'
 import HandValuedBadge from './HandValuedBadge'
@@ -159,6 +160,15 @@ export default function CardDetailModal({
 }: CardDetailModalProps) {
   const api = useAdminApi()
   const { options: locationOptions } = useLocations()
+  // Same id->name lookup the inventory table already uses (`ctx.consignorName`
+  // in admin-inventory-columns.tsx) — the read-only Consignor row below used to
+  // render the raw `consignor_id`, an opaque ULID no admin can read at a glance.
+  const { options: cosignorOptions } = useCosigners()
+  const consignorName = useCallback(
+    (consignorId: string | undefined | null) =>
+      cosignorOptions.find((o) => o.value === consignorId)?.label,
+    [cosignorOptions],
+  )
   const [editingField, setEditingField] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [saving, setSaving] = useState(false)
@@ -866,7 +876,15 @@ export default function CardDetailModal({
                     consigned card is someone else's money to read accurately. */}
                 <div className="grid grid-cols-[repeat(auto-fit,minmax(min(17rem,100%),1fr))] gap-2">
                   {[
-                    { label: 'Consignor', value: String(consignment.consignor_id ?? '—') },
+                    {
+                      label: 'Consignor',
+                      // Resolved to a NAME when the id is in the assignable
+                      // list; falls back to the raw id (e.g. a since-archived
+                      // consignor, invisible to useCosigners() by design) so
+                      // the row is never blank for an item that IS consigned.
+                      value: consignorName(consignment.consignor_id as string | undefined)
+                        ?? String(consignment.consignor_id ?? '—'),
+                    },
                     {
                       label: 'Our Cut',
                       // Stored as a 0-1 fraction ("0.05 = a 5% cut" per

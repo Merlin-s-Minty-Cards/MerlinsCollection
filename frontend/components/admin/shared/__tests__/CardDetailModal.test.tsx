@@ -247,13 +247,18 @@ describe('CardDetailModal field coverage (RFC 0008 §F6)', () => {
     expect(screen.getByText('Acquired Show')).toBeInTheDocument()
   })
 
-  it('shows consignment terms for a consigned item', async () => {
+  it('shows consignment terms for a consigned item, with the CONSIGNOR NAME resolved — not the raw id', async () => {
+    // Was `screen.getByText('cosigner-7')` — the modal used to render the raw
+    // `consignor_id` unconditionally, which is an opaque ULID to a human. The
+    // mocked useCosigners() above maps 'cos-1' -> 'Alex', the same id->name
+    // lookup the inventory table already uses (`ctx.consignorName` in
+    // admin-inventory-columns.tsx) — this modal must resolve it the same way.
     render(
       <CardDetailModal
         item={{
           ...item,
           consignment: {
-            consignor_id: 'cosigner-7',
+            consignor_id: 'cos-1',
             split_percent: '0.2',
             minimum_price: '50.00',
             paid_out: false,
@@ -264,7 +269,32 @@ describe('CardDetailModal field coverage (RFC 0008 §F6)', () => {
     )
 
     expect(await screen.findByText('Consignment')).toBeInTheDocument()
-    expect(screen.getByText('cosigner-7')).toBeInTheDocument()
+    expect(screen.getByText('Alex')).toBeInTheDocument()
+    expect(screen.queryByText('cos-1')).not.toBeInTheDocument()
+  })
+
+  it('falls back to the raw consignor id when it cannot be resolved to a name (e.g. an archived cosigner)', async () => {
+    // useCosigners() excludes archived cosigners by design (see use-cosigners.ts),
+    // so an item consigned to one since archived has no matching option. Losing
+    // the id entirely would leave an admin unable to even look the row up —
+    // showing the raw id here is strictly more useful than an em dash.
+    render(
+      <CardDetailModal
+        item={{
+          ...item,
+          consignment: {
+            consignor_id: 'archived-consignor-id',
+            split_percent: '0.2',
+            minimum_price: '50.00',
+            paid_out: false,
+          },
+        }}
+        onClose={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByText('Consignment')).toBeInTheDocument()
+    expect(screen.getByText('archived-consignor-id')).toBeInTheDocument()
   })
 
   // RFC 0012 C3 changed this: the section used to be omitted entirely for an

@@ -21,6 +21,43 @@ Skip this default for small fixes, one-off questions, or anything the user frame
 
 **Closing the loop is a separate, always-on concern, not part of the feature flow above.** `lesson-capture` fires whenever the user reports that something Claude built or decided fell short, or Claude itself notices it took a long or circuitous path a clearer rule would have avoided — it writes the generalized lesson (never a narrow one-off fix) to CLAUDE.md or a skill, gated on the lesson actually generalizing. `skill-curator` is the periodic, hand-run counterpart that reviews `.claude/skills/` for drift — near-duplicates to merge, bloated skills to split, over-narrow entries that slipped past the gate. Any skill file either one touches goes through `writing-great-skills`, never `superpowers:writing-skills`.
 
+## Context usage — stay under ~40% of the window, and say so before you don't
+
+A model has no built-in sense of its own context usage — it cannot "just tell"
+what percent full the conversation is without an explicit signal. This
+project's `.claude/settings.json` sets `totalTokensReminder: "countdown"` +
+`totalTokensReminderAfterUserTurn: true`, which is what supplies that signal:
+a `<total_tokens>N tokens left</total_tokens>` marker gets injected after tool
+results and after each user turn. That marker is the ONLY reliable usage
+signal available — never estimate context usage from turn count, message
+length, or "this feels like a long conversation" instead.
+
+**On the first such marker seen in a session, record its value as that
+session's baseline window size.** There is no direct readout of the model's
+total context-window size, so the first reading is the only usable reference
+point. Context-used percentage from then on is `1 - (current remaining /
+baseline)`.
+
+**Once usage crosses ~40% (remaining drops below ~60% of baseline), flag it
+before continuing the requested work** — one line, not a wall of text — and
+give the user two options: run `/compact` now, or wrap up the current point
+and start a fresh session for the next task. Don't silently keep working past
+that point without having flagged it at least once. Re-flag at ~60% and again
+as usage nears wherever this session's auto-compact would fire on its own, so
+the warnings escalate with how urgent it actually is.
+
+**This is advisory, not a gate.** The user decides whether to compact, start
+fresh, or keep going — never refuse to continue work solely because the
+estimate crossed 40%.
+
+`totalTokensReminder` is an undocumented/internal Claude Code setting (not
+part of the public settings schema's stable surface) — if a future Claude
+Code version stops honoring it, the marker simply stops appearing and this
+section becomes a no-op rather than something that errors. There is no other
+project-level way to give the model real numbers here; a pure "use your best
+judgment" instruction without this setting cannot produce an actual
+percentage, only a guess.
+
 # Project Overview
 Merlin's Minty Cards — a Pokemon card business website.
 - Public website: Home, Shows, About, Collectors Dictionary, Articles
@@ -129,6 +166,92 @@ without a sort or a filter.
 `admin-inventory-columns.tsx` shape as any other field, letting an admin scope
 the inventory table to one consignor's items.
 
+**The consignor filter was unreachable for months, RFC 0013 T2 found —
+present, wired, and invisible.** It had `columnKey: null`, so it only
+appeared behind the separate "Show all filters" advanced toggle (default
+off), and there was no Consignor **column** at all, so even a filtered view
+couldn't show which consignor owned a row. Fixed with a new `consignor_name`
+column (`admin-inventory-columns.tsx`) that resolves the id via the existing
+`useCosigners()` id→name map; giving the filter entry a real `columnKey:
+'consignor_name'` is what lets it ride the existing "filters follow visible
+columns" mechanism (RFC 0011/Q9) instead of the separate advanced toggle.
+
+**That fix shipped the column `defaultVisible: false` and `sortable: false`
+— both unconsulted, and both reversed 2026-08-15.** RFC 0013 T2 landed
+"every column sortable, every column filterable" as a stated universal rule
+elsewhere in this file; leaving one column's own filter effectively
+unreachable by default (a filter follows its column's visibility, and the
+column was off) and its sort silently unbuilt was a quiet exception to that
+same rule, never surfaced to the owner as a decision to make. Both are now
+`true`. Sorting works via a small special case rather than a `SORT_FIELDS`
+entry: `services/inventory_sort.py`'s `CONSIGNOR_NAME_FIELD` handles
+`consignor_name` outside the registry, because every `SORT_FIELDS` extractor
+is a pure `Callable[[InventoryItem], Any]` and this one needs data no single
+item carries (the item stores `consignor_id`, not a name). The router builds
+an id→name map from `repo.list_consignors()` — one bounded `Query` against
+the `CONSIGNORLIST` partition, not a Scan — and **only when `consignor_name`
+is the requested sort field**, so every other sort and every unsorted search
+pays nothing extra. `services/table_sort.py`, the factory shared by the other
+five sort registries, is untouched. `ctx.consignorName` (the id→name lookup)
+is threaded through the same `render(item, ctx)` context every other
+id-resolving column already uses.
+
+**`CardDetailModal`'s read-only Consignor row had the identical bug, worse:
+it rendered the raw `consignor_id` ULID, unconditionally** — never resolved
+to a name at all, on any item, not even a discoverability gap. Fixed the same
+day by giving the modal its own `useCosigners()` lookup (same pattern as
+`ctx.consignorName`), falling back to the raw id only when it can't resolve
+(e.g. an archived consignor, invisible to `useCosigners()` by design) — an
+admin can still trace the row rather than losing the reference entirely.
+
+## A FETCH-ONCE ADMIN DROPDOWN HOOK CAN LOSE THE SESSION RACE — depend on `isAuthenticated`
+
+Diagnosed 2026-08-15 while chasing why the Consignor filter's dropdown showed
+**zero options** even after the fix above made it reachable. Root cause:
+`components/providers/SessionProvider.tsx` mounts NextAuth's client
+`SessionProvider` with **no initial `session` prop**, so `useSession()`
+genuinely starts at `status: 'loading'` on every fresh page load — even on a
+route the SERVER already gated behind a valid admin session
+(`app/(admin)/layout.tsx`'s own `auth()` call happens server-side and tells
+you nothing about the CLIENT `SessionProvider`'s own async timing).
+
+**`useCosigners`, `useLocations`, `useShows`, and `useCatalogSets` all fetched
+once on mount with a `useEffect(..., [])`.** If that fetch fires during the
+loading window, `admin-api.ts`'s `request()` throws
+`AdminApiError(401, 'No access token available')`, the hook's own `.catch()`
+swallows it into an empty (or hardcoded-fallback) list — and because the
+effect has no dependency to ever re-run on, **it never retries**, for the
+rest of that page's life. The `/admin/cosigners` PAGE never showed this
+symptom, which is what made it look consignor-specific: its own fetch is a
+`useCallback` depending on `api` (from `useAdminApi()`), and `api`'s identity
+changes the moment `isAuthenticated` flips — same self-healing pattern
+`useCardImages` (`lib/use-card-images.ts`) already used correctly. The four
+one-shot hooks had neither the `isAuthenticated` guard nor that dependency.
+
+**Fix: gate the fetch on `api.isAuthenticated` and put it in the effect's
+dependency array**, not `[]`. All four hooks now read:
+
+```ts
+useEffect(() => {
+  if (!api.isAuthenticated) return
+  // ...fetch, with the same cancelled-flag cleanup as before
+}, [api.isAuthenticated])
+```
+
+`api.get` itself stays safe to call from an effect created on an earlier,
+unauthenticated render — it reads the current token through a ref at call
+time (`admin-api.ts`'s `tokenRef`), not at closure-creation time — so the
+only thing that needed fixing was **when** the effect re-fires, not the
+request itself. Depending on the boolean rather than the whole `api` object
+avoids an incidental refetch on every session poll (`refetchInterval={4 *
+60}` on the provider) while still catching the one transition that matters.
+
+**Any new admin dropdown hook that fetches through `useAdminApi()` must use
+this pattern from the start** — a hook that "works in testing" (where a mock
+session resolves synchronously) can still ship permanently empty on a real
+fresh page load. `use-cosigners.test.ts` carries the regression test; the
+other three hooks' test files mirror it.
+
 **Missing values sort LAST in both directions**, for every type — not just
 money. A column where the blanks bunch at whichever end you are not looking
 at is a column people stop clicking.
@@ -144,6 +267,77 @@ named params build the same `FieldFilter` objects. Four of them stay
 hand-written because they do more than a field comparison — `name` searches
 notes, `condition` splits `LP+`, `min_price` falls back to cost, and the
 catalog filters join the catalog.
+
+## SORTING IS UNIVERSAL — six backend registries, not one (RFC 0013)
+
+`inventory_sort.py` was the first registry; RFC 0013 T4 gave five more tables
+their own — **Shows** (`shows_sort.py`), **Transactions**
+(`transactions_sort.py`, the flat archive History reads), **Consignors**
+(`consignors_sort.py`), **Locations** (`locations_sort.py`), and **Slabs**
+(`slabs_sort.py`) — each built via the shared `services/table_sort.py` factory
+so the three invariants above (missing sorts LAST in both directions, an
+unknown field is a 422 not a silent no-op, `{field}_{direction}` splits on the
+LAST underscore) live in one place instead of six copies. Each registry still
+owns its own `SORT_FIELDS`/`SORT_ALIASES` and its own totality test — the
+factory shares behavior, never state, across tables.
+
+Two registries sort a **plain `dict`, not a Pydantic model** —
+`locations_sort.py` (`GET /admin/locations` returns
+`{"value": str, "label": str}` rows) and `slabs_sort.py` (`GET /admin/slabs`
+returns `_slab_row()` dicts, not `GradedInventoryItem`s) — which is what makes
+`table_sort.SortRegistry` being `Generic[T]` load-bearing rather than
+decorative. `slabs_sort.py` also has two fields **stringified in the
+response** (`grade`, `cost_basis` — `str(Decimal)`, so a Decimal survives JSON
+without becoming a float): their extractors parse back to a number, or
+`"9"` would sort after `"10"`. Its `priced` field is not a dict key at
+all — it is DERIVED, `market_value is not None`, mirroring the router's own
+`?priced=` filter rather than sorting the raw money figure (an unpriced slab
+is the ordinary state of a JP slab after the verified-join rule, not a gap to
+rank by size).
+
+**A totality test must compare against the REAL response shape, not against
+`SORT_FIELDS` itself.** `test_slabs_sort.py`'s first draft asserted
+`set(SORT_FIELDS) == {the same fields hand-typed again}` — circular, and
+incapable of ever catching a renamed or added dict key. The fix mirrors
+`test_locations_sort.py`: a `row()` test helper that mirrors the real
+`_slab_row()` key set, checked against `SORT_FIELDS` plus a documented
+`NOT_SORTABLE` exclusion set (same shape as `shows_sort.py`'s).
+
+**Frontend rollout, RFC 0013 T4:** every DataTable-backed admin list is now
+sortable — Triage, Unmatched, Shows, Locations, Cosigners joined
+Inventory/Prep Queue's existing wiring, and Market's watchlist and the Slabs
+list (`SlabList`) and Show Analytics' Shows-tab were redesigned from bespoke
+markup into sortable `DataTable`s. Show Analytics' Shows-tab sorts by `date`/
+`name` (the two `shows_sort.py` fields it renders); the Sold/Bought/Net/Items
+columns come from a separate `ShowAnalytics` join that registry does not
+cover and stay display-only.
+
+**Vault and Show Prep were deliberately NOT converted to server-side sort.**
+Both were suspected to call `/inventory/search` (which would have inherited
+`inventory_sort.py` for free) — they do not. `/vault` and
+`/show-prep/mispriced` are bespoke, **unpaginated** endpoints (no `limit`)
+returning computed fields (`dollar_net`/`percent_net`/`consigned`;
+`delta_pct`/`delta_dollar`) that no registry covers. Sorting an endpoint's
+FULL, already-fetched response client-side is identical in correctness to
+sorting it server-side — the failure mode server-side sort exists to prevent
+is a `limit` truncating the page BEFORE the sort runs, and neither endpoint
+truncates. Converting them would have meant inventing two more backend
+registries outside RFC 0013's five-table scope for zero behavioral gain.
+Same reasoning applies to the Market watchlist (`GET /watchlist`, also
+unpaginated) — its new DataTable sorts client-side too, via the shared
+`lib/client-table-sort.ts` helper (mirrors `table_sort.py`'s missing-last
+invariant client-side; `lib/vault-sort.ts` predates it and already matched
+that invariant on its own, so it was left as-is rather than merged in).
+
+**History's `TransactionGroups` got a group-level sort control, not a
+DataTable header** — sorting must never flatten a group's legs into rows.
+The control (Date / Total buttons, `TransactionGroups.tsx`) defaults to
+`groupTransactions`'s own "must not reorder the archive" order until clicked.
+It lives where `TransactionGroups` actually renders — **Show Analytics'
+Daily tab** (`/admin/analytics`), not `/admin/history`, which has no
+`TransactionGroups` usage at all and renders its own per-item chronological
+timeline instead (reordering THAT would misrepresent a transaction history,
+which is the entire reason the page exists).
 
 **Triage** (`/admin/triage`) — the one place to correct data the automation got
 wrong. It **is** the `needs_review` queue, not a second flag: "Send to Triage"
@@ -242,6 +436,24 @@ confirm. `GET /admin/slabs/certs/{cert}` warns on a cert already owned — a
 legitimate re-entry. `/admin/slabs?priced=false` is the unpriced worklist. The
 per-grade pricing behind it is documented under "Third-Party APIs" below.
 
+**Sold/lost/returned_to_consignor slabs are hidden by default, 2026-08-15.**
+Owner report: *"sold cards are not being automatically removed from our slab
+inventory."* Root cause was never the data — `sales.py` correctly flips
+`status` to `SOLD` — it was that `GET /admin/slabs` intentionally never
+filters by status unless asked
+(`test_status_narrows_the_list_and_nothing_is_hidden_by_default`,
+`backend/tests/routers/admin/test_slabs.py` — a sold slab is still real
+purchase history, so the endpoint keeps it), and
+the page never gave the admin any way to ask. Fixed **client-side only**: the
+page already fetches every status (no `status` param is ever sent), so a
+"Show sold / gone" checkbox — unchecked by default — filters `sold`, `lost`
+and `returned_to_consignor` out of what "Slabs on the shelf (N)" counts and
+renders, with no refetch on toggle. `on_hold` and `out_for_grading` stay
+visible either way: the slab is still owned and still accounted for. Same
+"hidden by default, visible on request" shape as the archiving pattern
+below — the backend's "nothing hidden" contract is unchanged and still
+correct for what it is (an archive), the gap was a missing view on top of it.
+
 **The intake toolbar has ONE button: "Manual entry".** It is a disclosure — the
 form is **put away by default**, like the other admin tabs, and stays open across
 adds because intake is a batch workflow. RFC 0010 T12 deleted the other three.
@@ -326,6 +538,22 @@ already takes.
 **Condition and grade are never rendered together.** They are alternatives,
 and the backend 422s a raw leg carrying graded fields.
 
+**The displayed trade `balance` NETS cash against the card totals — it does
+not add them.** Diagnosed 2026-08-14 (RFC 0013): a $125-in / $1025-out /
+$900-cash-received trade — genuinely settled at $0 — displayed as **+$1800**,
+because the frontend's own formula was `outgoingTotal - incomingTotal +
+cashNet` where it needed to be `- cashNet` (`cashNet` is already signed
+positive when the counterparty pays cash to us, so adding it double-counted
+the cash leg). The backend's own independent implementation of the same
+figure (`routers/admin/trades.py`, `total_out - total_in - cash_delta`) was
+correct the whole time — the frontend recomputes this as a live display value
+rather than calling that endpoint, and the two had drifted. The confirmed
+transaction legs themselves were never wrong (computed straight from each
+cash component's direction/amount, not from this display figure); the risk
+was purely operational — an operator trusting a wrong on-screen balance might
+"correct" an already-balanced trade's cash entry to force the display to
+zero, which would make the real trade wrong.
+
 **Shows** (`/admin/shows`) — CRUD for show/event days. Note this is a
 *different page* from Show Prep (`/admin/show-prep`, which moves inventory into
 show boxes) and from Show Analytics' Shows tab (`/admin/analytics`, which reads
@@ -384,9 +612,22 @@ rescheduling a show, or editing any import-created show, forks it into two
 rows. The sweep is skipped mid-import, where coexisting generations are the
 whole point of load-then-swap.
 
+**A show's analytics snapshot auto-generates on archive (RFC 0013).** Before
+this, `ShowAnalyticsSnapshot` was written only by the manual "Generate"
+button, so every un-generated show's Shows-tab row read 0 — the archive
+route now calls `generate_show_analytics` itself. Generation failure is
+**caught and logged, never surfaced as an archive failure**: archiving is
+the real state change and must not roll back over a reporting side-effect.
+The manual button still works, for re-generating a stale snapshot (see
+`ShowAnalyticsSnapshot.stale` below) or one from before this shipped —
+**nothing was backfilled automatically**, on the same "admin supervision
+only" precedent as Unmatched; `scripts/backfill_show_analytics.py` (dry-run
+by default) is the one-time catch-up for shows archived before this landed.
+
 **Show Analytics** (`/admin/analytics`) — tabbed `Daily` / `Shows` view. Daily
 tab shows a single day's dashboard (`GET /analytics/daily`); Shows tab lists
-the show archive (`GET /admin/shows`) with a detail drill-in per show.
+the show archive (`GET /admin/shows`) with a detail drill-in per show, now as
+a sortable `DataTable` (RFC 0013 T4e — see "SORTING IS UNIVERSAL" above).
 
 **History** (`/admin/history`) — searches an item's full transaction timeline
 and trade lineage. Shows `step_profit` per lineage hop (color-coded, guarded
@@ -764,6 +1005,37 @@ resolve through `useCardImages`, which batches the lookup and, since
 2026-08-07, **attempts each id once**: callers pass a freshly-mapped array so
 the hook's effect re-runs every render, and re-queueing failed ids meant one
 POST per keystroke on Trade. A failed or card-less id renders the placeholder.
+
+**Show Analytics' Daily tab joined this list 2026-08-15 — `SaleDetailModal`**
+(`frontend/components/admin/shared/SaleDetailModal.tsx`). Owner report:
+*"listed sales should have details of the cards sold including image, name,
+and price... instead of an arrow to reveal the individual sales, [let] users
+click on the bundled sale to view the individual components... in a popup
+similar to how you would click on an inventory item."* `TransactionGroups`'
+old inline chevron-expand rendered a bare `item_id` ULID per leg — no image,
+no name, a direct instance of this rule going unenforced on a real surface.
+Replaced, not patched: clicking a group's "N cards" cell (every group, not
+just multi-leg ones — a one-card sale showed no card identity inline
+either) opens the popup, which resolves each leg's name and `card_id` in ONE
+batched call to the new `POST /admin/inventory/items-brief`
+(`routers/admin/inventory.py`, same cap-at-100/null-not-omitted shape as the
+pre-existing `/card-images`) and reads its image through the same
+`useCardImages` every other surface uses. Price is `leg.amount`, not
+re-fetched — the transaction leg already carries the authoritative
+sold/bought figure. Per-leg void/restore moved into the popup along with the
+identity it now shows; the group-level Void/Restore in the table row is
+unchanged.
+
+> **A popup must key on group IDENTITY, not a captured object.** The first
+> version stored the clicked `TransactionGroup` object in state. Voiding a
+> leg from inside the still-open popup calls the page's `refetchDay()`,
+> which rebuilds every group as a new object — so the popup kept rendering
+> the stale pre-void object until closed and reopened. Fixed by storing the
+> group's `key` and re-deriving the current object from `groups` on every
+> render, the same way the old chevron's `expanded: Set<string>` already
+> did. Any popup/panel that displays a live, mutable list item should key on
+> an id and re-derive, not hold the object itself, once anything inside that
+> popup can trigger a refetch of the list behind it.
 
 **Model fields added by RFC 0008.** On `InventoryItem`:
 `display_name_override` (admin-typed English name; **customer-facing**, bounded

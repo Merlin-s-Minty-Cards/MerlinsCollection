@@ -72,6 +72,11 @@ export default function AdminCosignersPage() {
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [includeArchived, setIncludeArchived] = useState(false)
+  // RFC 0013 T4b — server-side sort via services/consignors_sort.py. `null`
+  // keeps today's storage order, which is what `GET /cosigners` has always
+  // returned with no `sort` sent (this endpoint has no prior default sort).
+  const [sortKey, setSortKey] = useState<string | null>(null)
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
   // Form mode
   const [formOpen, setFormOpen] = useState(false)
@@ -118,13 +123,15 @@ export default function AdminCosignersPage() {
     if (!api.isAuthenticated) return () => {}
     let cancelled = false
     setLoading(true)
+    const params: Record<string, string | boolean> = { include_archived: includeArchived }
+    if (sortKey) params.sort = `${sortKey}_${sortDir}`
     api
-      .get<Cosigner[]>('/cosigners', { include_archived: includeArchived })
+      .get<Cosigner[]>('/cosigners', params)
       .then((res) => { if (!cancelled) setCosigners(Array.isArray(res) ? res : []) })
       .catch(() => { if (!cancelled) setCosigners([]) })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [api, includeArchived])
+  }, [api, includeArchived, sortKey, sortDir])
 
   useEffect(() => fetchCosigners(), [fetchCosigners])
 
@@ -306,11 +313,21 @@ export default function AdminCosignersPage() {
   // Table columns
   // ---------------------------------------------------------------------------
 
+  const handleSort = (key: string) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setSortKey(key)
+      setSortDir('desc')
+    }
+  }
+
   const columns: Column<Cosigner>[] = [
     {
       key: 'name',
       label: 'Name',
       className: 'min-w-[140px]',
+      sortable: true,
       render: (item) => (
         // Dimmed as well as badged: while "Show archived" is on, an archived
         // row must read as archived at a glance rather than being silently
@@ -323,6 +340,7 @@ export default function AdminCosignersPage() {
     {
       key: 'email',
       label: 'Email',
+      sortable: true,
       render: (item) => (
         <span className="text-xs text-pine-300">{item.email || '—'}</span>
       ),
@@ -330,6 +348,7 @@ export default function AdminCosignersPage() {
     {
       key: 'phone',
       label: 'Phone',
+      sortable: true,
       render: (item) => (
         <span className="text-xs text-pine-300">{item.phone || '—'}</span>
       ),
@@ -338,6 +357,7 @@ export default function AdminCosignersPage() {
       key: 'payout_percent',
       label: 'Payout %',
       className: 'text-right',
+      sortable: true,
       render: (item) => (
         <span className="text-xs font-mono text-mint">{item.payout_percent}%</span>
       ),
@@ -345,6 +365,7 @@ export default function AdminCosignersPage() {
     {
       key: 'archived',
       label: 'Status',
+      sortable: true,
       render: (item) => <StatusBadge status={item.archived ? 'archived' : 'active'} />,
     },
     {
@@ -491,6 +512,9 @@ export default function AdminCosignersPage() {
               setSelectedCosigner(item)
               fetchDetail(item)
             }}
+            sortKey={sortKey}
+            sortDir={sortDir}
+            onSort={handleSort}
           />
         </div>
 

@@ -352,6 +352,57 @@ class TestTransactionsArchive:
         assert resp2.json()["total"] == 3
 
 
+class TestTransactionsArchiveSort:
+    """RFC 0013 T4c — ``?sort=`` on ``GET /admin/transactions``, via
+    ``services.transactions_sort``."""
+
+    def test_sort_by_amount_ascending(self, admin_client):
+        """Dates are the OPPOSITE of what amount order wants (big is dated
+        later, so default date-desc order would put it first), so this can
+        only pass via real amount sorting, not a date-order coincidence."""
+        client, repo, token = admin_client
+        repo.put_transaction(_txn(TransactionType.SALE, "big", date(2026, 7, 20), "500"))
+        repo.put_transaction(_txn(TransactionType.SALE, "small", date(2026, 7, 1), "5"))
+
+        resp = client.get(
+            "/admin/transactions?start=2026-07-01&end=2026-07-31&sort=amount_asc",
+            headers=_auth(token),
+        )
+        assert resp.status_code == 200
+        assert [t["item_id"] for t in resp.json()["items"]] == ["small", "big"]
+
+    def test_default_order_is_still_date_then_id_descending_when_no_sort_given(
+        self, admin_client
+    ):
+        """The pre-existing default (most recent first) must not change for
+        the caller that sends no ``sort`` at all."""
+        client, repo, token = admin_client
+        repo.put_transaction(_txn(TransactionType.SALE, "earlier", date(2026, 7, 1), "10"))
+        repo.put_transaction(_txn(TransactionType.SALE, "later", date(2026, 7, 20), "30"))
+
+        resp = client.get(
+            "/admin/transactions?start=2026-07-01&end=2026-07-31",
+            headers=_auth(token),
+        )
+        assert [t["item_id"] for t in resp.json()["items"]] == ["later", "earlier"]
+
+    def test_unknown_sort_field_is_422(self, admin_client):
+        client, _repo, token = admin_client
+        resp = client.get(
+            "/admin/transactions?start=2026-07-01&end=2026-07-31&sort=txn_id_asc",
+            headers=_auth(token),
+        )
+        assert resp.status_code == 422
+
+    def test_unknown_direction_is_422(self, admin_client):
+        client, _repo, token = admin_client
+        resp = client.get(
+            "/admin/transactions?start=2026-07-01&end=2026-07-31&sort=amount_sideways",
+            headers=_auth(token),
+        )
+        assert resp.status_code == 422
+
+
 # ===========================================================================
 # Per-show snapshot now carries sell_through_rate (metric rule 5)
 # ===========================================================================

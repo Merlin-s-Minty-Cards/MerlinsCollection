@@ -28,6 +28,11 @@ export interface CatalogSet {
  * the rest of the (already numerous) admin filters working. There is no
  * hardcoded fallback the way `useLocations` has one — a stale hardcoded set
  * list is exactly the drift this endpoint exists to remove.
+ *
+ * Gated on `api.isAuthenticated` and re-runs when it flips — see
+ * `useCosigners`'s docstring (lib/use-cosigners.ts) for why: a `[]`-deps
+ * fetch effect can race NextAuth's client session hydration, fail once
+ * before the token exists, and never get a second chance to retry.
  */
 export function useCatalogSets(): { sets: CatalogSet[]; loading: boolean } {
   const api = useAdminApi()
@@ -35,6 +40,7 @@ export function useCatalogSets(): { sets: CatalogSet[]; loading: boolean } {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
+    if (!api.isAuthenticated) return
     let cancelled = false
 
     api
@@ -57,7 +63,7 @@ export function useCatalogSets(): { sets: CatalogSet[]; loading: boolean } {
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [api.isAuthenticated])
 
   return { sets, loading }
 }

@@ -62,6 +62,12 @@ export default function AdminTriagePage() {
   const [detailItem, setDetailItem] = useState<TriageItem | null>(null)
   const [confirmingBulkClear, setConfirmingBulkClear] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // RFC 0013 T4b — server-side sort, same contract as Inventory/Prep Queue:
+  // `sort=${key}_${dir}` through `inventory_sort.py` (this page's list is
+  // `/inventory/search` too). `name` resolves via that registry's `name` ->
+  // `display_name` alias, so the column key does not need to change.
+  const [sortKey, setSortKey] = useState<string | null>(null)
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
   // Art is always on here, unlike the toggle the big inventory tables carry:
   // this queue is short by construction, and recognising the card IS the task
@@ -91,6 +97,7 @@ export default function AdminTriagePage() {
       // empty term omits the key rather than sending `name=""`, which is a
       // request the admin did not make.
       if (searchTerm) params.name = searchTerm
+      if (sortKey) params.sort = `${sortKey}_${sortDir}`
       const data = await api.get<{ items: TriageItem[] }>('/inventory/search', params)
       setItems(data?.items ?? [])
     } catch {
@@ -98,7 +105,7 @@ export default function AdminTriagePage() {
     } finally {
       setLoading(false)
     }
-  }, [api, reasonFilter, includeTerminal, searchTerm])
+  }, [api, reasonFilter, includeTerminal, searchTerm, sortKey, sortDir])
 
   useEffect(() => { fetchItems() }, [fetchItems])
 
@@ -225,10 +232,20 @@ export default function AdminTriagePage() {
     fetchItems()
   }
 
+  const handleSort = (key: string) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setSortKey(key)
+      setSortDir('desc')
+    }
+  }
+
   const columns: Column<TriageItem>[] = [
     {
       key: 'name',
       label: 'Card',
+      sortable: true,
       render: (item) => (
         // Art and name are ONE identity unit, so they share a cell instead of
         // sitting in two columns. On a `missing_english_name` row the name is
@@ -285,6 +302,7 @@ export default function AdminTriagePage() {
       key: 'condition',
       label: 'Condition',
       className: 'w-28',
+      sortable: true,
       // The third repair tool, inline: a card whose condition the import never
       // recorded is priced to customers as NM — the most expensive tier — and
       // only someone holding the card can say otherwise.
@@ -484,6 +502,9 @@ export default function AdminTriagePage() {
           loading={loading}
           emptyMessage="Nothing needs review"
           onRowClick={(item) => setDetailItem(item)}
+          sortKey={sortKey}
+          sortDir={sortDir}
+          onSort={handleSort}
         />
       )}
 

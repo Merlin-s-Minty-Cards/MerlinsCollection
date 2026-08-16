@@ -292,7 +292,7 @@ describe('AdminInventoryPage — Send to Triage (RFC 0008 T11)', () => {
 //     mode this whole section exists to avoid.
 
 const DEFAULT_HEADERS = [
-  'Name', 'Status', 'Kind', 'Cond', 'Location', 'Price Paid', 'Market', 'Sticker', 'Ownership', '',
+  'Name', 'Status', 'Kind', 'Cond', 'Location', 'Price Paid', 'Market', 'Sticker', 'Ownership', 'Consignor', '',
 ]
 
 function headers(): string[] {

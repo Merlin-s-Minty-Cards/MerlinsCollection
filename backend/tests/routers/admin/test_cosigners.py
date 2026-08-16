@@ -65,8 +65,12 @@ def _create(client, token, **overrides) -> dict:
     return resp.json()
 
 
-def _listing(client, token, *, include_archived=None) -> list[dict]:
-    params = {} if include_archived is None else {"include_archived": include_archived}
+def _listing(client, token, *, include_archived=None, sort=None) -> list[dict]:
+    params = {}
+    if include_archived is not None:
+        params["include_archived"] = include_archived
+    if sort is not None:
+        params["sort"] = sort
     resp = client.get("/admin/cosigners", params=params, headers=_auth(token))
     assert resp.status_code == 200, resp.text
     return resp.json()
@@ -126,6 +130,47 @@ class TestCosignerList:
         resp = client.get("/admin/cosigners", headers=_auth(token))
         assert resp.status_code == 200
         assert len(resp.json()) == 2
+
+
+class TestCosignerListSort:
+    """RFC 0013 T4d — ``?sort=`` on ``GET /admin/cosigners``, via
+    ``services.consignors_sort``."""
+
+    def test_sort_by_name_ascending(self, admin_client):
+        client, _repo, token = admin_client
+        _create(client, token, name="Beaverton Cards")
+        _create(client, token, name="Albany Cards")
+
+        names = [c["name"] for c in _listing(client, token, sort="name_asc")]
+        assert names == ["Albany Cards", "Beaverton Cards"]
+
+    def test_sort_by_payout_percent_descending(self, admin_client):
+        client, _repo, token = admin_client
+        _create(client, token, name="Low", payout_percent="30")
+        _create(client, token, name="High", payout_percent="70")
+
+        names = [
+            c["name"] for c in _listing(client, token, sort="payout_percent_desc")
+        ]
+        assert names == ["High", "Low"]
+
+    def test_unknown_sort_field_is_422(self, admin_client):
+        client, _repo, token = admin_client
+        _create(client, token)
+
+        resp = client.get(
+            "/admin/cosigners", params={"sort": "created_at_asc"}, headers=_auth(token)
+        )
+        assert resp.status_code == 422
+
+    def test_unknown_direction_is_422(self, admin_client):
+        client, _repo, token = admin_client
+        _create(client, token)
+
+        resp = client.get(
+            "/admin/cosigners", params={"sort": "name_sideways"}, headers=_auth(token)
+        )
+        assert resp.status_code == 422
 
 
 class TestCosignerGet:

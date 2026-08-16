@@ -199,6 +199,90 @@ describe('Slabs page', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Owner report: "sold cards are not being automatically removed from our
+// slab inventory." Root cause: GET /admin/slabs intentionally never hides a
+// status by default (test_status_narrows_the_list_and_nothing_is_hidden_by_default,
+// backend/tests/routers/admin/test_slabs.py) — a sold slab is still real
+// purchase history and the endpoint is not the right place to drop it. But
+// the frontend never gave the admin any way to filter it out either, so
+// "Slabs on the shelf" silently accumulated every slab ever sold. This is a
+// client-side fix only: the page already fetches every status (no `status`
+// param is ever sent), so hiding sold/lost/returned_to_consignor rows by
+// default is a pure display filter, with a toggle for the full history —
+// same "hidden by default, visible on request" shape as the archiving
+// pattern (CLAUDE.md, "ARCHIVING IS ONE PATTERN").
+// ---------------------------------------------------------------------------
+
+function slabRow(overrides: Partial<{
+  item_id: string; name: string; cert_number: string; status: string
+}> = {}) {
+  return {
+    item_id: 'ITEM1',
+    card_id: null,
+    name: 'Gengar VMAX',
+    cert_number: '89787279',
+    company: 'PSA',
+    grade: '9.5',
+    cost_basis: '900.50',
+    status: 'available',
+    market_value: null,
+    value_as_of: null,
+    price_source: null,
+    ...overrides,
+  }
+}
+
+describe('gone-slab visibility (sold slabs must not linger on the shelf)', () => {
+  const AVAILABLE = slabRow({ item_id: 'AVAIL1', cert_number: '11111111', status: 'available' })
+  const SOLD = slabRow({ item_id: 'SOLD1', cert_number: '22222222', status: 'sold' })
+  const LOST = slabRow({ item_id: 'LOST1', cert_number: '33333333', status: 'lost' })
+  const RETURNED = slabRow({
+    item_id: 'RET1', cert_number: '44444444', status: 'returned_to_consignor',
+  })
+  const ON_HOLD = slabRow({ item_id: 'HOLD1', cert_number: '55555555', status: 'on_hold' })
+
+  beforeEach(() => {
+    mockApi.get.mockReset(); mockApi.post.mockReset()
+    // The backend already returns every status unfiltered — this fixture is
+    // exactly what a real, unfiltered `GET /admin/slabs` response looks like.
+    mockApi.get.mockResolvedValue({
+      items: [AVAILABLE, SOLD, LOST, RETURNED, ON_HOLD], total: 5,
+    })
+  })
+
+  it('hides sold, lost, and returned_to_consignor slabs by default', async () => {
+    render(<SlabsPage />)
+    await screen.findByText('11111111')
+    expect(screen.getByText('55555555')).toBeInTheDocument() // on_hold: still owned, stays
+
+    expect(screen.queryByText('22222222')).not.toBeInTheDocument()
+    expect(screen.queryByText('33333333')).not.toBeInTheDocument()
+    expect(screen.queryByText('44444444')).not.toBeInTheDocument()
+  })
+
+  it('shows every status again once "Show sold" is checked', async () => {
+    render(<SlabsPage />)
+    await screen.findByText('11111111')
+
+    fireEvent.click(screen.getByRole('checkbox', { name: /show sold/i }))
+
+    expect(await screen.findByText('22222222')).toBeInTheDocument()
+    expect(screen.getByText('33333333')).toBeInTheDocument()
+    expect(screen.getByText('44444444')).toBeInTheDocument()
+  })
+
+  it('counts only the visible rows in the "Slabs on the shelf" heading', async () => {
+    render(<SlabsPage />)
+    await screen.findByText('11111111')
+    // 5 fetched, 2 gone (sold + lost + returned = 3 hidden, 2 left visible).
+    expect(screen.getByText(/slabs on the shelf \(2\)/i)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: /show sold/i }))
+    expect(await screen.findByText(/slabs on the shelf \(5\)/i)).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // RFC 0010 T12 — PSA is out, the scanner affordance is out, a price at intake
 // ---------------------------------------------------------------------------
 

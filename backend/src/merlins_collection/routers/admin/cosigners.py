@@ -17,6 +17,7 @@ from merlins_collection.models.inventory import (
     ConsignmentTerms,
     InventoryItemAdapter,
 )
+from merlins_collection.services.consignors_sort import SORT_FIELDS, parse_sort, sort_consignors
 from merlins_collection.services.dynamodb import InventoryRepository
 
 router = APIRouter(prefix="/cosigners", tags=["admin-cosigners"])
@@ -111,16 +112,33 @@ def create_cosigner(
 @router.get("")
 def list_cosigners(
     include_archived: bool = Query(False),
+    sort: str | None = Query(None),
     repo: InventoryRepository = Depends(get_repo),
 ) -> list[dict[str, Any]]:
     """Every cosigner. Archived ones are excluded unless asked for.
 
     Only THIS listing hides them. ``repo.get_consignor`` stays archive-agnostic
     so assets, analytics and unarchive keep resolving an archived consignor.
+
+    ``sort`` (RFC 0013 T4d) orders the result via ``services.consignors_sort`` —
+    same ``{field}_{direction}`` convention and 422-on-unknown rule as every
+    other admin list endpoint. No sort was ever guaranteed here before, so
+    omitting it keeps today's storage order.
     """
+    if sort is not None and parse_sort(sort) is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Unknown sort {sort!r}. Expected {{field}}_asc or {{field}}_desc, "
+                f"where field is one of: {', '.join(sorted(SORT_FIELDS))}."
+            ),
+        )
+
     cosigners = repo.list_consignors()
     if not include_archived:
         cosigners = [c for c in cosigners if not c.archived]
+    if sort is not None:
+        cosigners = sort_consignors(cosigners, sort)
     return [c.model_dump(mode="json") for c in cosigners]
 
 

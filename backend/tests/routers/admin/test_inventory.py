@@ -353,6 +353,52 @@ class TestAdminInventorySearch:
             )
             assert [i["item_id"] for i in resp.json()["items"]][-1] == "blank"
 
+    def test_sort_by_consignor_name(self, admin_client):
+        """`consignor_name` orders by the resolved NAME, not the raw consignor_id
+        the item stores — 'zoe-consignor' sorts before 'alex-consignor' by id,
+        but 'Alex' sorts before 'Zoe' by name. Proves the router builds the
+        id->name map from `repo.list_consignors()` and threads it through."""
+        from merlins_collection.models.business import Consignor
+        from merlins_collection.models.inventory import ConsignmentTerms
+
+        client, repo, admin_token, _ = admin_client
+        repo.put_consignor(Consignor(consignor_id="zoe-consignor", name="Zoe"))
+        repo.put_consignor(Consignor(consignor_id="alex-consignor", name="Alex"))
+
+        zoe_item = _raw(item_id="zoe-item").model_copy(update={
+            "consignment": ConsignmentTerms(
+                consignor_id="zoe-consignor", split_percent=Decimal("0.5"),
+            ),
+        })
+        alex_item = _raw(item_id="alex-item", card_id="sv1-2").model_copy(update={
+            "consignment": ConsignmentTerms(
+                consignor_id="alex-consignor", split_percent=Decimal("0.5"),
+            ),
+        })
+        repo.put_inventory_item(zoe_item)
+        repo.put_inventory_item(alex_item)
+
+        resp = client.get(
+            "/admin/inventory/search?sort=consignor_name_asc",
+            headers=_auth_header(admin_token),
+        )
+
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert [i["item_id"] for i in items] == ["alex-item", "zoe-item"]
+
+    def test_sort_by_consignor_name_is_not_a_422(self, admin_client):
+        """A previous session left this column unsortable rather than building
+        the name resolver. `consignor_name_asc` must be a recognized field."""
+        client, _, admin_token, _ = admin_client
+
+        resp = client.get(
+            "/admin/inventory/search?sort=consignor_name_asc",
+            headers=_auth_header(admin_token),
+        )
+
+        assert resp.status_code == 200
+
     # --- RFC 0011 T3: the generic filter layer ----------------------------
 
     def test_unknown_filter_field_is_a_422(self, admin_client):
@@ -2031,3 +2077,125 @@ class TestNoCatalogMatchQueue:
         )
 
         assert resp.status_code == 422
+
+
+# ===========================================================================
+# POST /admin/inventory/items-brief
+# ===========================================================================
+#
+# Owner report: the Show Analytics sale-detail popup needs to show each sold
+# card's image, name and price — but the transaction archive (GET
+# /admin/transactions) only ever carried item_id, never card_id or a name
+# (models/business.py's Transaction has no such field). This is the batch
+# resolver that fills the gap, same request/response shape as the existing
+# POST /admin/inventory/card-images (item_ids in, capped, one round trip —
+# CLAUDE.md: "keep the batching, never fire a request per row"). Price is
+# NOT part of this response: the transaction leg's own `amount` is the
+# authoritative sold/bought price, and duplicating it here would be a second,
+# driftable copy of a figure the caller already has.
+
+class TestAdminItemsBrief:
+    """POST /admin/inventory/items-brief — item_id -> {name, card_id}."""
+
+    def test_unauthenticated_returns_401(self, admin_client):
+        client, *_ = admin_client
+        resp = client.post("/admin/inventory/items-brief", json={"item_ids": []})
+        assert resp.status_code == 401
+
+    def test_non_admin_returns_403(self, admin_client):
+        client, _, _, user_token = admin_client
+        resp = client.post(
+            "/admin/inventory/items-brief",
+            json={"item_ids": []},
+            headers=_auth_header(user_token),
+        )
+        assert resp.status_code == 403
+
+    def test_resolves_the_display_name_override_first(self, admin_client):
+        """`admin_item_name` is the one shared authority (CLAUDE.md) — this
+        endpoint must go through it, not inline its own name logic."""
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(
+            _raw(item_id="x", card_id="sv1-1", display_name_override="Charizard EX (alt art)")
+        )
+
+        resp = client.post(
+            "/admin/inventory/items-brief",
+            json={"item_ids": ["x"]},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "x": {"name": "Charizard EX (alt art)", "card_id": "sv1-1"},
+        }
+
+    def test_falls_back_to_the_catalog_name_when_the_item_has_none(self, admin_client):
+        client, repo, admin, _ = admin_client
+        repo.batch_upsert_catalog_cards([_catalog(card_id="sv1-1", name="Pikachu")])
+        repo.put_inventory_item(_raw(item_id="x", card_id="sv1-1"))
+
+        resp = client.post(
+            "/admin/inventory/items-brief",
+            json={"item_ids": ["x"]},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.json() == {"x": {"name": "Pikachu", "card_id": "sv1-1"}}
+
+    def test_a_sealed_item_has_no_card_id_and_does_not_500(self, admin_client):
+        """Sealed/bulk kinds have no `card_id` attribute at all — reaching
+        for `item.card_id` directly raises AttributeError (same trap the
+        search filters already guard against)."""
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_sealed(item_id="box"))
+
+        resp = client.post(
+            "/admin/inventory/items-brief",
+            json={"item_ids": ["box"]},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "box": {"name": "Obsidian Flames ETB", "card_id": None},
+        }
+
+    def test_an_unknown_item_id_is_null_not_omitted(self, admin_client):
+        """A caller has to be able to tell "deleted since the sale" from
+        "never asked about" — an omitted key can't say that."""
+        client, _, admin, _ = admin_client
+        resp = client.post(
+            "/admin/inventory/items-brief",
+            json={"item_ids": ["does-not-exist"]},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"does-not-exist": None}
+
+    def test_rejects_a_non_list_body(self, admin_client):
+        client, _, admin, _ = admin_client
+        resp = client.post(
+            "/admin/inventory/items-brief",
+            json={"item_ids": "x"},
+            headers=_auth_header(admin),
+        )
+        assert resp.status_code == 422
+
+    def test_caps_at_100_ids(self, admin_client):
+        """Mirrors /card-images's cap — this is a batch endpoint, not an
+        unbounded one, and DynamoDB point reads are not free."""
+        client, repo, admin, _ = admin_client
+        ids = [f"item-{i}" for i in range(150)]
+        for item_id in ids[:5]:
+            repo.put_inventory_item(_raw(item_id=item_id))
+
+        resp = client.post(
+            "/admin/inventory/items-brief",
+            json={"item_ids": ids},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.status_code == 200
+        assert len(resp.json()) == 100

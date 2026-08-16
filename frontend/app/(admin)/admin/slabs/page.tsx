@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Keyboard, RefreshCw } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { formatMoney } from '@/lib/money'
@@ -10,6 +10,21 @@ import SlabList, { type SlabRow } from '@/components/admin/slabs/SlabList'
 
 type PricedFilter = 'all' | 'true' | 'false'
 
+// Owner report: "sold cards are not being automatically removed from our
+// slab inventory." GET /admin/slabs deliberately never hides a status by
+// default (backend/tests/routers/admin/test_slabs.py,
+// test_status_narrows_the_list_and_nothing_is_hidden_by_default) — a sold
+// slab is still real purchase history, so the endpoint keeps returning it.
+// The gap was purely on this page: it fetches every status already (no
+// `status` param is ever sent) but never gave the admin a way to filter one
+// out, so "Slabs on the shelf" silently accumulated every slab ever sold.
+// Hiding these three by default — with a toggle for the full history — is a
+// client-side filter over the same response, matching the "hidden by
+// default, visible on request" shape the archiving pattern uses elsewhere
+// (CLAUDE.md, "ARCHIVING IS ONE PATTERN"). `on_hold` and `out_for_grading`
+// stay visible: the slab is still owned and still physically accounted for.
+const GONE_STATUSES = new Set(['sold', 'lost', 'returned_to_consignor'])
+
 export default function SlabsPage() {
   const api = useAdminApi()
   const [rows, setRows] = useState<StagedSlab[]>([])
@@ -17,9 +32,20 @@ export default function SlabsPage() {
   const [result, setResult] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [slabs, setSlabs] = useState<SlabRow[]>([])
-  const [total, setTotal] = useState(0)
   const [priced, setPriced] = useState<PricedFilter>('all')
+  const [showGone, setShowGone] = useState(false)
   const [listError, setListError] = useState<string | null>(null)
+  // Client-side only — the backend already returns every status unfiltered
+  // (see GONE_STATUSES above), so toggling this needs no refetch.
+  const visibleSlabs = useMemo(
+    () => (showGone ? slabs : slabs.filter((s) => !GONE_STATUSES.has(s.status))),
+    [slabs, showGone],
+  )
+  // RFC 0013 T4d — server-side sort via services/slabs_sort.py, same contract
+  // as every other admin list. `null` keeps the endpoint's existing
+  // newest-first default untouched.
+  const [sortKey, setSortKey] = useState<string | null>(null)
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
   // Intake affordances. The form is put away by default, matching the other
   // admin tabs — the page's resting state is the shelf, not a blank form.
@@ -50,23 +76,34 @@ export default function SlabsPage() {
       // emit `?params=[object Object]`, so `priced` never reached the backend
       // and the worklist returned every slab. Caught by `next build`, not by
       // the suite — vitest does not typecheck.
+      const params: Record<string, string> = {}
+      if (priced !== 'all') params.priced = priced
+      if (sortKey) params.sort = `${sortKey}_${sortDir}`
       const body = await api.get<{ items: SlabRow[]; total: number }>(
         '/slabs',
-        priced === 'all' ? undefined : { priced },
+        Object.keys(params).length > 0 ? params : undefined,
       )
       setSlabs(body?.items ?? [])
-      setTotal(body?.total ?? 0)
       setListError(null)
     } catch (e) {
       // The list failing must never take the ENTRY form down with it — intake
       // is the job this page exists for, and it does not depend on the list.
       setListError(`Could not load the slab list: ${(e as Error).message}`)
     }
-  }, [api, priced])
+  }, [api, priced, sortKey, sortDir])
 
   useEffect(() => {
     loadSlabs()
   }, [loadSlabs])
+
+  const handleSort = (key: string) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setSortKey(key)
+      setSortDir('desc')
+    }
+  }
 
   /**
    * Price the batch that was just committed — AFTER the commit, never inside
@@ -264,7 +301,9 @@ export default function SlabsPage() {
       {/* ---- The shelf ---- */}
       <section className="flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-3">
-          <h2 className="text-sm font-semibold text-pine-100">Slabs on the shelf ({total})</h2>
+          <h2 className="text-sm font-semibold text-pine-100">
+            Slabs on the shelf ({visibleSlabs.length})
+          </h2>
           <label className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-pine-400">
             Show
             <select
@@ -280,6 +319,14 @@ export default function SlabsPage() {
               <option value="true">Priced</option>
             </select>
           </label>
+          <label className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-pine-400">
+            <input
+              type="checkbox"
+              checked={showGone}
+              onChange={(e) => setShowGone(e.target.checked)}
+            />
+            Show sold / gone
+          </label>
           <button
             type="button"
             onClick={loadSlabs}
@@ -294,7 +341,7 @@ export default function SlabsPage() {
             {listError}
           </p>
         )}
-        <SlabList rows={slabs} />
+        <SlabList rows={visibleSlabs} sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
       </section>
     </div>
   )

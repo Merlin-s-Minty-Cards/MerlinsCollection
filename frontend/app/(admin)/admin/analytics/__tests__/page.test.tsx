@@ -112,10 +112,14 @@ describe('Show Analytics dates (RFC 0010 T8)', () => {
     await renderPage()
     fireEvent.click(screen.getByRole('button', { name: 'Shows' }))
 
+    // RFC 0013 T4e converted this list to a DataTable — the clickable unit
+    // is now a `<tr>` (implicit `role="row"`, matched via `closest('tr')`
+    // the same way Triage/Inventory's own DataTable-row tests do), not a
+    // hand-rolled `role="button"` card.
     const name = await screen.findByText('Portland Card Show')
-    const card = name.closest('[role="button"]') as HTMLElement
-    expect(within(card).getByText(/Aug 10, 2026/)).toBeInTheDocument()
-    expect(within(card).queryByText(/Aug 9, 2026/)).not.toBeInTheDocument()
+    const row = name.closest('tr') as HTMLElement
+    expect(within(row).getByText(/Aug 10, 2026/)).toBeInTheDocument()
+    expect(within(row).queryByText(/Aug 9, 2026/)).not.toBeInTheDocument()
   })
 
   it('renders the selected-show header as Aug 10, not Aug 9', async () => {
@@ -269,6 +273,12 @@ describe('Show Analytics transaction grouping (RFC 0010 T10)', () => {
       if (path === '/analytics/by-date') return Promise.resolve({ analytics: [] })
       return Promise.resolve({})
     })
+    // SaleDetailModal's batched name/image lookup (owner report: sale rows
+    // need image, name and price) — only hit when a "Cards" cell is clicked.
+    postMock.mockImplementation((path: string) => {
+      if (path === '/inventory/items-brief') return Promise.resolve({})
+      return Promise.resolve({})
+    })
   })
 
   async function openTheDay() {
@@ -296,33 +306,46 @@ describe('Show Analytics transaction grouping (RFC 0010 T10)', () => {
     expect(within(group).getByText(/5 cards/)).toBeInTheDocument()
   })
 
-  it('reveals all five legs when expanded', async () => {
+  // Rewritten: the inline chevron-expand (a raw item_id, no image or name)
+  // was replaced by SaleDetailModal — owner report: *"listed sales should
+  // have details of the cards sold including image, name, and price...
+  // click on the bundled sale to view the individual components... in a
+  // popup similar to how you would click on an inventory item."* See
+  // TransactionGroups.test.tsx's "sale detail modal" block for the modal's
+  // own behavior (image/name/price rendering, void/restore); this page-level
+  // test only pins that the click reaches the popup with the right legs.
+  it('opens the sale detail modal with all five legs when the cards cell is clicked', async () => {
     await openTheDay()
-    expect(screen.queryAllByTestId('txn-leg')).toHaveLength(0)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
 
     const group = screen.getAllByTestId('txn-group')[0]
-    fireEvent.click(within(group).getByRole('button', { expanded: false }))
+    fireEvent.click(within(group).getByRole('button', { name: /view the 5 cards/i }))
 
-    expect(await screen.findAllByTestId('txn-leg')).toHaveLength(5)
+    const dialog = await screen.findByRole('dialog')
+    await waitFor(() =>
+      expect(postMock).toHaveBeenCalledWith('/inventory/items-brief', {
+        item_ids: BATCH.map((r) => r.item_id),
+      }),
+    )
+    expect(within(dialog).getByText('5 cards')).toBeInTheDocument()
   })
 
-  it('renders a legacy row with no batch_id as its own group, with no twisty', async () => {
+  it('offers the same popup for a legacy row with no batch_id — a group of one still has no card identity inline', async () => {
     // No backfill: a (date, payment_method, type) heuristic would merge two
     // separate cash sales on one show day into a transaction that never
     // happened. A one-item group is a truthful rendering of what is known.
+    //
+    // The OLD chevron deliberately hid itself for a group of one ("a twisty
+    // that reveals the same row is noise"). That reasoning no longer
+    // applies: the popup shows real new information — image and resolved
+    // name — that the collapsed row never carried for ANY group size, so a
+    // one-card legacy sale gets the same "View" affordance as a five-card one.
     await openTheDay()
     const legacy = screen.getAllByTestId('txn-group')[1]
     expect(within(legacy).getByText(/1 card/)).toBeInTheDocument()
-    // Rewritten for T11, deliberately: the row now carries a Void button, so a
-    // bare "no buttons" assertion no longer expresses this test's intent. What
-    // it guards is that a group of ONE renders no DISCLOSURE control — a twisty
-    // that reveals the same row is noise.
-    expect(
-      within(legacy).queryByRole('button', { expanded: false }),
-    ).not.toBeInTheDocument()
-    expect(
-      within(legacy).queryByRole('button', { expanded: true }),
-    ).not.toBeInTheDocument()
+
+    fireEvent.click(within(legacy).getByRole('button', { name: /view the 1 card/i }))
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
   })
 
   it('keeps the endpoint order — grouping does not reorder the archive', async () => {
@@ -449,9 +472,10 @@ describe('Show Analytics stale snapshots (RFC 0010 T11)', () => {
     await renderPage()
     fireEvent.click(screen.getByRole('button', { name: 'Shows' }))
 
+    // See the note above — the row is a DataTable `<tr>`, not a `role="button"` card.
     const name = await screen.findByText('Portland Card Show')
-    const card = name.closest('[role="button"]') as HTMLElement
-    expect(within(card).getByText(/out of date/i)).toBeInTheDocument()
+    const row = name.closest('tr') as HTMLElement
+    expect(within(row).getByText(/out of date/i)).toBeInTheDocument()
   })
 
   it('says so on the detail view too, next to the regenerate button', async () => {

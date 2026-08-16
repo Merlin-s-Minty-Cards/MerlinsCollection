@@ -192,6 +192,108 @@ class TestStability:
         assert sort_items([a, b], None) == [a, b]
 
 
+class TestConsignorNameSort:
+    """`consignor_name` sorts by the RESOLVED name, not the opaque `consignor_id`
+    the item actually stores — there is no join in DynamoDB, so the caller
+    (the router) must supply an id->name map built from `repo.list_consignors()`.
+
+    Deliberately NOT a `SORT_FIELDS` entry: every other extractor there is a
+    pure `Callable[[InventoryItem], Any]`, and this field needs data no single
+    item carries. It is handled as a special case in `sort_items`/`parse_sort`/
+    `resolve_sort_field` instead — see the module docstring additions.
+    """
+
+    def test_parses_like_any_other_field(self):
+        assert parse_sort("consignor_name_asc") == ("consignor_name", False)
+        assert parse_sort("consignor_name_desc") == ("consignor_name", True)
+
+    def test_resolves_as_a_known_field(self):
+        assert resolve_sort_field("consignor_name") == "consignor_name"
+
+    def test_sorts_by_the_resolved_name_not_the_id(self):
+        # Deliberately named so alphabetical-by-id would give the WRONG answer:
+        # "z-consignor" sorts before "a-consignor" by id, but "Alex" is before
+        # "Zoe" by name.
+        zoe_item = raw(item_id="zoe-item", consignment={
+            "consignor_id": "z-consignor", "split_percent": Decimal("0.5"),
+        })
+        alex_item = raw(item_id="alex-item", consignment={
+            "consignor_id": "a-consignor", "split_percent": Decimal("0.5"),
+        })
+        names = {"z-consignor": "Zoe", "a-consignor": "Alex"}
+
+        result = sort_items(
+            [zoe_item, alex_item], "consignor_name_asc", consignor_names=names,
+        )
+
+        assert ids(result) == ["alex-item", "zoe-item"]
+
+    def test_reverses_for_desc(self):
+        zoe_item = raw(item_id="zoe-item", consignment={
+            "consignor_id": "z-consignor", "split_percent": Decimal("0.5"),
+        })
+        alex_item = raw(item_id="alex-item", consignment={
+            "consignor_id": "a-consignor", "split_percent": Decimal("0.5"),
+        })
+        names = {"z-consignor": "Zoe", "a-consignor": "Alex"}
+
+        result = sort_items(
+            [zoe_item, alex_item], "consignor_name_desc", consignor_names=names,
+        )
+
+        assert ids(result) == ["zoe-item", "alex-item"]
+
+    @pytest.mark.parametrize("direction", ["asc", "desc"])
+    def test_an_owned_unconsigned_item_sorts_last(self, direction):
+        """No consignment at all — the ordinary, common case — is missing, not an error."""
+        owned = raw(item_id="owned", consignment=None)
+        consigned = raw(item_id="consigned", consignment={
+            "consignor_id": "c1", "split_percent": Decimal("0.5"),
+        })
+
+        result = sort_items(
+            [owned, consigned], f"consignor_name_{direction}",
+            consignor_names={"c1": "Alex"},
+        )
+
+        assert ids(result)[-1] == "owned"
+
+    @pytest.mark.parametrize("direction", ["asc", "desc"])
+    def test_a_consignor_id_absent_from_the_map_sorts_last(self, direction):
+        """An archived/deleted consignor's id may not resolve. Must not crash,
+        and an unresolvable name is exactly as "missing" as no name at all."""
+        unresolvable = raw(item_id="unresolvable", consignment={
+            "consignor_id": "gone", "split_percent": Decimal("0.5"),
+        })
+        resolvable = raw(item_id="resolvable", consignment={
+            "consignor_id": "c1", "split_percent": Decimal("0.5"),
+        })
+
+        result = sort_items(
+            [unresolvable, resolvable], f"consignor_name_{direction}",
+            consignor_names={"c1": "Alex"},
+        )
+
+        assert ids(result)[-1] == "unresolvable"
+
+    def test_missing_consignor_names_kwarg_does_not_crash(self):
+        """The router only builds the map when this field is actually requested,
+        but a caller that forgets to pass it must degrade, not raise."""
+        consigned = raw(item_id="consigned", consignment={
+            "consignor_id": "c1", "split_percent": Decimal("0.5"),
+        })
+
+        result = sort_items([consigned], "consignor_name_asc")
+
+        assert ids(result) == ["consigned"]
+
+    def test_is_not_a_literal_SORT_FIELDS_key(self):
+        """It cannot be a pure `Callable[[InventoryItem], Any]` — sorting it
+        needs data no single item carries — so it must not appear in the
+        registry dict itself, only in the parse/resolve/sort special-casing."""
+        assert "consignor_name" not in SORT_FIELDS
+
+
 class TestUnknownFields:
     def test_unknown_field_does_not_parse(self):
         assert parse_sort("not_a_field_asc") is None

@@ -331,6 +331,71 @@ class TestSlabList:
         assert client.get("/admin/slabs").status_code in (401, 403)
 
 
+class TestListSlabsSort:
+    """RFC 0013 T4 — the last of six sort registries. ``list_slabs``'s
+    default (no ``sort`` given) is newest-first by ``item_id`` (a ULID, so
+    it tracks insertion order) — every fixture below deliberately inserts
+    in an order that CONTRADICTS the requested sort's expected result, so a
+    green assertion actually proves the sort ran rather than agreeing with
+    the untouched default by coincidence."""
+
+    def test_sorts_by_cert_number_ascending(self, admin_client):
+        client, repo, token = admin_client
+        # Inserted lowest-cert-first, so the default (newest-first) order is
+        # [90000002, 90000001] — the OPPOSITE of what ascending must produce.
+        # A test that matched the default order here would prove nothing.
+        repo.put_inventory_item(_graded(cert_number="90000001"))
+        repo.put_inventory_item(_graded(cert_number="90000002"))
+
+        rows = client.get("/admin/slabs?sort=cert_number_asc",
+                          headers=_auth(token)).json()["items"]
+        assert [r["cert_number"] for r in rows] == ["90000001", "90000002"]
+
+    def test_sorts_by_grade_numerically_not_lexically(self, admin_client):
+        """`grade` is a stringified Decimal in the response — sorted as text,
+        `"9"` would land after `"10"`, exactly backwards for a desc sort.
+        Inserted lower-grade-second so the default (newest-first) order is
+        [grade 9, grade 10] — the OPPOSITE of what a desc-by-grade sort must
+        produce, so a pass here cannot be an accident of insertion order."""
+        client, repo, token = admin_client
+        repo.put_inventory_item(_graded(cert_number="90000004", grade=Decimal("10")))
+        repo.put_inventory_item(_graded(cert_number="90000003", grade=Decimal("9")))
+
+        rows = client.get("/admin/slabs?sort=grade_desc",
+                          headers=_auth(token)).json()["items"]
+        assert [r["cert_number"] for r in rows] == ["90000004", "90000003"]
+
+    def test_sorts_by_cost_basis_numerically(self, admin_client):
+        client, repo, token = admin_client
+        repo.put_inventory_item(_graded(cert_number="90000005", cost_basis=Decimal("9")))
+        repo.put_inventory_item(_graded(cert_number="90000006", cost_basis=Decimal("100")))
+
+        rows = client.get("/admin/slabs?sort=cost_basis_asc",
+                          headers=_auth(token)).json()["items"]
+        assert [r["cert_number"] for r in rows] == ["90000005", "90000006"]
+
+    def test_no_sort_keeps_the_existing_newest_first_default(self, admin_client):
+        client, repo, token = admin_client
+        first = _graded(cert_number="90000007")
+        second = _graded(cert_number="90000008")
+        repo.put_inventory_item(first)
+        repo.put_inventory_item(second)
+
+        rows = client.get("/admin/slabs", headers=_auth(token)).json()["items"]
+        assert [r["item_id"] for r in rows] == [second.item_id, first.item_id]
+
+    def test_unknown_sort_field_is_422(self, admin_client):
+        client, _repo, token = admin_client
+        resp = client.get("/admin/slabs?sort=buy_price_asc", headers=_auth(token))
+        assert resp.status_code == 422
+
+    def test_unparseable_sort_direction_is_422(self, admin_client):
+        client, _repo, token = admin_client
+        resp = client.get("/admin/slabs?sort=cert_number_sideways",
+                          headers=_auth(token))
+        assert resp.status_code == 422
+
+
 # ===========================================================================
 # RFC 0009 T7 — the refresh trigger and the price pin
 # ===========================================================================

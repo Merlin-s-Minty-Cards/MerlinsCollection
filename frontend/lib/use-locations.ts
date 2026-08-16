@@ -9,6 +9,11 @@ type LocationOption = { value: string; label: string }
 /**
  * Hook that fetches selectable inventory locations from the API, falling
  * back to the hardcoded LOCATION_OPTIONS list so dropdowns are never empty.
+ *
+ * Gated on `api.isAuthenticated` and re-runs when it flips — see
+ * `useCosigners`'s docstring (lib/use-cosigners.ts) for why: a `[]`-deps
+ * fetch effect can race NextAuth's client session hydration, fail once
+ * before the token exists, and never get a second chance to retry.
  */
 export function useLocations(): { options: LocationOption[]; loading: boolean } {
   const api = useAdminApi()
@@ -16,6 +21,7 @@ export function useLocations(): { options: LocationOption[]; loading: boolean } 
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
+    if (!api.isAuthenticated) return
     let cancelled = false
 
     api
@@ -34,7 +40,7 @@ export function useLocations(): { options: LocationOption[]; loading: boolean } 
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [api.isAuthenticated])
 
   return { options, loading }
 }

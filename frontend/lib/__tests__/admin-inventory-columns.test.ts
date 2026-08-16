@@ -44,11 +44,15 @@ describe('the registry itself', () => {
     }
   })
 
-  it('offers a Consignor column, off by default', () => {
+  it('offers a Consignor column, visible by default', () => {
+    // Was `defaultVisible: false` — which is also why the Consignor FILTER
+    // never appeared by default: `isFilterVisible` gates a filter on its
+    // column being visible, so an off-by-default column silently hid a
+    // filter that otherwise looked fully wired. See admin-inventory-columns.tsx.
     const consignor = INVENTORY_COLUMNS.find((c) => c.key === 'consignor_name')
     expect(consignor).toBeDefined()
-    expect(consignor?.defaultVisible).toBe(false)
-    expect(DEFAULT_VISIBLE_COLUMN_KEYS).not.toContain('consignor_name')
+    expect(consignor?.defaultVisible).toBe(true)
+    expect(DEFAULT_VISIBLE_COLUMN_KEYS).toContain('consignor_name')
   })
 
   it('derives DEFAULT_VISIBLE_COLUMN_KEYS from defaultVisible, in registry order', () => {
@@ -172,12 +176,14 @@ describe('storage access that throws is survivable', () => {
 // model field. These pin the frontend half: that we actually MARK the columns,
 // and that the keys stay parseable as `{field}_{direction}`.
 
-describe('every column is sortable except the three that cannot be', () => {
+describe('every column is sortable except the two that cannot be', () => {
   // `_image` renders art resolved client-side from card_id — there is no
   // server-side value to order by. `_actions` is a pinned button cell.
-  // `consignor_name` resolves a name client-side from consignor_id via
-  // useCosigners(); inventory_sort.py has no join to order by that label yet.
-  const UNSORTABLE = new Set(['_image', '_actions', 'consignor_name'])
+  // `consignor_name` USED to be unsortable too (no backend join existed to
+  // order by the resolved label), but `inventory_sort.py` now special-cases
+  // it via a router-supplied id->name map — see test_inventory_sort.py's
+  // TestConsignorNameSort. It belongs in the sortable set now.
+  const UNSORTABLE = new Set(['_image', '_actions'])
 
   it('marks every data column sortable', () => {
     const unmarked = INVENTORY_COLUMNS

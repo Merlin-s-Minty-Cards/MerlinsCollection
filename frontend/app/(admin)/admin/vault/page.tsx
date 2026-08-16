@@ -112,6 +112,16 @@ export default function AdminVaultPage() {
     )
   }) ?? []
 
+  // Client-side sort — deliberately, not a RFC 0013 T4c regression. `/vault`
+  // (like `/show-prep/mispriced`) returns its FULL on-hold set with no
+  // `limit`/pagination, so there is no page-boundary a server sort would
+  // need to protect the way Inventory/Prep Queue's `limit` does. `sortVaultItems`
+  // (lib/vault-sort.ts) already enforces the same missing-sorts-last-in-both-
+  // directions invariant every backend registry does, so converting this to a
+  // server round trip would add a new backend sort registry for a bespoke,
+  // computed response shape (`dollar_net`/`percent_net`/`consigned`) that is
+  // not one of RFC 0013's five named tables, for zero behavioral gain. See
+  // CLAUDE.md/RFC 0013 sync-docs notes for this deviation.
   const sortedItems = sortKey ? sortVaultItems(filteredItems, sortKey, sortDir) : filteredItems
 
   const summary = data?.summary

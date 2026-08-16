@@ -44,6 +44,15 @@ from merlins_collection.services.catalog_sync import (
     refresh_graded_prices,
 )
 from merlins_collection.services.dynamodb import InventoryRepository
+from merlins_collection.services.slabs_sort import (
+    SORT_FIELDS as SLAB_SORT_FIELDS,
+)
+from merlins_collection.services.slabs_sort import (
+    parse_sort as parse_slab_sort,
+)
+from merlins_collection.services.slabs_sort import (
+    sort_slabs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +133,7 @@ def list_slabs(
     # rule an unpriced slab is not flagged into Triage (owner's decision,
     # 2026-08-08), so this list is the only place it surfaces.
     priced: bool | None = Query(None),
+    sort: str | None = Query(None),
     limit: int = Query(_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT),
     repo: InventoryRepository = Depends(get_repo),
 ) -> SlabListResponse:
@@ -133,7 +143,23 @@ def list_slabs(
     search runs, which is a bounded set of Queries and NOT a table scan
     (CLAUDE.md Ops). A third search implementation was the alternative and would
     have been a third place for the filters to drift.
+
+    ``sort`` (RFC 0013 T4, last of six registries) orders the response rows
+    via ``services.slabs_sort`` — same ``{field}_{direction}`` convention and
+    422-on-unknown rule as every other admin list endpoint. It applies to
+    ``rows`` (the response dicts, AFTER the ``priced`` filter below), NOT to
+    ``items`` (the model objects the pre-existing newest-first default below
+    runs on) — when ``sort`` is omitted, that existing default is unchanged.
     """
+    if sort is not None and parse_slab_sort(sort) is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Unknown sort {sort!r}. Expected {{field}}_asc or {{field}}_desc, "
+                f"where field is one of: {', '.join(sorted(SLAB_SORT_FIELDS))}."
+            ),
+        )
+
     wanted_grade = _parse_grade(grade)
 
     items = [i for i in repo.list_inventory() if i.kind == "graded"]
@@ -157,6 +183,9 @@ def list_slabs(
 
     if priced is not None:
         rows = [r for r in rows if (r["market_value"] is not None) is priced]
+
+    if sort is not None:
+        rows = sort_slabs(rows, sort)
 
     return SlabListResponse(items=rows[:limit], total=len(rows))
 
