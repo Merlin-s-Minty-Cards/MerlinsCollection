@@ -9,7 +9,8 @@
     "lint": "next lint",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage --passWithNoTests"
+    "test:coverage": "vitest run --coverage --passWithNoTests",
+    "build:opennext": "open-next build"
   },
   "dependencies": {
     "@portabletext/react": "^3.2.4",
@@ -28,6 +29,7 @@
     "styled-components": "^6.4.3"
   },
   "devDependencies": {
+    "@opennextjs/aws": "^4.1.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",

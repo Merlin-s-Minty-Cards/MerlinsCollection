@@ -57,6 +57,30 @@ COPY backend/tests backend/tests
 WORKDIR /app/backend
 CMD ["pytest", "-q", "--tb=short"]
 
+# ---- Lambda runtime (RFC 0014 §1) — same `base` image the ECS `runtime`
+# stage below is built from, packaged for AWS Lambda instead of ECS Fargate.
+# Lambda container images do NOT support attached layers (that's a
+# zip-package-only feature), so the Lambda Web Adapter binary is COPIED in
+# directly rather than referenced as a Lambda layer.
+FROM base AS lambda
+COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:0.9.1 /lambda-adapter /opt/extensions/lambda-adapter
+WORKDIR /app/backend
+RUN useradd --create-home appuser
+USER appuser
+ENV AWS_LWA_PORT=8000
+# BUFFERED for launch — /chat returns a single ChatResponse today, not a
+# stream. RESPONSE_STREAM is available later with no app rewrite if
+# streaming chat becomes a real feature; a Function URL (chosen over API
+# Gateway HTTP API specifically so this stays possible, see RFC 0014 §1/
+# Alternatives) supports it, HTTP API does not.
+ENV AWS_LWA_INVOKE_MODE=BUFFERED
+# No --proxy-headers CLI flag needed: LWA forwards the real client IP as
+# X-Forwarded-For itself, and FORWARDED_ALLOW_IPS is supplied by the CDK
+# stack's environment (127.0.0.1/32 — the adapter is the app's only real
+# peer here, not a VPC-scoped load balancer; see infra/lib/backend-stack.ts
+# and RFC 0014 §1's trust-boundary note before changing this).
+CMD ["uvicorn", "merlins_collection.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
+
 # ---- Production runtime (LAST stage = default build target) ----
 FROM base AS runtime
 # CWD must be the parent of scripts/ so the ECS scheduled-sync overrides in
