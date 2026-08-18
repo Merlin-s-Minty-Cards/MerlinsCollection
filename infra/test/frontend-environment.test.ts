@@ -44,4 +44,24 @@ describe('buildFrontendEnvironment', () => {
     const env = buildFrontendEnvironment(baseProps)
     expect(env.COGNITO_ADMIN_GROUP).toBe('admin')
   })
+
+  it('omits NEXT_PUBLIC_SANITY_PROJECT_ID entirely when not supplied, rather than writing an empty string', () => {
+    const env = buildFrontendEnvironment(baseProps)
+    expect('NEXT_PUBLIC_SANITY_PROJECT_ID' in env).toBe(false)
+  })
+
+  it('sets NEXT_PUBLIC_SANITY_PROJECT_ID when supplied — required for sanity.config.ts to mount Studio at all', () => {
+    const env = buildFrontendEnvironment({ ...baseProps, sanityProjectId: 'abc123' })
+    expect(env.NEXT_PUBLIC_SANITY_PROJECT_ID).toBe('abc123')
+  })
+
+  it('always sets NEXT_PUBLIC_SANITY_DATASET, defaulting to "production" — sanity.config.ts has no fallback of its own', () => {
+    const env = buildFrontendEnvironment(baseProps)
+    expect(env.NEXT_PUBLIC_SANITY_DATASET).toBe('production')
+  })
+
+  it('carries a non-default NEXT_PUBLIC_SANITY_DATASET through unchanged', () => {
+    const env = buildFrontendEnvironment({ ...baseProps, sanityDataset: 'staging' })
+    expect(env.NEXT_PUBLIC_SANITY_DATASET).toBe('staging')
+  })
 })

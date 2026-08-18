@@ -31,6 +31,8 @@ export interface FrontendStackProps extends cdk.StackProps {
   readonly cognitoDomain: string
   readonly authSecret?: string
   readonly cognitoClientSecret?: string
+  readonly sanityProjectId?: string
+  readonly sanityDataset?: string
   /**
    * KNOWN, UNRESOLVED, CONFIRMED-REAL ISSUE (2026-08-17), not a hypothetical:
    * on this Windows dev machine, `next build`'s static-generation fetches to

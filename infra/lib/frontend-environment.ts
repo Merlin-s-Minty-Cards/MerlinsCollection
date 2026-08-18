@@ -16,6 +16,8 @@ export interface FrontendEnvironmentProps {
   readonly cognitoDomain: string
   readonly authSecret?: string
   readonly cognitoClientSecret?: string
+  readonly sanityProjectId?: string
+  readonly sanityDataset?: string
 }
 
 export function buildFrontendEnvironment(props: FrontendEnvironmentProps): Record<string, string> {
@@ -39,12 +41,23 @@ export function buildFrontendEnvironment(props: FrontendEnvironmentProps): Recor
     // drifted to the wrong plural guess and was never checked against the
     // pool itself.
     COGNITO_ADMIN_GROUP: 'admin',
+    // sanity.config.ts (the Studio mounted at /studio) reads this with a bare
+    // `!` assertion and no fallback — an absent value here bakes `undefined`
+    // into the client bundle at build time and Sanity's client throws
+    // "Configuration must contain `projectId`" the moment Studio mounts.
+    // Always set, defaulting to 'production' like frontend/Dockerfile's own
+    // ARG default and .env.example, since dataset has no code-level fallback
+    // either.
+    NEXT_PUBLIC_SANITY_DATASET: props.sanityDataset ?? 'production',
   }
   if (props.authSecret) {
     environment.AUTH_SECRET = props.authSecret
   }
   if (props.cognitoClientSecret) {
     environment.AWS_COGNITO_CLIENT_SECRET = props.cognitoClientSecret
+  }
+  if (props.sanityProjectId) {
+    environment.NEXT_PUBLIC_SANITY_PROJECT_ID = props.sanityProjectId
   }
   return environment
 }

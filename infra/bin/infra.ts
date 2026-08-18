@@ -64,6 +64,17 @@ new FrontendStack(app, 'MerlinsFrontendStack', {
   cognitoDomain: 'https://us-east-1ab945i9ir.auth.us-east-1.amazoncognito.com',
   authSecret: process.env.AUTH_SECRET,
   cognitoClientSecret: process.env.AWS_COGNITO_CLIENT_SECRET,
+  // Read from the deployer's own environment at synth/deploy time, same
+  // convention as AUTH_SECRET/AWS_COGNITO_CLIENT_SECRET above — not a
+  // secret, but there is no real default: an absent value here bakes
+  // `undefined` into the Studio's client bundle at build time and
+  // sanity.config.ts throws "Configuration must contain `projectId`" the
+  // moment /studio mounts (this stack's environment map previously had no
+  // field for either var at all, which is exactly what caused that error
+  // live). sanityDataset falls back to 'production' inside
+  // buildFrontendEnvironment when unset.
+  sanityProjectId: process.env.NEXT_PUBLIC_SANITY_PROJECT_ID,
+  sanityDataset: process.env.NEXT_PUBLIC_SANITY_DATASET,
   // See FrontendStackProps.skipOpenNextBuild's docstring for why this
   // exists and why it must default to false. Deliberately an explicit,
   // easy-to-grep env var rather than a silent default, so reusing it
