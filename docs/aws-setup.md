@@ -267,6 +267,16 @@ remaining frontend task — see "What's not done yet" below).
 
 ## Phase 6 — Hosting (when ready to go live)
 
+**Two deployment paths exist.** Everything below in this phase is the
+**container path (ECS Express Mode / Fargate)** — current production. RFC
+0014 added a parallel **serverless path (Lambda + CloudFront)**, deployed
+and reachable but still a validation spike nothing in production points at
+yet. Its exact deploy commands live in the root
+[`README.md`](../README.md#deploying-to-aws) (kept in one place rather than
+copied here, so the two don't drift) — see that section, and
+[`docs/rfcs/0014-ecs-to-serverless-migration.md`](rfcs/0014-ecs-to-serverless-migration.md)
+for the full design and current status, before choosing between them.
+
 **AWS App Runner is closed to new customers as of 2026-04-30** — it is no
 longer an option for either side of this app. Its named replacement is
 **Amazon ECS Express Mode** (GA November 2025): point it at a container

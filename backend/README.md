@@ -318,18 +318,24 @@ Catalog data arrives through two separate passes, because TCGdex serves pricing
   **only** as a slab still keeps `rarity: null` — that comes from the depth pass,
   which never visits it.
 
-## Deploying to AWS ECS
+## Deploying to AWS
+
+Two independent paths — **Containers (ECS Fargate)**, current production,
+and **Serverless (Lambda)**, RFC 0014's in-progress migration spike. See the
+root [`README.md`](../README.md#deploying-to-aws) for how the two relate.
+
+### Containers (ECS Fargate) — current production path
 
 The backend runs as a Docker container on ECS Fargate behind the `merlins` cluster.
 It bundles the MCP server (Node.js) as a subprocess inside the same image.
 
-### Prerequisites
+#### Prerequisites
 
 - AWS CLI configured with credentials for account `560151615792`
 - Docker installed and running
 - ECR repository `merlins-backend` exists in `us-east-1`
 
-### Deploy Backend
+#### Deploy Backend
 
 Run from the **repo root** (the Dockerfile uses repo root as build context because
 the MCP server workspace and the lockfile live there):
@@ -341,7 +347,7 @@ docker push 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-backend:latest
 aws ecs update-service --cluster merlins --service merlins-backend --force-new-deployment --region us-east-1
 ```
 
-### Runtime Env (on the container)
+#### Runtime Env (on the container)
 
 All settings are ECS task definition environment variables (never baked into the image).
 See `.env.example` for the complete list. Critical production settings:
@@ -352,21 +358,22 @@ See `.env.example` for the complete list. Critical production settings:
 - `CORS_ORIGINS` — frontend origin(s) allowed by CORS
 - `FORWARDED_ALLOW_IPS` — proxy trust boundary (see Dockerfile comments)
 
-**Credentials go in `secrets`, not `environment`.** Two of these settings are
-bearer tokens, and a task definition's `environment` block is readable by anyone
-with `ecs:DescribeTaskDefinition` and is printed in the console:
+**Both bearer-token credentials are plain `environment` values, not
+`secrets`** — owner decision, 2026-08-12 (see CLAUDE.md's "Third-Party APIs"
+section and `docs/aws-setup.md` Phase 8): no Secrets Manager secret, no
+execution-role grant, same `environment` array every other non-AWS config
+value already goes through. Confirmed live on `merlins-merlins-backend`'s
+current task definition — `secrets` is empty, both keys are in
+`environment`:
 
 - `ADMIN_API_KEY` — static bearer token for Retool admin access
 - `POKEMONPRICETRACKER_API_KEY` — graded pricing (RFC 0009). The **first outbound
   third-party credential this service holds**. Unset is a supported state: slab
   pricing is skipped and nothing else changes
 
-Both belong in the task definition's `secrets` array, sourced from Secrets Manager
-or SSM Parameter Store. See `docs/aws-setup.md` Phase 8 for the wiring and for why
-this needs **no new task-role IAM permission** for the vendor call itself.
 `PRICING_DAILY_QUOTA` is an ordinary non-secret `environment` value.
 
-### Infrastructure
+#### Infrastructure
 
 | Resource | Value |
 |----------|-------|
@@ -376,3 +383,25 @@ this needs **no new task-role IAM permission** for the vendor call itself.
 | Backend Service | `merlins-backend` |
 | Backend ECR | `560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-backend` |
 | Backend URL | `https://me-227b5d9d4f6444e9aea830a909f923c8.ecs.us-east-1.on.aws` |
+
+### Serverless (Lambda) — RFC 0014 spike
+
+Same image, different target: `backend/Dockerfile`'s `lambda` build stage
+(alongside the `runtime` stage the container path above uses) packages the
+same FastAPI app behind the Lambda Web Adapter. Deployed via the CDK stack
+`MerlinsBackendStack` in `infra/` — see the root
+[`README.md`](../README.md#deploying-to-aws) for exact commands, required
+environment variables, and status-check commands. Docker Desktop must be
+running locally since `cdk deploy` builds this stage as a Docker asset.
+
+Runtime env is the same variable list as the container path above, minus
+`FORWARDED_ALLOW_IPS` (the CDK stack sets it to `127.0.0.1/32` directly —
+the Lambda Web Adapter is the app's only real peer here, not a VPC-scoped
+load balancer). `CORS_ORIGINS` is a plain string literal in
+`infra/bin/infra.ts` rather than a task-definition field — see that file's
+comment before editing it.
+
+Deployed and reachable (Function URL from `aws cloudformation
+describe-stacks --stack-name MerlinsBackendStack --query
+"Stacks[0].Outputs"`), but nothing in production points at it yet — see
+`docs/rfcs/0014-ecs-to-serverless-migration.md`.

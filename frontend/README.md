@@ -134,17 +134,24 @@ holographic glare, scroll reveals, hover lifts, the vault background) live in
 **Motion is accessible:** every effect checks `prefers-reduced-motion` (in JS via
 `matchMedia` and in CSS via the media query) and falls back to a static state.
 
-## Deploying to AWS ECS
+## Deploying to AWS
+
+Two independent paths — **Containers (ECS Fargate)**, current production,
+and **Serverless (Lambda + CloudFront)**, RFC 0014's in-progress migration
+spike. See the root [`README.md`](../README.md#deploying-to-aws) for how the
+two relate.
+
+### Containers (ECS Fargate) — current production path
 
 The frontend runs as a Docker container on ECS Fargate behind the `merlins` cluster.
 
-### Prerequisites
+#### Prerequisites
 
 - AWS CLI configured with credentials for account `560151615792`
 - Docker installed and running
 - ECR repository `merlins-frontend` exists in `us-east-1`
 
-### Deploy Frontend
+#### Deploy Frontend
 
 Run from the **repo root** (the Dockerfile uses repo root as build context):
 
@@ -155,7 +162,7 @@ docker push 560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-frontend:latest
 aws ecs update-service --cluster merlins --service merlins-frontend --force-new-deployment --region us-east-1
 ```
 
-### Build Args (compile-time)
+#### Build Args (compile-time)
 
 These are baked into the client bundle at build time via `--build-arg`:
 
@@ -165,16 +172,23 @@ These are baked into the client bundle at build time via `--build-arg`:
 | `NEXT_PUBLIC_SANITY_PROJECT_ID` | Your Sanity project ID (optional) |
 | `NEXT_PUBLIC_SANITY_DATASET` | `production` (default) |
 
-### Runtime Env (on the container)
+#### Runtime Env (on the container)
 
 Server-side secrets are passed as ECS task definition environment variables — they are NOT in the Docker image:
 
 - `AUTH_SECRET` — NextAuth encryption key
 - `AWS_COGNITO_CLIENT_ID` / `AWS_COGNITO_CLIENT_SECRET` / `AWS_COGNITO_ISSUER` — Cognito provider
 - `AWS_COGNITO_DOMAIN` — Hosted UI domain (e.g. `https://<domain-prefix>.auth.<region>.amazoncognito.com`), used only for the silent access-token refresh POST to `/oauth2/token`. This is a **different host** than `AWS_COGNITO_ISSUER` — the issuer has no `/oauth2/token` route, so the refresh silently fails without this var set, and the user is signed out the first time the access token needs renewing (roughly hourly)
-- `COGNITO_ADMIN_GROUP` — admin group name (default: `admins`)
+- `COGNITO_ADMIN_GROUP` — admin group name. **Set this explicitly; do not rely
+  on the code's own fallback.** `frontend/lib/admin.ts` falls back to
+  `'admins'` (plural) when unset, but the pool's actual Cognito group
+  (confirmed via `aws cognito-idp list-groups`) is `admin` (singular) — the
+  fallback does not match production and never has. Every real deployment
+  (this container's task def, and the serverless Lambda below) sets it
+  explicitly to `admin` for exactly this reason; omitting it silently
+  demotes every admin to a regular user rather than erroring.
 
-### Infrastructure
+#### Infrastructure
 
 | Resource | Value |
 |----------|-------|
@@ -184,6 +198,31 @@ Server-side secrets are passed as ECS task definition environment variables — 
 | Frontend Service | `merlins-frontend` |
 | Frontend ECR | `560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-frontend` |
 | Backend URL | `https://me-227b5d9d4f6444e9aea830a909f923c8.ecs.us-east-1.on.aws` |
+
+### Serverless (Lambda + CloudFront) — RFC 0014 spike
+
+Deployed via `cdk-nextjs-standalone` (the CDK stack `MerlinsFrontendStack` in
+`infra/`) rather than this project's own Dockerfile — OpenNext builds the
+Next.js app into a Lambda-compatible bundle, and the construct provisions the
+CloudFront distribution, server Lambda, image-optimization Lambda, and ISR
+revalidation queue. See the root [`README.md`](../README.md#deploying-to-aws)
+for exact commands, required environment variables (same list above, read
+from `infra/bin/infra.ts` instead of a task definition — `AUTH_URL` is
+deliberately never set here, since `frontend/lib/auth.config.ts` sets
+`trustHost: true` specifically because the CloudFront domain isn't known
+until after the first deploy), and the manual Cognito-callback-URL /
+backend-CORS follow-up steps that only apply on this path.
+
+Two confirmed Windows-specific quirks in this toolchain, documented in
+`infra/lib/frontend-stack.ts` and RFC 0014: the OpenNext build hangs when
+invoked through `cdk`'s own nested process chain (worked around by
+`skipOpenNextBuild`/`SKIP_OPENNEXT_BUILD`, see the root README), and the
+image-optimization Lambda's dependency install fails with an `ENOENT
+mkdtemp` error on Windows — non-blocking, since it's the server Lambda that
+matters for this spike, not image optimization.
+
+Deployed and reachable, but nothing in production points at it yet — this is
+a parallel validation spike (RFC 0014 Task 6), not a cutover.
 
 ## Testing
 
