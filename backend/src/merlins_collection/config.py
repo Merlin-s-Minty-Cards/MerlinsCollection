@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     # which outlives the catalog lock's 3600 s TTL; `_CATALOG_MAX_RUNTIME_SECONDS`
     # in `services/catalog_sync.py` is the backstop and explains what that costs.
     catalog_refresh_cards_per_night: int = 5500
+    # How long a price-history point (card-level `price_point` or item-level
+    # `item_price_point`) is kept before DynamoDB's native TTL reaps it — the
+    # owner does not need more than two years of trend (RFC 0015). Computed
+    # from the point's own `date`, not write time, so a backfilled or
+    # late-written point still expires on the same schedule as one written on
+    # time would have.
+    price_history_retention_days: int = 730
     # Comma-separated browser origins allowed to call the API (CORS).
     cors_origins: str = "http://localhost:3000"
     # Dev-only: inject a fake user instead of verifying Cognito JWTs.

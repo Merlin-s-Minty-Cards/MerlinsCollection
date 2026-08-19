@@ -25,6 +25,7 @@ from merlins_collection.models.inventory import (
     InventoryItemAdapter,
     ItemStatus,
     _market_price,
+    market_price_and_finish,
     new_ulid,
     normalize_condition,
 )
@@ -777,8 +778,22 @@ def admin_item_price_chart(
     card_id = getattr(item, "card_id", None)
 
     if card_id and item.kind == "raw":
-        # Card-level history filtered by finish
+        # Card-level history filtered by finish. Resolved through the shared
+        # fallback-aware helper rather than an exact match on the item's own
+        # stored finish (RFC 0015) — the same fallback walk every other
+        # price-reading caller already uses. An item's stored finish routinely
+        # doesn't match the finish key TCGdex actually priced the card under
+        # (see `_market_price`'s docstring: a bare exact match once left
+        # 174/213 live items unpriced), so an exact-match lookup here silently
+        # renders an empty chart for a card whose history exists under a
+        # different finish key. Falls back to the item's own finish unchanged
+        # if the catalog card is missing or nothing resolves.
         finish = getattr(item, "finish", None)
+        card = repo.get_catalog_card(card_id)
+        if card is not None:
+            _, resolved_finish = market_price_and_finish(card, finish)
+            if resolved_finish is not None:
+                finish = resolved_finish
         history = repo.get_price_history(
             card_id, finish=finish, start=cutoff,
         )

@@ -27,7 +27,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 
@@ -35,6 +35,7 @@ import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
+from merlins_collection.config import settings
 from merlins_collection.models.business import (
     BalanceSheetSnapshot,
     BuyingPolicy,
@@ -75,6 +76,17 @@ def _cert_pk(company, cert_number: str) -> str:
     """
     name = company.value if isinstance(company, Enum) else str(company)
     return f"CERT#{name.strip().upper()}#{cert_number.strip()}"
+
+
+def _price_history_ttl(day: date) -> int:
+    """Epoch seconds a price-history row (raw/graded ``price_point`` or
+    ``item_price_point``) should expire, per ``settings.price_history_retention_days``
+    (RFC 0015). Computed from the point's own ``date``, not write time, so a
+    backfilled or late-written point expires on the same schedule a
+    written-on-time one would have.
+    """
+    moment = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
+    return int((moment + timedelta(days=settings.price_history_retention_days)).timestamp())
 
 
 def _bucket(key: str) -> int:
@@ -528,14 +540,21 @@ class InventoryRepository:
     # preserve-list, so an entity nobody thought about (auth tokens, rate-limit
     # counters, anything added later) survives by default rather than by vigilance.
     #
-    # This is exactly D4's delete list and nothing more. Two entities that were
-    # once here have been deliberately REMOVED, because they are hand-curated and
-    # not reseedable:
+    # This is exactly D4's delete list and nothing more. Three entities that were
+    # once here have been deliberately REMOVED, because they are hand-curated,
+    # historical, or otherwise not reseedable:
     #
     # * `graded_price` — slab values entered by hand. TCGdex has no graded prices
     #   at all, so nothing can rebuild them.
     # * `item_price_point` — the only price history sealed/bulk items have; they
     #   have no card to re-derive it from.
+    # * `price_point` (RFC 0015) — a card's TCGdex id is stable across a reseed,
+    #   so its accumulated price trail is still valid even though the
+    #   `catalog_card` row itself gets swept as belonging to a superseded
+    #   generation. TCGdex has no historical-price endpoint, only a current one,
+    #   so deleting this here would be a real, unrecoverable loss for zero
+    #   benefit — the same "not reseedable" reasoning as the two rows above, not
+    #   a new exception to it.
     #
     # Stamping them with a catalog generation at their write sites was the other
     # candidate fix and would NOT have worked: the reseed writes only
@@ -543,12 +562,13 @@ class InventoryRepository:
     # generation and the next wipe would delete them anyway. They are master data;
     # the wipe simply has no business touching them.
     _CARD_DATA_ENTITIES = frozenset({
-        "catalog_card", "price_point", "inventory_item", "transaction",
+        "catalog_card", "inventory_item", "transaction",
     })
 
     # Card-keyed rows: once the catalog is replaced these are orphans by
     # construction, so they are kept only if they carry the incoming generation.
-    _CATALOG_GEN_ENTITIES = frozenset({"catalog_card", "price_point"})
+    # `price_point` is deliberately NOT here — see `_CARD_DATA_ENTITIES` above.
+    _CATALOG_GEN_ENTITIES = frozenset({"catalog_card"})
 
     def set_catalog_generation(self, gen):
         """Stamp every subsequent catalog/price write with ``gen`` (None to stop).
@@ -1778,6 +1798,7 @@ class InventoryRepository:
             "PK": f"ITEM#{item_id}", "SK": f"PRICE#{day.isoformat()}",
             "entity": "item_price_point", "item_id": item_id,
             "date": day.isoformat(), "market_value": value,
+            "ttl": _price_history_ttl(day),
         })
 
     def get_item_price_history(self, item_id: str):
@@ -1799,6 +1820,7 @@ class InventoryRepository:
             sk = f"PRICE#GRADED#{p.company}#{_grade_key(p.grade)}#{p.date.isoformat()}"
         body = _serialize(p.model_dump(mode="python"))
         return {"PK": f"CARD#{p.card_id}", "SK": sk, "entity": "price_point",
+                "ttl": _price_history_ttl(p.date),
                 **self._cat_gen(), **body}
 
     def append_price_points(self, points):
@@ -1806,6 +1828,80 @@ class InventoryRepository:
         with self._table.batch_writer() as batch:
             for p in points:
                 batch.put_item(Item=self._price_point_item(p))
+
+    # ---- price-history retention backfill (RFC 0015) ----
+    # Rows written before the `ttl` write-path stamp existed carry no `ttl` at
+    # all and will never auto-expire under DynamoDB's native TTL. Additive
+    # only — never deletes anything itself, so it needs none of
+    # `purge_card_data`'s destructive rails.
+    _PRICE_HISTORY_ENTITIES = frozenset({"price_point", "item_price_point"})
+
+    def list_price_history_ttl_candidates(self) -> list[tuple[str, str, str]]:
+        """Scan for price-history rows missing ``ttl``. Returns ``(PK, SK, date)``.
+
+        Read-only — the scan itself is cheap (reads only) even across a large
+        table. Split out from the write side (``apply_price_history_ttl``) so
+        a caller can chunk the writes and report progress between chunks, the
+        same shape ``select_catalog_refresh_candidates`` /
+        ``refresh_catalog_prices`` already use. The original single-call
+        version of this backfill gave a human watching the terminal no signal
+        at all for the run's whole duration — against the live table, ~90
+        minutes of silence, indistinguishable from a hang.
+        """
+        kwargs = {
+            "ProjectionExpression": "PK, SK, #e, #d, #t",
+            "ExpressionAttributeNames": {"#e": "entity", "#d": "date", "#t": "ttl"},
+            "ConsistentRead": True,
+        }
+        candidates: list[tuple[str, str, str]] = []
+        while True:
+            resp = self._table.scan(**kwargs)
+            for item in resp.get("Items", []):
+                if item.get("entity") not in self._PRICE_HISTORY_ENTITIES:
+                    continue
+                if "ttl" in item:
+                    continue
+                raw_date = item.get("date")
+                if not raw_date:
+                    continue
+                candidates.append((item["PK"], item["SK"], raw_date))
+            last = resp.get("LastEvaluatedKey")
+            if not last:
+                break
+            kwargs["ExclusiveStartKey"] = last
+        return candidates
+
+    def apply_price_history_ttl(self, candidates: list[tuple[str, str, str]]) -> int:
+        """Stamp ``ttl`` on exactly the given ``(PK, SK, date)`` rows.
+
+        A targeted ``update_item`` (``SET ttl``) per row — never a
+        scan-then-``put_item`` of the full row, which could silently revert a
+        concurrent nightly-sync write landing on the same row mid-backfill
+        (RFC 0015, adversarial review). Returns the count written, so a caller
+        chunking this can report cumulative progress.
+        """
+        for pk, sk, raw_date in candidates:
+            ttl = _price_history_ttl(date.fromisoformat(raw_date))
+            self._table.update_item(
+                Key={"PK": pk, "SK": sk},
+                UpdateExpression="SET #t = :ttl",
+                ExpressionAttributeNames={"#t": "ttl"},
+                ExpressionAttributeValues={":ttl": ttl},
+            )
+        return len(candidates)
+
+    def backfill_price_history_ttl(self, *, dry_run: bool = True) -> dict:
+        """Convenience wrapper: list candidates, then (unless ``dry_run``) apply
+        them all in one call. Kept for callers with no need to chunk or report
+        progress (tests; a small table). ``scripts/backfill_price_history_ttl.py``
+        calls ``list_price_history_ttl_candidates``/``apply_price_history_ttl``
+        directly instead, so it can report progress between chunks on a large,
+        slow, real run.
+        """
+        candidates = self.list_price_history_ttl_candidates()
+        if not dry_run:
+            self.apply_price_history_ttl(candidates)
+        return {"candidates": len(candidates)}
 
     def get_price_history(self, card_id, *, finish=None, company=None,
                           grade=None, start=None, end=None):

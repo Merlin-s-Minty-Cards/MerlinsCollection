@@ -1250,6 +1250,45 @@ class TestAdminPriceChart:
         assert len(data["points"]) == 1
         assert data["points"][0]["market_value"] == "125.00"
 
+    def test_raw_item_finish_mismatch_falls_back_to_the_priced_finish(self, admin_client):
+        """RFC 0015: the item's own stored `finish` is not an exact-match-only key.
+
+        Mirrors the exact failure class `_market_price`'s docstring already
+        documents (a bare exact match left 174/213 live items unpriced) — an
+        item's stored finish routinely doesn't match the finish key TCGdex
+        actually priced the card under. The endpoint must resolve through the
+        same shared fallback-aware helper every other price-reading caller
+        already uses, rather than returning an empty chart for a card whose
+        history is sitting right there under a different finish key.
+        """
+        from datetime import timedelta
+        from merlins_collection.models.catalog import PricePoint
+
+        client, repo, admin_token, _ = admin_client
+        today = date.today()
+        # Item is stored as "reverseHolofoil", but the card was only ever
+        # priced (now, and historically) under "normal".
+        repo.put_inventory_item(_raw(item_id="raw-mismatch", card_id="sv1-9",
+                                     finish="reverseHolofoil"))
+        repo.batch_upsert_catalog_cards([CatalogCard(
+            card_id="sv1-9", name="Mismatch Test", set_id="sv1", set_name="SV",
+            number="9", prices={"normal": {"market": Decimal("20.00")}},
+            last_synced_at=datetime(2026, 6, 22, 12, 0, 0),
+        )])
+        repo.append_price_points([PricePoint(
+            card_id="sv1-9", date=today - timedelta(days=10), source="tcgdex",
+            kind="raw", finish="normal", market=Decimal("20.00"),
+        )])
+
+        resp = client.get(
+            "/admin/inventory/raw-mismatch/price-chart?timeframe=1yr",
+            headers=_auth_header(admin_token),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["points"]) == 1
+        assert data["points"][0]["market_value"] == "20.00"
+
     def test_nonexistent_item_returns_404(self, admin_client):
         client, _, admin_token, _ = admin_client
         resp = client.get(

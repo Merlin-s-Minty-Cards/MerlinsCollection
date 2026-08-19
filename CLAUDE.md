@@ -1106,6 +1106,36 @@ reason. Tests missed it for months because they all send prices as **strings**;
 when testing a money path, send a JSON **number**, which is what the frontend
 actually sends.
 
+## A PARTIAL ENV EXPORT ON `cdk deploy` SILENTLY DELETES SECRETS FROM THE LIVE LAMBDA
+
+Diagnosed 2026-08-18 on `MerlinsFrontendStack` (RFC 0014's CloudFront+Lambda
+spike, `infra/`). Redeploying to add `NEXT_PUBLIC_SANITY_PROJECT_ID` with only
+that var and `SKIP_OPENNEXT_BUILD` exported wiped `AUTH_SECRET` and
+`AWS_COGNITO_CLIENT_SECRET` off the already-working server Lambda. NextAuth
+then failed with its generic "Server error / problem with the server
+configuration" page, and — more confusingly — the Studio route's own admin
+gate (`frontend/app/studio/layout.tsx`) started returning a bare `404`
+instead of redirecting to sign-in, because `auth()` itself was failing
+without `AUTH_SECRET`.
+
+**Root cause:** `infra/bin/infra.ts` reads every secret (`AUTH_SECRET`,
+`AWS_COGNITO_CLIENT_SECRET`, `POKEMONPRICETRACKER_API_KEY`, `ADMIN_API_KEY`)
+from the deployer's OWN shell at synth time — by design, so nothing sensitive
+is ever a literal in `lib/*-stack.ts`. But `buildFrontendEnvironment` only
+*adds* a key to the environment map when its prop is truthy, and
+CloudFormation's `Lambda::Function.Environment.Variables` is a full
+**replace** on every stack update, never a merge. **Any deploy that omits a
+previously-set secret deletes it from production, silently — CDK gives no
+warning, and the stack still reports `UPDATE_COMPLETE`.**
+
+Before running `cdk deploy` on `MerlinsFrontendStack` for *any* reason —
+including a change that has nothing to do with auth — export every secret
+this stack uses, not just the one being changed: `AUTH_SECRET`,
+`AWS_COGNITO_CLIENT_SECRET`, and (if relevant to `MerlinsBackendStack`)
+`POKEMONPRICETRACKER_API_KEY` / `ADMIN_API_KEY`. The real values already live
+in `frontend/.env.local`. Same failure mode applies to any future secret
+added to either stack's environment map.
+
 **Catalog seed + sync (one-time owner action, not scheduled).** Needed only for
 a fresh/empty table, which the live one is not. With AWS creds, from `backend/`:
 
@@ -1124,6 +1154,29 @@ catalog itself.
 resolves to an unrelated environment that cannot import `merlins_collection`,
 and these files have no shebang — so `scripts/foo.py` hands the file to the
 shell, which tries to run its docstring as commands.
+
+**A one-time script that loops over live table data for more than a few
+seconds must print progress between chunks, never only a final summary.**
+Diagnosed 2026-08-19 on `backfill_price_history_ttl.py` (RFC 0015): a
+single-call scan-then-serially-`update_item` loop against ~70,000 real rows
+ran for ~90 minutes printing nothing between `"scanning…"` and the final
+summary — genuinely working the whole time (confirmed live via CloudWatch
+write-capacity metrics and a direct table scan showing steady completion),
+but indistinguishable from a hang to the owner watching the terminal.
+`reprice_catalog.py` (RFC 0010 T17) already solved exactly this class of
+problem — select candidates once, then apply them in bounded chunks with a
+line printed after each one (`chunk N/M: done/total, ETA`) — and its own task
+doc already states the rule outright: *"progress output every chunk... this
+runs unattended for two hours; silence is indistinguishable from a hang."`
+The new script matched the wrong sibling on the wrong axis: it correctly
+copied `backfill_catalog_sets.py`'s lighter `--execute`-only rail (right
+call — additive-only work doesn't need `--confirm-table`), but a script has
+independent axes to match precedent on — write-safety rail is one, loop
+duration/shape is another — and only the first was checked.
+**Before writing a new one-time script, estimate the real data volume it
+will walk (not an assumed-small one) and, if the loop will run more than a
+few seconds, copy `reprice_catalog.py`'s chunked-progress shape regardless of
+which sibling's write-safety rail is otherwise the right match.**
 
 **Catalog set registry backfill (one-time owner action).** The admin
 inventory page's Set filter lists every set in the catalog — including ones we

@@ -136,7 +136,6 @@ def test_the_default_write_path_still_overwrites(dynamo_repo):
 
 def test_purge_removes_card_data_of_every_other_generation(dynamo_repo):
     dynamo_repo.batch_upsert_catalog_cards([_card("old-1")])   # no generation
-    dynamo_repo.append_price_points([_point("old-1")])
     dynamo_repo.put_inventory_item(_raw_item("old-1"))
 
     dynamo_repo.set_catalog_generation("G2")
@@ -147,11 +146,30 @@ def test_purge_removes_card_data_of_every_other_generation(dynamo_repo):
 
     assert dynamo_repo.get_catalog_card("new-1") is not None
     assert dynamo_repo.get_catalog_card("old-1") is None
-    assert dynamo_repo.get_price_history("old-1") == []
     assert dynamo_repo.list_inventory() == []
     assert counts["catalog_card"] == 1
-    assert counts["price_point"] == 1
     assert counts["inventory_item"] == 1
+
+
+def test_purge_never_deletes_card_price_history(dynamo_repo):
+    """RFC 0015: a card's TCGdex id doesn't change across a reseed, so its
+    accumulated price trail is still valid even when the `catalog_card` row
+    itself gets swept as belonging to a superseded generation. Unlike
+    `catalog_card`, TCGdex has no way to reconstruct history once it's gone —
+    deleting it here would be a real, unrecoverable loss for zero benefit.
+    """
+    dynamo_repo.batch_upsert_catalog_cards([_card("old-1")])   # no generation
+    dynamo_repo.append_price_points([_point("old-1")])
+
+    dynamo_repo.set_catalog_generation("G2")
+    dynamo_repo.batch_upsert_catalog_cards([_card("new-1")])
+    dynamo_repo.set_catalog_generation(None)
+
+    counts = dynamo_repo.purge_card_data(keep_catalog_gen="G2", dry_run=False)
+
+    assert dynamo_repo.get_catalog_card("old-1") is None     # catalog identity IS swept
+    assert dynamo_repo.get_price_history("old-1") != []      # its price history is NOT
+    assert "price_point" not in counts
 
 
 def test_purge_preserves_business_master_data(dynamo_repo):

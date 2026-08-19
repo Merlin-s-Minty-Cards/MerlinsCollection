@@ -1,6 +1,6 @@
 import time
 from datetime import date as _date
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -328,6 +328,133 @@ def test_put_then_get_graded_inventory_item(dynamo_repo):
     )
     dynamo_repo.put_inventory_item(item)
     assert dynamo_repo.get_inventory_item(item.item_id) == item
+
+
+def test_raw_price_points_are_stamped_with_a_retention_ttl(dynamo_repo):
+    """RFC 0015: every price-history row carries a `ttl` DynamoDB can expire on
+    its own — no pruning job needed. Computed from the point's own `date`, not
+    write time, so a backfilled or late-written point still expires on schedule.
+    """
+    dynamo_repo.append_price_points([_raw_point("c5", _date(2026, 6, 20), "10")])
+
+    raw = dynamo_repo._table.get_item(
+        Key={"PK": "CARD#c5", "SK": "PRICE#RAW#holofoil#2026-06-20"}
+    )["Item"]
+    expected = int(
+        (datetime(2026, 6, 20, tzinfo=timezone.utc) + timedelta(days=730)).timestamp()
+    )
+    assert raw["ttl"] == expected
+
+
+def test_item_price_points_are_stamped_with_a_retention_ttl(dynamo_repo):
+    dynamo_repo.append_item_price_point("item-9", _date(2026, 3, 1), Decimal("40"))
+
+    raw = dynamo_repo._table.get_item(
+        Key={"PK": "ITEM#item-9", "SK": "PRICE#2026-03-01"}
+    )["Item"]
+    expected = int(
+        (datetime(2026, 3, 1, tzinfo=timezone.utc) + timedelta(days=730)).timestamp()
+    )
+    assert raw["ttl"] == expected
+
+
+def test_backfill_price_history_ttl_stamps_legacy_rows(dynamo_repo):
+    """A row written before this feature existed carries no `ttl` at all."""
+    dynamo_repo._table.put_item(Item={
+        "PK": "CARD#legacy-1", "SK": "PRICE#RAW#holofoil#2026-01-01",
+        "entity": "price_point", "card_id": "legacy-1", "date": "2026-01-01",
+        "source": "tcgplayer", "kind": "raw", "finish": "holofoil",
+        "market": Decimal("9.99"),
+    })
+
+    result = dynamo_repo.backfill_price_history_ttl(dry_run=False)
+
+    assert result["candidates"] == 1
+    raw = dynamo_repo._table.get_item(
+        Key={"PK": "CARD#legacy-1", "SK": "PRICE#RAW#holofoil#2026-01-01"}
+    )["Item"]
+    expected = int(
+        (datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(days=730)).timestamp()
+    )
+    assert raw["ttl"] == expected
+    # A targeted update, not a scan-then-put_item of the whole row — the field
+    # a concurrent nightly-sync write could have touched must survive untouched.
+    assert raw["market"] == Decimal("9.99")
+
+
+def test_backfill_price_history_ttl_dry_run_writes_nothing(dynamo_repo):
+    dynamo_repo._table.put_item(Item={
+        "PK": "CARD#legacy-2", "SK": "PRICE#RAW#holofoil#2026-01-01",
+        "entity": "price_point", "card_id": "legacy-2", "date": "2026-01-01",
+        "source": "tcgplayer", "kind": "raw", "finish": "holofoil",
+        "market": Decimal("5.00"),
+    })
+
+    result = dynamo_repo.backfill_price_history_ttl(dry_run=True)
+
+    assert result["candidates"] == 1
+    raw = dynamo_repo._table.get_item(
+        Key={"PK": "CARD#legacy-2", "SK": "PRICE#RAW#holofoil#2026-01-01"}
+    )["Item"]
+    assert "ttl" not in raw
+
+
+def test_backfill_price_history_ttl_skips_rows_already_stamped(dynamo_repo):
+    """A point written after this feature ships already carries `ttl` — a
+    re-run of the backfill must not treat it as a candidate."""
+    dynamo_repo.append_price_points([_raw_point("c10", _date(2026, 6, 20), "10")])
+
+    result = dynamo_repo.backfill_price_history_ttl(dry_run=False)
+
+    assert result["candidates"] == 0
+
+
+# ---------------------------------------------------------------------------
+# list_price_history_ttl_candidates / apply_price_history_ttl (RFC 0015
+# follow-up): split out of `backfill_price_history_ttl` so a caller can chunk
+# the write side and report progress between chunks — on a real table this
+# scan+write took ~90 minutes with zero output from the single-call version,
+# which looked identical to a hang.
+# ---------------------------------------------------------------------------
+
+
+def test_list_price_history_ttl_candidates_finds_legacy_rows(dynamo_repo):
+    dynamo_repo._table.put_item(Item={
+        "PK": "CARD#legacy-3", "SK": "PRICE#RAW#holofoil#2026-01-01",
+        "entity": "price_point", "card_id": "legacy-3", "date": "2026-01-01",
+        "source": "tcgplayer", "kind": "raw", "finish": "holofoil",
+        "market": Decimal("9.99"),
+    })
+    dynamo_repo.append_price_points([_raw_point("c11", _date(2026, 6, 20), "10")])  # already has ttl
+
+    candidates = dynamo_repo.list_price_history_ttl_candidates()
+
+    assert candidates == [
+        ("CARD#legacy-3", "PRICE#RAW#holofoil#2026-01-01", "2026-01-01"),
+    ]
+
+
+def test_apply_price_history_ttl_stamps_exactly_the_given_rows(dynamo_repo):
+    dynamo_repo._table.put_item(Item={
+        "PK": "CARD#legacy-4", "SK": "PRICE#RAW#holofoil#2026-01-01",
+        "entity": "price_point", "card_id": "legacy-4", "date": "2026-01-01",
+        "source": "tcgplayer", "kind": "raw", "finish": "holofoil",
+        "market": Decimal("9.99"),
+    })
+
+    written = dynamo_repo.apply_price_history_ttl(
+        [("CARD#legacy-4", "PRICE#RAW#holofoil#2026-01-01", "2026-01-01")]
+    )
+
+    assert written == 1
+    raw = dynamo_repo._table.get_item(
+        Key={"PK": "CARD#legacy-4", "SK": "PRICE#RAW#holofoil#2026-01-01"}
+    )["Item"]
+    expected = int(
+        (datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(days=730)).timestamp()
+    )
+    assert raw["ttl"] == expected
+    assert raw["market"] == Decimal("9.99")  # a targeted update, not a full replace
 
 
 def test_price_history_start_only(dynamo_repo):
