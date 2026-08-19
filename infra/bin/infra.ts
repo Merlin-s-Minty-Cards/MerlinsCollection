@@ -39,8 +39,24 @@ const backend = new BackendStack(app, 'MerlinsBackendStack', {
   // documented but never actually done, which is why every admin table on
   // the CloudFront spike came back empty (2026-08-17): the browser silently
   // dropped every fetch response because the Origin wasn't allow-listed.
+  //
+  // The raw *.cloudfront.net entry above fixed that once, but the
+  // distribution ALSO carries two custom-domain aliases —
+  // `merlinsmintycards.com` and `www.merlinsmintycards.com` (confirmed via
+  // `aws cloudfront list-distributions`) — and DNS for both already resolves
+  // to this same distribution. Neither was ever added here, so the exact
+  // same "every admin table empty" symptom recurred 2026-08-18 for anyone
+  // using the real production domain instead of the raw CloudFront URL:
+  // diagnosed from a live browser request whose `Referer` was
+  // `https://www.merlinsmintycards.com/` hitting a 400 "Disallowed CORS
+  // origin" on every preflight, while an identical request with the
+  // `.cloudfront.net` Origin succeeded. CORS rejects on the Origin's exact
+  // string — a distribution alias does not implicitly extend the allow-list,
+  // so every hostname that can reach this backend must be listed here
+  // explicitly, apex and `www` both (browsers treat them as different
+  // origins).
   corsOrigins:
-    'https://me-736e73de34b349da8d2027e56db0eb8a.ecs.us-east-1.on.aws,http://localhost:3000,https://d3pmro4bgrznx9.cloudfront.net',
+    'https://me-736e73de34b349da8d2027e56db0eb8a.ecs.us-east-1.on.aws,http://localhost:3000,https://d3pmro4bgrznx9.cloudfront.net,https://merlinsmintycards.com,https://www.merlinsmintycards.com',
   pokemonPriceTrackerApiKey: process.env.POKEMONPRICETRACKER_API_KEY,
   adminApiKey: process.env.ADMIN_API_KEY,
 })
