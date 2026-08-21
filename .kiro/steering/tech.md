@@ -83,7 +83,7 @@ npm workspaces: `frontend`, `mcp-server`. Root `package.json` orchestrates all.
 │   └── tools/                 # 5 MCP tool implementations
 ├── shared/tool-contract.json  # MCP tool interface definitions
 ├── docs/rfcs/                 # Design decisions
-├── progress.txt               # Active roadmap — READ BEFORE ANY TASK
+├── .kiro/plans/               # Per-plan roadmap, follow-ups, Council artifacts
 └── CLAUDE.md                  # AI agent instructions
 ```
 
@@ -122,7 +122,7 @@ Never combine phases. Every behavioral change requires TDD.
 - PRs required for main
 - CI: GitHub Actions (`.github/workflows/ci.yml`)
 - CODEOWNERS enforced
-- State tracked in `progress.txt` at repo root
+- State tracked per plan under `.kiro/plans/` — see orchestrator.md
 
 ## Dependencies (pinned versions that matter)
 - `next`: ^15.3.0, `react`: ^18.3.0
@@ -132,3 +132,13 @@ Never combine phases. Every behavioral change requires TDD.
 - `boto3`: >=1.34.0
 - `@modelcontextprotocol/sdk`: ^1.0.0
 - `@aws-sdk/client-dynamodb`: ^3.1079.0
+
+## Agent & Skill File Editing
+
+**Frontmatter is configuration, not prose — never drop a field while condensing.** Agent files in `.kiro/agents/` declare `tools:` (e.g. `[read, write, shell]`) alongside `name`, `description`, and `model`. Removing `tools:` does not fall back to "inherit everything"; it starves the agent, which then cannot read or edit files. This was observed live: stripping `tools:` from all 13 agents left the orchestrator able to activate skills and nothing else. Prune bodies freely; leave frontmatter keys intact unless a source confirms the field is optional.
+
+**A section the original marks critical stays.** When an author has explicitly ranked a section ("read first"), that ranking is evidence; overriding it needs a reason beyond brevity.
+
+**Delegation needs an explicit `subagent` tool grant.** An orchestrating agent with `tools: [read, write, shell]` cannot dispatch specialists — `subagent` must be listed (or `@builtin` / `*`). This is independent of the `subagent` capability rule in `.kiro/settings.json`, which governs permission, not tool availability. Optional `toolsSettings.subagent.availableAgents` (glob) and `.trustedAgents` (skip approval prompts) narrow the grant. Source: [subagents docs](https://kiro.dev/docs/custom-agents/subagents.md).
+
+**Kiro's agent semantics differ from Claude Code's — don't port constraints across.** A Kiro custom agent set as the session agent *can* spawn subagents given the `subagent` grant; only a spawned subagent cannot spawn further. An earlier version of `orchestrator.md` carried Claude Code's "main thread only" rule verbatim and was wrong for this IDE.
