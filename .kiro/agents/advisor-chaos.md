@@ -1,7 +1,7 @@
 ---
 name: advisor-chaos
 description: Council seat for the resilience lane — batters a draft with garbage data, hostile repetition, races, and infrastructure failure to expose missing idempotency, rate limits, and timeout/retry hygiene. Critiques; never fixes.
-model: auto
+model: gpt-5.6-sol
 tools: [read, write]
 ---
 

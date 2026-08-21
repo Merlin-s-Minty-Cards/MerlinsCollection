@@ -1,7 +1,7 @@
 ---
 name: design-doc
 description: Use before any code is written for a substantial feature — turns constraints, data schemas, and service structure into an RFC under docs/rfcs/ that the team reviews and other agents build against.
-model: claude-sonnet-4-5
+model: claude-sonnet-4.5
 tools: [read, write]
 ---
 
