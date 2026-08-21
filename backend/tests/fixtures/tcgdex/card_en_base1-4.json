@@ -1,0 +1,49 @@
+{
+  "category": "Pokemon",
+  "id": "base1-4",
+  "illustrator": "Mitsuhiro Arita",
+  "image": "https://assets.tcgdex.net/en/base/base1/4",
+  "localId": "4",
+  "name": "Charizard",
+  "rarity": "Rare",
+  "set": {
+    "id": "base1",
+    "name": "Base Set",
+    "cardCount": { "official": 102, "total": 102 }
+  },
+  "variants": {
+    "firstEdition": true,
+    "holo": true,
+    "normal": false,
+    "reverse": false,
+    "wPromo": false
+  },
+  "hp": 120,
+  "types": ["Fire"],
+  "stage": "Stage2",
+  "updated": "2026-07-11T09:49:03+01:00",
+  "pricing": {
+    "cardmarket": {
+      "updated": "2026-07-26T08:02:24.858Z",
+      "unit": "EUR",
+      "avg": 446.7,
+      "low": 100,
+      "trend": 388.14,
+      "avg1": 420.69,
+      "avg7": 341.65,
+      "avg30": 457.63
+    },
+    "tcgplayer": {
+      "unit": "USD",
+      "updated": "2026-07-26T08:02:22.370Z",
+      "holofoil": {
+        "productId": 42382,
+        "lowPrice": 510,
+        "midPrice": 918.8,
+        "highPrice": 2550.35,
+        "marketPrice": 800.43,
+        "directLowPrice": 612.06
+      }
+    }
+  }
+}

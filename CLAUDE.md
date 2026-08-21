@@ -6,14 +6,57 @@ Always follow the outside-in Test-Driven Development (TDD) process.
 Never combine phases. Wait for user confirmation after confirming tests fail.
 
 # Agent Workflow
-Custom sub-agents live in `.claude/agents/`. The `orchestrator` agent conducts this whole flow — deciding what's trivial vs. non-trivial and routing each piece to the right specialist. **Reference it into the main chat with `@orchestrator` (or `/`); never spawn it as a sub-agent.** Referencing loads its instructions into the main thread, which is the only thread that can spawn other agents — spawning the orchestrator instead would trap it in a sub-agent that cannot delegate, defeating its purpose.
+Development stays in the main thread — no subagent-driven orchestration. Custom skills live in `.claude/skills/`; the two remaining custom agents (`.claude/agents/test-qa.md`, `.claude/agents/web-browser.md`) exist only because their output is long-running or heavy and belongs off the main thread, not because they get orchestrated.
 
-For **non-trivial feature work** (new functionality, multi-step changes, anything that will touch more than a couple of files), default to this flow without waiting to be asked:
-1. Start with the `initializer` agent to audit the workspace and create/update `claude-progress.txt`, unless one already exists and is current for the active feature.
-2. Route each roadmap item to the appropriate agent (`design-doc`, `code-writer`, `test-qa`, `doc-writer`, `pull-request`, `web-browser`) based on its own description.
-3. Every `code-writer` submission must clear the Council Loop (`advisor-contrarian`, `advisor-security`, `advisor-chaos`, `advisor-architect` → `council-judge`) before being considered done.
+For **non-trivial feature work** (new functionality, multi-step changes, anything touching more than a couple of files), default to this flow without waiting to be asked:
+1. `initialize-roadmap` skill — audit the workspace, create/update `claude-progress.txt`, unless one already exists and is current for the active feature.
+2. `design-doc` skill for architecture/schema/contract design on substantial features.
+3. `tdd` skill for implementation — it nests `adversarial-review` as an inline pre- and post-change critique step (logic, security, chaos, bloat), no subagent spawn.
+4. `sync-docs` then `pr-description` skills to close out.
+5. `test-qa` and `web-browser` agents dispatch only when their isolation is actually needed (a long test run, heavy research output).
 
-Skip this default for small fixes, one-off questions, or anything the user frames as quick — go straight to the relevant single agent (or no agent) instead. The user can also override explicitly at any time (e.g. "skip the initializer", "just write the code").
+Skip this default for small fixes, one-off questions, or anything the user frames as quick — go straight to the relevant skill (or none) instead. The user can also override explicitly at any time (e.g. "skip the roadmap step", "just write the code").
+
+**When the user explicitly invokes `subagent-driven-development` as that override, design stays with the driving model and only mechanical implementation delegates down.** RFC-writing, the implementation plan, and any task-brief authoring are done by the model already running the conversation — never handed to a subagent, because a fresh subagent re-derives context that model already has. Only the per-task implementer dispatches (the code-writer loop the skill drives once briefs exist) go to subagents, and each of those dispatches **must pass an explicit `model` override** — omitting it silently inherits the calling session's own model, which defeats the skill's own "Model Selection" section rather than merely skipping an optimization. Diagnosed 2026-08-14 on RFC 0012: the first implementer dispatches ran on Opus by default via the `code-writer` agent's own frontmatter, for tasks whose briefs already contained the exact code to write — pure transcription-plus-testing, the skill's own stated cheapest-tier case. Knowing the skill's rule was not enough; the fix was to make the check mechanical rather than remembered — the driving model treats "no explicit `model` on this dispatch" as an incomplete call, the same way a missing required argument would be.
+
+**Closing the loop is a separate, always-on concern, not part of the feature flow above.** `lesson-capture` fires whenever the user reports that something Claude built or decided fell short, or Claude itself notices it took a long or circuitous path a clearer rule would have avoided — it writes the generalized lesson (never a narrow one-off fix) to CLAUDE.md or a skill, gated on the lesson actually generalizing. `skill-curator` is the periodic, hand-run counterpart that reviews `.claude/skills/` for drift — near-duplicates to merge, bloated skills to split, over-narrow entries that slipped past the gate. Any skill file either one touches goes through `writing-great-skills`, never `superpowers:writing-skills`.
+
+## Context usage — stay under ~40% of the window, and say so before you don't
+
+A model has no built-in sense of its own context usage — it cannot "just tell"
+what percent full the conversation is without an explicit signal. This
+project's `.claude/settings.json` sets `totalTokensReminder: "countdown"` +
+`totalTokensReminderAfterUserTurn: true`, which is what supplies that signal:
+a `<total_tokens>N tokens left</total_tokens>` marker gets injected after tool
+results and after each user turn. That marker is the ONLY reliable usage
+signal available — never estimate context usage from turn count, message
+length, or "this feels like a long conversation" instead.
+
+**On the first such marker seen in a session, record its value as that
+session's baseline window size.** There is no direct readout of the model's
+total context-window size, so the first reading is the only usable reference
+point. Context-used percentage from then on is `1 - (current remaining /
+baseline)`.
+
+**Once usage crosses ~40% (remaining drops below ~60% of baseline), flag it
+before continuing the requested work** — one line, not a wall of text — and
+give the user two options: run `/compact` now, or wrap up the current point
+and start a fresh session for the next task. Don't silently keep working past
+that point without having flagged it at least once. Re-flag at ~60% and again
+as usage nears wherever this session's auto-compact would fire on its own, so
+the warnings escalate with how urgent it actually is.
+
+**This is advisory, not a gate.** The user decides whether to compact, start
+fresh, or keep going — never refuse to continue work solely because the
+estimate crossed 40%.
+
+`totalTokensReminder` is an undocumented/internal Claude Code setting (not
+part of the public settings schema's stable surface) — if a future Claude
+Code version stops honoring it, the marker simply stops appearing and this
+section becomes a no-op rather than something that errors. There is no other
+project-level way to give the model real numbers here; a pure "use your best
+judgment" instruction without this setting cannot produce an actual
+percentage, only a guess.
 
 # Project Overview
 Merlin's Minty Cards — a Pokemon card business website.
@@ -41,6 +84,1135 @@ Merlin's Minty Cards — a Pokemon card business website.
 | `/articles`          | No            | Article listing (Cluster Hub)        |
 | `/articles/[slug]`   | No            | Individual article (SSG via Sanity)  |
 | `/inventory`         | Yes           | Inventory search (filter + chat)     |
+| `/admin`             | Yes (admin)   | Admin panel — see Admin Panel below  |
+
+# Admin Panel
+
+`/admin` (gated by admin Cognito group) covers inventory ops end to end.
+
+**The sidebar is THREE GROUPS, not a flat list** (RFC 0010 T13,
+`frontend/components/admin/AdminShell.tsx`). Sixteen flat tabs had outgrown the
+viewport; they are now Dashboard on its own plus three collapsible groups named
+for *when* you are using them. **Every route path is unchanged** —
+`/admin/outgoing` included — because grouping is a sidebar concern and renaming
+would break every bookmark to fix a URL nobody types.
+
+| Group | Route | Label | Purpose |
+|---|---|---|---|
+| — | `/admin` | Dashboard | Quick actions, needs-attention queues, position, today, coverage |
+| **At the show** | `/admin/inventory` | Inventory | Inventory CRUD, granular filters, ownership column |
+| | `/admin/trade` | **Buy / Sell / Trade** | One surface, three modes via `?mode=`. See "Buy / Sell / Trade" below |
+| | `/admin/slabs` | Slabs | Graded intake (cert → staged batch → commit → priced) + the slab list. See "Slabs" below |
+| **Back office** | `/admin/outgoing` | **Prep Queue** | See "Prep Queue" below — route path is unchanged, the UI/purpose is not |
+| | `/admin/show-prep` | Show Prep | Bulk-move to a show location, inline sticker/TCG-link editing, location filter + sort |
+| | `/admin/shows` | Shows | Show CRUD — see "Shows" below |
+| | `/admin/triage` | Triage | See "Triage" below — the `needs_review` queue + the four repair tools |
+| | `/admin/unmatched` | Unmatched | Cards TCGdex does not carry — parked from Triage, paired when the catalog catches up. See "Unmatched" below |
+| | `/admin/market` | Market | Prices, sync trigger, coverage/confidence, "check for new sets" |
+| | `/admin/vault` | Vault | Sortable inventory table, ownership column |
+| **Data** | `/admin/analytics` | Show Analytics | Tabbed Daily / Shows dashboard (see below) |
+| | `/admin/history` | History | Transaction history with profit visibility (see below) |
+| | `/admin/cosigners` | Cosigners | Cosigner CRUD + payout link tool |
+| | `/admin/locations` | Locations | Admin-managed location list — see "Locations" below |
+| — | `/admin/card/[id]` | (card detail) | Single-item detail, price chart, timeline — not in sidebar, reached via links |
+
+Three rules the grouping carries, all of which have a test in
+`AdminShell.test.tsx`:
+
+- **Groups default to OPEN**, and the group holding the active route is forced
+  open regardless of what was saved. Shut-by-default makes every destination
+  unreachable on a first visit.
+- **The Triage badge rolls onto its group header only while that group is
+  SHUT.** With the group open the count is on the Triage row itself, and the
+  same number twice trains the eye to stop reading it.
+- **The mobile bar is an explicit `mobileItems` list, never a `.slice()` of the
+  groups.** Flattening the three groups and taking five yields *Trade* where
+  Slabs used to be.
+
+**Prep Queue gotcha:** the route path is still `/admin/outgoing` (unchanged
+since before Round 3) but the page itself was repurposed in Task 3.4 from a
+sold/shipment tracker into a queue of unstickered available inventory
+(`GET` filtered to `status=available, missing_sticker=true`). Reading the URL
+alone will mislead — it no longer tracks outgoing shipments.
+
+**Pricing an item inline PATCHES the row and drops it — it does not refetch**
+(RFC 0010 T7), which is what stops the list jumping under the cursor. Two
+consequences follow and both are deliberate: the toast is **conditional**
+(setting a price says "Priced → removed"; *clearing* one says "Sticker price
+cleared" and the row stays, because a cleared row still meets this queue's
+`missing_sticker=true` criterion), and the priced id is pruned from
+`selectedIds` so the bulk bar cannot count a card nobody can see. The page also
+filters and sorts **by location**, and both summary cards carry the scope in
+their label (`In queue (Glass)`) — an unqualified total beside a scoped count is
+the same misread through a different card.
+
+**First header click sorts ASCENDING here, unlike `/admin/inventory`, whose
+`handleSort` opens `desc`.** The two pages genuinely disagree; this is a
+page-level default, not a `DataTable` change. And the column keys **are** the
+backend's sort fields, because `_sort_admin_results` splits on the LAST
+underscore — do not rename a `Column.key` on this page without re-checking that
+split.
+
+**Every inventory column is sortable and every column has its own filter**
+(RFC 0011). Both are registry-driven: `SORT_FIELDS`
+(`services/inventory_sort.py`) and `FILTERABLE_FIELDS`
+(`services/inventory_filters.py`) on the backend, `INVENTORY_COLUMNS` /
+`INVENTORY_FILTERS` on the frontend. Totality is enforced by tests on both
+sides, so a new model field fails a test rather than silently arriving
+without a sort or a filter.
+
+**A `consignor_id` filter joined this registry in RFC 0012** — same
+`services/inventory_filters.py` / `INVENTORY_FILTERS` +
+`admin-inventory-columns.tsx` shape as any other field, letting an admin scope
+the inventory table to one consignor's items.
+
+**The consignor filter was unreachable for months, RFC 0013 T2 found —
+present, wired, and invisible.** It had `columnKey: null`, so it only
+appeared behind the separate "Show all filters" advanced toggle (default
+off), and there was no Consignor **column** at all, so even a filtered view
+couldn't show which consignor owned a row. Fixed with a new `consignor_name`
+column (`admin-inventory-columns.tsx`) that resolves the id via the existing
+`useCosigners()` id→name map; giving the filter entry a real `columnKey:
+'consignor_name'` is what lets it ride the existing "filters follow visible
+columns" mechanism (RFC 0011/Q9) instead of the separate advanced toggle.
+
+**That fix shipped the column `defaultVisible: false` and `sortable: false`
+— both unconsulted, and both reversed 2026-08-15.** RFC 0013 T2 landed
+"every column sortable, every column filterable" as a stated universal rule
+elsewhere in this file; leaving one column's own filter effectively
+unreachable by default (a filter follows its column's visibility, and the
+column was off) and its sort silently unbuilt was a quiet exception to that
+same rule, never surfaced to the owner as a decision to make. Both are now
+`true`. Sorting works via a small special case rather than a `SORT_FIELDS`
+entry: `services/inventory_sort.py`'s `CONSIGNOR_NAME_FIELD` handles
+`consignor_name` outside the registry, because every `SORT_FIELDS` extractor
+is a pure `Callable[[InventoryItem], Any]` and this one needs data no single
+item carries (the item stores `consignor_id`, not a name). The router builds
+an id→name map from `repo.list_consignors()` — one bounded `Query` against
+the `CONSIGNORLIST` partition, not a Scan — and **only when `consignor_name`
+is the requested sort field**, so every other sort and every unsorted search
+pays nothing extra. `services/table_sort.py`, the factory shared by the other
+five sort registries, is untouched. `ctx.consignorName` (the id→name lookup)
+is threaded through the same `render(item, ctx)` context every other
+id-resolving column already uses.
+
+**`CardDetailModal`'s read-only Consignor row had the identical bug, worse:
+it rendered the raw `consignor_id` ULID, unconditionally** — never resolved
+to a name at all, on any item, not even a discoverability gap. Fixed the same
+day by giving the modal its own `useCosigners()` lookup (same pattern as
+`ctx.consignorName`), falling back to the raw id only when it can't resolve
+(e.g. an archived consignor, invisible to `useCosigners()` by design) — an
+admin can still trace the row rather than losing the reference entirely.
+
+## A FETCH-ONCE ADMIN DROPDOWN HOOK CAN LOSE THE SESSION RACE — depend on `isAuthenticated`
+
+Diagnosed 2026-08-15 while chasing why the Consignor filter's dropdown showed
+**zero options** even after the fix above made it reachable. Root cause:
+`components/providers/SessionProvider.tsx` mounts NextAuth's client
+`SessionProvider` with **no initial `session` prop**, so `useSession()`
+genuinely starts at `status: 'loading'` on every fresh page load — even on a
+route the SERVER already gated behind a valid admin session
+(`app/(admin)/layout.tsx`'s own `auth()` call happens server-side and tells
+you nothing about the CLIENT `SessionProvider`'s own async timing).
+
+**`useCosigners`, `useLocations`, `useShows`, and `useCatalogSets` all fetched
+once on mount with a `useEffect(..., [])`.** If that fetch fires during the
+loading window, `admin-api.ts`'s `request()` throws
+`AdminApiError(401, 'No access token available')`, the hook's own `.catch()`
+swallows it into an empty (or hardcoded-fallback) list — and because the
+effect has no dependency to ever re-run on, **it never retries**, for the
+rest of that page's life. The `/admin/cosigners` PAGE never showed this
+symptom, which is what made it look consignor-specific: its own fetch is a
+`useCallback` depending on `api` (from `useAdminApi()`), and `api`'s identity
+changes the moment `isAuthenticated` flips — same self-healing pattern
+`useCardImages` (`lib/use-card-images.ts`) already used correctly. The four
+one-shot hooks had neither the `isAuthenticated` guard nor that dependency.
+
+**Fix: gate the fetch on `api.isAuthenticated` and put it in the effect's
+dependency array**, not `[]`. All four hooks now read:
+
+```ts
+useEffect(() => {
+  if (!api.isAuthenticated) return
+  // ...fetch, with the same cancelled-flag cleanup as before
+}, [api.isAuthenticated])
+```
+
+`api.get` itself stays safe to call from an effect created on an earlier,
+unauthenticated render — it reads the current token through a ref at call
+time (`admin-api.ts`'s `tokenRef`), not at closure-creation time — so the
+only thing that needed fixing was **when** the effect re-fires, not the
+request itself. Depending on the boolean rather than the whole `api` object
+avoids an incidental refetch on every session poll (`refetchInterval={4 *
+60}` on the provider) while still catching the one transition that matters.
+
+**Any new admin dropdown hook that fetches through `useAdminApi()` must use
+this pattern from the start** — a hook that "works in testing" (where a mock
+session resolves synchronously) can still ship permanently empty on a real
+fresh page load. `use-cosigners.test.ts` carries the regression test; the
+other three hooks' test files mirror it.
+
+**Missing values sort LAST in both directions**, for every type — not just
+money. A column where the blanks bunch at whichever end you are not looking
+at is a column people stop clicking.
+
+**Condition sorts by rank, not alphabetically:** NM > LP+ > LP > LP- > MP >
+HP > DMG. Alphabetical sorting made `LP+` and `LP-` identical, which is the
+exact distinction RFC 0008 T2 stored in two fields.
+
+**An unknown `sort` field or `filter` triple is a 422, never a silent
+no-op** — same rule as `triage_reason`. Two spellings of a filter exist (the
+legacy named params and the generic `filter=`), but **one evaluator**: the
+named params build the same `FieldFilter` objects. Four of them stay
+hand-written because they do more than a field comparison — `name` searches
+notes, `condition` splits `LP+`, `min_price` falls back to cost, and the
+catalog filters join the catalog.
+
+## SORTING IS UNIVERSAL — six backend registries, not one (RFC 0013)
+
+`inventory_sort.py` was the first registry; RFC 0013 T4 gave five more tables
+their own — **Shows** (`shows_sort.py`), **Transactions**
+(`transactions_sort.py`, the flat archive History reads), **Consignors**
+(`consignors_sort.py`), **Locations** (`locations_sort.py`), and **Slabs**
+(`slabs_sort.py`) — each built via the shared `services/table_sort.py` factory
+so the three invariants above (missing sorts LAST in both directions, an
+unknown field is a 422 not a silent no-op, `{field}_{direction}` splits on the
+LAST underscore) live in one place instead of six copies. Each registry still
+owns its own `SORT_FIELDS`/`SORT_ALIASES` and its own totality test — the
+factory shares behavior, never state, across tables.
+
+Two registries sort a **plain `dict`, not a Pydantic model** —
+`locations_sort.py` (`GET /admin/locations` returns
+`{"value": str, "label": str}` rows) and `slabs_sort.py` (`GET /admin/slabs`
+returns `_slab_row()` dicts, not `GradedInventoryItem`s) — which is what makes
+`table_sort.SortRegistry` being `Generic[T]` load-bearing rather than
+decorative. `slabs_sort.py` also has two fields **stringified in the
+response** (`grade`, `cost_basis` — `str(Decimal)`, so a Decimal survives JSON
+without becoming a float): their extractors parse back to a number, or
+`"9"` would sort after `"10"`. Its `priced` field is not a dict key at
+all — it is DERIVED, `market_value is not None`, mirroring the router's own
+`?priced=` filter rather than sorting the raw money figure (an unpriced slab
+is the ordinary state of a JP slab after the verified-join rule, not a gap to
+rank by size).
+
+**A totality test must compare against the REAL response shape, not against
+`SORT_FIELDS` itself.** `test_slabs_sort.py`'s first draft asserted
+`set(SORT_FIELDS) == {the same fields hand-typed again}` — circular, and
+incapable of ever catching a renamed or added dict key. The fix mirrors
+`test_locations_sort.py`: a `row()` test helper that mirrors the real
+`_slab_row()` key set, checked against `SORT_FIELDS` plus a documented
+`NOT_SORTABLE` exclusion set (same shape as `shows_sort.py`'s).
+
+**Frontend rollout, RFC 0013 T4:** every DataTable-backed admin list is now
+sortable — Triage, Unmatched, Shows, Locations, Cosigners joined
+Inventory/Prep Queue's existing wiring, and Market's watchlist and the Slabs
+list (`SlabList`) and Show Analytics' Shows-tab were redesigned from bespoke
+markup into sortable `DataTable`s. Show Analytics' Shows-tab sorts by `date`/
+`name` (the two `shows_sort.py` fields it renders); the Sold/Bought/Net/Items
+columns come from a separate `ShowAnalytics` join that registry does not
+cover and stay display-only.
+
+**Vault and Show Prep were deliberately NOT converted to server-side sort.**
+Both were suspected to call `/inventory/search` (which would have inherited
+`inventory_sort.py` for free) — they do not. `/vault` and
+`/show-prep/mispriced` are bespoke, **unpaginated** endpoints (no `limit`)
+returning computed fields (`dollar_net`/`percent_net`/`consigned`;
+`delta_pct`/`delta_dollar`) that no registry covers. Sorting an endpoint's
+FULL, already-fetched response client-side is identical in correctness to
+sorting it server-side — the failure mode server-side sort exists to prevent
+is a `limit` truncating the page BEFORE the sort runs, and neither endpoint
+truncates. Converting them would have meant inventing two more backend
+registries outside RFC 0013's five-table scope for zero behavioral gain.
+Same reasoning applies to the Market watchlist (`GET /watchlist`, also
+unpaginated) — its new DataTable sorts client-side too, via the shared
+`lib/client-table-sort.ts` helper (mirrors `table_sort.py`'s missing-last
+invariant client-side; `lib/vault-sort.ts` predates it and already matched
+that invariant on its own, so it was left as-is rather than merged in).
+
+**History's `TransactionGroups` got a group-level sort control, not a
+DataTable header** — sorting must never flatten a group's legs into rows.
+The control (Date / Total buttons, `TransactionGroups.tsx`) defaults to
+`groupTransactions`'s own "must not reorder the archive" order until clicked.
+It lives where `TransactionGroups` actually renders — **Show Analytics'
+Daily tab** (`/admin/analytics`), not `/admin/history`, which has no
+`TransactionGroups` usage at all and renders its own per-item chronological
+timeline instead (reordering THAT would misrepresent a transaction history,
+which is the entire reason the page exists).
+
+**Triage** (`/admin/triage`) — the one place to correct data the automation got
+wrong. It **is** the `needs_review` queue, not a second flag: "Send to Triage"
+sets `needs_review = True`. Two things were added to that bare boolean —
+`review_reason` (why; **internal**, deliberately NOT in `_CUSTOMER_ITEM_FIELDS`)
+and `reviewed_at` (stamped server-side when an admin clears the flag, so
+automation cannot re-flag what a human already passed).
+
+One list, with a chip per reason — items routinely qualify under several at once:
+
+| Reason | Kind | Cleared by |
+|---|---|---|
+| `flagged` | stored `needs_review` | an admin, explicitly |
+| `missing_card_id` | derived: no catalog link | self-healing — re-point the card |
+| `missing_english_name` | derived: JP item, no `display_name_override` | self-healing — assign a name |
+
+The list is `GET /admin/inventory/search?triage=true` (the one OR on that
+endpoint), **not** a parallel endpoint; `GET /admin/triage/counts` backs the
+sidebar badge.
+
+**The SERVER decides why a row is there — never recompute it in the client.**
+`services/triage.reasons_for()` is the authority, `needs_triage(i)` is literally
+`bool(reasons_for(i))`, and `?triage=true` rows carry `triage_reasons` (plus
+`bulk_clearable`) in the response. `frontend/lib/triage.ts`'s `reasonsFor()`
+survives **only** as a prediction for optimistic updates before a refetch; its
+docstring says so. Filtering is **one** parameter, `triage_reason`, validated
+against the predicate set (**422** on an unknown key, never a silent no-op); the
+older `needs_review` / `missing_card_id` / `missing_english_name` params still
+work but Triage no longer sends them. Scope comes from `in_triage_scope`, which
+the list **and** the counts endpoint both call — sold, lost and
+returned-to-consignor rows are out unless `include_terminal=true`, and scoping
+one of the two without the other is how the badge starts lying.
+
+`POST /admin/inventory/bulk-clear-review` drops machine flags, and it is
+deliberately narrow: only items whose **only** reason is `flagged` **and** whose
+`review_reason` is in `MACHINE_REVIEW_REASONS` minus **`blank_condition`**. That
+exclusion is a money rule — the importer stored `Condition.NM`, the most
+expensive tier, for every blank condition, so bulk-clearing those would ratify an
+inflated customer price on cards nobody has graded. A human's free-text flag, and
+a bare flag with no reason at all, are never touched. "Send to Triage" lives in `CardDetailModal`, so it reaches the
+five pages that mount it (inventory, outgoing, show-prep, vault, triage) —
+the old separate `/admin/sell` mounted it too, but that page was deleted in
+RFC 0011 T16 and the unified `/admin/trade` does not mount it.
+The row-level quick action with undo (`TriageRowAction`) is on **Prep Queue
+only**. `/admin/trade` (all three modes), Market, History, Cosigners and
+`/admin/card/[id]` do not mount the modal and have **no** send-to-triage path
+at all — the "every tab" goal is not met yet; see
+`docs/plans/rfc-0008/follow-ups.md` (T5 row 1).
+
+`display_name_override` is editable **only from the Triage page**, not from
+`CardDetailModal` — the modal's "Display Name" row still edits `display_name`,
+the import-materialized fallback, which is a silent no-op on a catalog-matched
+item (follow-ups.md, T10 row 3).
+
+**The one rule that must not be broken:** assigning an English display name
+writes `display_name_override` and **never** `card_id`. Re-pointing a card is a
+separate, confirmed action with a before/after diff and warnings for trade
+lineage and cross-language links.
+
+**Unmatched** (`/admin/unmatched`) — the queue for cards the catalog does not
+have. RFC 0011. It exists because **`missing_card_id` is a DERIVED triage
+reason**, so before this an unmatchable card sat in Triage forever and the
+queue that is meant to reach zero had a floor it could never get under.
+
+**`no_catalog_match` is the stored fact, and `services/triage.is_missing_card_id`
+is the only place that reads it.** The list and the sidebar badge both route
+through that one function; adding the check anywhere else is how they start
+disagreeing.
+
+**The invariant: `no_catalog_match=True` implies `card_id is None`**, enforced
+by a model validator. Setting it on a linked item is a 422; assigning a
+`card_id` clears it automatically, because requiring a second write to leave a
+queue is how rows get stranded in one.
+
+**Nothing was backfilled and nothing auto-migrates** — owner requirement,
+2026-08-13: *"all cards that go there should only be moved under admin
+supervision."* There is a permanent test asserting the queue is empty on an
+untouched table. Do not write a migration for this later.
+
+**Unlinking clears `current_market_value`.** The card was pointed at a
+close-but-wrong promo, so the figure it inherited is that promo's price and no
+sync will ever correct it once the link is gone. A parked card is hand-valued
+and carries `HandValuedBadge`.
+
+A parked item that is **also** flagged or unnamed stays in Triage with its
+remaining chips. Parking answers one question; those are different, real
+errors.
+
+**Slabs** (`/admin/slabs`, sidebar position: **last in "At the show", after
+Trade**) — graded intake and the slab list, from RFC 0009. Intake is one cert
+field serving both a keyboard-wedge scanner and the keyboard, a
+catalog-autocomplete card picker with a free-text fallback, a client-side staging
+batch, then a commit that runs the ordinary buy session's create → items →
+confirm. `GET /admin/slabs/certs/{cert}` warns on a cert already owned — a
+**warning with override**, never a gate, because a slab sold and bought back is a
+legitimate re-entry. `/admin/slabs?priced=false` is the unpriced worklist. The
+per-grade pricing behind it is documented under "Third-Party APIs" below.
+
+**Sold/lost/returned_to_consignor slabs are hidden by default, 2026-08-15.**
+Owner report: *"sold cards are not being automatically removed from our slab
+inventory."* Root cause was never the data — `sales.py` correctly flips
+`status` to `SOLD` — it was that `GET /admin/slabs` intentionally never
+filters by status unless asked
+(`test_status_narrows_the_list_and_nothing_is_hidden_by_default`,
+`backend/tests/routers/admin/test_slabs.py` — a sold slab is still real
+purchase history, so the endpoint keeps it), and
+the page never gave the admin any way to ask. Fixed **client-side only**: the
+page already fetches every status (no `status` param is ever sent), so a
+"Show sold / gone" checkbox — unchecked by default — filters `sold`, `lost`
+and `returned_to_consignor` out of what "Slabs on the shelf (N)" counts and
+renders, with no refetch on toggle. `on_hold` and `out_for_grading` stay
+visible either way: the slab is still owned and still accounted for. Same
+"hidden by default, visible on request" shape as the archiving pattern
+below — the backend's "nothing hidden" contract is unchanged and still
+correct for what it is (an archive), the gap was a missing view on top of it.
+
+**The intake toolbar has ONE button: "Manual entry".** It is a disclosure — the
+form is **put away by default**, like the other admin tabs, and stays open across
+adds because intake is a batch workflow. RFC 0010 T12 deleted the other three.
+"Camera scan" and "Auto-fill from cert" went because PSA's cert API became a
+**paid** feature the owner declined, so the gap they marked is now permanent and
+a disabled button implies a roadmap that does not exist. "Scan cert" went for a
+different reason, and it is the one that matters:
+
+> **A wedge scanner is just a fast keyboard, so the ordinary cert field already
+> IS the scan target.** That is true **only** while `CertInput`
+> (`frontend/components/admin/slabs/CertInput.tsx`) keeps two things: `onEnter`
+> **advances** focus rather than submitting (the scanner's trailing Enter arrives
+> long before card, grade and cost are filled), and the input strips the
+> scanner's trailing `\r\n` on the way in (`replace(/[\r\n]/g, '')`). **Delete
+> either and wedge scanning breaks while hand-typing keeps working** — an
+> invisible failure nobody finds until they are standing at a table with a
+> scanner. There is deliberately **no timing logic**: a cert typed slowly over
+> ten seconds is exactly as valid as one scanned in 40 ms.
+
+**A slab is priced AFTER the commit, never inside its loop.** The commit returns
+`item_ids` and the page then fires `POST /admin/slabs/refresh-prices` scoped to
+them, un-awaited, on its own status line — a metered third-party HTTP call inside
+the write loop would rebuild the partial-write bug T0 fixed, on the same money
+path. The commit's success message is set *before* that call, so it lands first
+and unconditionally; a pricing failure must never reach the commit's `catch`,
+which says "Nothing was created". **An unmatched (free-text) slab is unpriceable
+by construction** — pricing needs a verified `card_id` join — so it commits, says
+so, and appears under `?priced=false`.
+
+`SlabEntryForm` takes cost through `MoneyInput`, so `1,300` stages as
+`$1,300.00` (see "Money input" below) — and `StagedSlab.buy_price` is a
+**number**, not a string.
+
+The page uses the **vault design system** (`vault-panel`, `vault-field`,
+`text-pine-*`, `bg-mint/15`) like every other admin tab. It previously used none
+of it, which is why its dropdowns rendered light-green-on-white: the admin theme
+is dark (`.vault-scope`, `#06150b`) with light-green text, so an unstyled
+`<select>` inherited the theme's text colour over the browser's default white
+background. **Never ship an admin control without `vault-field`.**
+
+Two gaps remain live and deliberate — **no per-row editing in the staging table**
+(so its commit gating is unbuilt on purpose) and **no pin control**. Full list:
+`docs/plans/rfc-0009/follow-ups.md`.
+
+**Buy / Sell / Trade** (`/admin/trade?mode=buy|sell|trade`) — one surface,
+three modes. RFC 0011 Part 2. `/admin/buy` and `/admin/sell` were **removed**,
+not redirected (owner decision 10). That departs from the `/admin/outgoing`
+precedent recorded above, and the distinction is real: that precedent covers
+*renaming a page that still exists*, while these two genuinely stopped
+existing.
+
+**`mode` lives in the query string**, which is what lets one route serve the
+dashboard's three quick actions and keeps the toggle bookmarkable.
+
+**`lib/deal-session.ts` is the ONLY place that knows which API a mode
+drives.** `purchases.py`, `sales.py` and `trades.py` stay separate (decision
+16) because they are the highest-risk money paths in the repo. A
+`if (mode === 'buy')` at a call site is three code paths coming back in
+disguise.
+
+**Switching mode with a non-empty session confirms first.** A session
+belongs to one API and there is no migration between them.
+
+**`POST /admin/trades/{id}/confirm` and `POST /admin/purchases/{id}/confirm`
+now return `item_ids` in the response** (RFC 0012), the same shape the Slabs
+commit has always returned — it is what lets a post-confirm step (e.g. linking
+a staged consignor) target the exact items a deal just created without a
+second lookup.
+
+**A slab can now come IN through a trade.** Trading one OUT always worked —
+outgoing legs reference an existing `item_id` and never inspect `kind`.
+Incoming was hardcoded to `kind: "raw"`, so a PSA 10 arrived as a raw NM card
+with its cert gone. Graded pricing joins on `(card_id, company, grade)`, so a
+graded leg with no `card_id` is unpriceable by construction — but as of RFC
+0012, that no longer makes it a rejected leg. **A manually entered graded item
+is now accepted**, the same backend 422 and frontend raw-only gate that used to
+enforce "manual entry can only ever be raw" were both removed, and the item
+lands unpriceable and self-routes to Triage via the existing
+`services/triage.is_missing_card_id` check — the same path an unmatched slab
+already takes.
+
+**Condition and grade are never rendered together.** They are alternatives,
+and the backend 422s a raw leg carrying graded fields.
+
+**The displayed trade `balance` NETS cash against the card totals — it does
+not add them.** Diagnosed 2026-08-14 (RFC 0013): a $125-in / $1025-out /
+$900-cash-received trade — genuinely settled at $0 — displayed as **+$1800**,
+because the frontend's own formula was `outgoingTotal - incomingTotal +
+cashNet` where it needed to be `- cashNet` (`cashNet` is already signed
+positive when the counterparty pays cash to us, so adding it double-counted
+the cash leg). The backend's own independent implementation of the same
+figure (`routers/admin/trades.py`, `total_out - total_in - cash_delta`) was
+correct the whole time — the frontend recomputes this as a live display value
+rather than calling that endpoint, and the two had drifted. The confirmed
+transaction legs themselves were never wrong (computed straight from each
+cash component's direction/amount, not from this display figure); the risk
+was purely operational — an operator trusting a wrong on-screen balance might
+"correct" an already-balanced trade's cash entry to force the display to
+zero, which would make the real trade wrong.
+
+**Shows** (`/admin/shows`) — CRUD for show/event days. Note this is a
+*different page* from Show Prep (`/admin/show-prep`, which moves inventory into
+show boxes) and from Show Analytics' Shows tab (`/admin/analytics`, which reads
+per-show numbers). Routes live in `routers/admin/analytics.py`, not a new
+module: `GET/POST /admin/shows`, `PUT /admin/shows/{id}`,
+`POST /admin/shows/{id}/archive` and `/unarchive`.
+
+**"Delete" is an archive, by owner decision** (RFC 0008 Q6). `Show.archived`
+is a boolean; nothing is ever destroyed, so there is no repo-level show delete
+and **no 409 in-use guard** — a show with transactions behind it archives like
+any other, and its analytics snapshot never dangles. `GET /admin/shows` hides
+archived shows unless `?include_archived=true`; `repo.list_shows()` and
+`repo.get_show()` stay archive-agnostic so `/shows/{id}/analytics` keeps
+resolving for an archived show.
+
+## ARCHIVING IS ONE PATTERN — every archivable entity behaves identically
+
+Owner rule, 2026-08-10: *"if there are other things that get archived, they
+should be the same… Archived entities are hidden by default but can be viewed in
+case they need to be pulled back or referenced."*
+
+**`/admin/shows` is the reference implementation. Copy it; do not reinvent it.**
+The contract, all six parts:
+
+1. a boolean `archived` field on the model (never a status enum value, never a
+   second "active" flag meaning the inverse);
+2. `DELETE`/archive sets it — **nothing is ever destroyed**, and there is **no
+   409 in-use guard**, because nothing dangles when nothing is removed;
+3. an `unarchive` route, because archiving that cannot be undone is just a
+   slower delete;
+4. the list endpoint **hides archived rows unless `?include_archived=true`**;
+5. the UI has a **"Show archived"** toggle, and while it is on the archived rows
+   are visibly marked (`Archived` badge + dimmed) rather than silently mixed in;
+6. the confirm dialog says *archive*, and says what is preserved — see
+   `frontend/app/(admin)/admin/shows/page.tsx:264-274, 416` for the exact
+   wording to mirror.
+
+**An `Archived` badge never reuses inventory-status vocabulary.** Rendering an
+archived *person* or *event* as `SOLD` is the bug this rule exists to prevent —
+it shipped on `/admin/cosigners`, which showed a deactivated consignor as
+"SOLD", and RFC 0010 T2 fixed it. `StatusBadge` now carries two entity-lifecycle
+styles, **`active`** and **`archived`**; pass those for a person or an event and
+never `available`/`sold`.
+
+Entities on this pattern: **`Show`**, **`Consignor`** (RFC 0010 T2). Entities
+deliberately NOT on it: **`Location`**, which hard-deletes behind a 409 in-use
+guard because a location is a label with no history of its own. `DELETE
+/admin/inventory/{item_id}` is a third thing again — its soft mode sets
+`ItemStatus.LOST`, a real lifecycle state rather than an archive flag; see
+`docs/plans/rfc-0010/follow-ups.md` before treating it as one.
+
+**`put_show` gotcha:** the SK embeds the show DATE and, during an import, the
+generation. Both move underneath an ordinary admin edit, so `put_show` now
+sweeps superseded rows for the same `show_id` after writing — otherwise
+rescheduling a show, or editing any import-created show, forks it into two
+rows. The sweep is skipped mid-import, where coexisting generations are the
+whole point of load-then-swap.
+
+**A show's analytics snapshot auto-generates on archive (RFC 0013).** Before
+this, `ShowAnalyticsSnapshot` was written only by the manual "Generate"
+button, so every un-generated show's Shows-tab row read 0 — the archive
+route now calls `generate_show_analytics` itself. Generation failure is
+**caught and logged, never surfaced as an archive failure**: archiving is
+the real state change and must not roll back over a reporting side-effect.
+The manual button still works, for re-generating a stale snapshot (see
+`ShowAnalyticsSnapshot.stale` below) or one from before this shipped —
+**nothing was backfilled automatically**, on the same "admin supervision
+only" precedent as Unmatched; `scripts/backfill_show_analytics.py` (dry-run
+by default) is the one-time catch-up for shows archived before this landed.
+
+**Show Analytics** (`/admin/analytics`) — tabbed `Daily` / `Shows` view. Daily
+tab shows a single day's dashboard (`GET /analytics/daily`); Shows tab lists
+the show archive (`GET /admin/shows`) with a detail drill-in per show, now as
+a sortable `DataTable` (RFC 0013 T4e — see "SORTING IS UNIVERSAL" above).
+
+**History** (`/admin/history`) — searches an item's full transaction timeline
+and trade lineage. Shows `step_profit` per lineage hop (color-coded, guarded
+against a $0 cost-basis overstating profit on consigned items) and a rolled-up
+"Chain Profit" summary when a chain has more than one hop; lineage nodes are
+clickable to navigate the chain.
+
+## THE LEDGER HAS A CORRECTION PATH — a VOID, never a delete
+
+RFC 0010 T11. A mistaken sale used to be uncorrectable. It is now voidable, and
+**void is the only shape allowed**: a deleted sale leaves no trace it existed and
+silently disagrees with every analytics snapshot already generated. Same
+precedent as archiving a show.
+
+**ONE countability predicate: `services/ledger.is_countable`, and every
+aggregate calls it.** `countable(rows)` is the sugar over it that readers
+actually use, so nobody can spell the filter differently. Its module docstring
+lists every reader exhaustively, and each has a named test.
+
+> **Never let an aggregate inline its own `txn.voided_at is None` check.** That
+> is a second definition of countability, and the failure mode is two sets of
+> books disagreeing by exactly one sale — which nobody notices until a month-end
+> number is wrong.
+
+**Two readers deliberately do NOT filter, and say so at the call site:**
+`GET /admin/transactions` (the archive) and the item timeline. The point of an
+archive is to show what was actually written, and a void is a thing that was
+written. A voided row renders struck through, with its reason. **Do not "fix"
+them into filtering** — that is how the archive stops being one.
+
+**SALES ONLY.** `POST /admin/transactions/{id}/void` refuses a **purchase** with
+a `400`, and the UI does not offer the action there rather than offering one that
+always fails. A **trade cannot be voided at all**, because its legs share a
+`batch_id` and one of them is a purchase. Consequence, recorded because it is
+real: **a mistaken buy still has no correction path.** Voiding a purchase means
+removing an item that may since have been sold, traded, re-priced or consigned,
+and a void that leaves a phantom item in stock is worse than no void at all.
+
+Four routes, not two — `/transactions/{id}/void|restore` and
+`/transactions/batch/{batch_id}/void|restore`. The batch pair exists because a
+five-card sale must void as one action: `reverse_sales` issues **one**
+`transact_write_items` for every leg and guards every leg before writing
+anything, so a batch containing one card that has moved on since voids nothing at
+all. Five separate POSTs could half-succeed, which is the partial-write class T0
+was created to eliminate. **A batch over 50 legs is refused with a 422** telling
+the operator to void one at a time — DynamoDB caps a transaction at 100 actions
+and a reversal spends two per leg, and chunking would silently reintroduce
+partial write.
+
+`Transaction` gains `voided_at` / `voided_by` / `void_reason`, and
+`ShowAnalyticsSnapshot` gains `stale` (rendered on `/admin/analytics`, because a
+flag no page shows is a silent serve). `voided_by` stores `email or username or
+sub` — one value with a fallback chain, never client-supplied.
+
+**`attribute_not_exists(voided_at)` is NOT the "not voided yet" guard.**
+`put_transaction` writes every model field including the `None`s, so a row
+carries `voided_at` as a DynamoDB **NULL, which exists**. The guard is
+`attribute_not_exists(voided_at) OR attribute_type(voided_at, "NULL")`; the
+restore side checks `attribute_type(voided_at, "S")`.
+
+**One timeline event per transaction, keyed `<txn_id>#void`**, re-put as
+`void_restored` on restore rather than appended. The original sale event is keyed
+`TIMELINE#<date>#<txn_id>`, so a void on the same day — the common case — would
+otherwise **overwrite the sale itself**.
+
+**`Transaction.batch_id`** (T10) is what makes a five-card buy read as one line.
+It is optional, defaults to `None`, and **nothing is backfilled** — a null-batch
+row groups on its own `txn_id`, one code path with no legacy branch. No
+`(date, payment_method, type)` heuristic is allowed: two separate cash sales on
+one show day are indistinguishable from one two-card sale, and inventing
+transactions is not acceptable in the one view where being wrong costs money.
+Grouping is **client-side** in `TransactionGroups`, which replaces `DataTable` on
+that table only. A mixed-direction group (a trade) renders a **net** total —
+summing magnitudes would report a $50-for-$30 trade as `$80`, a number that
+exists nowhere.
+
+**Cosigners** (`/admin/cosigners`) — CRUD + payout-link tool for consignors;
+card assignment is still raw item-ID entry (no picker UI, deliberately out of
+scope) on this page specifically. RFC 0012 added assign/unassign elsewhere
+too: `CardDetailModal.tsx` (a per-item panel calling
+`POST /admin/cosigners/{id}/link` and `DELETE .../assets/{item_id}` directly)
+and, on the incoming side of Buy/Trade, `IncomingCardForm.tsx` via
+`CosignorPicker` — both share the same `split_percent` convention as this
+page's link form (typed as a percent, divided by 100 before the request).
+"Delete" is an **archive** on the six-part contract above, and
+`Consignor.archived` **replaced `Consignor.active`** in RFC 0010 T2 — a
+`model_validator(mode="before")` reads a legacy stored `active: False` as
+`archived: True`, because the owner had already soft-deleted one. There is no
+writable `active` field any more; an `active` key on an inbound payload is
+migrated, not rejected.
+
+**Editing a consignor used to FORK the row**, exactly as editing a show once
+did: `put_consignor` generation-scopes its SK, so an import-written consignor
+lives at `CONSIGNOR#<id>#<gen>` while an admin edit (no generation) writes
+`CONSIGNOR#<id>`. It now sweeps superseded rows after writing, on the same rules
+as `put_show` — **write first, then delete**, and **never sweep mid-import**.
+`scripts/reconcile_consignors.py` collapses the forks that already exist (dry
+run by default, `--execute --confirm-table`); it keeps the **unsuffixed** row,
+which is the admin's edit and the newest, falling back to the highest generation
+only when no admin edit exists. `put_payout` and `put_debt` share the shape and
+are **not** fixed — no UI can trigger them yet; see
+`docs/plans/rfc-0010/follow-ups.md`.
+
+Consignor names carry a **409 duplicate guard** (case- and
+whitespace-insensitive, scoped to *another* consignor, and an archived consignor
+still collides — otherwise unarchiving resurrects a duplicate).
+
+## MONEY INPUT — one parser, and `parseFloat` is banned
+
+RFC 0010 T0/T1. Every admin money field goes through `MoneyInput`
+(`frontend/components/admin/shared/MoneyInput.tsx`) or `InlineEditCell`'s
+`type="money"`, both backed by **`parseMoney`** in `frontend/lib/money.ts`. The
+owner types `1,300`; that has to be accepted.
+
+> **Never use `parseFloat` on money.** Measured: `parseFloat("1,300")` is **1**,
+> `parseFloat("1,300.50")` is **1**, and **neither is `NaN`** — so it sails
+> through every `isNaN` guard in the codebase and converts a loud 500 into a
+> silent $1,299 loss. A wrong number that passes validation is strictly worse
+> than a crash.
+
+> **Never put `type="number"` on a money field.** A native number input does not
+> accept a comma, so it makes the owner's input un-typeable rather than correct
+> — it satisfies the machine and fails the person. Rejecting negatives is
+> `parseMoney`'s job, not `min="0"`'s.
+
+Two more rules that are easy to get wrong:
+
+- **`parseMoney('0')` is `0`, not `null`.** Test `=== null`, never falsiness —
+  `!parseMoney(cost)` rejects a legitimately free card, which is a real thing at
+  a buy table (a throw-in, a bulk lot).
+- **The wire format did not change.** Where a string went, `String(parsed)` still
+  goes (`sticker_price`, `manual_basis`, `minimum_price`); Buy and Trade already
+  sent JSON numbers and still do. `MONEY_PARSE_MESSAGE` lives in `lib/money.ts`
+  so the surfaces that render it cannot drift. Percent fields are deliberately
+  untouched.
+
+`formatMoney` (`1300` → `$1,300.00`) groups by hand rather than through
+`toLocaleString`, so output does not depend on which ICU data the runtime shipped
+with.
+
+## DATES — `frontend/lib/dates.ts`, and never `new Date()` on a date-only string
+
+RFC 0010 T8. If a date is rendered or defaulted anywhere, it goes through
+`lib/dates.ts`: `formatISODate`, `parseISODateLocal`, `todayLocal`,
+`toLocalISODate`, `formatTimestamp`.
+
+> **Never pass a date-only string to `new Date()`.** `new Date('2026-08-10')`
+> parses as **UTC midnight**, so it renders as **Aug 9** in every US timezone —
+> every admin date read a day early.
+
+> **Never derive "today" with `toISOString()`.** Both `.split('T')[0]` and
+> `.slice(0, 10)` give the **UTC** date, so after 5pm Pacific every new
+> transaction defaulted to **tomorrow** — on Buy, Sell, Trade and the dashboard.
+> The business sells at evening shows, which is exactly when it was wrong. Use
+> `todayLocal()`.
+
+Local zone first, `America/Los_Angeles` (`BUSINESS_TIME_ZONE`) as the fallback —
+an **IANA name, never a fixed `-08:00`**: Pacific is PDT (−7) in August and PST
+(−8) in January, so a hardcoded offset is wrong from March to November. For
+date-only values no zone is involved at all once you stop routing them through
+`new Date()`.
+
+**Tests that render a date must pin a negative-offset TZ** via
+`frontend/lib/__tests__/_timezone.ts` — a non-test file inside `__tests__` so
+vitest does not collect it and `next build` does not typecheck it. Use
+`vi.useFakeTimers({ toFake: ['Date'] })`, never the default: full fake timers
+deadlock `waitFor`. `mcp-server/` has no date helper and needs none — it returns
+ISO strings and never formats a calendar date.
+
+**Customer prices are CONDITION-ADJUSTED.** The catalog relays one market
+figure per finish and that figure is a **Near Mint** price. Every
+customer-facing surface scales it by the item's condition
+(`services/condition_pricing.py` — LP ×0.82, MP ×0.58, HP ×0.33, DMG ×0.15,
+`+`/`-` take the midpoint with the neighbouring tier). Before this, a DMG card
+was shown to a buyer at **~6.7× what the business valued it at**, wrong in the
+business's favour. Measured on live stock 2026-08-06: this moved the
+customer-visible total from **$6,143 to $5,005 (−18.5%)** across 73 of 228
+items.
+
+**The adjustment is applied in exactly ONE place per surface — do not add a
+second.** `_condition_adjust` in `routers/inventory.py` rewrites
+`summary.market_price` at enrichment, so the tile, the sort and the price bound
+all inherit the same number (this is what keeps RFC 0008 T1's single-authority
+invariant). `/inventory/summary` applies it to its **live** branch only, and MCP
+mirrors both via `mcp-server/src/condition-pricing.ts`. The stored
+`current_market_value` already has the multiplier baked in by the nightly
+denormalizer — **adjusting that would apply it twice.**
+
+**Name resolution: `display_name_override` wins EVERYWHERE.** One rule, four
+implementations, kept deliberately in sync — `itemTitle`
+(`frontend/lib/inventory.ts`, customer tiles), `adminItemName`
+(`frontend/lib/admin-item-name.ts`, every admin list), `admin_item_name`
+(`backend/services/card_text.py`, admin API responses) and MCP's `toCard`
+(chat). Never inline `display_name || product_name` in new code; call the
+helper. `CardDetailModal` shows **both** name fields, since editing
+`display_name` on a catalog-matched item is a silent no-op.
+
+## A CARD IS NEVER IDENTIFIED BY NAME ALONE — a card search MUST show image AND price
+
+**Owner rule, 2026-08-10, and it is absolute:** *"when searching for a card, name
+alone is not sufficient, it needs to have an image"* — extended the same day:
+*"I also want prices displayed as well."*
+
+**Three fields, always: name, image, price.** This applies to **every** surface
+where a human picks a card out of a list of candidates — catalog autocompletes,
+repair-tool pickers, watchlist add, search results, anywhere a set of cards is
+offered and one must be chosen. The image answers *"is this the card?"*; the price
+answers *"what do I do about it?"*, which at a buy table is the only question that
+matters. A picker missing either field is incomplete.
+
+Why it is a rule and not a preference: Pokémon names collide relentlessly across
+sets, printings, finishes and languages, so a list of names is a list of things
+the operator cannot tell apart. They are standing at a table with the physical
+card in hand.
+
+**And not only in pickers — wherever a card APPEARS.** Owner, 2026-08-13: *"card
+image, name, and price should all be shown when searching for cards, as well as
+when added to coming in or going out."* The first version of this rule was scoped
+to the moment of *choosing*, so surfaces showing an **already-chosen** card — a
+staged trade leg, a sale cart, a commit dialog — were read as out of scope and
+shipped without art. That reading was wrong: identity is needed **continuously**,
+not once. The operator builds a five-card deal over several minutes and
+re-verifies every row against the physical cards in their hand before confirming.
+A staged row is not a receipt; it is a thing still being checked.
+
+> **A HOVER NEVER SATISFIES THIS RULE.** `/admin/sell` rendered its art from
+> `onMouseEnter` into a side panel captioned *"Hover or select a card"*, and that
+> counted as "has an image" for months. It does not: a hover needs a mouse, shows
+> exactly one card when the operator is comparing several, shows **nothing** to
+> someone reading the list, and vanishes the moment the pointer moves. RFC 0011 §J
+> **deletes** that panel rather than restyling it. Hover may change a background
+> colour. It may never be the only way to see an image, a price, or a control.
+
+**Both fields are already in the response.** `CatalogCard.images` and
+`CatalogCard.prices` (`models/catalog.py`) are both populated and
+`GET /admin/market/search` returns them via `model_dump`. A picker without art or
+a price is not missing data; it is discarding data it was handed.
+
+**`CardPickerRow` is the reference row**: `CardImage size="sm"` beside a
+two-line block — name on line 1, `set · #number · rarity` on line 2, with
+`min-w-0 flex-1` + `truncate` so a long name shrinks instead of shoving the
+image. Three of the five original pickers were built from this pattern and
+dropped the image on the way, which is why this is a component and a rule
+rather than a habit. (This used to point at `/admin/buy`'s inline dropdown —
+that page was deleted in RFC 0011 T16; `CardPickerRow` is now the only copy
+of the pattern.)
+
+**`CardSearchPanel` is the one card search** — name + card number + set
+combobox, adopted by Slabs intake, Triage re-point, Market and Unmatched, and
+**composed** by the deal page's `DealSearchPanel` rather than duplicated.
+`GET /admin/market/search` always accepted all three fields; the pickers just
+never sent them. **Manual entry is a permanent control**, not something that
+appears after a failed search — the owner's report was finding a card that
+exists whose catalog row is the wrong printing, at which point a gated button
+is unreachable. It is offered only where creating an off-catalog item is
+meaningful: the deal page (Buy/Trade modes) and Slabs.
+
+**Price rendering — the honest cases are the ones that get this wrong:**
+
+- The figure comes from the **backend**, chosen with `_market_price(card,
+  "normal")` — the ONE shared finish-aware lookup (`models/inventory.py:388`).
+  Passing a default finish buys its whole fallback walk for free. **Never
+  re-implement price selection in the frontend**: a catalog result has no item and
+  therefore no finish, and a second copy of that walk is exactly how 174 of 213
+  live items once went unpriced.
+- **An absent price is never `$0.00`, never blank, and never a guess.**
+  `FinishPrice` bands are written only when a provider published a figure, so
+  absent means absent — the same discipline the graded prices already document.
+- **`detail: "brief"` vs `"full"` is a real distinction and the UI must keep it.**
+  `brief` = *we have never fetched a price for this card*; `full` with no band =
+  *no provider covers this card*. The model preserves that difference
+  deliberately; collapsing both to "—" throws away the only signal that says
+  whether waiting will help.
+- **Show the age when the figure is stale.** A price from six days ago is fine; a
+  three-month-old one is a different claim and must not look identical.
+- **A catalog price is a NEAR MINT market figure and is NOT condition-adjusted** —
+  there is no item and therefore no condition. Never present it as a sale price.
+
+Catalog prices are filled by the **weekly cycle** (`refresh_catalog_prices`, RFC
+0010 T17): every catalog card is re-priced at least once a week, by Friday. Before
+that job runs, most of the 31,603 catalog rows have **no** price at all — which is
+why the rules above lead with the absent cases instead of treating them as edges.
+
+**Adding these fields is not finished when they render. The layout has to be
+better, not merely more informative.** Owner: *"the UI has to be thought about so
+that adding an image next to the name is still readable, not squished into a page,
+and looks very clean from a design perspective so that users can do things as
+quickly as possible."* So: the text block gets `min-w-0` and truncates; the image
+never shrinks and never grows; real card proportions (5:7) — a stretched thumbnail
+misrepresents what the operator is comparing against; a card-less or failed id
+renders the **placeholder**, never a collapsed row, because rows that change height
+as art loads make the list jump under the cursor mid-click. Speed is the point:
+keep the debounce, keep the batching, never fire a request per row.
+
+**The three fields are required wherever a card appears, not only in
+pickers** — search results *and* staged/selected rows. **No hover may carry
+information.** A hover needs a mouse, shows one card at a time, shows nothing
+to someone reading the list, and vanishes. The Sell page's `onMouseEnter`
+preview panel was deleted rather than restyled (RFC 0011 §J).
+
+**Check this rule before writing any card-picking UI, and check it in review.**
+
+## AN ESCAPE HATCH IS NEVER GATED ON THE FAILURE OF THE PATH IT ESCAPES
+
+Owner rule, stated twice — 2026-08-13: *"There should always be an option for
+manual entry, not just when the catalog search returns no results"*, and again
+the same day for the merged deal surface.
+
+**Manual entry on `/admin/buy` appeared only after a search returned nothing.**
+That affordance was designed for the case that *motivated* it — the catalog has
+no such card — and not for the case that actually happens: **the search succeeds
+and every result is the wrong printing.** A Pokémon that exists, found, with no
+correct catalog row behind it. In exactly that state the button was unreachable,
+because the search had "worked".
+
+The general form, and it applies to any fallback, override or manual path:
+
+> **If the escape hatch is only reachable when the primary path fails, it cannot
+> be reached in the case where the primary path succeeds and is wrong** — which is
+> the more common and more expensive failure, because the operator has no signal
+> that anything went wrong.
+
+So: **a permanent control, put away by default.** Present before any search runs,
+while results are showing, and when there are none. `/admin/slabs`' "Manual entry"
+disclosure is the reference implementation — it is a button that is always there,
+the form is closed until asked for, and **it stays open across adds** because
+intake is a batch workflow and a control that closes after every entry fights the
+person using it.
+
+A disabled escape hatch is worse than none: it implies a roadmap. Either it works,
+or it is gone (RFC 0010 T12 deleted three buttons on exactly this reasoning). If
+it must be unavailable in some state, **say why in one line beside it** — e.g.
+(historically) manual entry forcing Raw because a graded item needs a `card_id`
+for pricing to join on, which is exactly the example the next paragraph shows
+going stale.
+
+**That one-line "say why" comment is a promise, and promises go stale.** RFC
+0012 found the promise above already broken: `IncomingCardForm.tsx`'s comment
+said Buy-mode graded intake stayed off "until that lands" — meaning until a
+cert-ownership warning existed — but the warning (`GET /slabs/certs/{cert}`,
+firing on `kind === 'graded'` alone) had *already been built*, in the same
+file, and nobody had come back to remove the gate it was blocking. The safety
+check and the restriction waiting on it were two separate pieces of code with
+no link between them but a sentence, so they drifted: one got finished, the
+other didn't notice. RFC 0012 then removed the gate itself — a manually
+entered graded item is accepted now, not just found stale (see "Buy / Sell /
+Trade" above for the current behavior).
+
+> **When a gate's own comment names the specific thing it's waiting on, that
+> named thing can be built later without the gate ever being revisited** —
+> nothing forces the two to move together. Before trusting a "not yet" comment,
+> grep the file for whether the missing piece has since landed; a comment is
+> not a dependency, and code review rarely re-checks old justifications, only
+> new ones.
+
+This is a different failure than the escape-hatch rule above (that one is about
+reachability depending on a *sibling path's outcome*; this one is about a gate's
+justification going out of date). Same fix both times, though: a disabled
+control's reason is either still true or the control comes out — never left
+standing on a stale comment.
+
+**Card art: import the size, never re-pick it.** `TABLE_THUMB_SIZE` (`xs`,
+56×78 — real card proportions) and `TABLE_THUMB_COLUMN` (`w-16`) are exported
+from `components/admin/shared/CardImage.tsx`. Every admin list row uses them.
+Hand-picking a size per page is what went wrong before: Inventory, Vault and
+Show Prep each chose `md` (160×224) while Prep Queue chose `lg` (224×320), and
+their columns disagreed too, so every one of them rendered an image several
+times wider than its own cell.
+
+Art now appears on Inventory, Vault, Show Prep, Prep Queue (behind each page's
+`ImageToggle`) and — always on, no toggle, because the list is short and
+identifying the card *is* the task — Triage, History (search hits, the item
+header, and every trade-lineage node) and Trade (both staged legs). All of them
+resolve through `useCardImages`, which batches the lookup and, since
+2026-08-07, **attempts each id once**: callers pass a freshly-mapped array so
+the hook's effect re-runs every render, and re-queueing failed ids meant one
+POST per keystroke on Trade. A failed or card-less id renders the placeholder.
+
+**Show Analytics' Daily tab joined this list 2026-08-15 — `SaleDetailModal`**
+(`frontend/components/admin/shared/SaleDetailModal.tsx`). Owner report:
+*"listed sales should have details of the cards sold including image, name,
+and price... instead of an arrow to reveal the individual sales, [let] users
+click on the bundled sale to view the individual components... in a popup
+similar to how you would click on an inventory item."* `TransactionGroups`'
+old inline chevron-expand rendered a bare `item_id` ULID per leg — no image,
+no name, a direct instance of this rule going unenforced on a real surface.
+Replaced, not patched: clicking a group's "N cards" cell (every group, not
+just multi-leg ones — a one-card sale showed no card identity inline
+either) opens the popup, which resolves each leg's name and `card_id` in ONE
+batched call to the new `POST /admin/inventory/items-brief`
+(`routers/admin/inventory.py`, same cap-at-100/null-not-omitted shape as the
+pre-existing `/card-images`) and reads its image through the same
+`useCardImages` every other surface uses. Price is `leg.amount`, not
+re-fetched — the transaction leg already carries the authoritative
+sold/bought figure. Per-leg void/restore moved into the popup along with the
+identity it now shows; the group-level Void/Restore in the table row is
+unchanged.
+
+> **A popup must key on group IDENTITY, not a captured object.** The first
+> version stored the clicked `TransactionGroup` object in state. Voiding a
+> leg from inside the still-open popup calls the page's `refetchDay()`,
+> which rebuilds every group as a new object — so the popup kept rendering
+> the stale pre-void object until closed and reopened. Fixed by storing the
+> group's `key` and re-deriving the current object from `groups` on every
+> render, the same way the old chevron's `expanded: Set<string>` already
+> did. Any popup/panel that displays a live, mutable list item should key on
+> an id and re-derive, not hold the object itself, once anything inside that
+> popup can trigger a refetch of the list behind it.
+
+**Model fields added by RFC 0008.** On `InventoryItem`:
+`display_name_override` (admin-typed English name; **customer-facing**, bounded
+200 chars, outranks the catalog name — nothing in sync/import ever writes it),
+`review_reason` (**internal**, bounded 500 chars, must stay out of
+`_CUSTOMER_ITEM_FIELDS`), and `reviewed_at` (server-stamped on clear). On
+`Show`: `archived` (bool). Plus a new `catalog_set` entity backing
+`GET /admin/catalog/sets`.
+
+There is **no `name_en` and no `dex_number`.** The RFC originally specified an
+automated `dexId`/Pokédex-map pipeline for Japanese names; the owner dropped it
+on 2026-08-05 in favour of the hands-on `display_name_override` above. If a doc
+or comment still claims those fields exist, it is stale — the pipeline was never
+built.
+
+**Condition vocabulary.** Display strings are `NM, LP+, LP, LP-, MP, HP, DMG`,
+but storage is ALWAYS two separate fields — `condition` (the tier: `NM/LP/MP/
+HP/DMG`, `Condition` enum) plus `condition_modifier` (`ConditionModifier`:
+`"+"`/`"-"`/`null`) — never a combined `"LP+"` enum value. That combined form
+used to be sent straight to the backend and failed enum validation (the Round 1
+bug); `normalize_condition()` (`backend/src/merlins_collection/models/
+inventory.py`) now splits a display string into the two stored fields, mirrored
+on the frontend by `parseCondition`/`formatCondition` (`frontend/lib/
+constants.ts`).
+
+**Locations.** Admin-managed, DB-backed list — not a hardcoded enum. Seeded
+once from the legacy `InventoryLocation` enum unioned with distinct location
+values already present on inventory, then editable by admins. Endpoints
+(`backend/src/merlins_collection/routers/admin/locations.py`):
+`GET /admin/locations`, `POST /admin/locations`, `DELETE /admin/locations/
+{value}` (blocked with 409 if the location is still in use by any item).
+Frontend reads it via `useLocations()`; never hardcode a location list in new
+code.
+
+# Ops
+
+**The catalog is NOT empty.** An earlier version of this file claimed the live
+`merlins-cards` table had an empty card catalog and that this was why market
+prices and the Buy page's catalog search came back blank. **That was wrong** —
+measured 2026-08-05, the table holds **31,603 catalog rows**. The real cause was
+performance, not missing data: `GET /admin/market/search` has no index on card
+name, so every keystroke triggered a full-table scan — 11.7 MB over 12
+sequential 1 MB pages, **11.2 seconds per request**, on a 300ms debounce. RFC
+0008 T9 fixed it with an in-process catalog cache
+(`services/catalog_cache.py`); read that module's docstring before touching it,
+especially the ~93 MB resident sizing note. Do not go looking for missing data
+here — this dead end has already cost one investigation.
+
+**The ECS task role must grant `dynamodb:Scan` and `dynamodb:UpdateItem`.**
+Diagnosed 2026-08-07 from CloudWatch: catalog search was returning **HTTP 500**
+on the live site, not failing to connect. `merlins-backend-task-role` had
+neither action on `table/merlins-cards`, so everything routed through
+`_scan_catalog` died — `GET /admin/market/search`, `GET /admin/market/coverage`,
+and (via `upsert_catalog_card_preserving_prices`) the price sync. The catalog
+cache T9 added is what introduced the Scan dependency; the policy was never
+updated to match. `deploy/backend-task-role-permissions.json` is the source of
+truth — apply it with `aws iam put-role-policy` (no ECS redeploy needed, task
+roles are read per request). **A blank catalog dropdown is far more likely to be
+this than missing data.**
+
+**Never write a bare `float` to DynamoDB.** boto3 rejects it outright
+("Float types are not supported"), and `_serialize`
+(`services/dynamodb.py`) is the one place that coerces `float` → `Decimal`,
+via `str()` so a price still round-trips. This matters because the sell/buy/
+trade session routers persist **raw request JSON**, where a price arrives as a
+float — `POST /admin/sales/{id}/items` 500'd in production for exactly this
+reason. Tests missed it for months because they all send prices as **strings**;
+when testing a money path, send a JSON **number**, which is what the frontend
+actually sends.
+
+## A PARTIAL ENV EXPORT ON `cdk deploy` SILENTLY DELETES SECRETS FROM THE LIVE LAMBDA
+
+Diagnosed 2026-08-18 on `MerlinsFrontendStack` (RFC 0014's CloudFront+Lambda
+spike, `infra/`). Redeploying to add `NEXT_PUBLIC_SANITY_PROJECT_ID` with only
+that var and `SKIP_OPENNEXT_BUILD` exported wiped `AUTH_SECRET` and
+`AWS_COGNITO_CLIENT_SECRET` off the already-working server Lambda. NextAuth
+then failed with its generic "Server error / problem with the server
+configuration" page, and — more confusingly — the Studio route's own admin
+gate (`frontend/app/studio/layout.tsx`) started returning a bare `404`
+instead of redirecting to sign-in, because `auth()` itself was failing
+without `AUTH_SECRET`.
+
+**Root cause:** `infra/bin/infra.ts` reads every secret (`AUTH_SECRET`,
+`AWS_COGNITO_CLIENT_SECRET`, `POKEMONPRICETRACKER_API_KEY`, `ADMIN_API_KEY`)
+from the deployer's OWN shell at synth time — by design, so nothing sensitive
+is ever a literal in `lib/*-stack.ts`. But `buildFrontendEnvironment` only
+*adds* a key to the environment map when its prop is truthy, and
+CloudFormation's `Lambda::Function.Environment.Variables` is a full
+**replace** on every stack update, never a merge. **Any deploy that omits a
+previously-set secret deletes it from production, silently — CDK gives no
+warning, and the stack still reports `UPDATE_COMPLETE`.**
+
+Before running `cdk deploy` on `MerlinsFrontendStack` for *any* reason —
+including a change that has nothing to do with auth — export every secret
+this stack uses, not just the one being changed: `AUTH_SECRET`,
+`AWS_COGNITO_CLIENT_SECRET`, and (if relevant to `MerlinsBackendStack`)
+`POKEMONPRICETRACKER_API_KEY` / `ADMIN_API_KEY`. The real values already live
+in `frontend/.env.local`. Same failure mode applies to any future secret
+added to either stack's environment map.
+
+**Catalog seed + sync (one-time owner action, not scheduled).** Needed only for
+a fresh/empty table, which the live one is not. With AWS creds, from `backend/`:
+
+```bash
+cd backend
+../.venv/Scripts/python.exe scripts/seed_catalog.py --help    # dry-run by default
+../.venv/Scripts/python.exe scripts/seed_catalog.py --execute --confirm-table merlins-cards
+```
+
+then press **Sync Prices** on `/admin/market`, or run `scripts/daily_sync.py`
+the same way. This is not part of the scheduled daily sync — the daily sync
+refreshes prices for cards already in the catalog, it does not seed the
+catalog itself.
+
+**Every script here needs the venv interpreter spelled out.** A bare `python`
+resolves to an unrelated environment that cannot import `merlins_collection`,
+and these files have no shebang — so `scripts/foo.py` hands the file to the
+shell, which tries to run its docstring as commands.
+
+**A one-time script that loops over live table data for more than a few
+seconds must print progress between chunks, never only a final summary.**
+Diagnosed 2026-08-19 on `backfill_price_history_ttl.py` (RFC 0015): a
+single-call scan-then-serially-`update_item` loop against ~70,000 real rows
+ran for ~90 minutes printing nothing between `"scanning…"` and the final
+summary — genuinely working the whole time (confirmed live via CloudWatch
+write-capacity metrics and a direct table scan showing steady completion),
+but indistinguishable from a hang to the owner watching the terminal.
+`reprice_catalog.py` (RFC 0010 T17) already solved exactly this class of
+problem — select candidates once, then apply them in bounded chunks with a
+line printed after each one (`chunk N/M: done/total, ETA`) — and its own task
+doc already states the rule outright: *"progress output every chunk... this
+runs unattended for two hours; silence is indistinguishable from a hang."`
+The new script matched the wrong sibling on the wrong axis: it correctly
+copied `backfill_catalog_sets.py`'s lighter `--execute`-only rail (right
+call — additive-only work doesn't need `--confirm-table`), but a script has
+independent axes to match precedent on — write-safety rail is one, loop
+duration/shape is another — and only the first was checked.
+**Before writing a new one-time script, estimate the real data volume it
+will walk (not an assumed-small one) and, if the loop will run more than a
+few seconds, copy `reprice_catalog.py`'s chunked-progress shape regardless of
+which sibling's write-safety rail is otherwise the right match.**
+
+**Catalog set registry backfill (one-time owner action).** The admin
+inventory page's Set filter lists every set in the catalog — including ones we
+own nothing from, which is the whole point of it — from a `catalog_set`
+registry rather than from a full catalog scan. `sync_new_sets` (the **check
+for new sets** button on `/admin/market`) maintains that registry going
+forward, but it deliberately never walks a set that already has cards, so it
+will not backfill a catalog seeded before the registry existed.
+
+**DONE — run against `merlins-cards` on 2026-08-06**, registering **284 sets**
+from 31,603 card rows; `GET /admin/catalog/sets` now returns all 284, of which
+94 have owned cards. Re-running is a harmless upsert that refreshes the counts:
+
+```bash
+cd backend
+../.venv/Scripts/python.exe scripts/backfill_catalog_sets.py            # DRY RUN
+../.venv/Scripts/python.exe scripts/backfill_catalog_sets.py --execute
+```
+
+Until it has run, `GET /admin/catalog/sets` honestly returns `[]` and the Set
+dropdown is empty. This is the one place a full catalog scan is acceptable —
+offline, once, from a CLI; never on a request path.
+
+**`CatalogCard.first_seen_at` answers "when did this row appear";
+`last_synced_at` does not** — it is bumped by any write, so a price refresh
+re-stamps a 2024 row. `None` means **predates the field**, not "new", and
+every reader counts only non-null values. It is written with a conditional
+`attribute_not_exists` update, **never in the item body**, because a full
+reseed whole-item `put_item`s every row and would otherwise reset all 31,603
+of them.
+
+**`sync_new_sets` now always walks the brief card list** for both languages,
+instead of only when a set is entirely absent. That early-out is why a promo
+catalogued into a set we already hold was invisible. The extra walk is the
+accepted cost; **restoring the early-out will look like an optimization and
+is the bug.**
 
 # Test Commands
 
@@ -49,9 +1221,95 @@ Merlin's Minty Cards — a Pokemon card business website.
 | All        | `npm test` (from repo root)                    |
 | Frontend   | `npm test --workspace=frontend`                |
 | MCP Server | `npm test --workspace=mcp-server`              |
-| Backend    | `python -m pytest backend/tests -q --tb=short` |
+| Backend    | `./.venv/Scripts/python.exe -m pytest backend/tests -q --tb=short` |
 | Lint (FE)  | `cd frontend && npm run lint`                  |
-| Lint (BE)  | `ruff check backend/src`                       |
+| Lint (BE)  | `./.venv/Scripts/python.exe -m ruff check backend/src` |
+
+**Use `./.venv/Scripts/python.exe` explicitly, not bare `python`.** The `python`
+on PATH resolves to an unrelated hermes-agent venv with no pytest and no ruff
+installed, so the bare form fails with "No module named pytest". This checkout
+is also a git worktree, and a global editable install can make Python import the
+**sibling** repo's backend — if results look impossible, check which package
+actually loaded before debugging anything else:
+
+```bash
+./.venv/Scripts/python.exe -c "import merlins_collection,os;print(os.path.dirname(merlins_collection.__file__))"
+```
+
+## Running Tests in Kiro/Cursor (Agent-Specific)
+
+The shell tool (`execute_pwsh`) has a hard ~10-15s effective timeout. Tests
+take longer than that, so you MUST use **background processes** to capture
+full output.
+
+### Pattern: Start → Wait → Poll
+
+```
+# Backend (runs from workspace root — cwd works here)
+control_pwsh_process start:
+  command: "python -m pytest backend/tests -q --tb=short 2>&1"
+
+# Frontend (use cmd /c wrapper — cwd param is broken for subdirs)
+control_pwsh_process start:
+  command: cmd /c "cd /d c:\Users\ethar\.cursor\projects\MerlinsCollection-Secondary\frontend & npx vitest run --reporter=verbose" 2>&1
+
+# MCP Server
+control_pwsh_process start:
+  command: cmd /c "cd /d c:\Users\ethar\.cursor\projects\MerlinsCollection-Secondary\mcp-server & npx vitest run --reporter=verbose" 2>&1
+```
+
+Then use `get_process_output` (with `terminalId`) to poll for results.
+Wait 30s+ for backend, 15s+ for frontend/mcp before first poll.
+
+### Approximate Runtimes
+Measured 2026-08-07, after the fixture rework below:
+- Backend: **~2 minutes** (1515 tests) — was ~10 minutes
+- Frontend: **~29 seconds** (609 tests, 80 files)
+- MCP Server: **~1 second** (98 tests, 7 files)
+
+**Do not reintroduce a per-test `mock_aws()`.** The backend suite spent **93% of
+its wall time in fixture setup** until 2026-08-07. Entering a fresh `mock_aws()`
+invalidates botocore's service-model caches, so the next
+`boto3.resource("dynamodb")` pays a full model reload — measured **507ms** per
+test to build the repo + table that way versus **15ms** inside a long-lived
+mock. `tests/conftest.py` now starts **one** `mock_aws()` for the session and an
+autouse `_clean_aws` fixture resets the moto DynamoDB backend between tests,
+which wipes every table exactly as leaving the old context did. Isolation is
+verified: a probe that wrote rows in one test and asserted an empty table in the
+next goes red if the reset is removed. The RSA signing key is session-scoped for
+the same reason (2048-bit keygen is ~53ms, and ~700 tests take a token).
+
+Anything creating a table must depend on `_clean_aws` **explicitly**, not rely
+on autouse ordering — nothing else drops a table now that the mock outlives the
+test, so a second `create_table` with the same name raises `ResourceInUseException`.
+
+Frontend: the ~20 pure-logic test files carry `// @vitest-environment node`,
+since constructing a jsdom per file was the suite's largest single cost.
+`vitest.setup.ts` guards its DOM work behind `HAS_DOM` and imports
+testing-library dynamically — keep both if you add a setup step.
+
+**`vi.clearAllMocks()` does NOT drain a `mockResolvedValueOnce` queue, and a
+queued `Once` value outranks a later `mockResolvedValue`.** Measured 2026-08-10
+with a two-test probe: after `clearAllMocks`, the next test received the previous
+test's leftover value instead of its own fixture. So any test that ends without
+consuming everything it queued — a timeout, an early assertion failure — hands
+its leftovers to the tests after it, which then fail on another test's data.
+**In a `beforeEach`, reset the mock (`mockReset()`), don't clear it.**
+
+This is what made `ChatPanel.test.tsx` look flaky for weeks. One test typed ~120
+characters through `userEvent` at its default per-keystroke delay, taking 3.3s of
+the 5s budget **with the machine idle**; under full-suite parallel load it
+crossed the timeout, and its 12 queued replies then cascaded into four
+neighbours. The failure *count* changed run to run, which is the tell that one
+failure is causing the others. Fixed 2026-08-11 by `mockReset()` plus a shared
+`userEvent.setup({ delay: null })` — same events, without a macrotask per
+character (3317ms → 994ms). **Reach for `delay: null` in any test that types
+more than a few characters.**
+
+### Quick commands that DO work with execute_pwsh
+- `ruff check backend/src` (lint, ~3s)
+- `npm run lint --workspace=frontend` (~5s)
+- `dir`, `git status`, `type <file>` (instant)
 
 # Inventory Search Tool
 Located at `/inventory` — authenticated customers only.
@@ -78,6 +1336,90 @@ Two distinct modes (user picks one at a time):
 | Rekognition     | Image analysis (future: identify cards from photos)  |
 | Bedrock         | Claude AI integration for chat mode queries          |
 
+# Third-Party APIs
+
+Authority: [`docs/rfcs/0009-slab-intake-and-graded-pricing.md`](docs/rfcs/0009-slab-intake-and-graded-pricing.md),
+with per-task status in [`docs/plans/rfc-0009/progress.md`](docs/plans/rfc-0009/progress.md).
+An earlier version of this section pointed at "claude-progress.txt Phase 4" — that
+file has no Phase 4 and never will; the admin-enhancement rounds replaced it.
+
+**Slab intake is MANUAL-FIRST, and that is the shipped design, not a stopgap.**
+An admin types (or wedge-scans) the cert number, identifies the card through
+catalog autocomplete with a free-text fallback, types company/grade/cost, stages
+a batch and commits it through the existing buy session — so slabs land in
+purchase history, timeline and show analytics like any other acquisition. There
+is **no camera** (never built) and **no cert lookup** (see PSA below). Every
+grading company goes down the same manual path; CGC/BGS/SGC are not a special
+case any more.
+
+- **PokemonPriceTracker — the graded price source, and the one that is LIVE.**
+  Per-grade market values from eBay sold comps. Not PriceCharting: the owner
+  declined a paid subscription on 2026-08-07, and any doc still naming
+  PriceCharting is stale. Free tier is **100 credits per UTC day**, and a graded
+  lookup costs **2 credits** (1 card + 1 `includeEbay`, `costPerCard: 2` read off
+  a live response) — so the real ceiling is **FIFTY lookups a day**. You are
+  billed on `limit` **even when the search matches zero cards**, which is why
+  `limit=1` is pinned. Key: `POKEMONPRICETRACKER_API_KEY`; budget knob:
+  `PRICING_DAILY_QUOTA` (credits, default 100).
+- **PSA cert API — WITHDRAWN on 2026-08-10. This is a closed decision, not a
+  gap.** The cert API became a **paid** feature and the owner declined it, so
+  approval is **not coming** and nothing is waiting on it. RFC 0009 T2 (the
+  lookup) and T5 (camera scan) are **WON'T DO**; RFC 0010 §H is the authority.
+  - **Do not call it, do not email `collectors-apis@collectors.com`, and do not
+    add a `psa_api_key` setting.** Every authenticated call ever made returned
+    `403 {"Message":"Access to this API is limited to approved customers."}` —
+    the key was valid, the **account was never entitled**, and no code change
+    reaches it. Re-confirmed 2026-08-10 against their Swagger with both bearer
+    spellings.
+  - **`PSA_API_KEY` is read by no code and never will be.** There is no
+    `psa_api_key` field on `Settings` and `model_config`'s `extra="ignore"`
+    swallows the env var, so setting it does nothing at all. It was removed from
+    `backend/.env.example` by RFC 0010 T14 for exactly that reason — a blank
+    placeholder reads as *"configure me"* and cannot work.
+    `test_config.py::test_there_is_still_no_psa_setting_to_configure` is a
+    **permanent** tripwire on that absence, not a temporary one.
+  - Nothing about its response shape was ever observed, so the mapper was never
+    guessed at. Had it landed it would have supplied identity only:
+    **`TotalPopulation`/`PopulationHigher` are always `null`** on the public API,
+    so there is no population feature and no field for one.
+  - The historical evidence — the 403 fixture, the key fingerprint, the Swagger
+    findings — stays in `docs/plans/rfc-0009/`. It is the record of a decision
+    made properly; deleting it would make the decision look casual.
+
+**How a slab gets priced** (`services/slab/pricing.py`, wired by
+`services/catalog_sync.py`):
+
+- Prices live in the **pre-existing** `CARD#<card_id>` / `GRADEDPRICE#<company>#
+  <grade>` rows. RFC 0009 added **no pricing schema** — the work was filling those
+  rows from an API instead of by hand.
+- `refresh_graded_prices` runs **nightly inside `run_daily_sync`** (step 3 of
+  six) and also behind `POST /admin/slabs/refresh-prices` and the Market page's
+  Sync Prices button. It walks owned slabs **stalest-first** (never-priced first),
+  deduped by `(card_id, company, grade)`, capped at what today's credits can pay
+  for. **It never calls PSA** — a cert's identity is immutable.
+- **A price attaches only on a VERIFIED JOIN**: the vendor's `externalCatalogId`,
+  read as `en:<id>`, must equal the item's own `card_id`. The vendor's name search
+  returns the wrong card roughly a third of the time and a wrong answer looks
+  exactly like a right one, so this rule is load-bearing. Japanese cards carry no
+  `externalCatalogId` at all, so **JP slabs are unpriceable by construction** and
+  are *not* Triage-flagged for it — they surface at `/admin/slabs?priced=false`.
+- **A hand-typed graded price is REPLACED by the provider unless it is pinned**
+  (owner decision, 2026-08-09). `PUT /admin/slabs/{id}/price/pin` sets the pin —
+  but **no frontend control calls it yet**, so in practice nothing is pinned and
+  the provider always wins. Anyone typing a graded value today should know it will
+  be overwritten on the next run.
+
+Both keys are bearer tokens spending a metered daily quota: never log one, never
+return one from an endpoint. Real values live in `backend/.env` (gitignored) and,
+in production, in the ECS task definition's plain `environment` array — owner
+decision, 2026-08-12, explicitly declining Secrets Manager for these two keys
+in favor of the same mechanism every other non-AWS config value already uses
+(see `docs/aws-setup.md`'s "Outbound third-party credentials" section). Do not
+reintroduce a `secrets`/Secrets Manager reference for these. An empty key
+is a supported state: `build_pricing_provider()` returns `None`, the nightly job
+skips graded pricing and every other step still runs, while the admin button
+reports `state: "failed"` because a human is standing there waiting.
+
 # Design System
 - Color scheme based on Spriggatito (forest greens, cream whites)
 - Business/brand images stored in `frontend/public/images/` organized by:
@@ -92,3 +1434,30 @@ Branch protection rules must be enabled in GitHub Settings > Branches:
 - Require a pull request before merging
 - Require status checks (CI) to pass
 - Require review from Code Owners
+
+# AWS Guidance
+
+- Prefer the AWS MCP Server for AWS interactions — it provides sandboxed
+  execution, observability, and audit logging. If unavailable, use the
+  AWS CLI directly.
+- Before starting a task, check whether a relevant AWS skill is available.
+  Load the skill with `retrieve_skill` and prefer its guidance over
+  general knowledge.
+- When uncertain about specific AWS details (API parameters, permissions,
+  limits, error codes), verify against documentation rather than guessing.
+  State uncertainty explicitly if you cannot confirm.
+- When creating infrastructure, prefer infrastructure-as-code (AWS CDK or
+  CloudFormation) over direct CLI commands.
+- When working with infrastructure, follow AWS Well-Architected Framework
+  principles.
+- Do not use em dashes in AWS resource names or descriptions. Use
+  hyphens instead.
+
+## Secret Safety
+
+- MUST load the `aws-secrets-manager` skill first for any secret,
+  credential, API key, token, or password task. MUST NOT call
+  `secretsmanager get-secret-value` or `batch-get-secret-value`, and MUST
+  NOT hit the Secrets Manager Agent daemon directly. MUST use
+  `{{resolve:secretsmanager:secret-id:SecretString:json-key}}` with
+  `asm-exec` so the secret resolves at runtime without entering context.

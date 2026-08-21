@@ -9,7 +9,10 @@ error (isError), slow call (timeout), and hard process crash.
 import os
 import time
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP
+except ModuleNotFoundError:  # mcp v2 renamed the module
+    from mcp.server.mcpserver import MCPServer as FastMCP
 
 server = FastMCP("fake-inventory")
 

@@ -1,0 +1,39 @@
+{
+  "family": "merlins-merlins-backend",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::560151615792:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::560151615792:role/merlins-backend-task-role",
+  "containerDefinitions": [
+    {
+      "name": "Main",
+      "image": "560151615792.dkr.ecr.us-east-1.amazonaws.com/merlins-backend:latest",
+      "cpu": 1024,
+      "memory": 2048,
+      "memoryReservation": 2048,
+      "essential": true,
+      "portMappings": [
+        { "containerPort": 8000, "hostPort": 8000, "protocol": "tcp", "name": "main-8000-tcp" }
+      ],
+      "environment": [
+        { "name": "DYNAMODB_TABLE_NAME", "value": "merlins-cards" },
+        { "name": "AWS_REGION", "value": "us-east-1" },
+        { "name": "CORS_ORIGINS", "value": "https://www.merlinsmintycards.com,https://me-736e73de34b349da8d2027e56db0eb8a.ecs.us-east-1.on.aws,http://localhost:3000" },
+        { "name": "COGNITO_CLIENT_ID", "value": "3vmg0a9lffhc85a2lrskh27b3f" },
+        { "name": "COGNITO_USER_POOL_ID", "value": "us-east-1_Ab945I9ir" },
+        { "name": "RATE_LIMIT_TABLE_NAME", "value": "merlins-rate-limits" },
+        { "name": "POKEMONPRICETRACKER_API_KEY", "value": "PASTE_YOUR_KEY_HERE" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/merlins-backend",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}

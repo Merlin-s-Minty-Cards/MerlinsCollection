@@ -30,8 +30,9 @@ What each verb means (confirmed with the business owner):
     be overwritten within a day and would, on a re-run, put a stale review-page
     figure back over a fresher synced one.
 
-    A **non-English** item is refused outright: the catalog holds English cards
-    only, so no English ``card_id`` is a correct answer for one.
+    A **cross-language** link is refused: a non-English item must link to a
+    catalog card in the same language; linking a JP item to an EN card (or vice
+    versa) is a mismatch and is refused.
 
 ``CARD <item_id> REJECT`` / ``TXN <txn_id> REJECT`` / ``TXN <txn_id> NOCHANGE``
     NO WRITE AT ALL. "Leave it flagged" and "it is already fine" are both
@@ -78,6 +79,7 @@ from botocore.exceptions import ClientError
 from merlins_collection.config import settings
 from merlins_collection.models.inventory import LANGUAGE_LABELS, Language
 from merlins_collection.services.card_text import (
+    format_display_name,
     item_language,
     normalize_name,
     normalize_number,
@@ -430,25 +432,27 @@ class DecisionApplier:
             return _refuse(decision, f"a '{item.kind}' item has no card_id field - "
                                      f"the catalog holds single cards only")
 
-        # LANGUAGE GATE. The catalog is English-only, so no English card_id is
-        # ever the right answer for a non-English item. This is the last gate
-        # before a live write and it deliberately does NOT trust the stored
-        # `language` attribute alone: production items predate that field, so the
-        # item's own text and TCGplayer link are read too, exactly as the review
-        # page reads them.
         language = item_language(item)
-        if language is not Language.EN:
-            label = LANGUAGE_LABELS.get(language, language.value)
-            return _refuse(decision, (
-                f"this item is a {label} printing, so no English catalog card is "
-                f"a correct match for it - card_id '{card_id}' would price it "
-                f"from the wrong card. Its value comes from the sheet's own "
-                f"figures; leave card_id unset (REJECT)"))
 
         card = self._repo.get_catalog_card(card_id)
         if card is None:
             return _refuse(decision, f"card_id '{card_id}' does not resolve to a "
                                      f"catalog card")
+
+        # LANGUAGE GATE. Now that the catalog carries cards in multiple languages
+        # (TCGdex seeds JP alongside EN), the check is a cross-language MISMATCH,
+        # not a blanket non-EN refusal: a JP item linking to a JP catalog card is
+        # correct; a JP item linking to an EN card is still wrong. This
+        # deliberately does NOT trust the stored `language` attribute alone:
+        # production items predate that field, so the item's own text and
+        # TCGplayer link are read too, exactly as the review page reads them.
+        if language != Language(card.language):
+            label = LANGUAGE_LABELS.get(language, language.value)
+            return _refuse(decision, (
+                f"this item is a {label} printing but card_id '{card_id}' is "
+                f"{card.language.value} - a cross-language mismatch would price "
+                f"it from the wrong card. Its value comes from the sheet's own "
+                f"figures; leave card_id unset (REJECT)"))
         mismatch = self._identity_mismatch(values, card)
         if mismatch:
             return _refuse(decision, f"card_id '{card_id}' does not match the block: "
@@ -495,8 +499,13 @@ class DecisionApplier:
         if before == after:
             return Result(decision, SKIP_APPLIED,
                           f"already resolved to {catalog_text}", before, after)
+        # Materialize the display_name from the decision's STRUCTURED name/number
+        # (the confirmed identity, never the item's free-text notes) so a relinked
+        # row carries a name too — a robust fallback if the catalog META is
+        # momentarily missing (Council MUST-FIX A/C, relink path).
+        display = format_display_name(values.get("name"), values.get("number") or "")
         if self._apply:
-            self._write_card(decision.record_id, card_id)
+            self._write_card(decision.record_id, card_id, display)
         return Result(decision, UPDATE, f"link to {catalog_text}", before, after)
 
     @staticmethod
@@ -552,25 +561,32 @@ class DecisionApplier:
                             f"own text says '{source.number}'")
         return "; ".join(problems)
 
-    def _write_card(self, item_id: str, card_id: str) -> None:
+    def _write_card(self, item_id: str, card_id: str,
+                    display_name: str | None = None) -> None:
         """Set the identity fields only — every other attribute is left alone.
 
         GSI1 keys are maintained alongside ``card_id`` so the item stays
         reachable by ``list_inventory_for_card``, exactly as a repository write
-        would leave it. ``current_market_value`` is deliberately absent: the daily
-        sync owns it.
+        would leave it. A ``display_name`` derived from the decision's structured
+        name/number is written alongside when one is available (never from notes).
+        ``current_market_value`` is deliberately absent: the daily sync owns it.
         """
+        names = {"#card_id": "card_id", "#needs_review": "needs_review",
+                 "#gsi1pk": "GSI1PK", "#gsi1sk": "GSI1SK"}
+        values = {":card_id": card_id, ":needs_review": False,
+                  ":gsi1pk": f"CARD#{card_id}", ":gsi1sk": f"ITEM#{item_id}"}
+        sets = ["#card_id = :card_id", "#needs_review = :needs_review",
+                "#gsi1pk = :gsi1pk", "#gsi1sk = :gsi1sk"]
+        if display_name:
+            names["#display_name"] = "display_name"
+            values[":display_name"] = display_name
+            sets.append("#display_name = :display_name")
         self._table.update_item(
             Key=_inventory_key(item_id),
-            UpdateExpression=("SET #card_id = :card_id, #needs_review = :needs_review,"
-                              " #gsi1pk = :gsi1pk, #gsi1sk = :gsi1sk"),
+            UpdateExpression="SET " + ", ".join(sets),
             ConditionExpression=Attr("PK").exists(),
-            ExpressionAttributeNames={"#card_id": "card_id",
-                                      "#needs_review": "needs_review",
-                                      "#gsi1pk": "GSI1PK", "#gsi1sk": "GSI1SK"},
-            ExpressionAttributeValues={":card_id": card_id, ":needs_review": False,
-                                       ":gsi1pk": f"CARD#{card_id}",
-                                       ":gsi1sk": f"ITEM#{item_id}"},
+            ExpressionAttributeNames=names,
+            ExpressionAttributeValues=values,
         )
 
     # -- transactions (no-ops only; date moves are cut) --

@@ -9,6 +9,7 @@
 import { describe, it, expect } from "vitest";
 
 import { DynamoDbInventoryRepository } from "../dynamodb-repository.js";
+import { getInventorySummary } from "../tools/get-inventory-summary.js";
 
 const TABLE = "merlins-cards";
 
@@ -95,6 +96,7 @@ function rawItem(overrides: Item = {}): Item {
     acquired_at: "2026-04-01",
     finish: "holofoil",
     condition: "NM",
+    location: "glass",
     ...overrides,
   };
 }
@@ -115,6 +117,7 @@ function gradedItem(overrides: Item = {}): Item {
     company: "PSA",
     grade: 9.5,
     cert_number: "12345678",
+    location: "glass",
     ...overrides,
   };
 }
@@ -177,8 +180,12 @@ describe("listCards", () => {
         set: "base1",
         condition: "NM",
         quantity: 1, // one record = one physical unit; legacy quantity is ignored
-        value: 250,
-        marketPrice: 300,
+        // RFC 0008 §D: the LIVE catalog holofoil band (320.5) wins over the
+        // denormalized current_market_value (300) on the row. This assertion
+        // used to read 300 — that was the bug: it pinned the priority order
+        // that made chat totals disagree with the dashboard.
+        value: 320.5,
+        marketPrice: 320.5,
         language: "EN", // no stored language attribute → defaults to EN
       },
     ]);
@@ -206,12 +213,11 @@ describe("listCards", () => {
     expect(card?.language).toBe("JP");
   });
 
-  it("reads the stored JP language for a sealed product", async () => {
-    const { repo } = repoWith({ "INV#2": [{ Items: [sealedItem({ language: "JP" })] }] });
-
-    const [card] = await repo.listCards();
-    expect(card?.language).toBe("JP");
-  });
+  // NOTE (RFC 0001): the former "reads the stored JP language for a sealed
+  // product" test was removed here. It asserted a sealed item surfaces from
+  // listCards, which directly contradicts the binding owner decision to HIDE
+  // sealed (see the "excludes sealed products …" test below). JP language
+  // reading stays covered by the raw/graded cases above.
 
   it("hides items that are not available (sold / on-hold / lost stay internal)", async () => {
     const { repo } = repoWith(
@@ -238,14 +244,34 @@ describe("listCards", () => {
     expect(await repo.listCards()).toEqual([]);
   });
 
-  it("includes sealed products (no catalog card) with name, type and market value", async () => {
+  // RFC 0001 owner decision (binding, overrides the earlier "keep sealed
+  // visible" recommendation): sealed products (kind=sealed) are hidden from
+  // the customer-facing chat tools entirely — cards-only surface. "sealed"
+  // must be removed from PUBLIC_KINDS (dynamodb-repository.ts:33).
+  it("excludes sealed products from the customer-facing projection (cards-only surface, RFC 0001)", async () => {
     const { repo } = repoWith({ "INV#2": [{ Items: [sealedItem()] }] });
-    const [card] = await repo.listCards();
-    expect(card?.name).toBe("Scarlet & Violet Booster Box");
-    expect(card?.condition).toBe("Booster Box");
-    expect(card?.value).toBe(120);
-    expect(card?.marketPrice).toBe(140);
-    expect(card?.quantity).toBe(1);
+    expect(await repo.listCards()).toEqual([]);
+  });
+
+  // Phase 5 (D3, display scoping): the backend's customer_visible_items() now
+  // adds a location gate (location in {glass, toploader} OR factory_sealed) on
+  // top of kind+status. isPublicInventory() must mirror it so a raw item with
+  // no visible location (e.g. still in a binder/storage) never reaches the
+  // chat tools even though it's an available raw/graded item.
+  it("excludes an available raw item with no customer-visible location", async () => {
+    const { repo } = repoWith({
+      "INV#0": [{ Items: [rawItem({ location: null, factory_sealed: false })] }],
+    });
+    expect(await repo.listCards()).toEqual([]);
+  });
+
+  it("includes an available raw item stored in glass", async () => {
+    const { repo } = repoWith(
+      { "INV#0": [{ Items: [rawItem({ location: "glass" })] }] },
+      { "CARD#base1-4|META": meta("base1-4") },
+    );
+    const cards = await repo.listCards();
+    expect(cards).toHaveLength(1);
   });
 
   it("fans out across all ten inventory shards", async () => {
@@ -293,6 +319,73 @@ describe("listCards", () => {
     const [card] = await repo.listCards();
     expect(card?.name).toBe("sv9-77");
     expect(card?.set).toBe("sv9");
+  });
+
+  // ---- RFC 0001 MUST-FIX A/C: read the materialized display_name field ----
+  // docs/rfcs/0001-inventory-catalog-relink-and-display-fallback.md, section C.5.
+  // The sanitized name is composed ONCE, at import, from the structured Name +
+  // Card # columns and stored on the row as `display_name` (backend
+  // services/card_text.format_display_name). MCP reads that single stored field
+  // verbatim — it does NOT parse `notes` at all — so the ~90-line notes parser is
+  // gone and backend/MCP parity is structural, not hand-synced. This closes the
+  // "chat shows only the card ID, no name" bug without any free-text path.
+
+  it("uses the stored display_name when the catalog is missing and card_id is null", async () => {
+    const { repo } = repoWith({
+      "INV#0": [{ Items: [rawItem({ card_id: null, display_name: "Dragonair #181" })] }],
+    });
+
+    const [card] = await repo.listCards();
+    expect(card?.name).toBe("Dragonair #181");
+  });
+
+  it("uses the stored display_name for a graded slab too", async () => {
+    const { repo } = repoWith({
+      "INV#1": [{ Items: [gradedItem({ card_id: null, display_name: "Charizard #4" })] }],
+    });
+
+    const [card] = await repo.listCards();
+    expect(card?.name).toBe("Charizard #4");
+  });
+
+  // MCP never reads `notes`: a row carrying internal Notes free-text but NO stored
+  // display_name falls back to the ULID, so cost/consignor/location text can never
+  // reach the model. (Under the old read-time parser a trailing " #<digits>" leaked
+  // — that whole class of bug is gone with the parser.)
+  it("falls back to the item_id when there is no display_name, never parsing notes", async () => {
+    const item = rawItem({
+      card_id: null,
+      display_name: null,
+      notes: "cost 40 sold to David #12",
+    });
+    const { repo } = repoWith({ "INV#0": [{ Items: [item] }] });
+
+    const [card] = await repo.listCards();
+    expect(card?.name).toBe(String(item.item_id)); // ULID fallback, not the note
+    expect(card?.name).not.toContain("David");
+    expect(card?.name).not.toContain("cost 40");
+    expect(card?.name).not.toContain("12");
+  });
+
+  it("ignores notes entirely even when they look like an identity segment", async () => {
+    // A row whose notes read like "<name> #<n>" but which stored no display_name
+    // still falls back to the ULID — the name comes only from the stored field.
+    const item = rawItem({ card_id: null, notes: "Dragonair #181.0 — 30-32" });
+    const { repo } = repoWith({ "INV#0": [{ Items: [item] }] });
+
+    const [card] = await repo.listCards();
+    expect(card?.name).toBe(String(item.item_id));
+    expect(card?.name).not.toContain("30-32");
+  });
+
+  it("prefers the catalog name over a stored display_name for a matched item", async () => {
+    const { repo } = repoWith(
+      { "INV#0": [{ Items: [rawItem({ card_id: "base1-4", display_name: "Stale #99" })] }] },
+      { "CARD#base1-4|META": meta("base1-4") },
+    );
+
+    const [card] = await repo.listCards();
+    expect(card?.name).toBe("Charizard"); // catalog META wins over display_name
   });
 
   it("uses the catalog finish market price when the item has no synced market value", async () => {
@@ -378,13 +471,299 @@ describe("listCards", () => {
     expect(cards.map((c) => c.name).sort()).toEqual(["Charizard", "Pikachu"]);
   });
 
-  it("reports marketPrice 0 when no reference price exists anywhere", async () => {
+  it("reports no marketPrice at all when no reference price exists anywhere", async () => {
+    // No catalog row, no denormalized value, no listed price → null, NOT 0.
+    // A zero would be summed into totals as a real $0 valuation and would rank
+    // in topValuedCards; null lets the callers skip the item the way the
+    // backend's /inventory/summary skips it.
     const { repo } = repoWith({
-      "INV#2": [{ Items: [rawItem({ card_id: "sv9-77", current_market_value: null })] }],
+      "INV#2": [{
+        Items: [rawItem({ card_id: "sv9-77", current_market_value: null, listed_price: null })],
+      }],
     });
 
     const [card] = await repo.listCards();
+    expect(card?.marketPrice).toBeNull();
+  });
+});
+
+// ---- RFC 0008 §D (T3): price resolution must mirror /inventory/summary ----
+// The backend resolves a price LIVE first (models/inventory._market_price against
+// the catalog), and only falls back to the stored current_market_value ??
+// listed_price. This repository used to do the exact opposite, so whenever the
+// nightly denormalizer lagged the catalog, get_inventory_summary and
+// calculate_inventory_value summed stale figures while the dashboard summed live
+// ones. See routers/inventory.py:377-397.
+describe("display_name_override (mirrors itemTitle / adminItemName)", () => {
+  it("prefers an admin's override over the catalog name", async () => {
+    // The whole point of the override: a Japanese card whose catalog row is in
+    // Japanese script gets an admin-typed English name. Filter mode already
+    // honoured it; chat read the catalog name, so the two halves of /inventory
+    // called the same card different things.
+    const { repo } = repoWith(
+      { "INV#0": [{ Items: [rawItem({ display_name_override: "Chespin" })] }] },
+      { "CARD#base1-4|META": meta("base1-4", { name: "ハリマロン" }) },
+    );
+
+    const [card] = await repo.listCards();
+    expect(card?.name).toBe("Chespin");
+  });
+
+  it("prefers the override over the materialized display_name when unmatched", async () => {
+    const { repo } = repoWith(
+      {
+        "INV#0": [
+          {
+            Items: [
+              rawItem({
+                card_id: null,
+                display_name: "ハリマロン #84",
+                display_name_override: "Chespin #84",
+              }),
+            ],
+          },
+        ],
+      },
+      {},
+    );
+
+    const [card] = await repo.listCards();
+    expect(card?.name).toBe("Chespin #84");
+  });
+
+  it("ignores a blank override rather than naming a card after whitespace", async () => {
+    const { repo } = repoWith(
+      { "INV#0": [{ Items: [rawItem({ display_name_override: "   " })] }] },
+      { "CARD#base1-4|META": meta("base1-4", { name: "Charizard" }) },
+    );
+
+    const [card] = await repo.listCards();
+    expect(card?.name).toBe("Charizard");
+  });
+
+  it("still uses the catalog name when no override is set", async () => {
+    const { repo } = repoWith(
+      { "INV#0": [{ Items: [rawItem()] }] },
+      { "CARD#base1-4|META": meta("base1-4", { name: "Charizard" }) },
+    );
+
+    const [card] = await repo.listCards();
+    expect(card?.name).toBe("Charizard");
+  });
+});
+
+describe("marketPrice resolution order (mirrors /inventory/summary)", () => {
+  it("prefers the live catalog price over a stale current_market_value", async () => {
+    const { repo } = repoWith(
+      { "INV#0": [{ Items: [rawItem({ current_market_value: 400 })] }] },
+      { "CARD#base1-4|META": meta("base1-4", { prices: { holofoil: { market: 517 } } }) },
+    );
+
+    const [card] = await repo.listCards();
+    expect(card?.marketPrice).toBe(517);
+  });
+
+  it("applies the condition multiplier to the live catalog price", async () => {
+    // The backend adjusts on the customer path and in /inventory/summary; chat
+    // reads DynamoDB directly, so it has to apply the same multiplier or the
+    // two halves of /inventory quote different prices for the same card.
+    // DMG = 0.15x, so a $100 NM catalog figure is a $15 card.
+    const { repo } = repoWith(
+      { "INV#0": [{ Items: [rawItem({ condition: "DMG", current_market_value: null })] }] },
+      { "CARD#base1-4|META": meta("base1-4", { prices: { holofoil: { market: 100 } } }) },
+    );
+
+    const [card] = await repo.listCards();
+    expect(card?.marketPrice).toBe(15);
+  });
+
+  it("honours a condition modifier when adjusting the live price", async () => {
+    // LP+ is the midpoint of LP (0.82) and NM (1.00) -> 0.91x.
+    const { repo } = repoWith(
+      {
+        "INV#0": [
+          {
+            Items: [
+              rawItem({ condition: "LP", condition_modifier: "+", current_market_value: null }),
+            ],
+          },
+        ],
+      },
+      { "CARD#base1-4|META": meta("base1-4", { prices: { holofoil: { market: 100 } } }) },
+    );
+
+    const [card] = await repo.listCards();
+    expect(card?.marketPrice).toBe(91);
+  });
+
+  it("leaves a Near Mint live price exactly alone", async () => {
+    const { repo } = repoWith(
+      { "INV#0": [{ Items: [rawItem({ condition: "NM", current_market_value: null })] }] },
+      { "CARD#base1-4|META": meta("base1-4", { prices: { holofoil: { market: 42.5 } } }) },
+    );
+
+    const [card] = await repo.listCards();
+    expect(card?.marketPrice).toBe(42.5);
+  });
+
+  it("does not re-adjust the stored current_market_value", async () => {
+    // refresh_inventory_market_values already baked the multiplier into that
+    // field. Adjusting the fallback too would apply it twice and under-quote.
+    const { repo } = repoWith(
+      { "INV#0": [{ Items: [rawItem({ condition: "DMG", current_market_value: 15 })] }] },
+      { "CARD#base1-4|META": meta("base1-4", { prices: {} }) },
+    );
+
+    const [card] = await repo.listCards();
+    expect(card?.marketPrice).toBe(15);
+  });
+
+  it("falls back to current_market_value when the catalog carries no market figure", async () => {
+    const { repo } = repoWith(
+      { "INV#0": [{ Items: [rawItem({ current_market_value: 250 })] }] },
+      { "CARD#base1-4|META": meta("base1-4", { prices: {} }) },
+    );
+
+    const [card] = await repo.listCards();
+    expect(card?.marketPrice).toBe(250);
+  });
+
+  it("falls back to listed_price when there is no catalog figure and no synced value", async () => {
+    // Last rung of the backend's `current_market_value ?? listed_price` fallback.
+    const { repo } = repoWith(
+      { "INV#0": [{ Items: [rawItem({ current_market_value: null, listed_price: 175 })] }] },
+      { "CARD#base1-4|META": meta("base1-4", { prices: {} }) },
+    );
+
+    const [card] = await repo.listCards();
+    expect(card?.marketPrice).toBe(175);
+  });
+
+  it("gives a graded slab no catalog price, keeping its own stored figure", async () => {
+    // A slab has no finish and carries a grade premium the catalog does not
+    // know, so _market_price refuses to price it (inventory.py:316-319) and the
+    // caller keeps the slab's own value — even when the catalog is much cheaper.
+    const { repo } = repoWith(
+      { "INV#1": [{ Items: [gradedItem({ current_market_value: 700 })] }] },
+      { "CARD#base1-4|META": meta("base1-4", { prices: { holofoil: { market: 320.5 } } }) },
+    );
+
+    const [card] = await repo.listCards();
+    expect(card?.marketPrice).toBe(700);
+  });
+
+  it("resolves the item's own finish band, not merely the first one listed", async () => {
+    const { repo } = repoWith(
+      {
+        "INV#0": [{
+          Items: [rawItem({ finish: "reverseHolofoil", current_market_value: 400 })],
+        }],
+      },
+      {
+        "CARD#base1-4|META": meta("base1-4", {
+          prices: { normal: { market: 12 }, reverseHolofoil: { market: 88 } },
+        }),
+      },
+    );
+
+    const [card] = await repo.listCards();
+    expect(card?.marketPrice).toBe(88);
+  });
+
+  it("skips a catalog band whose market figure is not a number", async () => {
+    // MCP reads the raw DynamoDB map; unlike the Python side there is no pydantic
+    // gate turning garbage into None. With the catalog lookup now FIRST, a band of
+    // "N/A" would coerce to $0 and outrank a good current_market_value.
+    const { repo } = repoWith(
+      { "INV#0": [{ Items: [rawItem({ current_market_value: 400 })] }] },
+      {
+        "CARD#base1-4|META": meta("base1-4", {
+          prices: { holofoil: { market: "N/A" }, normal: { market: 61 } },
+        }),
+      },
+    );
+
+    const [card] = await repo.listCards();
+    expect(card?.marketPrice).toBe(61); // walks on to the next band, not 0
+  });
+
+  it("keeps a catalog band that is genuinely zero", async () => {
+    // 0 is a real price the Python side would return; only non-numeric bands skip.
+    const { repo } = repoWith(
+      { "INV#0": [{ Items: [rawItem({ current_market_value: 400 })] }] },
+      { "CARD#base1-4|META": meta("base1-4", { prices: { holofoil: { market: 0 } } }) },
+    );
+
+    const [card] = await repo.listCards();
     expect(card?.marketPrice).toBe(0);
+  });
+
+  it("takes no catalog price for a raw row that stores no finish", async () => {
+    // _market_price returns None on a falsy finish (inventory.py:321-322) rather
+    // than assuming "normal". Mirroring that matters more now the catalog lookup
+    // runs FIRST: guessing a band here would silently misprice the row.
+    const { repo } = repoWith(
+      { "INV#0": [{ Items: [rawItem({ finish: null, current_market_value: 400 })] }] },
+      { "CARD#base1-4|META": meta("base1-4", { prices: { normal: { market: 12 } } }) },
+    );
+
+    const [card] = await repo.listCards();
+    expect(card?.marketPrice).toBe(400);
+  });
+});
+
+// The bug this task exists to fix, stated as the equality it broke. The Python
+// side cannot run from vitest, so the expected total is the backend's documented
+// walk (routers/inventory.py:383-391) applied to this fixture term by term:
+//   stale raw   → catalog holofoil 517 wins over current_market_value 400  → 517
+//   graded slab → no catalog price for a slab, keeps current_market_value  → 700
+//   no catalog  → falls through to current_market_value                    → 250
+//   no price    → skipped, not counted as zero                             →   0
+//                                                                    est_value  1467
+// cards_in_vault counts all four; only est_value skips the unpriced one.
+describe("chat totals agree with the dashboard", () => {
+  it("sums the same est_value /inventory/summary would over the same rows", async () => {
+    const { repo } = repoWith(
+      {
+        "INV#0": [{
+          Items: [
+            rawItem({
+              SK: "ITEM#01JRAW000000000000000001",
+              item_id: "01JRAW000000000000000001",
+              current_market_value: 400, // stale: the denormalizer lags the catalog
+            }),
+            rawItem({
+              SK: "ITEM#01JRAW000000000000000002",
+              item_id: "01JRAW000000000000000002",
+              card_id: null, // JP print: no catalog match by design
+              display_name: "Chespin #84",
+              current_market_value: 250,
+            }),
+            rawItem({
+              SK: "ITEM#01JRAW000000000000000003",
+              item_id: "01JRAW000000000000000003",
+              card_id: null,
+              display_name: "Unpriced #1",
+              current_market_value: null,
+              listed_price: null,
+            }),
+          ],
+        }],
+        "INV#1": [{ Items: [gradedItem({ current_market_value: 700 })] }],
+      },
+      { "CARD#base1-4|META": meta("base1-4", { prices: { holofoil: { market: 517 } } }) },
+    );
+
+    const summary = await getInventorySummary(repo);
+
+    expect(summary.totalValue).toBe(1467);
+    expect(summary.totalCards).toBe(4); // the unpriced item is still held
+    // ...but it is not advertised as a $0 "top valued card".
+    expect(summary.topValuedCards).toEqual([
+      { name: "Charizard", value: 700 }, // the slab
+      { name: "Charizard", value: 517 }, // the stale raw, repriced live
+      { name: "Chespin #84", value: 250 },
+    ]);
   });
 });
 

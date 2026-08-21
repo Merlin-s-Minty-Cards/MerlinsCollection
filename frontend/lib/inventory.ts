@@ -26,6 +26,9 @@ export interface CardSummary {
   number: string
   rarity: string | null
   image_small: string | null
+  // Live pokemontcg.io market price for a matched card; null when the catalog
+  // has none, in which case the tile falls back to the sheet's listed price.
+  market_price: string | null
 }
 
 export type Language = 'EN' | 'JP'
@@ -46,6 +49,21 @@ interface ItemBase {
    */
   language?: Language
   card: CardSummary | null
+  /**
+   * Sanitized name+number fallback the backend derives from an unmatched item's
+   * identity text (e.g. "Dragonair #181"). Present only when there is no catalog
+   * card; carries no internal notes/cost/location. Ranks above the raw ULID in
+   * {@link itemTitle}.
+   */
+  display_name?: string | null
+  /**
+   * An admin-typed name that OUTRANKS the catalog name — the only thing that
+   * does. Set on a Japanese card whose catalog row is in Japanese script so a
+   * customer sees a name they can read; absent (the normal case) means the
+   * catalog name renders unchanged. Editing it never touches `card_id`, so it
+   * cannot break the item's catalog link. Read it via {@link itemTitle}.
+   */
+  display_name_override?: string | null
 }
 
 export interface RawInventoryItem extends ItemBase {
@@ -80,6 +98,13 @@ export type InventoryItem =
 export interface InventorySearchResult {
   items: InventoryItem[]
   total: number
+  /**
+   * How many otherwise-matching cards the price range excluded purely because
+   * they have no price on file. They stay excluded — a card with no known price
+   * cannot honestly be claimed to be under $500 — but the UI surfaces the count
+   * so they are not dropped invisibly. Always 0 when no price bound was sent.
+   */
+  hidden_no_price: number
 }
 
 /** Flat filter params the FastAPI `/inventory/search` endpoint accepts. */
@@ -92,6 +117,30 @@ export interface InventoryFilters {
   max_price?: string
   /** 'EN' | 'JP'; omitted (or '') means "all languages" (no filter). */
   language?: string
+  /** Sort order: newest, oldest, price_desc, price_asc, name_asc, name_desc. */
+  sort?: string
+}
+
+/** A set option from the facets endpoint. */
+export interface FacetSet {
+  id: string
+  name: string
+}
+
+/** Distinct filterable values present among customer-visible inventory. */
+export interface InventoryFacets {
+  sets: FacetSet[]
+  rarities: string[]
+  conditions: string[]
+  languages: string[]
+}
+
+/** Dashboard header stats over the customer-visible cohort. `est_value` is a
+ *  backend Decimal serialized as a string (format it with {@link formatPrice}). */
+export interface InventorySummary {
+  cards_in_vault: number
+  est_value: string
+  sets_tracked: number
 }
 
 export interface ChatMessage {
@@ -116,6 +165,7 @@ const FILTER_KEYS: (keyof InventoryFilters)[] = [
   'min_price',
   'max_price',
   'language',
+  'sort',
 ]
 
 /** Build a flat, URL-encoded query string from filters, omitting empty fields. */
@@ -138,6 +188,20 @@ export async function searchInventory(
   const query = buildSearchQuery(filters)
   const path = query ? `/inventory/search?${query}` : '/inventory/search'
   return apiFetch<InventorySearchResult>(path, { token: opts.token })
+}
+
+/** Fetch the authenticated dashboard summary (same cohort as the search). */
+export async function getInventorySummary(
+  opts: RequestOptions = {},
+): Promise<InventorySummary> {
+  return apiFetch<InventorySummary>('/inventory/summary', { token: opts.token })
+}
+
+/** Fetch distinct filter options from the DB (Phase 13 — no hardcoded values). */
+export async function getInventoryFacets(
+  opts: RequestOptions = {},
+): Promise<InventoryFacets> {
+  return apiFetch<InventoryFacets>('/inventory/facets', { token: opts.token })
 }
 
 /** Send a chat message (with prior turns) to the Bedrock-backed endpoint. */
@@ -175,12 +239,21 @@ const PRODUCT_TYPE_LABELS: Record<SealedProductType, string> = {
 }
 
 /**
- * Display name for a tile: a sealed product's own name, else the catalog name,
- * falling back to the card id and finally the item id when nothing is synced.
+ * Display name for a tile: an admin's `display_name_override` beats everything
+ * — including a sealed product's own name — since correcting what the customer
+ * reads is the whole point of it. With no override (the normal case): a sealed
+ * product's own name, else the catalog name, then the backend's sanitized
+ * name+number fallback, then the card id, and only the item id ULID as a last
+ * resort when nothing else is present.
+ *
+ * The override is checked with a trim rather than `??` because `??` passes an
+ * empty string straight through, which would render a NAMELESS tile.
  */
 export function itemTitle(item: InventoryItem): string {
+  const override = item.display_name_override?.trim()
+  if (override) return override
   if (item.kind === 'sealed') return item.product_name
-  return item.card?.name ?? item.card_id ?? item.item_id
+  return item.card?.name ?? item.display_name ?? item.card_id ?? item.item_id
 }
 
 /**

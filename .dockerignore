@@ -7,6 +7,10 @@ dist
 **/dist
 *.tsbuildinfo
 
+# CDK output — excluding this stops the Docker build context from bundling
+# its own previous cdk.out into itself on every synth (runaway nested growth)
+infra/cdk.out
+
 # Python
 .venv
 venv

@@ -127,8 +127,26 @@ def get_current_user(
 
 
 def require_admin(
-    user: AuthenticatedUser = Depends(get_current_user),
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+    verifier: CognitoJwtVerifier | None = Depends(get_verifier),
 ) -> AuthenticatedUser:
+    """Gate admin routes. Accepts either:
+    1. A static API key (``ADMIN_API_KEY`` setting) — for Retool/external tools.
+    2. A valid Cognito JWT for a user in the admin group.
+
+    The API key path bypasses Cognito entirely and returns a synthetic admin user.
+    """
+    # --- Path 1: Static API key ---
+    if settings.admin_api_key and credentials and credentials.credentials:
+        if credentials.credentials == settings.admin_api_key:
+            return AuthenticatedUser(
+                sub="api-key-admin",
+                username="retool",
+                is_admin=True,
+            )
+
+    # --- Path 2: Cognito JWT (original flow) ---
+    user = get_current_user(credentials, verifier)
     if not user.is_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

@@ -1,0 +1,26 @@
+{
+  "status_code": 403,
+  "elapsed_ms": 674,
+  "body_bytes": 66,
+  "headers": {
+    "date": "Sat, 08 Aug 2026 18:48:26 GMT",
+    "content-type": "application/json; charset=utf-8",
+    "transfer-encoding": "chunked",
+    "connection": "keep-alive",
+    "cache-control": "no-cache",
+    "pragma": "no-cache",
+    "expires": "-1",
+    "x-aspnet-version": "4.0.30319",
+    "x-powered-by": "ASP.NET",
+    "access-control-allow-origin": "*",
+    "access-control-allow-headers": "authorization, Content-Type, cache-control, postman-token",
+    "access-control-allow-methods": "GET, POST, OPTIONS",
+    "cf-cache-status": "DYNAMIC",
+    "strict-transport-security": "max-age=0; includeSubDomains; preload",
+    "speculation-rules": "\"/cdn-cgi/speculation\"",
+    "content-encoding": "gzip",
+    "server": "cloudflare",
+    "cf-ray": "a280b1f98847c4cb-SEA",
+    "alt-svc": "h3=\":443\"; ma=86400"
+  }
+}

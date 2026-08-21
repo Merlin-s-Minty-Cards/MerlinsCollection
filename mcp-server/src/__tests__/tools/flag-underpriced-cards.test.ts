@@ -15,6 +15,18 @@ const seed = () =>
 const ids = (cards: Array<{ id: string }>) => cards.map((c) => c.id);
 
 describe("flagUnderpricedCards", () => {
+  // RFC 0008 §D (T3): an unresolvable price is null, not 0. Skipped for the same
+  // reason a 0 is — there is no meaningful discount against "unknown".
+  it("skips cards with no resolvable market price", async () => {
+    const repo = new InMemoryInventoryRepository([
+      card({ id: "unpriced", value: null, marketPrice: null }),
+    ]);
+
+    const result = await flagUnderpricedCards(repo, 80);
+
+    expect(result.flaggedCards).toEqual([]);
+  });
+
   it("flags cards listed below the threshold percentage of market price", async () => {
     const result = await flagUnderpricedCards(seed(), 80);
 

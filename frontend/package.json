@@ -9,23 +9,27 @@
     "lint": "next lint",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage --passWithNoTests"
+    "test:coverage": "vitest run --coverage --passWithNoTests",
+    "build:opennext": "open-next build"
   },
   "dependencies": {
     "@portabletext/react": "^3.2.4",
     "@sanity/client": "^6.22.0",
+    "chart.js": "4.4.7",
     "lucide-react": "^1.21.0",
     "next": "^15.3.0",
     "next-auth": "5.0.0-beta.31",
     "next-sanity": "^9.4.0",
     "react": "^18.3.0",
+    "react-chartjs-2": "5.3.0",
     "react-dom": "^18.3.0",
-    "sanity": "^3.99.0",
-    "styled-components": "^6.4.3",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "sanity": "^3.99.0",
+    "styled-components": "^6.4.3"
   },
   "devDependencies": {
+    "@opennextjs/aws": "^4.1.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",

@@ -1,7 +1,9 @@
 import time
 from datetime import date as _date
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+
+import pytest
 
 from merlins_collection.models.business import (
     BuyingPolicy,
@@ -66,6 +68,16 @@ def test_batch_upsert_handles_more_than_25(dynamo_repo):
     assert len(dynamo_repo.list_cards_by_set("setBig")) == 30
 
 
+def test_batch_upsert_deduplicates_repeated_ids_within_one_call(dynamo_repo):
+    """boto3's ``batch_writer`` does not deduplicate: two rows with the same key
+    in one request raise ``ValidationException`` and fail the whole 25-item
+    batch — killing the run over rows that were redundant, not wrong."""
+    dynamo_repo.batch_upsert_catalog_cards(
+        [_card("dupe-1", market="1.00"), _card("dupe-1", market="2.00")]
+    )
+    assert dynamo_repo.get_catalog_card("dupe-1").prices["holofoil"].market == Decimal("2.00")
+
+
 def test_batch_get_catalog_cards_returns_found_and_skips_missing(dynamo_repo):
     dynamo_repo.batch_upsert_catalog_cards([_card("a-1"), _card("a-2")])
 
@@ -86,6 +98,75 @@ def test_batch_get_catalog_cards_handles_more_than_100_keys(dynamo_repo):
 
 def test_batch_get_catalog_cards_empty_input_returns_empty(dynamo_repo):
     assert dynamo_repo.batch_get_catalog_cards([]) == {}
+
+
+# ---------------------------------------------------------------------------
+# upsert_catalog_card_preserving_prices — the depth pass's write (RFC 0003 §7)
+#
+# The invariant "a depth-pass write never deletes, zeroes or nulls an existing
+# price" lives HERE, in the storage layer, rather than in an `if` at the caller.
+# These tests are the enforcement: they exercise the repository directly, with
+# no depth pass in sight, so the guarantee survives a future second caller.
+# ---------------------------------------------------------------------------
+
+
+def _priceless(card_id="swsh1-1", set_id="swsh1", *, rarity="Rare Holo V",
+               name="Celebi V"):
+    """An identity-complete card carrying no price band at all.
+
+    This is what ``to_catalog_card`` returns for a perfectly good HTTP 200 whose
+    ``pricing`` block is absent, null, or carries only a ``lowPrice`` with a null
+    ``marketPrice`` — a case ``tcgdex`` documents as routine, not exceptional.
+    """
+    return CatalogCard(
+        card_id=card_id, name=name, set_id=set_id, set_name="S&S", number="1",
+        rarity=rarity, images={"small": "s", "large": "l"}, prices={},
+        detail="full", last_synced_at=datetime(2026, 6, 23, 12, 0, 0),
+    )
+
+
+def test_preserving_upsert_keeps_a_stored_band_when_the_incoming_card_has_none(dynamo_repo):
+    dynamo_repo.batch_upsert_catalog_cards([_card(market="9.25")])
+
+    dynamo_repo.upsert_catalog_card_preserving_prices(_priceless(rarity="Reprint"))
+
+    card = dynamo_repo.get_catalog_card("swsh1-1")
+    assert card.prices["holofoil"].market == Decimal("9.25")  # never nulled
+    assert card.rarity == "Reprint"      # ...and the row IS otherwise updated
+    assert card.detail == "full"
+
+
+def test_preserving_upsert_replaces_the_band_when_the_incoming_card_has_one(dynamo_repo):
+    """Preservation must not curdle into immutability: the very next response
+    that does carry a price has to land, or the price freezes forever."""
+    dynamo_repo.batch_upsert_catalog_cards([_card(market="9.25")])
+
+    dynamo_repo.upsert_catalog_card_preserving_prices(_card(market="2.00"))
+
+    assert dynamo_repo.get_catalog_card("swsh1-1").prices["holofoil"].market == Decimal("2.00")
+
+
+def test_preserving_upsert_creates_a_row_that_does_not_exist_yet(dynamo_repo):
+    """It is an UPSERT: a card the catalog has never seen must still be written,
+    priced or not, or a new holding would never get its identity row."""
+    dynamo_repo.upsert_catalog_card_preserving_prices(_priceless("swsh1-new"))
+
+    card = dynamo_repo.get_catalog_card("swsh1-new")
+    assert card is not None
+    assert card.prices == {}
+    assert card.rarity == "Rare Holo V"
+
+
+def test_preserving_upsert_leaves_other_cards_alone(dynamo_repo):
+    """It writes one row. Also pins that the GSI key is maintained: an
+    `update_item` that skipped `GSI1PK` would leave the row queryable only under
+    the set it used to belong to."""
+    dynamo_repo.batch_upsert_catalog_cards([_card("a-1", "setA"), _card("a-2", "setA")])
+
+    dynamo_repo.upsert_catalog_card_preserving_prices(_priceless("a-1", "setA"))
+
+    assert dynamo_repo.get_catalog_card("a-2").prices["holofoil"].market == Decimal("12.50")
+    assert {c.card_id for c in dynamo_repo.list_cards_by_set("setA")} == {"a-1", "a-2"}
 
 
 def test_batch_get_catalog_cards_bounds_unprocessed_retries(dynamo_repo, monkeypatch):
@@ -146,7 +227,7 @@ def test_catalog_upsert_does_not_clobber_graded_price(dynamo_repo):
 
 
 def _raw_point(card_id, d, market):
-    return PricePoint(card_id=card_id, date=d, source="pokemontcg.io",
+    return PricePoint(card_id=card_id, date=d, source="tcgplayer",
                       kind="raw", finish="holofoil", market=Decimal(market))
 
 
@@ -247,6 +328,133 @@ def test_put_then_get_graded_inventory_item(dynamo_repo):
     )
     dynamo_repo.put_inventory_item(item)
     assert dynamo_repo.get_inventory_item(item.item_id) == item
+
+
+def test_raw_price_points_are_stamped_with_a_retention_ttl(dynamo_repo):
+    """RFC 0015: every price-history row carries a `ttl` DynamoDB can expire on
+    its own — no pruning job needed. Computed from the point's own `date`, not
+    write time, so a backfilled or late-written point still expires on schedule.
+    """
+    dynamo_repo.append_price_points([_raw_point("c5", _date(2026, 6, 20), "10")])
+
+    raw = dynamo_repo._table.get_item(
+        Key={"PK": "CARD#c5", "SK": "PRICE#RAW#holofoil#2026-06-20"}
+    )["Item"]
+    expected = int(
+        (datetime(2026, 6, 20, tzinfo=timezone.utc) + timedelta(days=730)).timestamp()
+    )
+    assert raw["ttl"] == expected
+
+
+def test_item_price_points_are_stamped_with_a_retention_ttl(dynamo_repo):
+    dynamo_repo.append_item_price_point("item-9", _date(2026, 3, 1), Decimal("40"))
+
+    raw = dynamo_repo._table.get_item(
+        Key={"PK": "ITEM#item-9", "SK": "PRICE#2026-03-01"}
+    )["Item"]
+    expected = int(
+        (datetime(2026, 3, 1, tzinfo=timezone.utc) + timedelta(days=730)).timestamp()
+    )
+    assert raw["ttl"] == expected
+
+
+def test_backfill_price_history_ttl_stamps_legacy_rows(dynamo_repo):
+    """A row written before this feature existed carries no `ttl` at all."""
+    dynamo_repo._table.put_item(Item={
+        "PK": "CARD#legacy-1", "SK": "PRICE#RAW#holofoil#2026-01-01",
+        "entity": "price_point", "card_id": "legacy-1", "date": "2026-01-01",
+        "source": "tcgplayer", "kind": "raw", "finish": "holofoil",
+        "market": Decimal("9.99"),
+    })
+
+    result = dynamo_repo.backfill_price_history_ttl(dry_run=False)
+
+    assert result["candidates"] == 1
+    raw = dynamo_repo._table.get_item(
+        Key={"PK": "CARD#legacy-1", "SK": "PRICE#RAW#holofoil#2026-01-01"}
+    )["Item"]
+    expected = int(
+        (datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(days=730)).timestamp()
+    )
+    assert raw["ttl"] == expected
+    # A targeted update, not a scan-then-put_item of the whole row — the field
+    # a concurrent nightly-sync write could have touched must survive untouched.
+    assert raw["market"] == Decimal("9.99")
+
+
+def test_backfill_price_history_ttl_dry_run_writes_nothing(dynamo_repo):
+    dynamo_repo._table.put_item(Item={
+        "PK": "CARD#legacy-2", "SK": "PRICE#RAW#holofoil#2026-01-01",
+        "entity": "price_point", "card_id": "legacy-2", "date": "2026-01-01",
+        "source": "tcgplayer", "kind": "raw", "finish": "holofoil",
+        "market": Decimal("5.00"),
+    })
+
+    result = dynamo_repo.backfill_price_history_ttl(dry_run=True)
+
+    assert result["candidates"] == 1
+    raw = dynamo_repo._table.get_item(
+        Key={"PK": "CARD#legacy-2", "SK": "PRICE#RAW#holofoil#2026-01-01"}
+    )["Item"]
+    assert "ttl" not in raw
+
+
+def test_backfill_price_history_ttl_skips_rows_already_stamped(dynamo_repo):
+    """A point written after this feature ships already carries `ttl` — a
+    re-run of the backfill must not treat it as a candidate."""
+    dynamo_repo.append_price_points([_raw_point("c10", _date(2026, 6, 20), "10")])
+
+    result = dynamo_repo.backfill_price_history_ttl(dry_run=False)
+
+    assert result["candidates"] == 0
+
+
+# ---------------------------------------------------------------------------
+# list_price_history_ttl_candidates / apply_price_history_ttl (RFC 0015
+# follow-up): split out of `backfill_price_history_ttl` so a caller can chunk
+# the write side and report progress between chunks — on a real table this
+# scan+write took ~90 minutes with zero output from the single-call version,
+# which looked identical to a hang.
+# ---------------------------------------------------------------------------
+
+
+def test_list_price_history_ttl_candidates_finds_legacy_rows(dynamo_repo):
+    dynamo_repo._table.put_item(Item={
+        "PK": "CARD#legacy-3", "SK": "PRICE#RAW#holofoil#2026-01-01",
+        "entity": "price_point", "card_id": "legacy-3", "date": "2026-01-01",
+        "source": "tcgplayer", "kind": "raw", "finish": "holofoil",
+        "market": Decimal("9.99"),
+    })
+    dynamo_repo.append_price_points([_raw_point("c11", _date(2026, 6, 20), "10")])  # already has ttl
+
+    candidates = dynamo_repo.list_price_history_ttl_candidates()
+
+    assert candidates == [
+        ("CARD#legacy-3", "PRICE#RAW#holofoil#2026-01-01", "2026-01-01"),
+    ]
+
+
+def test_apply_price_history_ttl_stamps_exactly_the_given_rows(dynamo_repo):
+    dynamo_repo._table.put_item(Item={
+        "PK": "CARD#legacy-4", "SK": "PRICE#RAW#holofoil#2026-01-01",
+        "entity": "price_point", "card_id": "legacy-4", "date": "2026-01-01",
+        "source": "tcgplayer", "kind": "raw", "finish": "holofoil",
+        "market": Decimal("9.99"),
+    })
+
+    written = dynamo_repo.apply_price_history_ttl(
+        [("CARD#legacy-4", "PRICE#RAW#holofoil#2026-01-01", "2026-01-01")]
+    )
+
+    assert written == 1
+    raw = dynamo_repo._table.get_item(
+        Key={"PK": "CARD#legacy-4", "SK": "PRICE#RAW#holofoil#2026-01-01"}
+    )["Item"]
+    expected = int(
+        (datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(days=730)).timestamp()
+    )
+    assert raw["ttl"] == expected
+    assert raw["market"] == Decimal("9.99")  # a targeted update, not a full replace
 
 
 def test_price_history_start_only(dynamo_repo):
@@ -476,6 +684,73 @@ def test_R6_import_lock_is_not_import_owned(dynamo_repo):
     dynamo_repo.release_import_lock("gen-A")
 
 
+# ---- catalog reseed lock (RFC 0003 §8) ----
+# A second, PARALLEL lock domain from the import lock above -- same
+# conditional-write + TTL-expiry semantics, but keyed under its own
+# "CATALOGLOCK"/"LOCK" item so a spreadsheet import and a catalog reseed can
+# never block each other. Phase 9 wires only the depth-pass side
+# (`refresh_held_prices`) to this lock; the reseed side (`seed_catalog.py`)
+# stays unwired this session. These tests pin the LOCK's own behavior so the
+# eventual `_acquire_lock(key, gen, ttl)` extraction (RFC §8) is safe.
+
+
+def test_catalog_lock_is_single_flight(dynamo_repo):
+    from merlins_collection.services.dynamodb import CatalogReseedInProgressError
+    dynamo_repo.acquire_catalog_lock("cgen-A")
+    # A second acquire while the lock is held is refused.
+    try:
+        dynamo_repo.acquire_catalog_lock("cgen-B")
+        raised = False
+    except CatalogReseedInProgressError:
+        raised = True
+    assert raised
+    # After release, a new run can acquire.
+    dynamo_repo.release_catalog_lock("cgen-A")
+    dynamo_repo.acquire_catalog_lock("cgen-B")  # no raise
+    dynamo_repo.release_catalog_lock("cgen-B")
+
+
+def test_catalog_lock_reclaims_an_expired_lock(dynamo_repo):
+    # A negative TTL stamps `expires_at` in the past at write time, so the lock
+    # is already stale for any later acquire attempt -- deterministic, no real
+    # sleep or wall-clock mocking required.
+    dynamo_repo.acquire_catalog_lock("cgen-A", ttl_seconds=-10)
+    dynamo_repo.acquire_catalog_lock("cgen-B")  # reclaims the expired lock; no raise
+    dynamo_repo.release_catalog_lock("cgen-B")
+
+
+def test_catalog_lock_release_is_a_noop_when_the_lock_was_stolen(dynamo_repo):
+    from merlins_collection.services.dynamodb import CatalogReseedInProgressError
+    dynamo_repo.acquire_catalog_lock("cgen-A", ttl_seconds=-10)
+    dynamo_repo.acquire_catalog_lock("cgen-B")  # reclaims; steals the lock from A
+    # Releasing under the OLD (stolen) gen must be a silent no-op, not an error,
+    # and must NOT clear B's now-live lock.
+    dynamo_repo.release_catalog_lock("cgen-A")
+    try:
+        dynamo_repo.acquire_catalog_lock("cgen-C")
+        held = False
+    except CatalogReseedInProgressError:
+        held = True
+    assert held  # B's lock is still in force
+    dynamo_repo.release_catalog_lock("cgen-B")
+
+
+def test_catalog_lock_is_independent_of_the_import_lock(dynamo_repo):
+    # RFC 0003 §8: "a second, parallel generation domain, not an extension of
+    # the first" -- holding one must never block the other.
+    dynamo_repo.acquire_import_lock("igen-A")
+    dynamo_repo.acquire_catalog_lock("cgen-A")  # must not raise
+    dynamo_repo.release_import_lock("igen-A")
+    dynamo_repo.release_catalog_lock("cgen-A")
+
+
+def test_current_catalog_generation_is_none_on_a_fresh_table(dynamo_repo):
+    # No `CATALOGGEN` marker has ever been written (the reseed/`finalize_catalog`
+    # writer stays unwired this session), so reading it back must degrade to
+    # "no generation" rather than raise.
+    assert dynamo_repo.current_catalog_generation() is None
+
+
 # ---- import-owned data probe (re-import guard) ----
 
 def test_find_import_owned_entity_none_on_empty_table(dynamo_repo):
@@ -570,3 +845,340 @@ def test_R5_finalize_scan_reads_strongly_consistent(dynamo_repo):
     dynamo_repo.set_import_generation(None)
     assert scan_consistency  # the finalize scan ran
     assert all(c is True for c in scan_consistency)  # every page read strongly-consistent
+
+
+# ======================= scoped guard + scoped sweep =========================
+# A Singles-only import must be able to ask "does inventory/transaction data
+# already exist?" and to sweep ONLY inventory/transaction on commit, without the
+# shows/debts/payouts/consignors/config rows it never touches being probed,
+# refused over, or deleted. Both knobs sentinel-default to today's full scope.
+
+_SCOPED = frozenset({"inventory_item", "transaction"})
+
+
+def _seed_other_business_data(repo):
+    """One row of every import-owned entity a Singles-only run must NOT touch."""
+    from merlins_collection.models.business import (
+        BalanceSheetLine,
+        BalanceSheetSection,
+        BalanceSheetSnapshot,
+        Payout,
+    )
+    repo.put_show(Show(show_id="s1", name="Mint City", date=_date(2026, 3, 8)))
+    repo.put_debt(_debt("Colin"))
+    repo.put_payout(Payout(event="E1", partner="Casey", amount=Decimal("40")))
+    repo.put_consignor(Consignor(consignor_id="c1", name="Rylan"))
+    repo.put_cash_account(CashAccount(account="venmo", balance=Decimal("10")))
+    repo.put_payment_method(PaymentMethod(method="cash"))
+    repo.put_buying_policy(BuyingPolicy(product_type="raw", cash_pct_min=Decimal("60")))
+    repo.put_balance_sheet(BalanceSheetSnapshot(
+        snapshot_id="current", label="current", frozen=False,
+        lines=[BalanceSheetLine(section=BalanceSheetSection.ASSET,
+                                label="Inventory", amount=Decimal("100"))]))
+
+
+def test_find_import_owned_entity_scoped_ignores_out_of_scope_entities(dynamo_repo):
+    _seed_other_business_data(dynamo_repo)
+    # Unscoped, this table plainly holds business data...
+    assert dynamo_repo.find_import_owned_entity() is not None
+    # ...but a Singles-only run asks only about inventory/transactions.
+    assert dynamo_repo.find_import_owned_entity(entities=_SCOPED) is None
+
+
+def test_find_import_owned_entity_scoped_still_detects_in_scope_entities(dynamo_repo):
+    dynamo_repo.put_inventory_item(_raw_item())
+    assert dynamo_repo.find_import_owned_entity(entities=_SCOPED) == "inventory_item"
+
+
+def test_find_import_owned_entity_scoped_does_not_query_other_partitions(dynamo_repo):
+    # "Not swept" is not enough — the out-of-scope partitions must not even be READ.
+    _seed_other_business_data(dynamo_repo)
+    queried, original_query = [], dynamo_repo._table.query
+
+    def _spy(**kwargs):
+        queried.append(kwargs["KeyConditionExpression"].get_expression()["values"][1])
+        return original_query(**kwargs)
+
+    dynamo_repo._table.query = _spy
+    assert dynamo_repo.find_import_owned_entity(entities=_SCOPED) is None
+    assert queried  # the probe really ran
+    assert set(queried) == {f"INV#{b}" for b in range(INVENTORY_SHARD_COUNT)}
+
+
+def test_find_import_owned_entity_rejects_an_unknown_entity_name(dynamo_repo):
+    with pytest.raises(ValueError, match="not import-owned"):
+        dynamo_repo.find_import_owned_entity(entities={"catalog_card"})
+
+
+def test_find_import_owned_entity_rejects_a_scope_with_no_probeable_partition(
+        dynamo_repo):
+    # The month-partitioned ledgers are never probed directly, so a scope naming
+    # ONLY one of them would silently always answer "no data" — refuse instead.
+    dynamo_repo.put_inventory_item(_raw_item())
+    with pytest.raises(ValueError, match="no probeable partition"):
+        dynamo_repo.find_import_owned_entity(entities={"transaction"})
+    with pytest.raises(ValueError, match="no probeable partition"):
+        dynamo_repo.find_import_owned_entity(entities=frozenset())
+
+
+def test_entity_partition_map_matches_the_unscoped_probe(dynamo_repo):
+    # The scoped map and the unscoped partition list must not drift: every
+    # import-owned entity has an entry, and their union is exactly what an
+    # unscoped probe reads. An entity added without an entry fails here.
+    repo = type(dynamo_repo)
+    assert set(repo._ENTITY_PARTITIONS) == set(repo._IMPORT_OWNED_ENTITIES)
+    union = {p for ps in repo._ENTITY_PARTITIONS.values() for p in ps}
+    unscoped = {f"INV#{b}" for b in range(INVENTORY_SHARD_COUNT)}
+    unscoped |= set(repo._BUSINESS_PARTITIONS)
+    assert union == unscoped
+
+
+def test_finalize_import_entity_scope_leaves_other_entities_alone(dynamo_repo):
+    # Prior generation: everything. New generation: inventory only.
+    dynamo_repo.set_import_generation("gen-old")
+    _seed_other_business_data(dynamo_repo)
+    dynamo_repo.put_inventory_item(_raw_item(card_id="old-1"))
+    dynamo_repo.finalize_import("gen-old", committed=True)
+
+    dynamo_repo.set_import_generation("gen-new")
+    dynamo_repo.put_inventory_item(_raw_item(card_id="new-1"))
+    removed = dynamo_repo.finalize_import("gen-new", committed=True,
+                                          entity_scope=_SCOPED)
+    dynamo_repo.set_import_generation(None)
+
+    assert removed == 1  # only the prior generation's inventory row
+    assert [i.card_id for i in dynamo_repo.list_inventory()] == ["new-1"]
+    # Everything outside the scope survived, gen-old tag and all.
+    assert len(dynamo_repo.list_shows()) == 1
+    assert len(dynamo_repo.list_debts()) == 1
+    assert len(dynamo_repo.list_payouts()) == 1
+    assert len(dynamo_repo.list_consignors()) == 1
+    assert len(dynamo_repo.list_cash_accounts()) == 1
+    assert len(dynamo_repo.list_payment_methods()) == 1
+    assert len(dynamo_repo.list_buying_policies()) == 1
+    assert len(dynamo_repo.list_balance_sheets()) == 1
+
+
+def test_finalize_import_without_a_scope_still_sweeps_everything(dynamo_repo):
+    # REGRESSION GUARD (mirrors the scoped test above exactly, minus the kwarg):
+    # omitting entity_scope must keep today's all-or-nothing swap behavior.
+    dynamo_repo.set_import_generation("gen-old")
+    _seed_other_business_data(dynamo_repo)
+    dynamo_repo.put_inventory_item(_raw_item(card_id="old-1"))
+    dynamo_repo.finalize_import("gen-old", committed=True)
+
+    dynamo_repo.set_import_generation("gen-new")
+    dynamo_repo.put_inventory_item(_raw_item(card_id="new-1"))
+    dynamo_repo.finalize_import("gen-new", committed=True)
+    dynamo_repo.set_import_generation(None)
+
+    assert [i.card_id for i in dynamo_repo.list_inventory()] == ["new-1"]
+    assert dynamo_repo.list_shows() == []
+    assert dynamo_repo.list_debts() == []
+    assert dynamo_repo.list_payouts() == []
+    assert dynamo_repo.list_consignors() == []
+    assert dynamo_repo.list_cash_accounts() == []
+    assert dynamo_repo.list_payment_methods() == []
+    assert dynamo_repo.list_buying_policies() == []
+    assert dynamo_repo.list_balance_sheets() == []
+
+
+def test_finalize_import_entity_scope_also_scopes_a_rollback(dynamo_repo):
+    # A scoped ROLLBACK must not delete this generation's out-of-scope rows
+    # either — it only unwinds what the scoped run itself was allowed to write.
+    dynamo_repo.set_import_generation("gen-x")
+    _seed_other_business_data(dynamo_repo)
+    dynamo_repo.put_inventory_item(_raw_item(card_id="doomed"))
+    removed = dynamo_repo.finalize_import("gen-x", committed=False,
+                                          entity_scope=_SCOPED)
+    dynamo_repo.set_import_generation(None)
+
+    assert removed == 1
+    assert dynamo_repo.list_inventory() == []
+    assert len(dynamo_repo.list_shows()) == 1
+
+
+def test_finalize_import_rejects_a_bad_entity_scope(dynamo_repo):
+    with pytest.raises(ValueError, match="not import-owned"):
+        dynamo_repo.finalize_import("gen-x", committed=True,
+                                    entity_scope={"catalog_card"})
+    with pytest.raises(ValueError, match="empty"):
+        dynamo_repo.finalize_import("gen-x", committed=True,
+                                    entity_scope=frozenset())
+
+
+# ---- float -> Decimal coercion -------------------------------------------
+# DynamoDB has no float type and boto3 refuses one outright ("Float types are
+# not supported. Use Decimal types instead."). Every value we write therefore
+# has to be a Decimal by the time it reaches `put_item`. Pydantic models give
+# us that for free, but the sell/buy/trade session routers store RAW REQUEST
+# JSON, where a price arrives as a Python float. That path 500'd in production
+# on `POST /admin/sales/{id}/items` -- these tests pin the coercion that fixes
+# it. The tests above never caught it because they all send prices as STRINGS.
+
+def test_serialize_converts_float_to_decimal():
+    from merlins_collection.services.dynamodb import _serialize
+
+    assert _serialize(45.0) == Decimal("45.0")
+    assert isinstance(_serialize(45.0), Decimal)
+
+
+def test_serialize_float_conversion_goes_through_str_not_binary():
+    # Decimal(0.1) is 0.1000000000000000055511151231257827..., which would
+    # persist a price that no longer round-trips. Decimal(str(0.1)) is "0.1".
+    from merlins_collection.services.dynamodb import _serialize
+
+    assert _serialize(0.1) == Decimal("0.1")
+    assert _serialize(45.67) == Decimal("45.67")
+
+
+def test_serialize_converts_floats_nested_in_dicts_and_lists():
+    from merlins_collection.services.dynamodb import _serialize
+
+    result = _serialize({"items": [{"agreed_price": 45.5, "discount_pct": 10.0}]})
+    price = result["items"][0]["agreed_price"]
+    assert isinstance(price, Decimal) and price == Decimal("45.5")
+    assert isinstance(result["items"][0]["discount_pct"], Decimal)
+
+
+def test_serialize_leaves_ints_and_bools_alone():
+    # bool is a subclass of int, not of float, but DynamoDB stores it as BOOL
+    # and turning it into Decimal("1") would silently change the stored type.
+    from merlins_collection.services.dynamodb import _serialize
+
+    assert _serialize(True) is True
+    assert _serialize(False) is False
+    assert _serialize(7) == 7 and isinstance(_serialize(7), int)
+
+
+def test_serialize_rejects_nan_and_infinity():
+    # Python's json module parses the bare literals NaN/Infinity, so these can
+    # reach us from a request body. DynamoDB cannot store either; failing here
+    # names the offending value instead of surfacing a boto3 error two frames on.
+    from merlins_collection.services.dynamodb import _serialize
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="finite"):
+            _serialize(bad)
+
+
+def test_put_sell_session_accepts_float_prices(dynamo_repo):
+    # The exact production payload: the Sell page sends agreed_price as a JSON
+    # number (sell/page.tsx builds it with parseFloat), so it lands as a float.
+    dynamo_repo.put_sell_session({
+        "sell_id": "sell-float-1",
+        "status": "draft",
+        "created_at": "2026-08-07T00:00:00",
+        "items": [{"item_id": "card-1", "agreed_price": 45.5,
+                   "original_price": 60.0, "discount_pct": 24.17}],
+    })
+
+    stored = dynamo_repo.get_sell_session("sell-float-1")
+    assert stored["items"][0]["agreed_price"] == Decimal("45.5")
+
+
+# --- RFC 0009 T1: the cert pointer row ------------------------------------
+#
+# "Do I already own this slab?" must be an O(1) point read. CLAUDE.md's Ops
+# section records what a full-table scan on a request path already cost this
+# project once.
+#
+# Staleness is handled on the READ side: the pointer is advisory, and
+# ``get_item_id_by_cert`` re-reads the item and confirms it still claims that
+# cert. The alternative -- sweeping the old pointer on update -- would put an
+# extra ``get_item`` on EVERY inventory write, including the bulk import loop,
+# and still would not cover a deleted item.
+
+
+def _graded_item(cert_number="12345678", company=GradingCompany.PSA, **over):
+    kw = dict(
+        card_id="swsh1-1", cost_basis=Decimal("300"), acquired_at=_date(2026, 1, 1),
+        company=company, grade=Decimal("10"), cert_number=cert_number,
+    )
+    kw.update(over)
+    return GradedInventoryItem(**kw)
+
+
+def test_saving_a_graded_item_writes_a_resolvable_cert_pointer(dynamo_repo):
+    item = _graded_item()
+    dynamo_repo.put_inventory_item(item)
+    assert dynamo_repo.get_item_id_by_cert("PSA", "12345678") == item.item_id
+
+
+def test_get_item_id_by_cert_returns_none_for_unknown_cert(dynamo_repo):
+    assert dynamo_repo.get_item_id_by_cert("PSA", "99999999") is None
+
+
+def _cert_pointer_rows(repo):
+    """Every cert_pointer row in the table. Asserted directly rather than through
+    the reader, because "the lookup returns None" is also what a WRONG pointer
+    looks like -- these two tests are about nothing being written at all."""
+    return [i for i in repo._table.scan().get("Items", [])
+            if i.get("entity") == "cert_pointer"]
+
+
+def test_saving_a_raw_item_writes_no_cert_pointer(dynamo_repo):
+    """A raw single has no cert. Nothing should land in the CERT# partition."""
+    dynamo_repo.put_inventory_item(_raw_item())
+    assert _cert_pointer_rows(dynamo_repo) == []
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_saving_a_graded_item_with_a_blank_cert_writes_no_pointer(dynamo_repo, blank):
+    """An unverified/manual slab may have no cert yet. Writing ``CERT#PSA#``
+    would make every such slab a duplicate of every other."""
+    dynamo_repo.put_inventory_item(_graded_item(cert_number=blank))
+    assert _cert_pointer_rows(dynamo_repo) == []
+
+
+def test_editing_a_cert_makes_the_old_pointer_stop_resolving(dynamo_repo):
+    """The stale-pointer case. Re-pointing a slab at its real cert leaves the
+    old pointer row behind; the reader must not report the item under a cert it
+    no longer claims, or the owner gets a false "duplicate" on a cert they
+    legitimately re-enter."""
+    item = _graded_item(cert_number="11111111")
+    dynamo_repo.put_inventory_item(item)
+    assert dynamo_repo.get_item_id_by_cert("PSA", "11111111") == item.item_id
+
+    corrected = item.model_copy(update={"cert_number": "22222222"})
+    dynamo_repo.put_inventory_item(corrected)
+
+    assert dynamo_repo.get_item_id_by_cert("PSA", "11111111") is None
+    assert dynamo_repo.get_item_id_by_cert("PSA", "22222222") == item.item_id
+
+
+def test_deleted_item_stops_resolving_by_cert(dynamo_repo):
+    """``delete_inventory_item`` does not know about the pointer. Reader-side
+    verification is what keeps the orphan harmless."""
+    item = _graded_item(cert_number="33333333")
+    dynamo_repo.put_inventory_item(item)
+    dynamo_repo.delete_inventory_item(item.item_id)
+    assert dynamo_repo.get_item_id_by_cert("PSA", "33333333") is None
+
+
+def test_cert_pointer_is_scoped_by_grading_company(dynamo_repo):
+    """The same cert digits can exist at two graders; they are different slabs."""
+    psa = _graded_item(cert_number="44444444", company=GradingCompany.PSA)
+    cgc = _graded_item(cert_number="44444444", company=GradingCompany.CGC)
+    dynamo_repo.put_inventory_item(psa)
+    dynamo_repo.put_inventory_item(cgc)
+    assert dynamo_repo.get_item_id_by_cert("PSA", "44444444") == psa.item_id
+    assert dynamo_repo.get_item_id_by_cert("CGC", "44444444") == cgc.item_id
+
+
+def test_cert_lookup_normalizes_company_case_and_surrounding_space(dynamo_repo):
+    """The lookup is fed by a query string and a hand-typed scan bar, so the
+    read side must normalize exactly as the write side did or it silently misses."""
+    item = _graded_item(cert_number="55555555")
+    dynamo_repo.put_inventory_item(item)
+    assert dynamo_repo.get_item_id_by_cert("psa", " 55555555 ") == item.item_id
+
+
+def test_rebuying_a_sold_slab_points_at_the_newest_item(dynamo_repo):
+    """Two items can legitimately share a cert over time -- you sell a slab and
+    buy it back. The pointer holds the MOST RECENT item id."""
+    old = _graded_item(cert_number="66666666")
+    dynamo_repo.put_inventory_item(old)
+    new = _graded_item(cert_number="66666666")
+    dynamo_repo.put_inventory_item(new)
+    assert dynamo_repo.get_item_id_by_cert("PSA", "66666666") == new.item_id

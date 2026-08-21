@@ -26,11 +26,37 @@ export type CardResult = {
   set: string;
   condition: string;
   quantity: number;
-  /** Per-unit listed value (mirrors `Card.value`). */
-  currentValue: number;
+  /** Per-unit market value; `null` when no price could be resolved for the card. */
+  currentValue: number | null;
+  /** Per-unit market price (same as currentValue — kept for backward compat). */
+  marketPrice: number | null;
   /** Print language (EN/JP) — lets the model distinguish a JP print from its EN twin. */
   language: "EN" | "JP";
 };
+
+/**
+ * LP+/LP- aware condition matching. When the filter includes a modifier
+ * ("LP+", "LP-"), only that exact tier+modifier matches. When the filter is
+ * a bare tier ("LP"), all variants of that tier match (LP, LP+, LP-).
+ * Comparison is case-insensitive.
+ */
+function conditionMatches(cardCondition: string, filterCondition: string): boolean {
+  const filter = filterCondition.trim();
+  const lastChar = filter.slice(-1);
+  const hasModifier = lastChar === "+" || lastChar === "-";
+
+  if (hasModifier) {
+    // Exact match: "LP+" must match only "LP+"
+    return cardCondition.toLowerCase() === filter.toLowerCase();
+  }
+
+  // Bare tier: "LP" matches "LP", "LP+", "LP-"
+  const cardLower = cardCondition.toLowerCase();
+  const tierLower = filter.toLowerCase();
+  if (!cardLower.startsWith(tierLower)) return false;
+  const remainder = cardLower.slice(tierLower.length);
+  return remainder === "" || remainder === "+" || remainder === "-";
+}
 
 /**
  * Returns the cards matching every provided filter (AND semantics); omitted
@@ -55,17 +81,18 @@ export async function searchInventory(
     if (filters.set !== undefined && card.set.toLowerCase() !== filters.set.toLowerCase()) {
       return false;
     }
-    if (
-      filters.condition !== undefined &&
-      card.condition.toLowerCase() !== filters.condition.toLowerCase()
-    ) {
+    if (filters.condition !== undefined && !conditionMatches(card.condition, filters.condition)) {
       return false;
     }
-    if (filters.minValue !== undefined && card.value < filters.minValue) {
-      return false;
-    }
-    if (filters.maxValue !== undefined && card.value > filters.maxValue) {
-      return false;
+    // A card with no resolvable price cannot satisfy a bound, so any bound at
+    // all excludes it. This must be explicit: left to JS coercion the two bounds
+    // would disagree — `null < min` is true (excluded) but `null > max` is false
+    // (kept, and returned with a null currentValue). Mirrors the backend's
+    // hidden_no_price behaviour on /inventory/search.
+    if (filters.minValue !== undefined || filters.maxValue !== undefined) {
+      if (card.marketPrice == null) return false;
+      if (filters.minValue !== undefined && card.marketPrice < filters.minValue) return false;
+      if (filters.maxValue !== undefined && card.marketPrice > filters.maxValue) return false;
     }
     if (
       filters.language !== undefined &&
@@ -82,7 +109,8 @@ export async function searchInventory(
     set: card.set,
     condition: card.condition,
     quantity: card.quantity,
-    currentValue: card.value,
+    currentValue: card.marketPrice,
+    marketPrice: card.marketPrice,
     language: card.language,
   }));
 }

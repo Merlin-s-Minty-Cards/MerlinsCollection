@@ -1,12 +1,13 @@
 {
   "name": "merlins-collection",
   "private": true,
-  "workspaces": ["frontend", "mcp-server"],
+  "workspaces": ["frontend", "mcp-server", "infra"],
   "scripts": {
-    "test": "npm run test --workspaces --if-present && python -m pytest backend/tests -q --tb=short",
+    "test": "npm run test --workspaces --if-present && npm run test:backend",
     "test:frontend": "npm run test --workspace=frontend",
     "test:mcp": "npm run test --workspace=mcp-server",
-    "test:backend": "python -m pytest backend/tests -q --tb=short",
+    "_comment:test:backend": "The venv interpreter is spelled out deliberately: a bare `python` on PATH resolves to an unrelated environment with no pytest installed, so the previous `python -m pytest` here failed with 'No module named pytest'. Backslashes because npm runs scripts through cmd.exe on Windows, which rejects a leading './'. These root scripts are dev convenience only -- CI runs each workspace directly (see .github/workflows/ci.yml), never this one. See CLAUDE.md > Test Commands.",
+    "test:backend": ".venv\\Scripts\\python.exe -m pytest backend/tests -q --tb=short",
     "docker:test": "docker compose -f docker-compose.test.yml run --rm --build backend-tests && docker compose -f docker-compose.test.yml run --rm --build frontend-tests && docker compose -f docker-compose.test.yml run --rm --build mcp-tests"
   }
 }

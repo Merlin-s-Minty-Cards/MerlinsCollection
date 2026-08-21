@@ -12,6 +12,7 @@ catalog_card          ``CARD#<id>``         ``META``
 inventory_item        ``INV#<shard>``       ``ITEM#<item_id>``
 graded_price          ``CARD#<id>``         ``GRADEDPRICE#<company>#<grade>``
 price_point           ``CARD#<id>``         ``PRICE#RAW#<finish>#<date>`` / ``PRICE#GRADED#...``
+cert_pointer          ``CERT#<co>#<cert>``  ``POINTER``  (advisory — see ``get_item_id_by_cert``)
 ====================  ====================  ============================================
 
 Inventory is sharded across ``INVENTORY_SHARD_COUNT`` partitions (by a stable
@@ -26,7 +27,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 
@@ -34,6 +35,7 @@ import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
+from merlins_collection.config import settings
 from merlins_collection.models.business import (
     BalanceSheetSnapshot,
     BuyingPolicy,
@@ -64,6 +66,29 @@ def _grade_key(grade) -> str:
     return f"{Decimal(str(grade)).normalize():f}"
 
 
+def _cert_pk(company, cert_number: str) -> str:
+    """Partition key for a slab's cert pointer row.
+
+    Normalization has to be IDENTICAL on the write and read sides or the lookup
+    silently misses: the write side is handed a ``GradingCompany`` enum, while the
+    read side is fed a query string and a hand-typed scan bar, where ``psa`` and a
+    cert with a trailing space are both ordinary.
+    """
+    name = company.value if isinstance(company, Enum) else str(company)
+    return f"CERT#{name.strip().upper()}#{cert_number.strip()}"
+
+
+def _price_history_ttl(day: date) -> int:
+    """Epoch seconds a price-history row (raw/graded ``price_point`` or
+    ``item_price_point``) should expire, per ``settings.price_history_retention_days``
+    (RFC 0015). Computed from the point's own ``date``, not write time, so a
+    backfilled or late-written point expires on the same schedule a
+    written-on-time one would have.
+    """
+    moment = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
+    return int((moment + timedelta(days=settings.price_history_retention_days)).timestamp())
+
+
 def _bucket(key: str) -> int:
     # Shard an inventory ``item_id`` (or txn's item_id) across INVENTORY_SHARD_COUNT
     # partitions via md5 — stable across processes, unlike builtin hash() which is
@@ -77,6 +102,18 @@ def _serialize(value):
         return value.value
     if isinstance(value, (datetime, date)):
         return value.isoformat()
+    # DynamoDB has no float type and boto3 refuses one outright. Pydantic-backed
+    # writers already hand us Decimals, but the sell/buy/trade session routers
+    # persist RAW REQUEST JSON, where a price arrives as a float -- which 500'd
+    # `POST /admin/sales/{id}/items` in production. Converting via str() is the
+    # point: Decimal(0.1) is 0.1000000000000000055511151231257827..., so the
+    # binary constructor would persist a price that no longer round-trips.
+    # `bool` subclasses int, not float, so it stays a native DynamoDB BOOL.
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            raise ValueError(f"Cannot store non-finite number {value!r}: "
+                             "DynamoDB numbers must be finite")
+        return Decimal(str(value))
     if isinstance(value, dict):
         return {k: _serialize(v) for k, v in value.items()}
     if isinstance(value, list):
@@ -88,6 +125,17 @@ class ItemAlreadySoldError(Exception):
     """The sale's target item is already sold (or doesn't exist)."""
 
 
+class LedgerReversalConflictError(Exception):
+    """A void/restore lost its condition check and wrote NOTHING.
+
+    Raised when the atomic reversal is cancelled — the row was voided by a
+    concurrent request, or the item's status moved between the route's
+    pre-check and the write. Distinct from ``ItemAlreadySoldError`` because the
+    caller's answer is different: a sale collision is a 409 about the item, this
+    one is a 409 about the reversal itself.
+    """
+
+
 class ImportInProgressError(Exception):
     """Another import already holds the single-flight import lock.
 
@@ -95,6 +143,17 @@ class ImportInProgressError(Exception):
     second concurrent run refuses to start rather than racing the first into a
     mutual-wipe. The lock — not cross-machine ULID wall-clock ordering — is what
     makes the finalize swap safe under concurrency (BLOCKING-4).
+    """
+
+
+class CatalogReseedInProgressError(Exception):
+    """A catalog reseed already holds the single-flight catalog lock.
+
+    The catalog's counterpart to ``ImportInProgressError``, and deliberately a
+    DISTINCT type: the two locks guard unrelated lifecycles, and the daily depth
+    pass swallows this one (it skips and retries tomorrow) while an import
+    holding up another import is an operator-facing refusal. One exception type
+    for both would make the depth pass silently swallow an import collision too.
     """
 
 
@@ -108,6 +167,7 @@ class InventoryRepository:
 
     def __init__(self, table_name, *, endpoint_url=None, region_name="us-east-1"):
         self._import_gen = None  # set during an import so writes carry a generation
+        self._catalog_gen = None  # set during a catalog reseed (see purge_card_data)
         self._resource = boto3.resource(
             "dynamodb", endpoint_url=endpoint_url, region_name=region_name
         )
@@ -169,7 +229,38 @@ class InventoryRepository:
     _BUSINESS_PARTITIONS = ("SHOWLIST", "DEBTLIST", "PAYOUTLIST", "BALANCESHEET",
                             "CONSIGNORLIST", "CONFIG")
 
-    def find_import_owned_entity(self) -> str | None:
+    # Which fixed partitions a SCOPED probe reads for each import-owned entity.
+    # Consulted ONLY when a caller narrows `find_import_owned_entity` with
+    # ``entities=``; the unscoped probe still walks the full list above, so the
+    # default path is untouched by this table's existence.
+    #
+    # The two month-partitioned ledgers map to NO partition on purpose: their
+    # partition names are unbounded (``TXN#<YYYY-MM>`` / ``EXP#<YYYY-MM>``) and
+    # are never queried directly, so neither is probeable on its own. Each is
+    # covered only in company of an entity that IS probed and that it cannot
+    # exist without (a sale writes its ``INV#`` item in the same transaction as
+    # its txn row; every import seeds the ``CONFIG`` payment methods before any
+    # expense tab runs). A scope naming one of them ALONE is therefore refused
+    # rather than silently answering "no data" — see the ``entities`` docs.
+    #
+    # A test asserts this map covers every ``_IMPORT_OWNED_ENTITIES`` member and
+    # that its values union to exactly the unscoped partition list, so the two
+    # cannot drift apart when an entity is added.
+    _ENTITY_PARTITIONS = {
+        "inventory_item": tuple(f"INV#{b}" for b in range(INVENTORY_SHARD_COUNT)),
+        "transaction": (),               # TXN#<YYYY-MM> — see above
+        "expense": (),                   # EXP#<YYYY-MM> — see above
+        "show": ("SHOWLIST",),
+        "debt": ("DEBTLIST",),
+        "payout": ("PAYOUTLIST",),
+        "consignor": ("CONSIGNORLIST",),
+        "balance_sheet_snapshot": ("BALANCESHEET",),
+        "cash_account": ("CONFIG",),
+        "buying_policy": ("CONFIG",),
+        "payment_method": ("CONFIG",),
+    }
+
+    def find_import_owned_entity(self, *, entities=None) -> str | None:
         """Name of an import-owned entity already present in this table, else ``None``.
 
         Cheap by construction: one ``Limit=1``, strongly-consistent Query per KNOWN
@@ -188,9 +279,45 @@ class InventoryRepository:
         tab runs, and a sale writes its ``INV#`` item alongside the txn, so any run
         that produced a ledger row necessarily left a probed partition non-empty —
         and a rollback removes both together, since they share one generation.
+
+        ``entities`` (default ``None`` = today's full scope, byte-for-byte) narrows
+        the question to a SUBSET of ``_IMPORT_OWNED_ENTITIES``: only the partitions
+        those entities live in are read, and only their tags count as a hit. A
+        single-tab run that will write — and later sweep — nothing but
+        ``inventory_item``/``transaction`` asks with that pair, so the live table's
+        shows/debts/payouts/consignors/config neither refuse it nor get read.
+
+        Narrowing the probe narrows the PROTECTION with it: an entity left out is
+        no longer checked for pre-existing data, which is only safe because the
+        caller also never writes or sweeps it. Pair ``entities`` with the matching
+        ``finalize_import(entity_scope=...)`` or the guarantee breaks.
+
+        Raises ``ValueError`` for a name that is not import-owned, and for a scope
+        with no probeable partition (empty, or only month-partitioned ledgers) —
+        such a probe could only ever answer ``None``, which would read as "the
+        table is clean" and silently disarm the guard.
         """
-        partitions = [f"INV#{b}" for b in range(INVENTORY_SHARD_COUNT)]
-        partitions.extend(self._BUSINESS_PARTITIONS)
+        if entities is None:
+            wanted = self._IMPORT_OWNED_ENTITIES
+            partitions = [f"INV#{b}" for b in range(INVENTORY_SHARD_COUNT)]
+            partitions.extend(self._BUSINESS_PARTITIONS)
+        else:
+            wanted = frozenset(entities)
+            unknown = wanted - self._IMPORT_OWNED_ENTITIES
+            if unknown:
+                raise ValueError(
+                    f"cannot scope the re-import probe to {sorted(unknown)}: "
+                    f"not import-owned entities")
+            partitions = sorted({p for entity in wanted
+                                 for p in self._ENTITY_PARTITIONS[entity]})
+            if not partitions:
+                raise ValueError(
+                    f"cannot scope the re-import probe to {sorted(wanted)}: no "
+                    f"probeable partition — the month-partitioned ledgers are "
+                    f"never queried directly, so this probe could only ever "
+                    f"answer 'no data'. Include the entity that stands for them "
+                    f"(inventory_item for transaction, a CONFIG entity for "
+                    f"expense).")
         for pk in partitions:
             kwargs = {
                 "KeyConditionExpression": Key("PK").eq(pk),
@@ -202,7 +329,7 @@ class InventoryRepository:
             while True:
                 resp = self._table.query(**kwargs)
                 for item in resp.get("Items", []):
-                    if item.get("entity") in self._IMPORT_OWNED_ENTITIES:
+                    if item.get("entity") in wanted:
                         return item["entity"]
                 last = resp.get("LastEvaluatedKey")
                 if not last:
@@ -219,7 +346,48 @@ class InventoryRepository:
     # committed generation). The lock item is NOT an import-owned entity, so
     # `finalize_import` never sweeps it.
     _LOCK_KEY = {"PK": "IMPORTLOCK", "SK": "LOCK"}
-    _LOCK_TTL_SECONDS = 3600  # >> a full import; only a crashed holder is stolen
+    _LOCK_TTL_SECONDS = 3600  # >> a full import or reseed; only a crashed holder is stolen
+
+    def _acquire_lock(self, key, gen, ttl, *, entity, error, message):
+        """Take a single-flight lock item, or raise ``error``.
+
+        ONE algorithm, two configurations (RFC 0003 §8): the import lock and the
+        catalog lock differ only in their key, entity tag and refusal message.
+        Copying the body per domain is how the two silently drift — one gains a
+        TTL reclaim or a condition fix and the other does not — so the domains
+        below are thin wrappers and this is the only place the semantics live.
+
+        Conditional on the lock being absent or EXPIRED, so a crashed holder's
+        stale lock is reclaimed after ``ttl`` instead of wedging the pipeline
+        forever.
+        """
+        now = int(time.time())
+        try:
+            self._table.put_item(
+                Item={**key, "entity": entity, "gen": gen,
+                      "acquired_at": now, "expires_at": now + ttl},
+                ConditionExpression="attribute_not_exists(PK) OR #x < :now",
+                ExpressionAttributeNames={"#x": "expires_at"},
+                ExpressionAttributeValues={":now": now},
+            )
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                raise error(message) from exc
+            raise
+
+    def _release_lock(self, key, gen, *, label):
+        """Delete a lock item if ``gen`` still holds it (no-op if it was stolen)."""
+        try:
+            self._table.delete_item(
+                Key=key,
+                ConditionExpression="#g = :gen",
+                ExpressionAttributeNames={"#g": "gen"},
+                ExpressionAttributeValues={":gen": gen},
+            )
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                raise
+            logger.warning("%s lock was not ours to release (gen=%r)", label, gen)
 
     def acquire_import_lock(self, gen, *, ttl_seconds: int | None = None):
         """Take the single-flight import lock for ``gen``.
@@ -228,37 +396,17 @@ class InventoryRepository:
         stale lock is reclaimed after ``ttl_seconds`` instead of wedging imports
         forever. Raises ``ImportInProgressError`` if a live lock is held.
         """
-        ttl = self._LOCK_TTL_SECONDS if ttl_seconds is None else ttl_seconds
-        now = int(time.time())
-        try:
-            self._table.put_item(
-                Item={**self._LOCK_KEY, "entity": "import_lock", "gen": gen,
-                      "acquired_at": now, "expires_at": now + ttl},
-                ConditionExpression="attribute_not_exists(PK) OR #x < :now",
-                ExpressionAttributeNames={"#x": "expires_at"},
-                ExpressionAttributeValues={":now": now},
-            )
-        except ClientError as exc:
-            if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
-                raise ImportInProgressError(
-                    "another import is already in flight (import lock held); "
-                    "refusing to start a second run"
-                ) from exc
-            raise
+        self._acquire_lock(
+            self._LOCK_KEY, gen,
+            self._LOCK_TTL_SECONDS if ttl_seconds is None else ttl_seconds,
+            entity="import_lock", error=ImportInProgressError,
+            message="another import is already in flight (import lock held); "
+                    "refusing to start a second run",
+        )
 
     def release_import_lock(self, gen):
         """Release the lock if we still hold it (no-op if it was stolen)."""
-        try:
-            self._table.delete_item(
-                Key=self._LOCK_KEY,
-                ConditionExpression="#g = :gen",
-                ExpressionAttributeNames={"#g": "gen"},
-                ExpressionAttributeValues={":gen": gen},
-            )
-        except ClientError as exc:
-            if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
-                raise
-            logger.warning("import lock was not ours to release (gen=%r)", gen)
+        self._release_lock(self._LOCK_KEY, gen, label="import")
 
     # ---- import generations (load-then-swap replace) ----
     def set_import_generation(self, gen):
@@ -284,7 +432,7 @@ class InventoryRepository:
         """
         return f"{sk}#{self._import_gen}" if self._import_gen else sk
 
-    def finalize_import(self, gen, *, committed: bool) -> int:
+    def finalize_import(self, gen, *, committed: bool, entity_scope=None) -> int:
         """End an import stamped with ``gen`` (load-then-swap):
 
         * ``committed=True`` — delete every import-owned record that is NOT of this
@@ -310,7 +458,41 @@ class InventoryRepository:
         itself created, so a bad baseline is never locked in permanently.
 
         The catalog/price entities are never touched. Returns records removed.
+
+        ``entity_scope`` (default ``None`` = today's full ``_IMPORT_OWNED_ENTITIES``
+        sweep, byte-for-byte) restricts BOTH halves of the swap to a subset of the
+        import-owned entities. Rows of any other entity type are skipped outright —
+        never deleted, whatever generation they carry. That is what lets a
+        single-tab run replace its own entity types without the sweep reading
+        "these were not re-stamped this run" as "these are stale" and destroying
+        ledgers the run never even opened.
+
+        The sentinel is ``None``, not falsiness: an EMPTY scope is a caller bug
+        (a sweep that can remove nothing), so it raises rather than silently
+        turning the swap into a no-op. Unknown entity names raise too.
+
+        *** SCOPING IS BY ENTITY TYPE, WHICH IS COARSER THAN "one tab's rows". ***
+        Every tab that writes inventory (Singles, Sealed, Bulk, Consignments)
+        writes the SAME ``inventory_item`` entity, so a scoped sweep cannot tell
+        one tab's rows from another's — it removes every prior-generation row of
+        the types in scope. See ``run_singles_only_import`` in
+        ``services/spreadsheet_import.py`` for why that is exactly right today and
+        precisely what must change before a second inventory-writing tab is turned
+        back on. Do not read this parameter as general multi-tab safety.
         """
+        if entity_scope is None:
+            scope = self._IMPORT_OWNED_ENTITIES
+        else:
+            scope = frozenset(entity_scope)
+            unknown = scope - self._IMPORT_OWNED_ENTITIES
+            if unknown:
+                raise ValueError(
+                    f"cannot scope the import sweep to {sorted(unknown)}: not "
+                    f"import-owned entities")
+            if not scope:
+                raise ValueError(
+                    "entity_scope is empty — a sweep that can remove nothing is a "
+                    "caller bug; pass None for the full sweep")
         this_gen_keys: list[dict] = []
         other_gen_keys: list[dict] = []
         kwargs = {
@@ -323,7 +505,7 @@ class InventoryRepository:
             resp = self._table.scan(**kwargs)
             for item in resp.get("Items", []):
                 entity = item.get("entity")
-                if entity not in self._IMPORT_OWNED_ENTITIES:
+                if entity not in scope:
                     continue
                 key = {"PK": item["PK"], "SK": item["SK"]}
                 if entity == "balance_sheet_snapshot" and item.get("frozen"):
@@ -346,6 +528,210 @@ class InventoryRepository:
                 batch.delete_item(Key=key)
         return len(keys)
 
+    # ---- catalog generations (load-then-swap replace for CARD data) ----
+    # The import generation above belongs to the SPREADSHEET pipeline and sweeps
+    # `_IMPORT_OWNED_ENTITIES`, which includes shows and consignors. The catalog is
+    # written by a different pipeline (TCGdex) and is deliberately not
+    # import-owned, so a catalog reseed cannot reuse `finalize_import` without
+    # destroying the very business master data D4 says to preserve. It gets its own
+    # stamp instead, and `purge_card_data` is the swap half.
+    #
+    # Only these entities are EVER deleted by that swap. It is an allowlist, not a
+    # preserve-list, so an entity nobody thought about (auth tokens, rate-limit
+    # counters, anything added later) survives by default rather than by vigilance.
+    #
+    # This is exactly D4's delete list and nothing more. Three entities that were
+    # once here have been deliberately REMOVED, because they are hand-curated,
+    # historical, or otherwise not reseedable:
+    #
+    # * `graded_price` — slab values entered by hand. TCGdex has no graded prices
+    #   at all, so nothing can rebuild them.
+    # * `item_price_point` — the only price history sealed/bulk items have; they
+    #   have no card to re-derive it from.
+    # * `price_point` (RFC 0015) — a card's TCGdex id is stable across a reseed,
+    #   so its accumulated price trail is still valid even though the
+    #   `catalog_card` row itself gets swept as belonging to a superseded
+    #   generation. TCGdex has no historical-price endpoint, only a current one,
+    #   so deleting this here would be a real, unrecoverable loss for zero
+    #   benefit — the same "not reseedable" reasoning as the two rows above, not
+    #   a new exception to it.
+    #
+    # Stamping them with a catalog generation at their write sites was the other
+    # candidate fix and would NOT have worked: the reseed writes only
+    # `catalog_card` rows, so such a stamp could only ever record a PAST
+    # generation and the next wipe would delete them anyway. They are master data;
+    # the wipe simply has no business touching them.
+    _CARD_DATA_ENTITIES = frozenset({
+        "catalog_card", "inventory_item", "transaction",
+    })
+
+    # Card-keyed rows: once the catalog is replaced these are orphans by
+    # construction, so they are kept only if they carry the incoming generation.
+    # `price_point` is deliberately NOT here — see `_CARD_DATA_ENTITIES` above.
+    _CATALOG_GEN_ENTITIES = frozenset({"catalog_card"})
+
+    def set_catalog_generation(self, gen):
+        """Stamp every subsequent catalog/price write with ``gen`` (None to stop).
+
+        Lets a reseed load a whole new catalog alongside the old one and hand the
+        generation to ``purge_card_data``, so the table is never half-empty while
+        the site is serving ``/inventory``.
+        """
+        self._catalog_gen = gen
+
+    def _cat_gen(self) -> dict:
+        return {"cat_gen": self._catalog_gen} if self._catalog_gen else {}
+
+    # ---- single-flight catalog lock (RFC 0003 §8) ----
+    # A second, PARALLEL lock domain — not an extension of the import lock. The
+    # spreadsheet import and a catalog reseed touch disjoint entities and run on
+    # unrelated cadences, so sharing one lock item would make each block the other
+    # for no reason. Both go through `_acquire_lock`/`_release_lock` above, so
+    # there is one algorithm with two configurations rather than a copy.
+    #
+    # What it actually guards: a reseed's `finalize_catalog` deletes every
+    # `catalog_card` not of its generation. A depth-pass write landing after the
+    # reseed has passed that card but before the swap carries the OLD generation
+    # and is deleted — the card silently vanishes from a live catalog. So the
+    # daily depth pass takes this lock too, and skips its whole run when a reseed
+    # holds it.
+    _CATALOG_LOCK_KEY = {"PK": "CATALOGLOCK", "SK": "LOCK"}
+
+    # The committed catalog generation, written by the reseed's finalize step.
+    _CATALOG_GEN_KEY = {"PK": "CATALOGGEN", "SK": "CURRENT"}
+
+    def acquire_catalog_lock(self, gen, *, ttl_seconds: int | None = None):
+        """Take the single-flight catalog lock for ``gen``.
+
+        Same conditional-write + TTL-expiry semantics as the import lock, in its
+        own key space. Raises ``CatalogReseedInProgressError`` if a live lock is
+        held.
+        """
+        self._acquire_lock(
+            self._CATALOG_LOCK_KEY, gen,
+            self._LOCK_TTL_SECONDS if ttl_seconds is None else ttl_seconds,
+            entity="catalog_lock", error=CatalogReseedInProgressError,
+            message="a catalog reseed is already in flight (catalog lock held); "
+                    "refusing to start a second run",
+        )
+
+    def release_catalog_lock(self, gen):
+        """Release the catalog lock if we still hold it (no-op if it was stolen)."""
+        self._release_lock(self._CATALOG_LOCK_KEY, gen, label="catalog")
+
+    def current_catalog_generation(self):
+        """The generation of the catalog currently committed, or ``None``.
+
+        Read strongly-consistently: the depth pass uses it to stamp its own
+        writes, and an eventually-consistent read straight after a reseed's
+        finalize would stamp them with the SUPERSEDED generation — precisely the
+        rows the next swap deletes.
+
+        ``None`` means no reseed has ever committed a generation (a fresh table,
+        or today's not-yet-wired reseed path). Callers stamp nothing in that
+        case, which is exactly how catalog writes behave today.
+        """
+        item = self._table.get_item(
+            Key=self._CATALOG_GEN_KEY, ConsistentRead=True
+        ).get("Item")
+        return item.get("gen") if item else None
+
+    @staticmethod
+    def _card_language(pk: str):
+        """The language code embedded in a ``CARD#`` partition key, or ``None``.
+
+        ``card_id`` is the composite ``"{lang}:{tcgdex_id}"``, so the language is
+        readable straight off the key the scan already projects. ``None`` means
+        the row predates that scheme — i.e. it is a dead pokemontcg.io-era row
+        ("xy7-54"), which is precisely what the wipe exists to remove, so it must
+        never be rescued by language scoping.
+        """
+        card_id = pk[len("CARD#"):] if pk.startswith("CARD#") else pk
+        return card_id.split(":", 1)[0] if ":" in card_id else None
+
+    def purge_card_data(self, *, keep_catalog_gen, languages=None,
+                        keep_card_ids=None, dry_run: bool = True) -> dict:
+        """Delete card data that is not part of catalog generation ``keep_catalog_gen``.
+
+        This is the SWAP half of the catalog load-then-swap: run it only after the
+        new catalog has fully landed. Returns ``{entity: rows}`` counts; with
+        ``dry_run`` (the default) it counts without deleting, which is what the
+        wipe entrypoint reports before ``--execute`` is given.
+
+        What goes:
+
+        * ``catalog_card`` / ``price_point`` not stamped with ``keep_catalog_gen``;
+        * every ``inventory_item`` — D4 rebuilds all holdings from the sheet;
+        * ``transaction`` rows carrying an import ``gen``, i.e. derived from a
+          spreadsheet import. A sale the live app recorded through ``record_sale``
+          carries no generation and is NOT sheet-derived, so it survives — that
+          stamp is the only durable evidence of which writer produced a row.
+
+        What stays: everything else, by allowlist (``_CARD_DATA_ENTITIES``).
+        Shows, consignors, config, auth and rate-limit rows are never candidates,
+        and neither are hand-curated ``graded_price`` / ``item_price_point`` rows.
+
+        ``languages`` scopes the sweep to the language codes the reseed actually
+        loaded. Without it, ``--language en`` would mint one generation, stamp
+        only English rows with it, and then delete the entire Japanese catalog as
+        "not of this generation" — while exiting 0. Retrying one language after an
+        abort is a normal operator move, so this is a likely invocation, not a
+        contrived one. ``None`` means every language is in scope.
+
+        ``keep_card_ids`` lets a DRY RUN predict honestly. A dry run writes
+        nothing, so nothing carries the new generation and the naive count is
+        "the entire catalog" — not a prediction, and an operator who sees an
+        absurd number learns to ignore the last check standing between them and
+        an irreversible wipe. Passing the ids the reseed *would* write makes the
+        reported figure the real one.
+
+        ``keep_catalog_gen`` is mandatory. Without one this is not a swap, it is
+        "delete the catalog", and a typo would empty the customer-facing table.
+        """
+        if not keep_catalog_gen:
+            raise ValueError(
+                "purge_card_data requires keep_catalog_gen: the generation of the "
+                "catalog that was just loaded. Without it this would delete every "
+                "card row and leave nothing behind."
+            )
+        counts = dict.fromkeys(self._CARD_DATA_ENTITIES, 0)
+        keys: list[dict] = []
+        kwargs = {
+            "ProjectionExpression": "PK, SK, #e, #g, #c",
+            "ExpressionAttributeNames": {"#e": "entity", "#g": "gen",
+                                         "#c": "cat_gen"},
+            "ConsistentRead": True,
+        }
+        while True:
+            resp = self._table.scan(**kwargs)
+            for item in resp.get("Items", []):
+                entity = item.get("entity")
+                if entity not in self._CARD_DATA_ENTITIES:
+                    continue
+                if entity in self._CATALOG_GEN_ENTITIES:
+                    if item.get("cat_gen") == keep_catalog_gen:
+                        continue
+                    language = self._card_language(item["PK"])
+                    if languages is not None and language is not None \
+                            and language not in languages:
+                        continue  # another language's catalog; not this run's
+                    if keep_card_ids is not None and \
+                            item["PK"][len("CARD#"):] in keep_card_ids:
+                        continue  # the reseed would replace this row, not orphan it
+                elif entity == "transaction" and not item.get("gen"):
+                    continue
+                counts[entity] += 1
+                keys.append({"PK": item["PK"], "SK": item["SK"]})
+            last = resp.get("LastEvaluatedKey")
+            if not last:
+                break
+            kwargs["ExclusiveStartKey"] = last
+        if not dry_run:
+            with self._table.batch_writer() as batch:
+                for key in keys:
+                    batch.delete_item(Key=key)
+        return counts
+
     # ---- internal helpers ----
     def _query_all(self, **kwargs):
         """Run a query, following ``LastEvaluatedKey`` until all pages are read."""
@@ -358,14 +744,64 @@ class InventoryRepository:
                 return items
             kwargs["ExclusiveStartKey"] = last
 
-    def _catalog_item(self, card: CatalogCard) -> dict:
+    def _first_seen_stamps(self, cards) -> dict:
+        """``{card_id: first_seen_at}`` to write, for a page of catalog cards.
+
+        **Why this needs a read at all.** ``first_seen_at`` has to survive a
+        whole-item ``put_item``, which replaces the item entirely — an attribute
+        not in the body is REMOVED. A "stamp only if absent" conditional update
+        after the put is therefore always true and always re-stamps, which is
+        the exact bug the field exists to avoid: it would come to mean "when we
+        last rebuilt the catalog". So the existing value has to be carried
+        forward in the body, which means knowing it.
+
+        **This is used ONLY by the unconditional path, and that restriction is
+        load-bearing.** A pre-read in front of the *preserving* path would
+        reintroduce the Phase 2.0a race that path exists to close: a depth write
+        landing between the read and the put would be clobbered by a brief row
+        (``test_the_seed_decides_at_write_time_not_by_pre_reading``). The
+        unconditional path makes no decision from what it reads — it is a
+        whole-item replace that overwrites regardless — so a read here adds no
+        window that the write itself did not already have. The preserving path
+        gets the old value from ``ReturnValues="ALL_OLD"`` instead, inside the
+        same operation as its write.
+
+        One chunked ``BatchGetItem`` per page, not a point read per card. A card
+        with no stored value — genuinely new, or a row that predates the field —
+        gets ``now()``.
+        """
+        moment = datetime.now(timezone.utc)
+        card_ids = [c.card_id for c in cards]
+        if not card_ids:
+            return {}
+        existing = self.batch_get_catalog_cards(card_ids)
+        return {
+            card_id: (
+                stored.first_seen_at
+                if (stored := existing.get(card_id)) is not None
+                and stored.first_seen_at is not None
+                else moment
+            )
+            for card_id in card_ids
+        }
+
+    def _catalog_item(self, card: CatalogCard, first_seen_at=None) -> dict:
         body = _serialize(card.model_dump(mode="python"))
+        # The repository owns this field, never the caller. An inbound card
+        # always carries `None` (nothing constructs one with a value), so
+        # without this the attribute would be written as NULL and the stamp
+        # would be lost on every write.
+        if first_seen_at is not None:
+            body["first_seen_at"] = _serialize(first_seen_at)
+        else:
+            body.pop("first_seen_at", None)
         return {
             "PK": f"CARD#{card.card_id}",
             "SK": "META",
             "GSI1PK": f"SET#{card.set_id}",
             "GSI1SK": f"CARD#{card.card_id}",
             "entity": "catalog_card",
+            **self._cat_gen(),
             **body,
         }
 
@@ -375,11 +811,192 @@ class InventoryRepository:
         item = self._table.get_item(Key={"PK": f"CARD#{card_id}", "SK": "META"}).get("Item")
         return CatalogCard.model_validate(item) if item else None
 
-    def batch_upsert_catalog_cards(self, cards):
-        """Insert/overwrite catalog cards in bulk (used by the daily sync)."""
-        with self._table.batch_writer() as batch:  # auto-chunks to 25 + retries unprocessed
+    def batch_upsert_catalog_cards(self, cards, *, preserve_priced: bool = False) -> int:
+        """Insert/overwrite catalog cards in bulk; returns rows left untouched.
+
+        ``preserve_priced`` is for the BREADTH seed, which carries identity only:
+        it refuses to replace a row a depth pass has already filled in
+        (``detail="full"``), because a whole-item ``put_item`` does not merge and
+        would revert every price it landed on.
+
+        That refusal is a ``ConditionExpression``, not a read-then-decide, and the
+        difference is the whole point (Phase 2.0a): the condition is evaluated by
+        DynamoDB inside the same operation as the write, so a depth pass landing
+        between the caller's decision and its put cannot be clobbered. The
+        previous check-then-act shape was safe only while no depth pass existed.
+        The cost is one request per card instead of a 25-item batch — the same
+        write capacity, more round trips, and it drops the ``batch_get`` the old
+        shape needed, so the seed's read cost goes to zero.
+
+        The default (unconditional) path is a whole-item replace and will
+        therefore blank a stored ``prices`` map if handed a card that has none —
+        a write that carries prices, or carries none *by construction* (the
+        BREADTH seed's brief rows), is fine here. **A depth-pass write, whose
+        emptiness means "upstream told us nothing today", must go through
+        ``upsert_catalog_card_preserving_prices`` instead.** There,
+        ``overwrite_by_pkeys`` is load-bearing
+        rather than tidiness: boto3 does NOT deduplicate a batch, so two rows
+        carrying the same id in one page raise ``ValidationException: Provided
+        list of item keys contains duplicates`` and fail the entire 25-item batch
+        — killing the run over rows that were merely redundant, not wrong.
+        """
+        if preserve_priced:
+            return self._upsert_catalog_cards_preserving_priced(cards)
+        cards = list(cards)
+        # Read the stamps BEFORE the writes, for the whole page at once. A
+        # whole-item `put_item` removes any attribute not in the body, so the
+        # existing `first_seen_at` has to be carried forward explicitly — see
+        # `_first_seen_stamps`.
+        first_seen = self._first_seen_stamps(cards)
+        with self._table.batch_writer(  # auto-chunks to 25 + retries unprocessed
+            overwrite_by_pkeys=["PK", "SK"]
+        ) as batch:
             for card in cards:
-                batch.put_item(Item=self._catalog_item(card))
+                batch.put_item(
+                    Item=self._catalog_item(card, first_seen.get(card.card_id))
+                )
+        return 0
+
+    def _upsert_catalog_cards_preserving_priced(self, cards) -> int:
+        """See ``batch_upsert_catalog_cards`` for ``preserve_priced``.
+
+        **Deliberately NO pre-read of any kind** — for ``first_seen_at`` same as
+        for the priced-row refusal itself (Phase 2.0a). A pre-read in front of
+        this write would reopen the exact race the ``ConditionExpression``
+        exists to close: a depth write landing between the read and the put
+        would be overwritten by a brief row
+        (``test_the_seed_decides_at_write_time_not_by_pre_reading``).
+
+        Instead the put itself is asked for ``ReturnValues="ALL_OLD"``. On a
+        SUCCESSFUL conditional put, that is the prior item's attributes — read
+        for free, inside the same operation as the write, with no window for a
+        concurrent write to invalidate it. The follow-up ``update_item`` that
+        restores ``first_seen_at`` is then either writing back a value already
+        known correct (the row existed) or a plain "stamp if absent" (the row
+        did not) — never a decision made from a stale read.
+        """
+        preserved = 0
+        for card in cards:
+            item = self._catalog_item(card)
+            try:
+                response = self._table.put_item(
+                    Item=item,
+                    ConditionExpression="attribute_not_exists(PK) OR #d <> :full",
+                    ExpressionAttributeNames={"#d": "detail"},
+                    ExpressionAttributeValues={":full": "full"},
+                    ReturnValues="ALL_OLD",
+                )
+            except ClientError as exc:
+                if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                    raise
+                preserved += 1
+                if self._catalog_gen:
+                    # Re-stamp the survivor, or "preserve" and "swap" cancel out
+                    # into data loss: the row keeps its OLD generation, so the
+                    # purge that follows the reseed deletes it and the card ends
+                    # up neither replaced nor kept.
+                    self._table.update_item(
+                        Key={"PK": item["PK"], "SK": item["SK"]},
+                        UpdateExpression="SET #c = :gen",
+                        ExpressionAttributeNames={"#c": "cat_gen"},
+                        ExpressionAttributeValues={":gen": self._catalog_gen},
+                    )
+                continue
+            old_first_seen = (response.get("Attributes") or {}).get("first_seen_at")
+            if old_first_seen is not None:
+                self._table.update_item(
+                    Key={"PK": item["PK"], "SK": item["SK"]},
+                    UpdateExpression="SET first_seen_at = :fs",
+                    ExpressionAttributeValues={":fs": old_first_seen},
+                )
+            else:
+                self._stamp_first_seen_if_absent(item["PK"], item["SK"])
+        return preserved
+
+    def upsert_catalog_card_preserving_prices(self, card: CatalogCard) -> None:
+        """Write ``card``, but NEVER replace a stored price map with an empty one.
+
+        This is the depth pass's write, and it exists because RFC 0003 §7's
+        "never deletes, zeroes, or nulls an existing price" has to be a property
+        of the write itself. ``to_catalog_card`` returns ``prices={}`` for a
+        perfectly good HTTP 200 whose ``pricing`` block is absent or yields no
+        band — ``services.tcgdex`` calls that routine, not exceptional — and it
+        raises nothing, so a caller has no signal to react to. Through
+        ``batch_upsert_catalog_cards`` that ``{}`` is a whole-item ``put_item``
+        and yesterday's bands are gone.
+
+        The policy, and it is deliberate:
+
+        * an **empty** incoming ``prices`` is the absence of information, so it
+          is omitted from the write and the stored map survives untouched;
+        * a **non-empty** one replaces the stored map wholesale rather than
+          merging finish by finish. ``_prices_from_pricing`` applies its provider
+          preference at CARD level precisely so a card is never described by two
+          providers at once; a per-finish merge would reintroduce exactly the
+          mixed TCGplayer/Cardmarket bands that rule exists to prevent, and would
+          keep a retired finish alive forever;
+        * every non-price field is written either way. A priceless response can
+          still carry a corrected ``rarity`` or ``name``, and skipping the write
+          outright would trade one data-loss problem for a smaller one.
+
+        One ``update_item``, not a read-then-decide. That is the same reasoning
+        ``_upsert_catalog_cards_preserving_priced`` already applies one method
+        up: reading the prior card in the caller and merging its prices into the
+        model before a ``put_item`` is check-then-act, and a concurrent write
+        landing in that window is erased anyway. DynamoDB evaluates this inside
+        the same operation as the write, so there is no window.
+
+        Side effect of ``update_item``: an attribute absent from the item — a
+        ``cat_gen`` this process is not stamping — is LEFT ALONE rather than
+        removed. That is the behavior we want and the opposite of ``put_item``'s:
+        a depth-pass write must not strip a reseed's generation stamp off a row
+        and orphan it into the next purge.
+        """
+        item = self._catalog_item(card)
+        attributes = {k: v for k, v in item.items() if k not in ("PK", "SK")}
+        if not card.prices:
+            attributes.pop("prices", None)
+        # Placeholders for every name: `name` is a DynamoDB reserved word, and
+        # so is any field a future model adds.
+        names, values, assignments = {}, {}, []
+        for index, (attribute, value) in enumerate(attributes.items()):
+            names[f"#a{index}"] = attribute
+            values[f":v{index}"] = value
+            assignments.append(f"#a{index} = :v{index}")
+        self._table.update_item(
+            Key={"PK": item["PK"], "SK": item["SK"]},
+            UpdateExpression="SET " + ", ".join(assignments),
+            ExpressionAttributeNames=names,
+            ExpressionAttributeValues=values,
+        )
+        # This path costs no read, unlike the two put_item writers: `update_item`
+        # LEAVES an attribute it does not mention alone, so an existing
+        # `first_seen_at` survives the write above untouched (`_catalog_item`
+        # omits it from the body). All that is left is the genuinely-new case,
+        # and `attribute_not_exists` makes that idempotent.
+        self._stamp_first_seen_if_absent(item["PK"], item["SK"])
+
+    def _stamp_first_seen_if_absent(self, pk: str, sk: str) -> None:
+        """Set ``first_seen_at`` only on a row that has none.
+
+        Safe ONLY after a write that preserves absent attributes. After a
+        ``put_item`` the attribute is always absent — the put removed it — so
+        this would re-stamp every row on every write. That is why the two
+        put_item writers carry the value forward in the body instead.
+        """
+        try:
+            self._table.update_item(
+                Key={"PK": pk, "SK": sk},
+                UpdateExpression="SET first_seen_at = :now",
+                ConditionExpression="attribute_not_exists(first_seen_at)",
+                ExpressionAttributeValues={
+                    ":now": datetime.now(timezone.utc).isoformat()
+                },
+            )
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                raise
+            # Already stamped — the expected outcome for every existing row.
 
     def batch_get_catalog_cards(self, card_ids):
         """Point-read many catalog cards at once; missing ids are simply absent.
@@ -448,7 +1065,20 @@ class InventoryRepository:
 
     # ---- inventory (keyed by item_id; card link is a sparse GSI1) ----
     def put_inventory_item(self, item):
-        """Insert or overwrite one inventory item (one physical unit)."""
+        """Insert or overwrite one inventory item (one physical unit).
+
+        A graded item with a cert also gets a **cert pointer row**, so "do I
+        already own this slab?" is an O(1) point read instead of a table scan
+        (CLAUDE.md's Ops section records what a scan on a request path cost).
+
+        Ordering matters, the opposite way round from ``put_show``: the ITEM is
+        written first and the pointer second. The pointer is an advisory index —
+        a dangling one is harmless because ``get_item_id_by_cert`` verifies it,
+        while a MISSING one is invisible and never heals. Writing the item first
+        also means a failure on the index can never cost us the real inventory
+        row; the error propagates rather than being swallowed, and the retry
+        upserts both.
+        """
         body = _serialize(item.model_dump(mode="python"))
         record = {
             "PK": f"INV#{_bucket(item.item_id)}",
@@ -462,6 +1092,53 @@ class InventoryRepository:
             record["GSI1PK"] = f"CARD#{card_id}"
             record["GSI1SK"] = f"ITEM#{item.item_id}"
         self._table.put_item(Item=record)
+
+        cert_number = (getattr(item, "cert_number", "") or "").strip()
+        if getattr(item, "kind", None) == "graded" and cert_number:
+            # Deliberately NOT generation-stamped. A gen-scoped row that no sweep
+            # knows to remove would be worse than an unscoped one, and the reader
+            # already tolerates an orphan (see docs/plans/rfc-0009/follow-ups.md).
+            self._table.put_item(Item={
+                "PK": _cert_pk(item.company, cert_number),
+                "SK": "POINTER",
+                "entity": "cert_pointer",
+                "item_id": item.item_id,
+                "company": _serialize(item.company),
+                "cert_number": cert_number,
+            })
+
+    def get_item_id_by_cert(self, company, cert_number: str) -> str | None:
+        """The item currently holding this cert, or ``None``.
+
+        The pointer row is ADVISORY and is verified here rather than swept on
+        write. Two writers leave one behind: editing a slab's cert (the old
+        pointer still names the item, which no longer claims that cert) and
+        deleting the item outright (nothing to name at all). Sweeping on write
+        would need the item's OLD cert, i.e. an extra ``get_item`` on *every*
+        inventory write including the bulk import loop, and still would not cover
+        the delete — so the cost lands here, on a per-scan admin path, instead.
+
+        Rebuilding the item's own key and comparing it to the requested one
+        checks the company and the cert in a single expression, under exactly the
+        normalization the write side used.
+
+        Note this holds only the MOST RECENT item per cert; a slab sold and
+        re-bought is legitimate, and duplicate detection warns rather than blocks
+        (RFC 0009 §9).
+        """
+        cert_number = (cert_number or "").strip()
+        if not cert_number:
+            return None
+        pk = _cert_pk(company, cert_number)
+        row = self._table.get_item(Key={"PK": pk, "SK": "POINTER"}).get("Item")
+        if not row:
+            return None
+        item = self.get_inventory_item(row["item_id"])
+        if item is None or getattr(item, "kind", None) != "graded":
+            return None
+        if _cert_pk(item.company, item.cert_number) != pk:
+            return None
+        return item.item_id
 
     def get_inventory_item(self, item_id: str):
         """Fetch one item by id, or ``None`` if absent.
@@ -487,7 +1164,12 @@ class InventoryRepository:
         """Return the entire inventory, fanning out across all shard partitions."""
         items = []
         for bucket in range(INVENTORY_SHARD_COUNT):
-            items.extend(self._query_all(KeyConditionExpression=Key("PK").eq(f"INV#{bucket}")))
+            items.extend(self._query_all(
+                KeyConditionExpression=(
+                    Key("PK").eq(f"INV#{bucket}")
+                    & Key("SK").begins_with("ITEM#")
+                ),
+            ))
         return [InventoryItemAdapter.validate_python(i) for i in items]
 
     def list_inventory_for_card(self, card_id):
@@ -500,32 +1182,94 @@ class InventoryRepository:
         return [InventoryItemAdapter.validate_python(i) for i in items]
 
     # ---- graded current price (separate item; catalog put never touches it) ----
-    def set_graded_market_value(self, card_id, company, grade, value: Decimal):
-        """Record the current manual market value for a graded slab.
+    def set_graded_market_value(self, card_id, company, grade, value: Decimal,
+                                *, source: str = "manual",
+                                confidence: str | None = None,
+                                pinned: bool | None = None):
+        """Record the current market value for a graded slab.
 
         Stored under its own ``GRADEDPRICE#`` item so a catalog re-sync (which
         overwrites the ``META`` item) never clobbers a hand-entered graded price.
+
+        ``source`` says who put the number there — ``"manual"`` (an admin typed
+        it) or ``"provider"`` (RFC 0009 T6 scraped it). It defaults to
+        ``"manual"`` because that is what every caller predating T6 meant, and
+        because the honest failure of a missing default is to understate our
+        confidence rather than overstate it. ``/admin/slabs`` surfaces this, so
+        the UI can say where a figure came from instead of implying they are all
+        equally authoritative.
+
+        ``confidence`` is the pricing vendor's own word for how much it trusts
+        its figure (``high``/``medium``/``low``), stored alongside the price
+        rather than derived from it — the difference between a number built from
+        334 sales and one built from two.
+
+        ``pinned`` protects a figure from the nightly provider refresh (RFC 0009
+        T7; owner's decision, 2026-08-09: a hand-typed price is NOT protected
+        unless it is explicitly pinned). ``None`` — the default, and what every
+        caller predating T7 means — **preserves whatever the stored row says**,
+        which is why it costs a read. This method is a whole-row ``put_item``,
+        so the alternative is that an admin re-typing a value silently clears a
+        pin someone set on purpose, and finds out only when the provider
+        replaces the figure they were protecting.
         """
-        self._table.put_item(
-            Item={
-                "PK": f"CARD#{card_id}",
-                "SK": f"GRADEDPRICE#{company}#{_grade_key(grade)}",
-                "entity": "graded_price",
-                "card_id": card_id,
-                "company": _serialize(company),
-                "grade": grade,
-                "market_value": value,
-                "source": "manual",
-                "updated_at": datetime.now(tz=timezone.utc).isoformat(),
-            }
-        )
+        if pinned is None:
+            existing = self.get_graded_price_row(card_id, company, grade)
+            pinned = bool(existing.get("pinned")) if existing else False
+
+        item = {
+            "PK": f"CARD#{card_id}",
+            "SK": f"GRADEDPRICE#{company}#{_grade_key(grade)}",
+            "entity": "graded_price",
+            "card_id": card_id,
+            "company": _serialize(company),
+            # Through `_serialize` because a provider figure arrives as a JSON
+            # NUMBER, i.e. a Python float, which boto3 refuses outright. This is
+            # the exact shape of the production 500 CLAUDE.md records.
+            "grade": _serialize(grade),
+            "market_value": _serialize(value),
+            "source": source,
+            "pinned": bool(pinned),
+            "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+        }
+        if confidence:
+            item["confidence"] = confidence
+        self._table.put_item(Item=item)
+
+    def set_graded_price_pinned(self, card_id, company, grade,
+                                pinned: bool) -> bool:
+        """Pin or unpin an existing graded price. ``False`` if there is no row.
+
+        Deliberately refuses to create a row: pinning is a promise that a
+        specific figure will not be overwritten, and there is nothing to promise
+        about a price that does not exist yet. Re-puts the row as read, so the
+        value, source, confidence and ``updated_at`` all survive — pinning is
+        not a re-pricing and must not look like one on a chart.
+        """
+        row = self.get_graded_price_row(card_id, company, grade)
+        if row is None:
+            return False
+        row["pinned"] = bool(pinned)
+        self._table.put_item(Item=row)
+        return True
 
     def get_graded_market_value(self, card_id, company, grade):
         """Return the stored graded market value, or ``None`` if none is set."""
-        item = self._table.get_item(
+        item = self.get_graded_price_row(card_id, company, grade)
+        return item["market_value"] if item else None
+
+    def get_graded_price_row(self, card_id, company, grade):
+        """Return the whole graded-price row, or ``None``.
+
+        Separate from ``get_graded_market_value`` because the bare figure cannot
+        answer the two questions ``/admin/slabs`` actually asks — *who* priced
+        this and *when*. "$2,479.50, scraped last night" and "$2,479.50, typed in
+        by hand in March" are different facts and the list has to be able to say
+        which it is holding.
+        """
+        return self._table.get_item(
             Key={"PK": f"CARD#{card_id}", "SK": f"GRADEDPRICE#{company}#{_grade_key(grade)}"}
         ).get("Item")
-        return item["market_value"] if item else None
 
     # ---- transaction ledger ----
     @staticmethod
@@ -570,6 +1314,153 @@ class InventoryRepository:
         """All ledger records with start <= date <= end (month-partition walk)."""
         return [Transaction.model_validate(i)
                 for i in self._query_month_partitions("TXN", start, end)]
+
+    # How far back ``get_transaction`` will walk looking for a row. The ledger
+    # is keyed by month partition (``TXN#<YYYY-MM>``) and a txn_id alone does
+    # not name one, so the lookup walks months NEWEST FIRST and stops at the
+    # first hit: voiding a mistake made an hour ago costs one Query, and the
+    # bound stops an unknown id walking to the beginning of time.
+    _TXN_LOOKUP_YEARS = 3
+
+    def _walk_txn_months_newest_first(self, match):
+        """Yield ``(month_rows_matching)`` walking TXN partitions newest first.
+
+        Stops at the bounded horizon above. Shared by the two by-id lookups so
+        neither invents its own window.
+        """
+        today = date.today()
+        # One month ahead, because a backdated-forward row is possible.
+        probe = (today.year + 1, 1) if today.month == 12 else (today.year, today.month + 1)
+        oldest = (today.year - self._TXN_LOOKUP_YEARS, today.month)
+
+        while probe >= oldest:
+            rows = self._query_all(
+                KeyConditionExpression=Key("PK").eq(f"TXN#{probe[0]:04d}-{probe[1]:02d}"),
+            )
+            hits = [r for r in rows if match(r)]
+            if hits:
+                yield hits
+            probe = (probe[0] - 1, 12) if probe[1] == 1 else (probe[0], probe[1] - 1)
+
+    def get_transaction(self, txn_id: str) -> Transaction | None:
+        """Find one ledger row by id, or ``None``.
+
+        Deliberately not a point read: the SK embeds the transaction's DATE,
+        which the caller of a void does not have to know. Walking newest-first
+        makes the common case (a correction made minutes later) one query, and
+        the worst case bounded at ~37.
+        """
+        for hits in self._walk_txn_months_newest_first(
+                lambda r: r.get("txn_id") == txn_id):
+            return Transaction.model_validate(hits[0])
+        return None
+
+    def list_transactions_by_batch(self, batch_id: str) -> list[Transaction]:
+        """Every leg of one real transaction (T10's ``batch_id``), or ``[]``.
+
+        Stops at the first month that has any leg: one confirm writes one
+        ``txn_date`` for every row it creates, so a batch cannot straddle a
+        month boundary. That is what keeps the whole-transaction void one query
+        in the ordinary case.
+        """
+        if not batch_id:
+            return []
+        for hits in self._walk_txn_months_newest_first(
+                lambda r: r.get("batch_id") == batch_id):
+            return [Transaction.model_validate(r) for r in hits]
+        return []
+
+    # DynamoDB caps a transaction at 100 actions and a reversal spends two per
+    # leg. Chunking past that would reintroduce the partial write this whole
+    # method exists to prevent, so the caller refuses instead.
+    MAX_REVERSAL_LEGS = 50
+
+    def reverse_sales(self, txns: list[Transaction], *, to_status: str,
+                      from_status: str, expect_voided: bool):
+        """Reverse EVERY leg of one real transaction, or none of them.
+
+        One ``transact_write_items`` covering all legs, so a five-card sale
+        cannot end up three-fifths voided — the same failure class RFC 0010 T0
+        fixed in the buy confirm, arriving through a different door.
+        """
+        if not txns:
+            return
+        if len(txns) > self.MAX_REVERSAL_LEGS:
+            raise ValueError(
+                f"{len(txns)} legs exceeds the {self.MAX_REVERSAL_LEGS}-leg "
+                "atomic limit"
+            )
+        actions = []
+        for txn in txns:
+            actions.extend(self._reversal_actions(
+                txn, to_status=to_status, from_status=from_status,
+                expect_voided=expect_voided,
+            ))
+        try:
+            self._resource.meta.client.transact_write_items(TransactItems=actions)
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "TransactionCanceledException":
+                raise LedgerReversalConflictError(
+                    ", ".join(t.txn_id for t in txns)) from exc
+            raise
+
+    def reverse_sale(self, txn: Transaction, *, to_status: str, from_status: str,
+                     expect_voided: bool):
+        """One leg. Delegates, so there is a single reversal implementation."""
+        self.reverse_sales([txn], to_status=to_status, from_status=from_status,
+                           expect_voided=expect_voided)
+
+    def _reversal_actions(self, txn: Transaction, *, to_status: str,
+                          from_status: str, expect_voided: bool) -> list[dict]:
+        """The two guarded writes that reverse one sale.
+
+        The mirror of :meth:`record_sale`, and the same shape on purpose: a void
+        is two things happening (the row is stamped, the card comes back), and
+        the two must never disagree. Both halves are condition-guarded —
+
+        * the ledger row must still be in the void state the caller read
+          (``expect_voided``), so a concurrent second void writes nothing;
+        * the item must still be ``from_status``, so a card that has moved on
+          since is never resurrected under its new owner.
+
+        ``txn`` is the row AS IT SHOULD BE STORED — the caller stamps or clears
+        the three void fields before handing it over, so this method has no
+        opinion about who voided what.
+        """
+        # ``attribute_not_exists`` alone is NOT the "not voided yet" test: a row
+        # written since the field existed carries ``voided_at`` as a DynamoDB
+        # NULL, which exists. Both spellings have to be accepted, and the voided
+        # side has to check for a STRING rather than mere presence.
+        if expect_voided:
+            void_guard = "attribute_exists(PK) AND attribute_type(voided_at, :vt)"
+            guard_values = {":vt": "S"}
+        else:
+            void_guard = ("attribute_exists(PK) AND (attribute_not_exists(voided_at) "
+                          "OR attribute_type(voided_at, :vt))")
+            guard_values = {":vt": "NULL"}
+        txn_item = {**self._txn_keys(txn), "entity": "transaction", **self._gen(),
+                    **_serialize(txn.model_dump(mode="python"))}
+        return [
+            {"Put": {
+                "TableName": self._table_name,
+                "Item": txn_item,
+                "ConditionExpression": void_guard,
+                "ExpressionAttributeValues": guard_values,
+            }},
+            {"Update": {
+                "TableName": self._table_name,
+                "Key": {
+                    "PK": f"INV#{_bucket(txn.item_id)}",
+                    "SK": f"ITEM#{txn.item_id}",
+                },
+                "UpdateExpression": "SET #status = :to",
+                "ConditionExpression":
+                    "attribute_exists(PK) AND #status = :from",
+                "ExpressionAttributeNames": {"#status": "status"},
+                "ExpressionAttributeValues": {":to": to_status,
+                                              ":from": from_status},
+            }},
+        ]
 
     def record_sale(self, txn: Transaction):
         """Atomically append the sale txn and flip its item to ``sold``.
@@ -630,13 +1521,37 @@ class InventoryRepository:
 
     # ---- shows ----
     def put_show(self, show: Show):
-        """Insert one show/event day (generation-scoped during an import)."""
+        """Upsert one show/event day (generation-scoped during an import).
+
+        The SK embeds the show DATE and, during an import, the generation — so a
+        plain ``put_item`` only replaces the prior copy when neither has moved.
+        Both move underneath an ordinary admin edit: rescheduling a show changes
+        the date, and every show the spreadsheet import wrote keeps its
+        ``#<gen>`` suffix after ``finalize_import`` commits, while an admin edit
+        runs with no generation set. Without the sweep below either edit forks
+        the show into two rows, so the list shows it twice and archiving flips
+        only one of them.
+
+        Ordering matters: write FIRST, then delete the superseded rows. A crash
+        in between leaves a visible duplicate that the next write cleans up,
+        rather than deleting the only copy of the show.
+
+        The sweep is skipped mid-import. There, coexisting generations are the
+        point — ``finalize_import``'s load-then-swap needs the prior generation's
+        copy to survive until commit/rollback is decided (see ``_gen_sk``).
+        """
+        sk = self._gen_sk(f"SHOW#{show.date.isoformat()}#{show.show_id}")
         body = _serialize(show.model_dump(mode="python"))
         self._table.put_item(Item={
             "PK": "SHOWLIST",
-            "SK": self._gen_sk(f"SHOW#{show.date.isoformat()}#{show.show_id}"),
+            "SK": sk,
             "entity": "show", **self._gen(), **body,
         })
+        if self._import_gen:
+            return
+        for row in self._query_all(KeyConditionExpression=Key("PK").eq("SHOWLIST")):
+            if row.get("show_id") == show.show_id and row["SK"] != sk:
+                self._table.delete_item(Key={"PK": "SHOWLIST", "SK": row["SK"]})
 
     def list_shows(self):
         """Return every show, oldest first (SK embeds the date)."""
@@ -647,6 +1562,30 @@ class InventoryRepository:
         """Return one show by id, or ``None``. (SK embeds the date, so a point
         read would need it; the show list is tiny, so filter instead.)"""
         return next((s for s in self.list_shows() if s.show_id == show_id), None)
+
+    # ---- show analytics (A4) ----
+
+    def put_show_analytics(self, snapshot):
+        """Store a show analytics snapshot at PK=SHOW#{show_id}, SK=ANALYTICS."""
+        body = _serialize(snapshot.model_dump(mode="python"))
+        self._table.put_item(Item={
+            "PK": f"SHOW#{snapshot.show_id}",
+            "SK": "ANALYTICS",
+            "entity": "show_analytics",
+            **body,
+        })
+
+    def get_show_analytics(self, show_id: str):
+        """Retrieve the analytics snapshot for a show, or None."""
+        from merlins_collection.models.business import ShowAnalyticsSnapshot
+        resp = self._table.get_item(Key={
+            "PK": f"SHOW#{show_id}",
+            "SK": "ANALYTICS",
+        })
+        item = resp.get("Item")
+        if item is None:
+            return None
+        return ShowAnalyticsSnapshot.model_validate(item)
 
     # ---- debts (single small partition, both directions) ----
     def put_debt(self, debt: Debt):
@@ -713,17 +1652,105 @@ class InventoryRepository:
 
     # ---- consignors ----
     def put_consignor(self, consignor: Consignor):
-        """Insert one consignor (generation-scoped during an import)."""
+        """Upsert one consignor (generation-scoped during an import).
+
+        Identical shape to ``put_show``, and it had the identical bug. Every
+        consignor the spreadsheet import wrote keeps its ``#<gen>`` suffix after
+        ``finalize_import`` commits, while an admin edit runs with no generation
+        set and writes an unsuffixed SK — a DIFFERENT sort key in the same
+        partition. Without the sweep below, editing an imported consignor forks
+        them into two rows: the list shows the same person twice, and a delete
+        or archive flips only one of them. The consignor id is not the fork
+        axis; ``import_consignments`` assigns a deterministic id, so only the
+        generation moves.
+
+        Ordering matters: write FIRST, then delete the superseded rows. A crash
+        in between leaves a visible duplicate that the next write cleans up,
+        rather than deleting the only copy of the consignor.
+
+        The sweep is skipped mid-import. There, coexisting generations are the
+        point — ``finalize_import``'s load-then-swap needs the prior
+        generation's copy to survive until commit/rollback is decided (see
+        ``_gen_sk``). Do not "simplify" this by dropping ``_gen_sk``: that
+        trades a visible duplicate for an unrecoverable import.
+        """
+        sk = self._gen_sk(f"CONSIGNOR#{consignor.consignor_id}")
         body = _serialize(consignor.model_dump(mode="python"))
         self._table.put_item(Item={
             "PK": "CONSIGNORLIST",
-            "SK": self._gen_sk(f"CONSIGNOR#{consignor.consignor_id}"),
+            "SK": sk,
             "entity": "consignor", **self._gen(), **body,
         })
+        if self._import_gen:
+            return
+        for row in self.list_consignor_rows():
+            if row.get("consignor_id") == consignor.consignor_id and row["SK"] != sk:
+                self._table.delete_item(Key={"PK": "CONSIGNORLIST", "SK": row["SK"]})
+
+    def list_consignor_rows(self):
+        """Raw CONSIGNORLIST rows, sort keys included.
+
+        ``list_consignors`` validates into the model, which drops PK/SK — and
+        the SK is the only thing telling a forked consignor's two copies apart.
+        Used by ``put_consignor``'s sweep and by
+        ``scripts/reconcile_consignors.py``, which cleans up the forks that
+        already exist. Nothing on a request path needs the raw shape.
+        """
+        return self._query_all(KeyConditionExpression=Key("PK").eq("CONSIGNORLIST"))
 
     def list_consignors(self):
+        return [Consignor.model_validate(i) for i in self.list_consignor_rows()]
+
+    def get_consignor(self, consignor_id: str):
+        """Get a single consignor by id.
+
+        Deliberately archive-agnostic, like ``get_show``: an archived consignor
+        is hidden from the listing, not gone, so every reader that resolves one
+        by id — assets, analytics, unarchive — must keep working.
+        """
+        items = self.list_consignor_rows()
+        for item in items:
+            if item.get("consignor_id") == consignor_id:
+                return Consignor.model_validate(item)
+        return None
+
+    def delete_consignor(self, consignor_id: str):
+        """Delete a consignor by id. Scans SK prefix to find the actual key."""
         items = self._query_all(KeyConditionExpression=Key("PK").eq("CONSIGNORLIST"))
-        return [Consignor.model_validate(i) for i in items]
+        for item in items:
+            if item.get("consignor_id") == consignor_id:
+                self._table.delete_item(Key={"PK": "CONSIGNORLIST", "SK": item["SK"]})
+                return True
+        return False
+
+    # ---- timeline events (A3) ----
+
+    def put_timeline_event(self, item_id: str, event: dict):
+        """Write a timeline event under the item's INV# partition."""
+        bucket = _bucket(item_id)
+        date_str = event.get("date", "")
+        txn_id = event.get("txn_id", "")
+        sk = f"TIMELINE#{date_str}#{txn_id}"
+        body = _serialize(event)
+        self._table.put_item(Item={
+            "PK": f"INV#{bucket}",
+            "SK": sk,
+            "entity": "timeline_event",
+            **body,
+        })
+
+    def get_timeline_events(self, item_id: str) -> list[dict]:
+        """Get all timeline events for an item, ordered by date."""
+        bucket = _bucket(item_id)
+        items = self._query_all(
+            KeyConditionExpression=(
+                Key("PK").eq(f"INV#{bucket}")
+                & Key("SK").begins_with("TIMELINE#")
+            ),
+        )
+        # Filter to only events for this specific item
+        events = [i for i in items if i.get("item_id") == item_id]
+        return sorted(events, key=lambda e: e.get("date", ""))
 
     # ---- config entities (CONFIG partition) ----
     def _put_config(self, sk: str, entity: str, model):
@@ -771,6 +1798,7 @@ class InventoryRepository:
             "PK": f"ITEM#{item_id}", "SK": f"PRICE#{day.isoformat()}",
             "entity": "item_price_point", "item_id": item_id,
             "date": day.isoformat(), "market_value": value,
+            "ttl": _price_history_ttl(day),
         })
 
     def get_item_price_history(self, item_id: str):
@@ -791,13 +1819,89 @@ class InventoryRepository:
                 raise ValueError("graded price points require 'company' and 'grade'")
             sk = f"PRICE#GRADED#{p.company}#{_grade_key(p.grade)}#{p.date.isoformat()}"
         body = _serialize(p.model_dump(mode="python"))
-        return {"PK": f"CARD#{p.card_id}", "SK": sk, "entity": "price_point", **body}
+        return {"PK": f"CARD#{p.card_id}", "SK": sk, "entity": "price_point",
+                "ttl": _price_history_ttl(p.date),
+                **self._cat_gen(), **body}
 
     def append_price_points(self, points):
         """Bulk-append daily price-history points (one item per point)."""
         with self._table.batch_writer() as batch:
             for p in points:
                 batch.put_item(Item=self._price_point_item(p))
+
+    # ---- price-history retention backfill (RFC 0015) ----
+    # Rows written before the `ttl` write-path stamp existed carry no `ttl` at
+    # all and will never auto-expire under DynamoDB's native TTL. Additive
+    # only — never deletes anything itself, so it needs none of
+    # `purge_card_data`'s destructive rails.
+    _PRICE_HISTORY_ENTITIES = frozenset({"price_point", "item_price_point"})
+
+    def list_price_history_ttl_candidates(self) -> list[tuple[str, str, str]]:
+        """Scan for price-history rows missing ``ttl``. Returns ``(PK, SK, date)``.
+
+        Read-only — the scan itself is cheap (reads only) even across a large
+        table. Split out from the write side (``apply_price_history_ttl``) so
+        a caller can chunk the writes and report progress between chunks, the
+        same shape ``select_catalog_refresh_candidates`` /
+        ``refresh_catalog_prices`` already use. The original single-call
+        version of this backfill gave a human watching the terminal no signal
+        at all for the run's whole duration — against the live table, ~90
+        minutes of silence, indistinguishable from a hang.
+        """
+        kwargs = {
+            "ProjectionExpression": "PK, SK, #e, #d, #t",
+            "ExpressionAttributeNames": {"#e": "entity", "#d": "date", "#t": "ttl"},
+            "ConsistentRead": True,
+        }
+        candidates: list[tuple[str, str, str]] = []
+        while True:
+            resp = self._table.scan(**kwargs)
+            for item in resp.get("Items", []):
+                if item.get("entity") not in self._PRICE_HISTORY_ENTITIES:
+                    continue
+                if "ttl" in item:
+                    continue
+                raw_date = item.get("date")
+                if not raw_date:
+                    continue
+                candidates.append((item["PK"], item["SK"], raw_date))
+            last = resp.get("LastEvaluatedKey")
+            if not last:
+                break
+            kwargs["ExclusiveStartKey"] = last
+        return candidates
+
+    def apply_price_history_ttl(self, candidates: list[tuple[str, str, str]]) -> int:
+        """Stamp ``ttl`` on exactly the given ``(PK, SK, date)`` rows.
+
+        A targeted ``update_item`` (``SET ttl``) per row — never a
+        scan-then-``put_item`` of the full row, which could silently revert a
+        concurrent nightly-sync write landing on the same row mid-backfill
+        (RFC 0015, adversarial review). Returns the count written, so a caller
+        chunking this can report cumulative progress.
+        """
+        for pk, sk, raw_date in candidates:
+            ttl = _price_history_ttl(date.fromisoformat(raw_date))
+            self._table.update_item(
+                Key={"PK": pk, "SK": sk},
+                UpdateExpression="SET #t = :ttl",
+                ExpressionAttributeNames={"#t": "ttl"},
+                ExpressionAttributeValues={":ttl": ttl},
+            )
+        return len(candidates)
+
+    def backfill_price_history_ttl(self, *, dry_run: bool = True) -> dict:
+        """Convenience wrapper: list candidates, then (unless ``dry_run``) apply
+        them all in one call. Kept for callers with no need to chunk or report
+        progress (tests; a small table). ``scripts/backfill_price_history_ttl.py``
+        calls ``list_price_history_ttl_candidates``/``apply_price_history_ttl``
+        directly instead, so it can report progress between chunks on a large,
+        slow, real run.
+        """
+        candidates = self.list_price_history_ttl_candidates()
+        if not dry_run:
+            self.apply_price_history_ttl(candidates)
+        return {"candidates": len(candidates)}
 
     def get_price_history(self, card_id, *, finish=None, company=None,
                           grade=None, start=None, end=None):
@@ -807,7 +1911,15 @@ class InventoryRepository:
         ``start``/``end`` bound the date range. For a *graded* range query
         ``grade`` is required — without it the ``SK`` prefix spans grades and the
         ``between`` bounds won't line up with the grade-segmented keys.
+
+        Raw keys are ``PRICE#RAW#<finish>#<date>``, so a ``between`` on the date
+        only lines up when ``finish`` pins the segment before it. With
+        ``finish=None`` the prefix stops at ``PRICE#RAW#`` and every real key
+        sorts *after* ``PRICE#RAW#<date>`` — which is why the range query used to
+        return nothing at all (silently emptying the market price-trend view).
+        In that case the range is filtered on the parsed date instead.
         """
+        date_filter_in_python = False
         if company is not None:
             if grade is not None:
                 prefix = f"PRICE#GRADED#{company}#{_grade_key(grade)}#"
@@ -817,8 +1929,10 @@ class InventoryRepository:
             prefix = f"PRICE#RAW#{finish}#"
         else:
             prefix = "PRICE#RAW#"
+            date_filter_in_python = True
         pk = Key("PK").eq(f"CARD#{card_id}")
-        if start is not None or end is not None:
+        bounded = start is not None or end is not None
+        if bounded and not date_filter_in_python:
             if company is not None and grade is None:
                 raise ValueError("graded range queries require 'grade'")
             lo = (start or date.min).isoformat()
@@ -827,4 +1941,221 @@ class InventoryRepository:
         else:
             cond = pk & Key("SK").begins_with(prefix)
         items = self._query_all(KeyConditionExpression=cond)
-        return [PricePoint.model_validate(i) for i in items]
+        points = [PricePoint.model_validate(i) for i in items]
+        if bounded and date_filter_in_python:
+            lo_d = start or date.min
+            hi_d = end or date.max
+            points = [p for p in points if lo_d <= p.date <= hi_d]
+        return points
+
+    # ---- catalog full list (admin market search) ----
+    def list_all_catalog_cards(self):
+        """Return all catalog cards via filtered scan. Expensive — admin-only."""
+        return list(self.iter_catalog_cards())
+
+    # ---- catalog set registry (RFC 0008 T8) ----
+    # There is no set ENTITY in the catalog: sets exist only as denormalized
+    # `set_id`/`set_name` fields on ~31,600 card rows, plus the GSI1 `SET#`
+    # partition — which answers "cards IN this set" and cannot answer "what sets
+    # exist". Without a registry, listing every set means a full-table scan, i.e.
+    # the 11.2-second read T9 diagnosed as the cause of the dead catalog search.
+    #
+    # So: one small row per set (~400 total: 218 EN + 177 JA), all in ONE
+    # partition, listed by a single query. The shape mirrors `list_inventory`'s
+    # `INV#{bucket}` partitions rather than the watchlist's GSI1 fan-in, because
+    # GSI1 is already carrying `SET#{set_id}` for card rows and adding a second
+    # meaning to that partition would make `list_cards_by_set` depend on its
+    # `begins_with("CARD#")` filter for correctness rather than for narrowing.
+    _CATALOG_SETS_PK = "CATALOGSETS"
+
+    def put_catalog_sets(self, sets: list[dict]) -> int:
+        """Upsert registry rows (one per set); returns how many were written.
+
+        **Upsert only — this never deletes.** The writer is the catalog sync,
+        which degrades a failed ``list_sets`` to "no sets for this language"; a
+        rebuild-by-replace would turn one language's upstream 503 into "every JA
+        set vanished from the admin's dropdown".
+
+        Each row needs ``set_id``; ``set_name``, ``language``, ``card_count`` and
+        ``updated_at`` ride along as written.
+        """
+        written = 0
+        with self._table.batch_writer(overwrite_by_pkeys=["PK", "SK"]) as batch:
+            for row in sets:
+                batch.put_item(Item={
+                    "PK": self._CATALOG_SETS_PK,
+                    "SK": f"SET#{row['set_id']}",
+                    "entity": "catalog_set",
+                    **_serialize(row),
+                })
+                written += 1
+        return written
+
+    def list_catalog_sets(self) -> list[dict]:
+        """Every set in the catalog, as one query over a single partition.
+
+        Deliberately NOT derived from the card rows. See the comment above the
+        partition key: that derivation is a full-table scan.
+        """
+        return self._query_all(
+            KeyConditionExpression=Key("PK").eq(self._CATALOG_SETS_PK)
+            & Key("SK").begins_with("SET#"),
+        )
+
+    # ---- watchlist (admin feature) ----
+    def put_watchlist_entry(self, entry: dict):
+        """Insert a watchlist entry."""
+        entry_id = entry["entry_id"]
+        record = {
+            "PK": f"WATCHLIST#{entry_id}",
+            "SK": "META",
+            "entity": "watchlist_entry",
+            "GSI1PK": "WATCHLIST#ALL",
+            "GSI1SK": entry.get("added_at", ""),
+            **_serialize(entry),
+        }
+        self._table.put_item(Item=record)
+
+    def get_watchlist_entry(self, entry_id: str) -> dict | None:
+        """Fetch one watchlist entry by id."""
+        item = self._table.get_item(
+            Key={"PK": f"WATCHLIST#{entry_id}", "SK": "META"},
+        ).get("Item")
+        return item if item else None
+
+    def list_watchlist_entries(self) -> list[dict]:
+        """List all watchlist entries via the GSI1 WATCHLIST#ALL partition."""
+        items = self._query_all(
+            IndexName="GSI1",
+            KeyConditionExpression=Key("GSI1PK").eq("WATCHLIST#ALL"),
+        )
+        return items
+
+    def delete_watchlist_entry(self, entry_id: str):
+        """Delete a watchlist entry."""
+        self._table.delete_item(
+            Key={"PK": f"WATCHLIST#{entry_id}", "SK": "META"},
+        )
+
+    # ---- sell sessions (admin feature) ----
+    def put_sell_session(self, session: dict):
+        """Insert or update a sell session."""
+        sell_id = session["sell_id"]
+        record = {
+            "PK": f"SELL#{sell_id}",
+            "SK": "META",
+            "entity": "sell_session",
+            "GSI1PK": f"SELLS#{session.get('status', 'draft')}",
+            "GSI1SK": session.get("created_at", ""),
+            **_serialize(session),
+        }
+        self._table.put_item(Item=record)
+
+    def get_sell_session(self, sell_id: str) -> dict | None:
+        """Fetch one sell session by id."""
+        item = self._table.get_item(
+            Key={"PK": f"SELL#{sell_id}", "SK": "META"},
+        ).get("Item")
+        return item if item else None
+
+    # ---- buy sessions (admin feature) ----
+    def put_buy_session(self, session: dict):
+        """Insert or update a buy session."""
+        buy_id = session["buy_id"]
+        record = {
+            "PK": f"BUY#{buy_id}",
+            "SK": "META",
+            "entity": "buy_session",
+            "GSI1PK": f"BUYS#{session.get('status', 'draft')}",
+            "GSI1SK": session.get("created_at", ""),
+            **_serialize(session),
+        }
+        self._table.put_item(Item=record)
+
+    def get_buy_session(self, buy_id: str) -> dict | None:
+        """Fetch one buy session by id."""
+        item = self._table.get_item(
+            Key={"PK": f"BUY#{buy_id}", "SK": "META"},
+        ).get("Item")
+        return item if item else None
+
+    # ---- trade sessions (admin feature) ----
+    def put_trade_session(self, session: dict):
+        """Insert or update a trade session."""
+        trade_id = session["trade_id"]
+        record = {
+            "PK": f"TRADE#{trade_id}",
+            "SK": "META",
+            "entity": "trade_session",
+            "GSI1PK": f"TRADES#{session.get('status', 'draft')}",
+            "GSI1SK": session.get("created_at", ""),
+            **_serialize(session),
+        }
+        self._table.put_item(Item=record)
+
+    def get_trade_session(self, trade_id: str) -> dict | None:
+        """Fetch one trade session by id."""
+        item = self._table.get_item(
+            Key={"PK": f"TRADE#{trade_id}", "SK": "META"},
+        ).get("Item")
+        return item if item else None
+
+    # ---- admin-managed inventory locations ----
+    def put_location_config(
+        self,
+        locations: list[dict[str, str]],
+        *,
+        expected_generation: int | None = None,
+    ) -> int:
+        """Persist the full admin-managed location list (single row), guarded
+        by optimistic concurrency on ``gen`` (mirrors the ``#g = :gen`` lock
+        pattern used for the import/catalog locks above).
+
+        ``expected_generation=None`` means "this is the first write" (initial
+        seeding) and the write is conditioned on the row not existing yet.
+        Otherwise the write is conditioned on the stored generation still
+        matching ``expected_generation`` and bumps it by one. Two concurrent
+        read-modify-write callers racing on the same generation would
+        otherwise silently drop one admin's change (last write wins) while
+        both requests report success — the loser instead gets a
+        ``ConditionalCheckFailedException`` (``ClientError``) here, which
+        callers translate into a 409 for the admin to retry. Returns the new
+        generation on success.
+        """
+        new_gen = 1 if expected_generation is None else expected_generation + 1
+        record = {
+            "PK": "CONFIG#LOCATIONS",
+            "SK": "META",
+            "entity": "location_config",
+            "locations": _serialize(locations),
+            "gen": new_gen,
+        }
+        if expected_generation is None:
+            self._table.put_item(
+                Item=record,
+                ConditionExpression="attribute_not_exists(PK)",
+            )
+        else:
+            self._table.put_item(
+                Item=record,
+                ConditionExpression="#g = :gen",
+                ExpressionAttributeNames={"#g": "gen"},
+                ExpressionAttributeValues={":gen": expected_generation},
+            )
+        return new_gen
+
+    def get_location_config(self) -> list[dict[str, str]] | None:
+        """Fetch the persisted location list, or ``None`` if never seeded."""
+        result = self.get_location_config_with_generation()
+        return result[0] if result is not None else None
+
+    def get_location_config_with_generation(self) -> tuple[list[dict[str, str]], int] | None:
+        """Fetch the persisted location list plus its ``gen``, for callers
+        that need to round-trip ``expected_generation`` into a later write
+        (e.g. admin add/remove) — or ``None`` if never seeded."""
+        item = self._table.get_item(
+            Key={"PK": "CONFIG#LOCATIONS", "SK": "META"},
+        ).get("Item")
+        if not item:
+            return None
+        return item["locations"], item.get("gen", 0)

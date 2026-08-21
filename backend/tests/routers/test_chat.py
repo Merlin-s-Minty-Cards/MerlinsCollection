@@ -11,10 +11,25 @@ from merlins_collection.services.bedrock import (
 
 
 @pytest.fixture
-def chat_client(cognito_config, jwks):
-    """TestClient with auth overridden; bedrock service is overridden per-test."""
+def chat_client(cognito_config, jwks, _clean_aws):
+    """TestClient with auth overridden; bedrock service is overridden per-test.
+
+    /chat now enforces the DynamoDB-backed rate limiter as a dependency, and it
+    FAILS CLOSED (503) if the counter table is unreachable — so the fixture
+    provisions a moto-backed rate-limit table and wires a real limiter in front.
+    Request volumes here are tiny, so the limiter never trips; it just needs to be
+    able to verify usage.
+
+    ``_clean_aws`` (conftest) supplies the empty DynamoDB this used to get from
+    its own ``with mock_aws():``. It is depended on EXPLICITLY, not left to
+    autouse ordering: the session-wide mock means nothing else drops
+    ``merlins-rate-limits-test`` between tests, so without a guaranteed reset
+    first the second test here would fail ``create_table`` with
+    ``ResourceInUseException``.
+    """
     from merlins_collection.dependencies import get_verifier
     from merlins_collection.main import app
+    from merlins_collection.rate_limit import DynamoRateLimiter, get_rate_limiter
     from merlins_collection.services.cognito import CognitoJwtVerifier
 
     verifier = CognitoJwtVerifier(
@@ -24,6 +39,11 @@ def chat_client(cognito_config, jwks):
         jwks=jwks,
     )
     app.dependency_overrides[get_verifier] = lambda: verifier
+
+    limiter = DynamoRateLimiter("merlins-rate-limits-test", region_name="us-east-1")
+    limiter.create_table()
+    app.dependency_overrides[get_rate_limiter] = lambda: limiter
+
     yield TestClient(app)
     app.dependency_overrides.clear()
 

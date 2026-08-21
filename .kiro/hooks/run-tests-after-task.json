@@ -1,0 +1,14 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Run Tests After Task Completion",
+      "trigger": "PostTaskExec",
+      "description": "Prompts the agent to run relevant tests after a spec task completes, using the background process workaround.",
+      "action": {
+        "type": "agent",
+        "prompt": "A spec task just completed. If the task involved code changes to backend, frontend, or mcp-server, run the relevant test suite using background processes. Use this pattern:\n\nFor backend: control_pwsh_process start with command \"python -m pytest backend/tests -q --tb=short 2>&1\"\nFor frontend: control_pwsh_process start with command: cmd /c \"cd /d c:\\Users\\ethar\\.cursor\\projects\\MerlinsCollection-Secondary\\frontend & npx vitest run --reporter=verbose\" 2>&1\nFor mcp-server: control_pwsh_process start with command: cmd /c \"cd /d c:\\Users\\ethar\\.cursor\\projects\\MerlinsCollection-Secondary\\mcp-server & npx vitest run --reporter=verbose\" 2>&1\n\nThen poll with get_process_output after waiting (30s for backend, 15s for frontend/mcp). Report results to the user."
+      }
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "status_code": 200,
+  "elapsed_ms": 150,
+  "body_bytes": 8345,
+  "headers": {
+    "access-control-allow-headers": "Authorization, Content-Type",
+    "access-control-allow-methods": "GET, OPTIONS",
+    "access-control-allow-origin": "*",
+    "cache-control": "public, s-maxage=60, stale-while-revalidate=300",
+    "content-encoding": "gzip",
+    "content-type": "application/json",
+    "date": "Sat, 08 Aug 2026 19:20:24 GMT",
+    "server": "Vercel",
+    "strict-transport-security": "max-age=63072000",
+    "vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch",
+    "x-api-calls-breakdown": "cards=1,history=0,ebay=1",
+    "x-api-calls-consumed": "2",
+    "x-matched-path": "/api/v2/cards",
+    "x-ratelimit-daily-limit": "100",
+    "x-ratelimit-daily-remaining": "72",
+    "x-ratelimit-daily-reset": "1786233600",
+    "x-ratelimit-minute-limit": "60",
+    "x-ratelimit-minute-remaining": "50",
+    "x-ratelimit-minute-reset": "1786216873",
+    "x-ratelimit-purchased-remaining": "0",
+    "x-ratelimit-scope": "user",
+    "x-ratelimit-total-remaining": "72",
+    "x-vercel-cache": "BYPASS",
+    "x-vercel-id": "pdx1::iad1::drmkd-1786216824792-8c84377416c3",
+    "transfer-encoding": "chunked"
+  }
+}

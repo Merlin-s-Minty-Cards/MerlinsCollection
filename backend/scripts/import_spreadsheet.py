@@ -3,6 +3,17 @@
 Usage: python backend/scripts/import_spreadsheet.py <csv_dir> [--table merlins-cards]
                                                    [--allow-empty "Payouts,Debts"]
                                                    [--force-replace]
+                                                   [--singles-only]
+
+--SINGLES-ONLY is a separate, narrower run. It reads exactly one file --
+Singles_enriched_v3.csv -- and touches only inventory_item/transaction: the guard
+below asks about those two entities alone, and the commit sweep may delete only
+those two. Shows, debts, payouts, consignors, cash accounts, buying policies,
+payment methods and balance sheets are neither probed nor swept. It exists
+because the live table holds real, backup-less business data from those other
+ledgers that this rebuild does not re-import, and the full run below can only
+either refuse over that data or replace all of it. Without this flag the run is
+byte-for-byte what it always was: all 18 tabs, full guard, full sweep.
 
 RE-IMPORT IS DELIBERATELY LOCKED. This is a ONE-SHOT migration tool. Once the
 spreadsheet has been imported, the DATABASE is the source of truth: corrections,
@@ -30,7 +41,11 @@ really is empty for this period, acknowledge it explicitly with --allow-empty.
 import argparse
 
 from merlins_collection.services.dynamodb import InventoryRepository
-from merlins_collection.services.spreadsheet_import import run_import
+from merlins_collection.services.spreadsheet_import import (
+    SINGLES_ONLY_CSV_NAME,
+    run_import,
+    run_singles_only_import,
+)
 
 
 def main() -> None:
@@ -52,13 +67,29 @@ def main() -> None:
         help="proceed even though the table already holds business data, "
              "REPLACING it with the spreadsheet's contents (see module docstring)",
     )
+    parser.add_argument(
+        "--singles-only", action="store_true",
+        help=f"import ONLY {SINGLES_ONLY_CSV_NAME}, guarding and sweeping only "
+             f"inventory_item/transaction (see module docstring)",
+    )
     args = parser.parse_args()
+    if args.singles_only and args.allow_empty:
+        # --allow-empty names TABS, and a Singles-only run has exactly one, which
+        # is never allowed to be empty. Silently ignoring the flag would leave the
+        # operator believing an acknowledgement was accepted.
+        parser.error("--allow-empty does not apply to --singles-only: that run "
+                     "reads one file and refuses to commit it empty.")
     allow_empty = frozenset(
         t.strip() for t in args.allow_empty.split(",") if t.strip()
     )
     repo = InventoryRepository(args.table)
-    for tab, summary in run_import(args.csv_dir, repo, allow_empty=allow_empty,
-                                   force_replace=args.force_replace).items():
+    if args.singles_only:
+        summaries = run_singles_only_import(args.csv_dir, repo,
+                                            force_replace=args.force_replace)
+    else:
+        summaries = run_import(args.csv_dir, repo, allow_empty=allow_empty,
+                               force_replace=args.force_replace)
+    for tab, summary in summaries.items():
         print(f"{tab}: {summary}")
 
 

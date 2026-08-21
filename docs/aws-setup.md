@@ -72,6 +72,36 @@ Or in the console: DynamoDB → Create table →
 - After creation, add a **Global Secondary Index** named `GSI1`:
   partition key `GSI1PK` (String), sort key `GSI1SK` (String), projection **All**.
 
+### Phase 2b — the rate-limit table (`merlins-rate-limits`)
+
+The app-side rate limiter (`backend/src/merlins_collection/rate_limit.py`) keeps
+its counters in a **separate** DynamoDB table — deliberately NOT `merlins-cards`,
+so ephemeral counters are never swept as business data by the importer. Provision
+it once (name it `merlins-rate-limits`, or match `RATE_LIMIT_TABLE_NAME`):
+
+```powershell
+cd backend
+python -c "from merlins_collection.rate_limit import DynamoRateLimiter; DynamoRateLimiter('merlins-rate-limits', region_name='us-east-1').create_table()"
+```
+
+Then **enable TTL** so expired per-minute/per-day counter items auto-delete
+(there is no IaC; this is a one-time manual step):
+
+```powershell
+aws dynamodb update-time-to-live --table-name merlins-rate-limits `
+  --time-to-live-specification "Enabled=true,AttributeName=expires_at"
+```
+
+Console equivalent: table `merlins-rate-limits`, partition key `PK` (String), no
+sort key, On-demand; then Additional settings → Time to Live → attribute
+`expires_at`. TTL is a cleanup optimization only — correctness does not depend on
+it (each new window uses a new item), it just stops the table growing forever.
+
+> **Launch-critical:** `/chat` **fails closed** — if the backend's role cannot
+> write to this table, EVERY chat request returns 503 the moment the link goes
+> public. Grant the scoped IAM permission below (Phase 7) BEFORE the table goes
+> live, and do **not** paper over a missing grant with a broad `dynamodb:*`.
+
 ## Phase 3 — Bedrock model access + first end-to-end run (20 min)
 
 1. Bedrock console (us-east-1) → **Model access** → request access to
@@ -87,22 +117,34 @@ Or in the console: DynamoDB → Create table →
    failing with `ResourceNotFoundException: ... reached the end of its
    life`), so if chat mode 502s, this is the first thing to check.
 2. Seed some data. Two options:
-   - **Real catalog data**: get a free API key at https://dev.pokemontcg.io,
-     set `POKEMONTCG_API_KEY` in `backend/.env`, then run:
+   - **Real catalog data**: TCGdex needs no API key. From `backend/`:
 
-     ```python
-     from datetime import date
-     from merlins_collection.services.catalog_sync import run_daily_sync
-     from merlins_collection.services.dynamodb import InventoryRepository
-     from merlins_collection.services.pokemontcg import PokemonTcgClient
-
-     repo = InventoryRepository("merlins-cards", region_name="us-east-1")
-     client = PokemonTcgClient(api_key="<your POKEMONTCG_API_KEY>")
-     run_daily_sync(repo, client, date.today())
+     ```bash
+     python scripts/seed_catalog.py                     # DRY RUN, both languages
+     python scripts/seed_catalog.py --language en       # DRY RUN, English only
+     # actually write (the table name must be repeated back):
+     python scripts/seed_catalog.py --execute --confirm-table merlins-cards
      ```
 
-     This fills catalog cards + price points, then runs
-     `refresh_inventory_market_values`.
+     That is the identity-only pass (one request per language). TCGdex serves
+     prices only from its per-card detail endpoint, so prices are fetched
+     separately for the cards actually held.
+
+     **The seed is a dry run unless you pass both `--execute` and a
+     `--confirm-table` that matches the configured target.** The target defaults
+     to the live table that serves `/inventory`, and the seed writes ~23,444 rows
+     into it. It will not overwrite a row a depth pass has already priced
+     (`detail="full"`), and it exits non-zero rather than reporting success if
+     the catalog comes back implausibly short or most rows fail to map.
+   - **Daily job** (price snapshots + market-value denormalization):
+
+     ```bash
+     python scripts/daily_sync.py
+     ```
+
+     Runs the graded-slab snapshot, the sealed snapshot, and
+     `refresh_inventory_market_values`. Read-only against TCGdex — it works off
+     data already in DynamoDB. This is what a scheduler should invoke.
    - **Manual**: `put_inventory_item` / `batch_upsert_catalog_cards` from a
      Python shell for a handful of cards (see `backend/tests/routers/test_inventory.py`
      for exact model construction).
@@ -126,6 +168,46 @@ Or in the console: DynamoDB → Create table →
    Visit http://localhost:3000/inventory — filter search should return your
    seeded cards, and chat mode should answer questions using the MCP tools.
 
+### Phase 3b — Bedrock cost guardrail (must-do before sharing the link)
+
+Bedrock bills per token, on-demand, no matter how tight the app-side rate
+limits (Phase 2b / Phase 7) are — a bug or a burst of legitimate traffic can
+still run up a real bill within a day. Two things to set up before the
+`/inventory` link goes out publicly:
+
+1. **Keep Bedrock on-demand.** Do not switch to Provisioned Throughput — that
+   trades a bill that scales with actual usage for a fixed hourly commitment,
+   the wrong tradeoff for a small business with bursty, unpredictable traffic.
+2. **An AWS Budgets *Action*, not just an alert.** This is the only
+   AWS-native **hard stop** on spend: a plain budget *alert* only sends an
+   email — nothing stops the next Bedrock call, and by the time the email is
+   read the bill has already grown. An Action actually revokes the
+   permission to call Bedrock until it's manually restored. The Budgets
+   console does **not** let you author policy JSON inline, so this needs two
+   pieces created ahead of time:
+   - **The deny policy itself.** IAM → Policies → Create policy → JSON:
+     ```json
+     {"Version":"2012-10-17","Statement":[{"Effect":"Deny","Action":"bedrock:InvokeModel","Resource":"*"}]}
+     ```
+     Name it something like `DenyBedrockInvoke`. This is the policy the
+     Action attaches to the backend's role when the budget threshold is hit.
+   - **A one-time Budgets service role.** AWS Budgets can't execute *any*
+     Action until it has permission to make IAM changes on your behalf:
+     IAM → Create role → attach the managed policy
+     `AWSBudgetsActions_RolePolicyForResourceAdministrationWithSSM`. This is
+     a separate role from the target role above — it's the role you select
+     as "the IAM role" *for Budgets itself* when adding the Action, not the
+     role the deny policy gets attached to.
+   - **Then create the budget and Action.** Billing → Budgets → create a
+     **daily** budget (e.g. **$20/day**) → add an **Action** of type **IAM
+     policy**, referencing the `DenyBedrockInvoke` policy's ARN, targeting
+     the role the backend runs as, using the Budgets service role above,
+     triggered at 100% of the budget.
+
+**Bedrock "Guardrails" is a different feature** (content filtering / PII
+redaction on model input and output) — it does **not** limit spend. Don't
+mistake configuring a Guardrail for having a cost control in place.
+
 ## Phase 4 — Cognito (customer auth) (30 min)
 
 The backend verifies Cognito **access tokens** (`services/cognito.py`); the
@@ -135,13 +217,27 @@ remaining frontend task — see "What's not done yet" below).
 1. Cognito → User pools → Create:
    - Sign-in options: **Email**
    - Password policy / MFA: your call (email-code MFA is fine to start)
-   - App client: type **Public client**, name `merlins-frontend`,
-     **generate a client secret** (NextAuth uses it),
-     Allowed callback URL `http://localhost:3000/api/auth/callback/cognito`
-     (add the production URL later), enable **Authorization code grant** with
-     scopes `openid`, `email`, `profile`.
-   - Add a **domain** (App integration → Domain → Cognito domain) so the
-     hosted login UI works.
+   - App client: **Application type = "Traditional web application"**, name
+     `merlins-frontend`. **Do not pick "Public client"** — only the
+     "Traditional web application" and "Machine-to-machine application"
+     profiles generate a client secret; "Public client" (the SPA-style
+     profile) never does, and this codebase's NextAuth config genuinely reads
+     `AWS_COGNITO_CLIENT_SECRET` (`frontend/lib/auth.config.ts`, both for the
+     initial sign-in and for refreshing the access token), so picking Public
+     client here would leave you stuck later with no secret to put in
+     `frontend/.env.local`. Set the callback URL to
+     `http://localhost:3000/api/auth/callback/cognito` (add the production
+     URL later).
+   - After the user pool is created, the OAuth details aren't part of that
+     same wizard anymore: go to **App clients** → select `merlins-frontend` →
+     **Hosted UI / Login pages** settings, and confirm **Authorization code
+     grant** is checked under OAuth grant types, with scopes `openid`,
+     `email`, `profile` under OpenID Connect scopes.
+   - Add a **domain** (Branding → Domain → Create Cognito domain) so the
+     hosted login UI works. The console now offers two branding options here:
+     **managed login** (newer, currently the recommended default) and
+     **classic hosted UI** (older, still works). Either gets you a working
+     login page; managed login is the one AWS points you toward today.
 2. Create an admin group (optional, gates future admin routes): User pool →
    Groups → create `admin`, add yourself.
 3. Fill in the env files:
@@ -167,41 +263,419 @@ remaining frontend task — see "What's not done yet" below).
    **Origin Access Control** (CloudFront creates the bucket policy for you).
 3. Put `NEXT_PUBLIC_CLOUDFRONT_URL=https://dxxxxxxxx.cloudfront.net` in
    `frontend/.env.local`, and add that hostname to `images.remotePatterns` in
-   `frontend/next.config.ts` (pokemontcg.io images already work without this).
+   `frontend/next.config.ts` (TCGdex images already work without this).
 
 ## Phase 6 — Hosting (when ready to go live)
 
-Simplest architecture that fits this codebase:
+**Two deployment paths exist.** Everything below in this phase is the
+**container path (ECS Express Mode / Fargate)** — current production. RFC
+0014 added a parallel **serverless path (Lambda + CloudFront)**, deployed
+and reachable but still a validation spike nothing in production points at
+yet. Its exact deploy commands live in the root
+[`README.md`](../README.md#deploying-to-aws) (kept in one place rather than
+copied here, so the two don't drift) — see that section, and
+[`docs/rfcs/0014-ecs-to-serverless-migration.md`](rfcs/0014-ecs-to-serverless-migration.md)
+for the full design and current status, before choosing between them.
+
+**AWS App Runner is closed to new customers as of 2026-04-30** — it is no
+longer an option for either side of this app. Its named replacement is
+**Amazon ECS Express Mode** (GA November 2025): point it at a container
+image and one call provisions Fargate + an Application Load Balancer +
+health checks + autoscaling, the same "just deploy the container" experience
+App Runner used to offer. This codebase already builds a production Docker
+image for each side (`frontend/Dockerfile`, `backend/Dockerfile`, both
+already smoke-tested by CI's `docker-build` job), so Express Mode is used
+for **both**:
 
 | Piece | Service | Notes |
 |-------|---------|-------|
-| Frontend | **AWS Amplify Hosting** (or Vercel) | Connect the GitHub repo, root dir `frontend/`. Set all `frontend/.env` vars in the console. |
-| Backend + MCP server | **App Runner** or a small **EC2/Lightsail** instance | The two must live together: the backend spawns `node mcp-server/dist/index.js` as a subprocess, so the image/instance needs Python 3.12+, Node 20+, and a built `mcp-server/dist`. Attach an IAM **role** (DynamoDB + Bedrock access) instead of access keys. |
+| Frontend | **ECS Express Mode**, from `frontend/Dockerfile` | Health check path `/` — the Next.js app has no dedicated `/health` route. |
+| Backend + MCP server | **ECS Express Mode**, from `backend/Dockerfile` | Health check path `/health`. Size the task **~1 vCPU / 2 GB** — it runs the Python/FastAPI process AND spawns a Node MCP **subprocess** at the same time, so it needs more headroom than a bare API container. |
+
+Why not the old framing:
+- **Amplify Hosting (or Vercel) for the frontend — dropped.** Amplify's
+  Next.js hosting is a **git-based build service**: it clones the repo and
+  runs its own build, rather than deploying the Docker image this repo
+  already builds and smoke-tests in CI. It also has silent build-minute and
+  response-size caps that don't surface until you hit them. Deploying the
+  same tested image via ECS Express Mode is more predictable.
+- **App Runner for the backend — closed to new customers**, so Express Mode
+  is the direct successor.
+
+Two ways to drive Express Mode — the console wizard (recommended for a
+first-time, tight-deadline deploy) and the CLI (better once you're
+scripting/automating deploys). Either way, push the image to ECR first —
+Express Mode deploys from an ECR image, not straight from a Dockerfile.
+
+### Console path (recommended)
+
+`console.aws.amazon.com/ecs/v2` → left nav **"Express mode"** → fill in the
+**Image URI** (the ECR image you pushed) and the rest of the wizard. For the
+**Task execution role** and **Infrastructure role** dropdowns, choose
+**"Create new role"** — the console auto-creates both required IAM roles for
+you (the equivalents of `ecsTaskExecutionRole` and
+`ecsInfrastructureRoleForExpressServices` below), so there's nothing to
+pre-create by hand on this path.
+
+Repeat the wizard once per image — frontend and backend are two independent
+Express services (two ECR images, two wizard runs), not one combined task.
+
+### CLI path (for scripting/automation)
+
+Unlike the console wizard, the CLI does **not** create the required IAM
+roles for you — confirm these two roles already exist in the account before
+the first Express call (Express Mode assumes them on this path):
+- `ecsTaskExecutionRole` — lets ECS pull the image from ECR and write logs.
+- `ecsInfrastructureRoleForExpressServices` — lets Express Mode provision the
+  ALB, target group, and autoscaling on your behalf.
+
+Steps, run once per image:
+1. Push the built image to **ECR** (`aws ecr create-repository`, then
+   `docker push`) — Express Mode deploys from an ECR image, not straight
+   from a Dockerfile.
+2. Run `aws ecs create-express-gateway-service` against that image. This one
+   command provisions the Fargate service, the ALB, the health check, and
+   autoscaling — no separate ALB / target group / service setup needed.
+3. Repeat for the other image. Frontend and backend are two independent
+   Express services (two ECR images, two `create-express-gateway-service`
+   calls), not one combined task.
 
 Production settings to remember:
 - `CORS_ORIGINS=https://your-domain.com` on the backend (comma-separated for
   multiple origins; localhost is only the dev default).
-- `MCP_SERVER_PATH` should be an **absolute** path in production.
+- `MCP_SERVER_PATH` should be an **absolute** path in production (the
+  backend image already sets `MCP_SERVER_PATH=/app/mcp-server/dist/index.js`
+  via `ENV` in `backend/Dockerfile` — nothing to change here unless that
+  image's layout changes).
 - **Never set `AUTH_DISABLED` in production** — it bypasses login entirely
   (the backend logs a loud warning at startup whenever it's on).
 - Add the production callback URL to the Cognito app client.
-- API Gateway in front of the backend is optional at this stage; App Runner /
-  a load balancer with HTTPS is enough to start.
+- Attach the backend's task IAM **role** (DynamoDB + Bedrock access, see
+  Phase 7) so credentials never need to live in the container — this is
+  separate from `ecsTaskExecutionRole` above, whose only job is pulling the
+  image and writing logs.
+- API Gateway in front of the backend is still optional at this stage; the
+  ALB Express Mode provisions (with HTTPS) is enough to start.
+
+### Edge rate limiting — AWS WAF (recommended fast-follow, deferred for launch)
+
+The app already enforces its own limits (Phase 2b / Phase 7) — a
+DynamoDB-backed cap per authenticated Cognito user plus a global daily
+Bedrock ceiling. The recommended complement is an **AWS WAF rate-based rule
+on the backend's ALB** (the one Express Mode provisions above): it caps
+requests **per source IP at the network edge**, before they ever reach the
+app. That catches what the app-side limiter can't — a pre-auth flood, or one
+IP hammering multiple backend instances — and it keeps working across app
+restarts, since the count lives in WAF, not in the app's own counters.
+
+**Deferred for this launch** (owner decision): WAF costs roughly **$5/month
+per Web ACL + $1/month per rule + ~$0.60 per million requests inspected** —
+real but small money, not worth blocking the first show over. Treat it as
+the first post-launch hardening step: create a Web ACL scoped to the
+backend's ALB, add a rate-based rule (e.g. N requests per 5-minute window
+per IP), and associate the Web ACL with the ALB. The app-side limiter above
+is what actually caps Bedrock spend per user and globally; WAF adds
+pre-auth / multi-IP flood protection on top of it, not a replacement for it.
 
 ## Phase 7 — Tighten IAM (after everything works)
 
 Replace `merlins-dev`'s full-access policies with least privilege:
-- DynamoDB: `dynamodb:GetItem, Query, BatchGetItem, BatchWriteItem, PutItem, DeleteItem` on `table/merlins-cards` and `table/merlins-cards/index/GSI1`
+- DynamoDB (business table): `dynamodb:GetItem, Query, BatchGetItem, BatchWriteItem, PutItem, DeleteItem` on `table/merlins-cards` and `table/merlins-cards/index/GSI1`
+- DynamoDB (rate-limit table): `dynamodb:UpdateItem` on `table/merlins-rate-limits` — **required**; without it `/chat` fails closed and 503s for all users. Add `dynamodb:CreateTable` + `dynamodb:UpdateTimeToLive` on the same ARN only while running the one-time Phase 2b provisioning step (drop them after).
 - Bedrock: `bedrock:InvokeModel` on the Claude model ARN
 - S3: `s3:GetObject, PutObject` on the images bucket
 
+Scoped statement for the rate-limit table (swap in your account id / region /
+table name; the runtime action is just `UpdateItem` — the limiter never reads,
+scans, or deletes, and TTL handles cleanup):
+
+```json
+{
+  "Sid": "RateLimitCounters",
+  "Effect": "Allow",
+  "Action": "dynamodb:UpdateItem",
+  "Resource": "arn:aws:dynamodb:us-east-1:<ACCOUNT_ID>:table/merlins-rate-limits"
+}
+```
+
+The rate-limit table is **separate** from `merlins-cards`, so an existing narrow
+policy scoped to the business table does NOT cover it — the grant above is an
+additional statement, not an edit to the business-table one. **Never** substitute
+`dynamodb:*` on `*` as a deadline shortcut.
+
 Also rotate the Phase 1 access key once production runs on IAM roles.
+
+## Phase 8 — Scheduled Syncs (EventBridge Scheduler → ECS RunTask)
+
+Two automated sync jobs keep prices and the card catalog current. Both run
+as **ECS RunTask** invocations of the existing backend container image,
+dispatched by EventBridge Scheduler.
+
+### Why ECS RunTask, not Lambda
+
+The sync jobs already exist as CLI scripts built to run in the backend
+container. The image carries all their dependencies (boto3,
+merlins_collection, tcgdex client), and the existing ECS task role already
+grants the required DynamoDB access. A new-set catalog sync can exceed
+Lambda's hard 15-minute timeout. ECS RunTask reuses the existing
+infrastructure with zero new deployment artefacts — no separate Lambda
+package, no new IAM role for Lambda, no cold-start tuning.
+
+### The two schedules
+
+| Schedule | Cron | Job | What it does |
+|----------|------|-----|--------------|
+| `merlins-price-sync` | Daily 09:00 UTC (~5 AM ET, before shop hours) | `--job prices` | Calls `run_daily_sync` — **six steps**: TCGdex depth pass for held cards, **per-grade slab pricing (metered, see below)**, graded/sealed snapshots, inventory market-value refresh, and the **weekly catalog price cycle** (RFC 0010 T17 — ~5,500 unheld catalog cards a night, stalest-first, so the whole catalog is re-priced within a week; adds ~24 min to the run) |
+| `merlins-catalog-sync` | First Monday of each month, 10:00 UTC | `--job catalog` | Calls `sync_new_sets`: seeds identity rows for any TCGdex set the catalog doesn't have yet |
+
+Both schedules have `FlexibleTimeWindow` enabled and a `RetryPolicy` with
+`MaximumRetryAttempts: 2`.
+
+### Setup commands
+
+Replace placeholders (`<ACCOUNT_ID>`, `<CLUSTER_ARN>`, `<TASK_DEF_ARN>`,
+`<SUBNET_IDS>`, `<SECURITY_GROUP_ID>`) with your actual values before running.
+
+**1. Create the scheduler IAM role:**
+
+```bash
+# Trust policy — lets EventBridge Scheduler assume the role
+aws iam create-role \
+  --role-name merlins-scheduler-role \
+  --assume-role-policy-document file://deploy/scheduled-sync-scheduler-role.json
+
+# Permissions — ecs:RunTask + iam:PassRole for the task/execution roles
+# Extract the "_permissions" block from the role JSON into a separate file,
+# or inline it:
+aws iam put-role-policy \
+  --role-name merlins-scheduler-role \
+  --policy-name SchedulerRunTask \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "RunSyncTask",
+        "Effect": "Allow",
+        "Action": "ecs:RunTask",
+        "Resource": "<TASK_DEF_ARN>",
+        "Condition": { "ArnLike": { "ecs:cluster": "<CLUSTER_ARN>" } }
+      },
+      {
+        "Sid": "PassTaskRoles",
+        "Effect": "Allow",
+        "Action": "iam:PassRole",
+        "Resource": [
+          "arn:aws:iam::<ACCOUNT_ID>:role/merlins-backend-task-role",
+          "arn:aws:iam::<ACCOUNT_ID>:role/ecsTaskExecutionRole"
+        ]
+      }
+    ]
+  }'
+```
+
+**2. Create the schedules** (reference definitions in
+`deploy/scheduled-sync-eventbridge.json`):
+
+```bash
+# Daily price sync
+aws scheduler create-schedule \
+  --name merlins-price-sync \
+  --schedule-expression "cron(0 9 * * ? *)" \
+  --flexible-time-window '{"Mode":"FLEXIBLE","MaximumWindowInMinutes":15}' \
+  --target '{
+    "Arn": "<CLUSTER_ARN>",
+    "RoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/merlins-scheduler-role",
+    "EcsParameters": {
+      "TaskDefinitionArn": "<TASK_DEF_ARN>",
+      "TaskCount": 1,
+      "LaunchType": "FARGATE",
+      "NetworkConfiguration": {
+        "AwsvpcConfiguration": {
+          "Subnets": ["<SUBNET_IDS>"],
+          "SecurityGroups": ["<SECURITY_GROUP_ID>"],
+          "AssignPublicIp": "ENABLED"
+        }
+      }
+    },
+    "Input": "{\"containerOverrides\":[{\"name\":\"Main\",\"command\":[\"python\",\"-m\",\"scripts.scheduled_sync\",\"--job\",\"prices\"]}]}",
+    "RetryPolicy": {"MaximumRetryAttempts": 2, "MaximumEventAgeInSeconds": 3600}
+  }'
+
+# Monthly catalog sync (first Monday)
+aws scheduler create-schedule \
+  --name merlins-catalog-sync \
+  --schedule-expression "cron(0 10 ? * MON#1 *)" \
+  --flexible-time-window '{"Mode":"FLEXIBLE","MaximumWindowInMinutes":30}' \
+  --target '{
+    "Arn": "<CLUSTER_ARN>",
+    "RoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/merlins-scheduler-role",
+    "EcsParameters": {
+      "TaskDefinitionArn": "<TASK_DEF_ARN>",
+      "TaskCount": 1,
+      "LaunchType": "FARGATE",
+      "NetworkConfiguration": {
+        "AwsvpcConfiguration": {
+          "Subnets": ["<SUBNET_IDS>"],
+          "SecurityGroups": ["<SECURITY_GROUP_ID>"],
+          "AssignPublicIp": "ENABLED"
+        }
+      }
+    },
+    "Input": "{\"containerOverrides\":[{\"name\":\"Main\",\"command\":[\"python\",\"-m\",\"scripts.scheduled_sync\",\"--job\",\"catalog\"]}]}",
+    "RetryPolicy": {"MaximumRetryAttempts": 2, "MaximumEventAgeInSeconds": 3600}
+  }'
+```
+
+**DONE — applied against account 560151615792 on 2026-08-12.** Both
+`merlins-scheduler-role` and both schedules already exist and are `ENABLED`
+(verified live via `aws iam get-role` / `aws scheduler get-schedule`
+2026-08-15). Real values, for the record — `deploy/scheduled-sync-*.json`
+deliberately keep the placeholder form above rather than being edited to match,
+the same template-vs-applied split every other `deploy/*.json` file in this
+repo follows:
+
+- `<CLUSTER_ARN>` = `arn:aws:ecs:us-east-1:560151615792:cluster/merlins`
+- `<TASK_DEF_ARN>` = `arn:aws:ecs:us-east-1:560151615792:task-definition/merlins-merlins-backend`
+  (the bare family, no `:revision` — so a future deploy's new revision is
+  picked up automatically; a pinned revision would silently go stale)
+- `<SUBNET_IDS>` = `subnet-02c58dac47f3ef1a9,subnet-0db51619531f5ed05,subnet-05d7f7cf7c1ebac08`
+  (3 of the cluster's 6 available subnets — any subnet reachable by
+  `sg-0eaae8e456e45b31e` works for a Fargate `RunTask`)
+- `<SECURITY_GROUP_ID>` = `sg-0eaae8e456e45b31e`
+
+**Confirmed actually firing, not just created:** `aws ecs describe-tasks` on
+the most recent stopped task in the cluster shows `startedBy:
+"chronos-schedule/merlins-price-sync"`, `createdAt`
+`2026-08-15T02:12:54-07:00` (= 09:12 UTC, inside the cron's 09:00 UTC +
+15-minute flexible window), and container `Main` exited `0`. This is a real,
+unattended, successful price-sync run — the exact gap RFC 0013 item 5 set out
+to close.
+
+**A prior version of RFC 0013's own tracking file (`claude-progress.txt`)
+still listed this item as not-yet-deployed** after the schedules had already
+gone live two days earlier — the file was never updated with a "DONE" line
+the way this section now is, so a later session re-diagnosed a solved problem
+as still open. Always check live AWS state (`aws scheduler list-schedules`)
+before re-attempting a deploy step a progress file marks as pending; the file
+can lag reality in either direction.
+
+### Monitoring
+
+Both jobs log a single structured JSON summary line to stdout, which lands in
+the ECS task's CloudWatch log group. Look for the log group associated with
+the backend task definition (typically `/ecs/merlins-backend` or similar).
+
+- **Success:** `{"job": "prices", "status": "ok", "summary": {...}}`
+- **Failure:** `{"job": "prices", "status": "error", "error": "RuntimeError: ..."}`
+
+The exit code is 0 on success and non-zero on failure, so ECS marks the task
+as STOPPED with a non-zero exit code on failure, and EventBridge's retry
+policy kicks in automatically.
+
+### Manual trigger
+
+Either job can be triggered on demand from the admin Market page (Sync Prices
+button / Check for New Sets button), or from the CLI:
+
+```bash
+# From the backend directory, with AWS creds configured:
+python -m scripts.scheduled_sync --job prices
+python -m scripts.scheduled_sync --job catalog
+```
+
+### Outbound third-party credentials (RFC 0009 graded pricing)
+
+`POKEMONPRICETRACKER_API_KEY` is the **first outbound third-party credential this
+service has ever held.** Everything before it was an AWS credential resolved from
+a role. That difference is the whole point of this subsection: a role has no
+value to paste anywhere, and this key does.
+
+**Owner decision, 2026-08-12: plain ECS `environment`, not Secrets Manager.**
+An earlier version of this section specified the task definition's `secrets`
+array (a `valueFrom` pointing at a Secrets Manager ARN). The owner explicitly
+declined that — no Secrets Manager secret, no execution-role grant, just the
+same `environment` array every other non-AWS config value already goes
+through (`deploy/backend-container.json` has always held `AWS_COGNITO_CLIENT_SECRET`
+this way). `ADMIN_API_KEY` has the same shape and follows the same rule.
+This trades the "readable by anyone who can call `ecs:DescribeTaskDefinition`"
+exposure for one less moving part; that tradeoff was made knowingly, not
+missed. Do not silently reintroduce a `secrets` block for these two keys.
+
+```json
+"environment": [
+  { "name": "POKEMONPRICETRACKER_API_KEY", "value": "<the real key>" },
+  { "name": "ADMIN_API_KEY", "value": "<the real key>" }
+]
+```
+
+`deploy/backend-container.json` is the reference container definition and
+deliberately carries a **placeholder** value (`PASTE_YOUR_KEY_HERE`) for
+`POKEMONPRICETRACKER_API_KEY` rather than a real one — replace it with the
+real key when you wire it, the same way you would any other env var here.
+`PRICING_DAILY_QUOTA` is not a secret either; it belongs in `environment` too
+(default `100` **credits**, i.e. 50 lookups).
+
+**Both consumers are covered by one injection.** The API service and the
+EventBridge-triggered sync task run the **same task definition** (Phase 8 above
+overrides only the container `command`), so a secret added there reaches both the
+nightly `refresh_graded_prices` pass and the admin `POST /admin/slabs/refresh-prices`
+button. Nothing separate to configure for the schedule.
+
+**IAM — read this before granting anything:**
+
+- **The task role needs NOTHING new.** The vendor call is ordinary outbound HTTPS,
+  not an AWS API. The daily/minute quota counters are **purely in-process and
+  in-memory** (`services/slab/quota.py`) — they touch **no DynamoDB table at all**,
+  not `merlins-rate-limits` and not `merlins-cards`. If a doc or a task claims this
+  RFC needs a new task-role permission, it is wrong; re-check before granting.
+  (The `dynamodb:Scan` / `UpdateItem` gap in CLAUDE.md's Ops section is a separate,
+  pre-existing catalog-cache problem and has nothing to do with these keys.)
+- **The ECS execution role needs nothing extra either**, now that the key is a
+  plain `environment` value rather than a `secrets` reference — no
+  `secretsmanager:GetSecretValue` grant to add or maintain.
+- An unset key is a **supported state**, not an outage: slab pricing is skipped
+  with a warning and every other step of the nightly sync still runs. So a missed
+  grant costs slab prices, not the site.
+
+**Quota reality, so nobody sizes a schedule off the wrong number:** the free tier
+is 100 **credits** a day and one graded lookup costs **2** (card + eBay block),
+which makes it **50 slab lookups a night**. You are billed on the query `limit`
+even when the search matches zero cards. Above 50 owned slabs the job refreshes
+the 50 stalest and the rest wait for a later night — by design, not a failure.
+
+**Rotation is an owner action in an external vendor web UI that no AWS command
+performs:** issue a new key in the vendor portal, update `backend/.env` locally,
+update the task definition's `environment` value, then force a new ECS
+deployment so the running tasks pick it up (a plain `environment` value only
+takes effect on the next task launch, same as any other env var here — there
+is no separate "resolve at start" step to think about now that it is not a
+Secrets Manager reference).
+
+**2026-08-12: the key that had been pasted into a chat transcript during
+2026-08-07 planning was never actually wired into production** — the task
+definition carried a literal `PASTE_YOUR_KEY_HERE` placeholder instead, which
+is why every graded-pricing lookup failed with a 401 until this was caught.
+Fixed by wiring a freshly-issued key directly into `environment` (see the
+decision above); nothing from the 2026-08-07 transcript was reused.
+
+**Only the PokemonPriceTracker key still matters.** The PSA key is **moot** as of
+2026-08-10: PSA's cert API became a paid feature, the owner declined it, and RFC
+0010 §H made the withdrawal permanent — no code reads the key, no code ever will,
+and RFC 0010 T14 removed it from `backend/.env.example`. Revoke it in the PSA
+portal if that is convenient, but there is nothing to re-issue and nothing to
+redeploy. **Do the pricing key.**
+
+### One-time catalog bootstrap (NOT scheduled)
+
+The full catalog bootstrap (`scripts/seed_catalog.py --execute --confirm-table`)
+is **deliberately NOT scheduled**. It writes ~23,000+ rows into the live
+DynamoDB table and is designed as a one-time human-supervised operation. It
+must be run once by a human with AWS credentials before the first price sync
+will have catalog data to price against. See Phase 3 above for the exact
+command.
 
 ## Deferred (not needed to launch)
 
-- **Lambda + API Gateway** (price lookup / image processing) — the daily sync
-  currently runs manually via `run_daily_sync`; a scheduled Lambda (EventBridge
-  cron) is its natural home later.
 - **Rekognition** — future card-from-photo identification.
 - **Frontend Cognito login UI** — NextAuth provider wiring + a sign-in page +
   passing the session's access token into `searchInventory`/`sendChat` (the
@@ -212,8 +686,20 @@ Also rotate the Phase 1 access key once production runs on IAM roles.
 
 Backend (`backend/.env`): `AWS_REGION`, `DYNAMODB_TABLE_NAME`, `BEDROCK_MODEL_ID`,
 `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`, `MCP_SERVER_PATH`, `CORS_ORIGINS`,
-`AUTH_DISABLED`, `POKEMONTCG_API_KEY`. AWS credentials are **not** read from
-this file — see Phase 1 (`aws configure` / an IAM role in production).
+`AUTH_DISABLED`, `EUR_USD_RATE`, `POKEMONPRICETRACKER_API_KEY`,
+`PRICING_DAILY_QUOTA`. AWS credentials are **not** read from this file — see
+Phase 1 (`aws configure` / an IAM role in production). In production the two
+bearer tokens (`POKEMONPRICETRACKER_API_KEY`, `ADMIN_API_KEY`) are plain ECS
+`environment` entries, same as every other non-AWS config value — see Phase 8
+for the 2026-08-12 decision against Secrets Manager for these.
+
+**`PSA_API_KEY` is gone from `backend/.env.example` (RFC 0010 T14) and must not
+come back.** No code reads it — there is no `psa_api_key` field on `Settings` and
+`Settings` ignores unknown env vars — and none ever will: the cert lookup (RFC
+0009 T2) and camera scan (T5) are **WON'T DO** as of 2026-08-10, because PSA's
+API became paid and the owner declined it (RFC 0010 §H). **Do not add it to a
+task definition, an ECS secret, or a Settings field expecting an effect.** An
+existing `PSA_API_KEY` in your local `backend/.env` is harmless and inert.
 
 Frontend (`frontend/.env.local`): `NEXT_PUBLIC_API_URL` (backend base URL),
 `AUTH_URL`/`AUTH_SECRET` (NextAuth), `AWS_COGNITO_*` (provider),

@@ -5,7 +5,9 @@
 # ---- Workspace dependencies ----
 FROM node:20-slim AS deps
 WORKDIR /repo
-COPY package.json package-lock.json ./
+# .npmrc carries fetch-retry settings so a dropped socket on a flaky network
+# doesn't fail the whole (large) install — see the repo-root .npmrc.
+COPY package.json package-lock.json .npmrc ./
 COPY frontend/package.json frontend/package.json
 COPY mcp-server/package.json mcp-server/package.json
 RUN npm ci --workspace=frontend

@@ -1,0 +1,38 @@
+{
+  "category": "Pokemon",
+  "id": "base1-1",
+  "illustrator": "Ken Sugimori",
+  "image": "https://assets.tcgdex.net/en/base/base1/1",
+  "localId": "1",
+  "name": "Alakazam",
+  "rarity": "Rare",
+  "set": {
+    "id": "base1",
+    "name": "Base Set",
+    "cardCount": { "official": 102, "total": 102 }
+  },
+  "variants": {
+    "firstEdition": true,
+    "holo": true,
+    "normal": false,
+    "reverse": false,
+    "wPromo": false
+  },
+  "hp": 80,
+  "types": ["Psychic"],
+  "stage": "Stage2",
+  "updated": "2026-07-11T09:49:03+01:00",
+  "pricing": {
+    "tcgplayer": {
+      "unit": "USD",
+      "updated": "2026-07-26T08:02:22.370Z",
+      "first-edition-holofoil": {
+        "productId": 1,
+        "lowPrice": 100,
+        "midPrice": 200,
+        "highPrice": 400,
+        "marketPrice": 250
+      }
+    }
+  }
+}

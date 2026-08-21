@@ -7,9 +7,10 @@ status codes. All real logic lives in the service.
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from merlins_collection.dependencies import get_bedrock_service, get_current_user
+from merlins_collection.dependencies import get_bedrock_service
 from merlins_collection.models.auth import AuthenticatedUser
 from merlins_collection.models.chat import ChatRequest, ChatResponse
+from merlins_collection.rate_limit import rate_limit_chat
 from merlins_collection.services.bedrock import (
     BedrockChatService,
     BedrockContentFilteredError,
@@ -21,10 +22,16 @@ from merlins_collection.services.bedrock import (
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 
+# The cost-critical route. `rate_limit_chat` is a dependency, so it (and its
+# three tiers — per-user minute, per-user day, global account-wide day) runs
+# BEFORE the endpoint body: an over-limit request 429s without ever calling
+# Bedrock, and if the DynamoDB limiter can't verify usage it fails CLOSED (503)
+# rather than proceeding to Bedrock uncapped. It also enforces auth (401 first)
+# and reads settings live so the master switch works without a rebuild.
 @router.post("/", response_model=ChatResponse)
 def chat(
-    request: ChatRequest,
-    _user: AuthenticatedUser = Depends(get_current_user),
+    body: ChatRequest,
+    _user: AuthenticatedUser = Depends(rate_limit_chat),
     service: BedrockChatService = Depends(get_bedrock_service),
 ) -> ChatResponse:
     """Answer a chat message about the inventory; requires a valid bearer token.
@@ -33,7 +40,7 @@ def chat(
     content filtering → 422, any other Bedrock error → 502.
     """
     try:
-        reply = service.chat(request.message, request.history)
+        reply = service.chat(body.message, body.history)
     except BedrockThrottledError as exc:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,

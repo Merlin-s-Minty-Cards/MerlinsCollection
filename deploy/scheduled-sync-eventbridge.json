@@ -1,0 +1,79 @@
+{
+  "_comment": [
+    "EventBridge Scheduler definitions for the two automated sync jobs.",
+    "Each schedule targets the existing backend ECS task definition,",
+    "overriding only the container command to dispatch the appropriate job.",
+    "",
+    "Apply with 'aws scheduler create-schedule' — see docs/aws-setup.md for",
+    "the full commands with placeholder substitution."
+  ],
+
+  "schedules": [
+    {
+      "Name": "merlins-price-sync",
+      "Description": "Daily price snapshot + market-value refresh (09:00 UTC / ~5 AM ET, before shop hours)",
+      "ScheduleExpression": "cron(0 9 * * ? *)",
+      "ScheduleExpressionTimezone": "UTC",
+      "FlexibleTimeWindow": {
+        "Mode": "FLEXIBLE",
+        "MaximumWindowInMinutes": 15
+      },
+      "State": "ENABLED",
+      "Target": {
+        "Arn": "<CLUSTER_ARN>",
+        "RoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/merlins-scheduler-role",
+        "EcsParameters": {
+          "TaskDefinitionArn": "<TASK_DEF_ARN>",
+          "TaskCount": 1,
+          "LaunchType": "FARGATE",
+          "NetworkConfiguration": {
+            "AwsvpcConfiguration": {
+              "Subnets": "<SUBNET_IDS>",
+              "SecurityGroups": ["<SECURITY_GROUP_ID>"],
+              "AssignPublicIp": "ENABLED"
+            }
+          },
+          "PlatformVersion": "LATEST"
+        },
+        "Input": "{\"containerOverrides\":[{\"name\":\"Main\",\"command\":[\"python\",\"-m\",\"scripts.scheduled_sync\",\"--job\",\"prices\"]}]}",
+        "RetryPolicy": {
+          "MaximumRetryAttempts": 2,
+          "MaximumEventAgeInSeconds": 3600
+        }
+      }
+    },
+    {
+      "Name": "merlins-catalog-sync",
+      "Description": "Monthly new-set catalog sync (first Monday, 10:00 UTC)",
+      "ScheduleExpression": "cron(0 10 ? * MON#1 *)",
+      "ScheduleExpressionTimezone": "UTC",
+      "FlexibleTimeWindow": {
+        "Mode": "FLEXIBLE",
+        "MaximumWindowInMinutes": 30
+      },
+      "State": "ENABLED",
+      "Target": {
+        "Arn": "<CLUSTER_ARN>",
+        "RoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/merlins-scheduler-role",
+        "EcsParameters": {
+          "TaskDefinitionArn": "<TASK_DEF_ARN>",
+          "TaskCount": 1,
+          "LaunchType": "FARGATE",
+          "NetworkConfiguration": {
+            "AwsvpcConfiguration": {
+              "Subnets": "<SUBNET_IDS>",
+              "SecurityGroups": ["<SECURITY_GROUP_ID>"],
+              "AssignPublicIp": "ENABLED"
+            }
+          },
+          "PlatformVersion": "LATEST"
+        },
+        "Input": "{\"containerOverrides\":[{\"name\":\"Main\",\"command\":[\"python\",\"-m\",\"scripts.scheduled_sync\",\"--job\",\"catalog\"]}]}",
+        "RetryPolicy": {
+          "MaximumRetryAttempts": 2,
+          "MaximumEventAgeInSeconds": 3600
+        }
+      }
+    }
+  ]
+}

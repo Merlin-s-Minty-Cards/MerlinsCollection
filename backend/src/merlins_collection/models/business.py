@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from merlins_collection.models.inventory import new_ulid
 
@@ -44,8 +44,39 @@ class Transaction(BaseModel):
     fee: Decimal = Decimal("0")
     show_id: str | None = None
     trade_id: str | None = None
+    # The session that produced this row: buy_id, sell_id or trade_id. Lets a
+    # five-card purchase render as ONE line instead of five unrelated ones.
+    #
+    # Optional with a None default, so every row written before this field
+    # existed still validates. Deliberately NOT backfilled: a
+    # (date, payment_method, type) heuristic cannot tell two separate cash sales
+    # on one show day from a single two-card sale, so it would fabricate
+    # transactions that never happened in the one view where being wrong costs
+    # money. Legacy rows render as single-row groups instead.
+    #
+    # No key layout change — it rides on the existing TXN#<YYYY-MM> rows.
+    batch_id: str | None = None
     consignor_payout: Decimal | None = None
     notes: str | None = None
+
+    # A void, never a delete (RFC 0010 T11). The row stays readable in the
+    # archive and on the item's timeline, and it counts toward NOTHING.
+    #
+    # Every aggregate MUST exclude a voided row through
+    # ``services.ledger.is_countable`` — see that module's docstring. A reader
+    # that inlines ``voided_at is None`` is a second definition of countability,
+    # and the failure mode is two sets of books disagreeing by exactly one sale.
+    #
+    # All three optional with a None default, so every row written before they
+    # existed still validates.
+    voided_at: datetime | None = None
+    # SERVER-stamped from the authenticated principal. A client's claim about
+    # who voided a sale is not evidence, and this is the one field in the model
+    # whose whole purpose is accountability.
+    voided_by: str | None = None
+    # Bounded like ``review_reason``, for the same reason: free text riding
+    # into a DynamoDB item with a 400 KB ceiling.
+    void_reason: str | None = Field(default=None, max_length=500)
 
 
 class ExpenseCategory(StrEnum):
@@ -81,10 +112,43 @@ class Show(BaseModel):
     show_id: str = Field(default_factory=new_ulid)
     name: str
     date: date_type
+    # Optional structured location. Both default to None and are populated only
+    # when the import source carries dedicated columns — rows stored before these
+    # fields existed validate to None (backward-compatible; no data migration).
+    venue: str | None = None   # physical venue name, e.g. "Lloyd Center"
+    city: str | None = None    # "Portland, OR"
     sales_goal: Decimal | None = None
     cash_at_start: Decimal | None = None
     inventory_value_at_start: Decimal | None = None
     notes: str | None = None
+    # "Deleted" in the admin UI. Nothing is ever destroyed: a mistakenly
+    # archived show with real transaction history stays recoverable and the
+    # analytics snapshots that reference it never dangle. Rows stored before
+    # this field existed carry no ``archived`` attribute and default to False.
+    archived: bool = False
+
+
+class ShowAnalyticsSnapshot(BaseModel):
+    """Pre-computed analytics for a completed show (A4)."""
+
+    show_id: str
+    date: date_type
+    total_sold: Decimal = Decimal("0")
+    total_bought: Decimal = Decimal("0")
+    net_sales: Decimal = Decimal("0")
+    inventory_value_at_start: Decimal | None = None
+    sell_through_rate: Decimal | None = None
+    items_sold_count: int = 0
+    items_bought_count: int = 0
+    trades_count: int = 0
+    cash_at_start: Decimal | None = None
+    snapshot_generated_at: datetime | None = None
+    # A snapshot is a stored point-in-time record, so voiding a transaction
+    # behind it leaves it wrong BY CONSTRUCTION. Never silently rewrite one and
+    # never silently serve one: the void marks it stale and the UI says so
+    # until an admin regenerates it (which mints a fresh snapshot, defaulting
+    # this back to False).
+    stale: bool = False
 
 
 class DebtDirection(StrEnum):
@@ -107,8 +171,39 @@ class Debt(BaseModel):
 class Consignor(BaseModel):
     consignor_id: str = Field(default_factory=new_ulid)
     name: str
-    contact: str | None = None
+    contact: str | None = None  # legacy — kept for backward compat
+    email: str | None = None
+    phone: str | None = None
+    payout_percent: Decimal = Decimal("50")  # default payout % to consignor
+    # "Deleted" in the admin UI, and the same contract as ``Show.archived``:
+    # nothing is ever destroyed, so a consignment ledger can never lose its
+    # counterparty and an archived consignor stays recoverable.
+    archived: bool = False
     notes: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _archived_from_legacy_active(cls, data):
+        """Read a pre-RFC-0010 row's ``active: False`` as ``archived: True``.
+
+        ``active`` meant exactly this under a worse name and was read almost
+        nowhere — only written at create and by the soft delete. It is gone as a
+        field, because two live booleans for one concept is how the next reader
+        introduces a bug, and ``archived`` is the name CLAUDE.md's archiving
+        contract already established.
+
+        The mapping is not hypothetical: the owner had already soft-deleted a
+        consignor before this landed, so at least one production row carries
+        ``active: False`` and must render as archived rather than as active.
+
+        An explicit ``archived`` always wins; ``active`` is consulted only when
+        the row predates the field, so an old client's payload is migrated
+        rather than rejected.
+        """
+        if isinstance(data, dict) and "active" in data and data.get("archived") is None:
+            data = dict(data)
+            data["archived"] = not bool(data.pop("active"))
+        return data
 
 
 class Payout(BaseModel):

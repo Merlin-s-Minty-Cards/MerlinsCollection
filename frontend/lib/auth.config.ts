@@ -18,6 +18,16 @@ const REFRESH_BUFFER_MS = 60 * 1000
  * which verifies it against the same Cognito user pool.
  */
 export const authConfig: NextAuthConfig = {
+  // RFC 0014 Task 6: the OpenNext/CloudFront deployment's domain is assigned
+  // by AWS at deploy time, not chosen ahead of it, so there is no fixed
+  // AUTH_URL to set for it the way there is for the ECS deployment (which
+  // has a known, stable domain). trustHost makes Auth.js derive the
+  // callback host from the incoming request instead of a fixed env var —
+  // safe here because the only things in front of this app are CloudFront
+  // and this app's own Lambda, both under our control, not an arbitrary
+  // untrusted proxy. Also works unchanged for the ECS deployment, which
+  // still sets AUTH_URL explicitly and doesn't rely on this.
+  trustHost: true,
   providers: [
     Cognito({
       clientId: process.env.AWS_COGNITO_CLIENT_ID,
@@ -25,6 +35,16 @@ export const authConfig: NextAuthConfig = {
       issuer: process.env.AWS_COGNITO_ISSUER,
     }),
   ],
+  // Phase 17: explicit session configuration so the session lifetime is visible
+  // and not reliant on undocumented NextAuth defaults.
+  session: {
+    strategy: 'jwt',
+    // How long the encrypted session cookie lives. Set to 30 days (Cognito
+    // refresh token default). The access token inside refreshes silently via
+    // the jwt callback; this outer lifetime is when the user must fully
+    // re-authenticate regardless.
+    maxAge: 30 * 24 * 60 * 60, // 30 days in seconds
+  },
   callbacks: {
     async jwt({ token, account, profile }) {
       // `account` is present only on the initial sign-in callback: capture the
@@ -48,13 +68,21 @@ export const authConfig: NextAuthConfig = {
       // request in flight near the boundary — or a backend clock running ahead —
       // doesn't reach Cognito with an already-expired token.
       const expires = token.accessTokenExpires
-      if (typeof expires === 'number' && Date.now() < expires - REFRESH_BUFFER_MS) {
+      if (typeof expires === 'number' && expires > 0 && Date.now() < expires - REFRESH_BUFFER_MS) {
         return token
       }
 
-      // Expired but nothing to refresh with — leave the token untouched.
-      if (!token.refreshToken) {
+      // If accessTokenExpires was never set (legacy token from before refresh
+      // logic existed), leave the token alone — we can't know if it's expired.
+      if (typeof expires !== 'number' || expires === 0) {
         return token
+      }
+
+      // Token is expired. If we have no refresh token, flag the error so the
+      // session degrades cleanly rather than letting stale access tokens silently
+      // fail on every backend call (Phase 17 fix).
+      if (!token.refreshToken) {
+        return { ...token, error: 'RefreshAccessTokenError' }
       }
 
       // Expired: exchange the refresh token for a fresh access token.
@@ -84,7 +112,12 @@ export const authConfig: NextAuthConfig = {
  */
 async function refreshAccessToken(token: JWT): Promise<JWT> {
   try {
-    const issuer = process.env.AWS_COGNITO_ISSUER
+    // NOT `AWS_COGNITO_ISSUER` — that is the OIDC/JWKS host
+    // (cognito-idp.<region>.amazonaws.com/<pool-id>), which has no
+    // /oauth2/token route. The token endpoint lives on the Hosted UI domain
+    // (Cognito's own .well-known/openid-configuration confirms the two are
+    // different hosts), which is what this refresh must POST to.
+    const domain = process.env.AWS_COGNITO_DOMAIN
     const clientId = process.env.AWS_COGNITO_CLIENT_ID ?? ''
     const clientSecret = process.env.AWS_COGNITO_CLIENT_SECRET ?? ''
 
@@ -94,7 +127,7 @@ async function refreshAccessToken(token: JWT): Promise<JWT> {
       refresh_token: token.refreshToken as string,
     })
 
-    const response = await fetch(`${issuer}/oauth2/token`, {
+    const response = await fetch(`${domain}/oauth2/token`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',

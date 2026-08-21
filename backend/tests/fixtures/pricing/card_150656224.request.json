@@ -1,0 +1,9 @@
+{
+  "url": "https://www.pokemonpricetracker.com/api/v2/cards",
+  "params": {
+    "search": "Seismitoad",
+    "includeEbay": "true",
+    "language": "japanese",
+    "limit": "1"
+  }
+}

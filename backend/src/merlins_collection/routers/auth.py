@@ -6,15 +6,15 @@ Token validation itself lives in ``services/cognito.py`` and is applied via the
 
 from fastapi import APIRouter, Depends
 
-from merlins_collection.dependencies import get_current_user
 from merlins_collection.models.auth import AuthenticatedUser
+from merlins_collection.rate_limit import rate_limit_auth
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.get("/me", response_model=AuthenticatedUser)
 def read_current_user(
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(rate_limit_auth),
 ) -> AuthenticatedUser:
     """Return the identity and role of the authenticated caller."""
     return user

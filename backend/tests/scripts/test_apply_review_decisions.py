@@ -294,6 +294,26 @@ def test_card_accept_applies_fields_and_clears_needs_review(dynamo_repo):
         == [item.item_id]
 
 
+def test_card_accept_materializes_display_name_from_the_decision(dynamo_repo):
+    """Council MUST-FIX A/C, relink path: when the applier sets identity it also
+    writes a structured display_name (from the decision's confirmed name + number),
+    so a relinked/backfilled row carries a name too — a robust fallback if the
+    catalog META is momentarily missing. Derived from the structured decision
+    fields, never from the item's free-text notes."""
+    dynamo_repo.batch_upsert_catalog_cards([make_card()])
+    item = make_raw_item(display_name=None)
+    dynamo_repo.put_inventory_item(item)
+
+    text = (HEADER + f"CARD {item.item_id} ACCEPT card_id=swshp-SWSH068; name=Snorlax; "
+            f"set=SWSH Black Star Promos; number=SWSH068\n")
+    report = run(dynamo_repo, text, apply=True)
+
+    assert actions(report) == {("CARD", item.item_id): ard.UPDATE}
+    stored = dynamo_repo.get_inventory_item(item.item_id)
+    assert stored.card_id == "swshp-SWSH068"
+    assert stored.display_name == "Snorlax #swsh068"
+
+
 def test_card_set_without_value_leaves_market_value_alone(dynamo_repo):
     dynamo_repo.batch_upsert_catalog_cards([
         make_card(card_id="me2pt5-289", name="Steven's Metagross ex",
@@ -631,6 +651,50 @@ def test_a_stamped_japanese_item_is_refused_too(dynamo_repo, spy):
     report = run(dynamo_repo, HEADER + (
         "CARD 01ITEM0000000000000000RAW1 ACCEPT card_id=swshp-SWSH068; "
         "name=Snorlax; set=SWSH Black Star Promos; number=SWSH068\n"), apply=True)
+    assert report.results[0].action == ard.REFUSED
+    assert spy.writes == []
+
+
+def make_jp_card(card_id="sv4a-123", name="Pikachu", set_name="Shiny Treasure EX",
+                 number="123", set_id="sv4a"):
+    """A JP catalog card — TCGdex now seeds these alongside the EN ones."""
+    return CatalogCard(
+        card_id=card_id, name=name, set_id=set_id, set_name=set_name, number=number,
+        rarity="Rare", types=["Electric"], language=ard.Language.JP,
+        images=CardImages(small=f"https://img/{card_id}.png",
+                          large=f"https://img/{card_id}_hires.png"),
+        prices={}, last_synced_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+
+
+def test_a_japanese_item_accepts_a_matching_japanese_catalog_card(dynamo_repo, spy):
+    """Phase 6.1: the catalog is no longer English-only (TCGdex adds JP cards),
+    so a JP item linking to a JP catalog card is the CORRECT match and must be
+    applied, not refused outright by the old English-only gate."""
+    dynamo_repo.batch_upsert_catalog_cards([make_jp_card()])
+    dynamo_repo.put_inventory_item(
+        make_raw_item(language="JP", notes="Pikachu #123"))
+    spy.writes.clear()
+    report = run(dynamo_repo, HEADER + (
+        "CARD 01ITEM0000000000000000RAW1 ACCEPT card_id=sv4a-123; "
+        "name=Pikachu; set=Shiny Treasure EX; number=123\n"), apply=True)
+
+    assert report.results[0].action == ard.UPDATE
+    assert dynamo_repo.get_inventory_item(
+        "01ITEM0000000000000000RAW1").card_id == "sv4a-123"
+
+
+def test_a_japanese_item_still_refuses_an_english_catalog_card(dynamo_repo, spy):
+    """Regression guard: a cross-language mismatch (JP item, EN card) must
+    still be refused — only a matching JP card_id is now accepted."""
+    dynamo_repo.batch_upsert_catalog_cards([make_card()])  # default language EN
+    dynamo_repo.put_inventory_item(
+        make_raw_item(language="JP", notes="Snorlax #SWSH068"))
+    spy.writes.clear()
+    report = run(dynamo_repo, HEADER + (
+        "CARD 01ITEM0000000000000000RAW1 ACCEPT card_id=swshp-SWSH068; "
+        "name=Snorlax; set=SWSH Black Star Promos; number=SWSH068\n"), apply=True)
+
     assert report.results[0].action == ard.REFUSED
     assert spy.writes == []
 

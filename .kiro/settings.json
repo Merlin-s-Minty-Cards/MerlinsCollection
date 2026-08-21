@@ -1,0 +1,112 @@
+{
+  "rules": [
+    {
+      "capability": "fs_read",
+      "effect": "allow",
+      "match": [
+        "*",
+        "C:/Users/ethar/.kiro/settings/mcp.json",
+        "C:/Users/ethar/.kiro/settings",
+        "C:/Users/ethar/Documents/GitHub/impeccable",
+        "C:/Users/ethar/Documents/GitHub/ui-ux-pro-max-skill"
+      ]
+    },
+    {
+      "capability": "fs_write",
+      "effect": "allow",
+      "match": [
+        "C:\\Users\\ethar\\.cursor\\projects",
+        "C:\\Users\\ethar\\.cursor\\projects\\*",
+        "C:\\Users\\ethar\\.cursor\\projects\\*\\*",
+        "C:\\Users\\ethar\\.cursor\\projects\\*\\*\\*",
+        "C:\\Users\\ethar\\.cursor\\projects\\*\\*\\*\\*",
+        "C:\\Users\\ethar\\.cursor\\projects\\*\\*\\*\\*\\*",
+        "C:\\Users\\ethar\\.cursor\\projects\\*\\*\\*\\*\\*\\*",
+        "C:\\Users\\ethar\\.cursor\\projects\\*\\*\\*\\*\\*\\*\\*"
+      ]
+    },
+    {
+      "capability": "mcp",
+      "effect": "allow",
+      "match": [
+        "*",
+        "aws-knowledge-mcp/aws___search_documentation"
+      ]
+    },
+    {
+      "capability": "power",
+      "effect": "allow",
+      "match": [
+        "shell"
+      ]
+    },
+    {
+      "capability": "shell",
+      "effect": "allow",
+      "match": [
+        "Test-Path *",
+        "Get-ChildItem *",
+        "Select-Object *",
+        "ForEach-Object *",
+        "(Get-ChildItem *",
+        "$_.FullName *",
+        "$_.Name *",
+        "Sort-Object *",
+        "cd *",
+        "git *",
+        "Write-Host *",
+        "Measure-Object *",
+        "$_.FullName.Replace((Get-Location).Path *",
+        "Get-Location *",
+        "Where-Object *",
+        "$_.FileCount *",
+        "Get-Content *",
+        "Select-String *",
+        "npm *",
+        "npx *",
+        "pnpm *",
+        "yarn *",
+        "pip *",
+        "pytest *",
+        "python *",
+        "python3 *",
+        "npm test *"
+      ]
+    },
+    {
+      "capability": "skill",
+      "effect": "allow",
+      "match": [
+        "impeccable"
+      ]
+    },
+    {
+      "capability": "subagent",
+      "effect": "allow",
+      "match": [
+        "*",
+        "code-writer",
+        "web-browser"
+      ]
+    },
+    {
+      "capability": "web_search",
+      "effect": "allow"
+    },
+    {
+      "capability": "web_fetch",
+      "effect": "allow",
+      "match": [
+        "*",
+        "kiro.dev",
+        "github.com",
+        "lablab.ai",
+        "www.github.com",
+        "ssojet.com",
+        "www.digitalapplied.com",
+        "achan2013.medium.com",
+        "www.mindstudio.ai"
+      ]
+    }
+  ]
+}

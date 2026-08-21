@@ -3,28 +3,22 @@ import Link from 'next/link'
 import Container from '@/components/ui/Container'
 import Eyebrow from '@/components/ui/Eyebrow'
 import Reveal from '@/components/ui/Reveal'
+import {
+  getPublicShows,
+  showBadge,
+  formatShowDate,
+  type PublicShow,
+} from '@/lib/public'
 
 export const metadata: Metadata = { title: 'Shows' }
 
-type Show = {
-  month: string
-  day: string
-  title: string
-  venue: string
-  time: string
-  city: string
-}
+// Regenerate on a schedule so newly added shows appear without a rebuild. The
+// window matches the backend's in-process cache TTL (see lib/public.ts).
+export const revalidate = 300
 
-const upcoming: Show[] = [
-  { month: 'JUL', day: '12', title: 'Twin Oaks Portland', venue: 'Lloyd Center', time: '10am – 4pm', city: 'Portland, OR' },
-  { month: 'AUG', day: '09', title: 'Rose City Collect-a-Con', venue: 'Oregon Convention Center', time: '9am – 5pm', city: 'Portland, OR' },
-  { month: 'SEP', day: '20', title: 'Beaverton Card Show', venue: 'Beaverton Community Center', time: '10am – 3pm', city: 'Beaverton, OR' },
-]
-
-const past: Show[] = [
-  { month: 'MAY', day: '17', title: 'Salem Spring Card Show', venue: 'Salem Armory', time: '10am – 4pm', city: 'Salem, OR' },
-  { month: 'APR', day: '05', title: 'Vancouver Collectibles Fair', venue: 'Clark County Event Center', time: '9am – 4pm', city: 'Vancouver, WA' },
-]
+// Shows come from the business's own records (DynamoDB SHOWLIST). Only name,
+// date, and — for shows added with structured columns — venue/city are stored;
+// nothing is invented. Missing venue/city are simply omitted from the card.
 
 function DateBadge({ month, day, past }: { month: string; day: string; past?: boolean }) {
   return (
@@ -39,28 +33,41 @@ function DateBadge({ month, day, past }: { month: string; day: string; past?: bo
   )
 }
 
-function ShowRow({ show, past }: { show: Show; past?: boolean }) {
+function ShowRow({ show, past }: { show: PublicShow; past?: boolean }) {
+  const { month, day } = showBadge(show.date)
   return (
     <div
       className={`flex flex-wrap items-center gap-5 rounded-2xl border border-line px-6 py-5 ${
         past ? 'bg-cream' : 'bg-cream hover-lift hover:border-mint hover:shadow-card'
       }`}
     >
-      <DateBadge month={show.month} day={show.day} past={past} />
+      <DateBadge month={month} day={day} past={past} />
       <div className="min-w-[180px] flex-1">
-        <h3 className="font-serif text-[20px] font-semibold text-forest-deep">{show.title}</h3>
-        <div className="mt-0.5 text-[15px] text-muted">
-          {show.venue} · {show.city}
-        </div>
+        <h3 className="font-serif text-[20px] font-semibold text-forest-deep">{show.name}</h3>
+        {show.venue && <div className="mt-0.5 text-[15px] text-muted">{show.venue}</div>}
+        {show.city && <div className="text-[14px] text-muted">{show.city}</div>}
       </div>
       <div className="font-sans text-[14px] font-semibold uppercase tracking-[0.06em] text-forest">
-        {show.time}
+        {formatShowDate(show.date)}
       </div>
     </div>
   )
 }
 
-export default function ShowsPage() {
+export default async function ShowsPage() {
+  // Never break on a fetch error: degrade to empty lists (empty-state copy).
+  let upcoming: PublicShow[] = []
+  let past: PublicShow[] = []
+  try {
+    const shows = await getPublicShows()
+    upcoming = shows.upcoming
+    past = shows.past
+  } catch {
+    upcoming = []
+    past = []
+  }
+  const isEmpty = upcoming.length === 0 && past.length === 0
+
   return (
     <>
       <section className="py-[clamp(48px,8vw,84px)]">
@@ -79,35 +86,46 @@ export default function ShowsPage() {
       </section>
 
       <Container className="pb-[clamp(48px,8vw,84px)]">
-        <section>
+        {isEmpty ? (
           <Reveal>
-            <h2 className="mb-5 font-serif text-[clamp(24px,4vw,32px)] font-semibold text-forest-deep">
-              Upcoming shows
-            </h2>
+            <div className="rounded-2xl border border-line bg-cream px-6 py-10 text-center text-[17px] text-muted">
+              No shows on the calendar right now — check back soon, or get in touch if you&apos;re
+              running an event.
+            </div>
           </Reveal>
-          <div className="space-y-4">
-            {upcoming.map((show, i) => (
-              <Reveal key={show.title} delay={i * 80}>
-                <ShowRow show={show} />
+        ) : (
+          <>
+            <section>
+              <Reveal>
+                <h2 className="mb-5 font-serif text-[clamp(24px,4vw,32px)] font-semibold text-forest-deep">
+                  Upcoming shows
+                </h2>
               </Reveal>
-            ))}
-          </div>
-        </section>
+              <div className="space-y-4">
+                {upcoming.map((show, i) => (
+                  <Reveal key={`${show.date}-${show.name}-${i}`} delay={i * 80}>
+                    <ShowRow show={show} />
+                  </Reveal>
+                ))}
+              </div>
+            </section>
 
-        <section className="mt-14">
-          <Reveal>
-            <h2 className="mb-5 font-serif text-[clamp(24px,4vw,32px)] font-semibold text-forest-deep">
-              Past shows
-            </h2>
-          </Reveal>
-          <div className="space-y-4">
-            {past.map((show, i) => (
-              <Reveal key={show.title} delay={i * 80}>
-                <ShowRow show={show} past />
+            <section className="mt-14">
+              <Reveal>
+                <h2 className="mb-5 font-serif text-[clamp(24px,4vw,32px)] font-semibold text-forest-deep">
+                  Past shows
+                </h2>
               </Reveal>
-            ))}
-          </div>
-        </section>
+              <div className="space-y-4">
+                {past.map((show, i) => (
+                  <Reveal key={`${show.date}-${show.name}-${i}`} delay={i * 80}>
+                    <ShowRow show={show} past />
+                  </Reveal>
+                ))}
+              </div>
+            </section>
+          </>
+        )}
 
         <Reveal>
           <div className="mt-14 flex flex-col items-start gap-4 rounded-3xl bg-forest px-7 py-8 text-white sm:flex-row sm:items-center sm:justify-between">

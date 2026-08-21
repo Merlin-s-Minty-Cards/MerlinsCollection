@@ -15,6 +15,11 @@ export type InventoryValueResult = {
  * Computes the full holding value of the inventory (per-unit value x quantity),
  * along with breakdowns grouped by set and by condition. Every set and condition
  * that appears is included in its breakdown, even when its subtotal is zero.
+ *
+ * A card with no resolvable price (`value === null`) contributes nothing to any
+ * total — mirroring the backend's `est_value`, which skips unpriced items rather
+ * than valuing them at $0. It still opens its set/condition key, so a cohort of
+ * entirely unpriced cards reports as present-at-zero rather than vanishing.
  */
 export async function calculateInventoryValue(
   repo: InventoryRepository,
@@ -26,7 +31,7 @@ export async function calculateInventoryValue(
   const valueByCondition: Record<string, number> = {};
 
   for (const card of cards) {
-    const holdingValue = card.value * card.quantity;
+    const holdingValue = card.value == null ? 0 : card.value * card.quantity;
     totalValue += holdingValue;
     valueBySet[card.set] = (valueBySet[card.set] ?? 0) + holdingValue;
     valueByCondition[card.condition] = (valueByCondition[card.condition] ?? 0) + holdingValue;

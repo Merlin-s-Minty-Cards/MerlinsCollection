@@ -25,6 +25,7 @@ const charizardNM: InventoryItem = {
     number: '4',
     rarity: 'Rare Holo',
     image_small: 'https://img/charizard.png',
+    market_price: '260.00',
   },
 }
 
@@ -46,6 +47,9 @@ const charizardPsa9: InventoryItem = {
     number: '4',
     rarity: 'Rare Holo',
     image_small: 'https://img/charizard.png',
+    // Graded slab: the catalog's ungraded market price must NOT be shown; the
+    // tile keeps the slab's own listed price.
+    market_price: '199.99',
   },
 }
 
@@ -79,14 +83,28 @@ afterEach(() => {
 })
 
 describe('CardGrid', () => {
-  it('renders a tile per item with name, set, condition label and listed price', () => {
+  it('shows market price for a raw card and keeps the listed price for a graded slab', () => {
     render(<CardGrid items={[charizardNM, charizardPsa9]} />)
     expect(screen.getAllByText('Charizard')).toHaveLength(2)
     expect(screen.getAllByText('Base').length).toBeGreaterThan(0)
     expect(screen.getByText('NM')).toBeInTheDocument()
     expect(screen.getByText('PSA 9')).toBeInTheDocument()
-    expect(screen.getByText('$250.42')).toBeInTheDocument()
+    // Raw single: pokemontcg.io market price replaces the sheet sticker ($250.42).
+    expect(screen.getByText('$260.00')).toBeInTheDocument()
+    expect(screen.queryByText('$250.42')).toBeNull()
+    // Graded slab: the ungraded market figure is ignored; its own price stands.
     expect(screen.getByText('$900.00')).toBeInTheDocument()
+    expect(screen.queryByText('$199.99')).toBeNull()
+  })
+
+  it('falls back to the sheet listed price when a raw card has no market price', () => {
+    const noMarket: InventoryItem = {
+      ...charizardNM,
+      item_id: 'no-market-1',
+      card: { ...charizardNM.card!, market_price: null },
+    }
+    render(<CardGrid items={[noMarket]} />)
+    expect(screen.getByText('$250.42')).toBeInTheDocument()
   })
 
   it('keys duplicate card_ids uniquely (no React duplicate-key warning)', () => {

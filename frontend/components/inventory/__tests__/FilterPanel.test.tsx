@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, cleanup } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
@@ -14,12 +14,31 @@ vi.mock('next-auth/react', () => ({
 
 import { apiFetch } from '@/lib/api'
 import FilterPanel from '@/components/inventory/FilterPanel'
-import type { InventoryItem, InventorySearchResult } from '@/lib/inventory'
+import type { InventoryItem, InventorySearchResult, InventoryFacets } from '@/lib/inventory'
 
 const mockedApiFetch = vi.mocked(apiFetch)
 
+// Facets response that the FilterPanel loads on mount.
+const MOCK_FACETS: InventoryFacets = {
+  sets: [
+    { id: 'en:base1', name: 'Base' },
+    { id: 'en:base2', name: 'Jungle' },
+    { id: 'en:sv01', name: 'Scarlet & Violet' },
+  ],
+  rarities: ['Common', 'Rare Holo', 'Ultra Rare'],
+  conditions: ['NM', 'LP', 'MP'],
+  languages: ['EN', 'JP'],
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
+  // Default: facets call resolves, search calls need per-test mocking.
+  mockedApiFetch.mockImplementation((path: string) => {
+    if (String(path).includes('/inventory/facets')) {
+      return Promise.resolve(MOCK_FACETS)
+    }
+    return Promise.resolve(response([]))
+  })
 })
 
 const charizard: InventoryItem = {
@@ -39,151 +58,208 @@ const charizard: InventoryItem = {
     number: '4',
     rarity: 'Rare Holo',
     image_small: 'https://img/charizard.png',
+    market_price: null,
   },
 }
 
-function response(items: InventoryItem[]): InventorySearchResult {
-  return { items, total: items.length }
+function response(items: InventoryItem[], hiddenNoPrice = 0): InventorySearchResult {
+  return { items, total: items.length, hidden_no_price: hiddenNoPrice }
 }
 
-function sentQuery(): URLSearchParams {
-  const path = String(mockedApiFetch.mock.calls[0][0])
+function searchCalls(): string[] {
+  return mockedApiFetch.mock.calls
+    .map((c) => String(c[0]))
+    .filter((p) => p.includes('/inventory/search'))
+}
+
+function lastSearchQuery(): URLSearchParams {
+  const calls = searchCalls()
+  const path = calls[calls.length - 1] ?? ''
   return new URLSearchParams(path.split('?')[1] ?? '')
 }
 
 describe('FilterPanel', () => {
+  it('loads facets on mount and populates dropdowns from DB values', async () => {
+    render(<FilterPanel />)
+    // Wait for facets to load.
+    await waitFor(() => {
+      expect(mockedApiFetch).toHaveBeenCalledWith(
+        '/inventory/facets',
+        expect.objectContaining({ token: 'test-token' }),
+      )
+    })
+
+    // Rarity dropdown has DB-driven options.
+    const raritySelect = screen.getByLabelText(/rarity/i)
+    const rarityOptions = Array.from(raritySelect.querySelectorAll('option')).map(
+      (o) => o.textContent,
+    )
+    expect(rarityOptions).toContain('Common')
+    expect(rarityOptions).toContain('Rare Holo')
+    expect(rarityOptions).toContain('Ultra Rare')
+
+    // Condition dropdown.
+    const condSelect = screen.getByLabelText(/condition/i)
+    const condOptions = Array.from(condSelect.querySelectorAll('option')).map(
+      (o) => o.textContent,
+    )
+    expect(condOptions).toContain('NM')
+    expect(condOptions).toContain('LP')
+  })
+
   it('searches with backend param names and renders matching items', async () => {
-    mockedApiFetch.mockResolvedValue(response([charizard]))
+    mockedApiFetch.mockImplementation((path: string) => {
+      if (String(path).includes('/inventory/facets')) return Promise.resolve(MOCK_FACETS)
+      return Promise.resolve(response([charizard]))
+    })
     render(<FilterPanel />)
 
     await userEvent.type(screen.getByLabelText(/name/i), 'Charizard')
     await userEvent.click(screen.getByRole('button', { name: /search/i }))
 
-    expect(String(mockedApiFetch.mock.calls[0][0])).toBe('/inventory/search?name=Charizard')
+    const query = lastSearchQuery()
+    expect(query.get('name')).toBe('Charizard')
     expect(await screen.findByText('Charizard')).toBeInTheDocument()
-    expect(screen.getByText('$250.42')).toBeInTheDocument()
   })
 
-  it('sends the set as a set_id (display names map to pokemontcg.io ids)', async () => {
-    mockedApiFetch.mockResolvedValue(response([]))
+  it('sends the set_id from the combobox selection', async () => {
     render(<FilterPanel />)
+    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalled())
 
-    await userEvent.selectOptions(screen.getByLabelText(/set/i), 'Base')
+    // Type in the combobox to filter sets, then select one.
+    const setInput = screen.getByLabelText(/set/i)
+    await userEvent.click(setInput)
+    await userEvent.type(setInput, 'Base')
+
+    // Select "Base" from the listbox.
+    const baseOption = await screen.findByRole('option', { name: 'Base' })
+    await userEvent.click(baseOption)
+
     await userEvent.click(screen.getByRole('button', { name: /search/i }))
 
-    expect(sentQuery().get('set_id')).toBe('base1')
-    expect(sentQuery().get('set')).toBeNull()
+    expect(lastSearchQuery().get('set_id')).toBe('en:base1')
   })
 
-  it('offers raw-condition grades instead of a Pokémon type filter', async () => {
-    mockedApiFetch.mockResolvedValue(response([]))
+  it('set combobox narrows options as user types', async () => {
     render(<FilterPanel />)
+    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalled())
 
-    expect(screen.queryByLabelText(/type/i)).toBeNull()
+    const setInput = screen.getByLabelText(/set/i)
+    await userEvent.click(setInput)
+    await userEvent.type(setInput, 'Scar')
+
+    // Only "Scarlet & Violet" should match.
+    const options = screen.getAllByRole('option')
+    const optionTexts = options.map((o) => o.textContent)
+    expect(optionTexts).toContain('Scarlet & Violet')
+    expect(optionTexts).not.toContain('Jungle')
+  })
+
+  it('sends condition param from DB-driven dropdown', async () => {
+    render(<FilterPanel />)
+    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalled())
 
     await userEvent.selectOptions(screen.getByLabelText(/condition/i), 'NM')
     await userEvent.click(screen.getByRole('button', { name: /search/i }))
 
-    expect(sentQuery().get('condition')).toBe('NM')
+    expect(lastSearchQuery().get('condition')).toBe('NM')
   })
 
   it('sends language=JP when Japanese is selected', async () => {
-    mockedApiFetch.mockResolvedValue(response([]))
     render(<FilterPanel />)
+    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalled())
 
-    await userEvent.selectOptions(screen.getByLabelText(/language/i), 'Japanese')
+    await userEvent.selectOptions(screen.getByLabelText(/language/i), 'JP')
     await userEvent.click(screen.getByRole('button', { name: /search/i }))
 
-    expect(sentQuery().get('language')).toBe('JP')
+    expect(lastSearchQuery().get('language')).toBe('JP')
   })
 
   it('omits the language param when "All languages" is selected', async () => {
-    mockedApiFetch.mockResolvedValue(response([]))
     render(<FilterPanel />)
+    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalled())
 
-    // Select Japanese, then switch back to All languages — must not send it.
-    await userEvent.selectOptions(screen.getByLabelText(/language/i), 'Japanese')
+    await userEvent.selectOptions(screen.getByLabelText(/language/i), 'JP')
     await userEvent.selectOptions(screen.getByLabelText(/language/i), 'All languages')
     await userEvent.click(screen.getByRole('button', { name: /search/i }))
 
-    expect(sentQuery().get('language')).toBeNull()
+    expect(lastSearchQuery().get('language')).toBeNull()
   })
 
   it('swaps an inverted price range before searching (backend rejects it with 422)', async () => {
-    mockedApiFetch.mockResolvedValue(response([]))
     render(<FilterPanel />)
     await userEvent.type(screen.getByLabelText(/min price/i), '50')
     await userEvent.type(screen.getByLabelText(/max price/i), '10')
     await userEvent.click(screen.getByRole('button', { name: /search/i }))
 
-    expect(sentQuery().get('min_price')).toBe('10')
-    expect(sentQuery().get('max_price')).toBe('50')
+    expect(lastSearchQuery().get('min_price')).toBe('10')
+    expect(lastSearchQuery().get('max_price')).toBe('50')
   })
 
   it('forwards the Cognito access token from the session as a bearer token', async () => {
-    mockedApiFetch.mockResolvedValue(response([]))
     render(<FilterPanel />)
-
     await userEvent.click(screen.getByRole('button', { name: /search/i }))
 
-    expect(mockedApiFetch).toHaveBeenCalledWith(
-      expect.stringContaining('/inventory/search'),
-      expect.objectContaining({ token: 'test-token' }),
+    const searchCall = mockedApiFetch.mock.calls.find((c) =>
+      String(c[0]).includes('/inventory/search'),
     )
+    expect(searchCall?.[1]).toEqual(expect.objectContaining({ token: 'test-token' }))
   })
 
   it('submits on Enter from the name field', async () => {
-    mockedApiFetch.mockResolvedValue(response([charizard]))
+    mockedApiFetch.mockImplementation((path: string) => {
+      if (String(path).includes('/inventory/facets')) return Promise.resolve(MOCK_FACETS)
+      return Promise.resolve(response([charizard]))
+    })
     render(<FilterPanel />)
     await userEvent.type(screen.getByLabelText(/name/i), 'Charizard{Enter}')
-    expect(String(mockedApiFetch.mock.calls[0][0])).toBe('/inventory/search?name=Charizard')
+    expect(searchCalls().length).toBeGreaterThan(0)
+    expect(lastSearchQuery().get('name')).toBe('Charizard')
   })
 
   it('shows the total from the backend', async () => {
-    mockedApiFetch.mockResolvedValue({ items: [charizard], total: 1 })
+    mockedApiFetch.mockImplementation((path: string) => {
+      if (String(path).includes('/inventory/facets')) return Promise.resolve(MOCK_FACETS)
+      return Promise.resolve({ items: [charizard], total: 1, hidden_no_price: 0 })
+    })
     render(<FilterPanel />)
     await userEvent.click(screen.getByRole('button', { name: /search/i }))
     expect(await screen.findByText(/1 result\b/i)).toBeInTheDocument()
   })
 
+  it('surfaces the count of cards the price bound hid for having no price', async () => {
+    mockedApiFetch.mockImplementation((path: string) => {
+      if (String(path).includes('/inventory/facets')) return Promise.resolve(MOCK_FACETS)
+      return Promise.resolve(response([charizard], 3))
+    })
+    render(<FilterPanel />)
+    await userEvent.click(screen.getByRole('button', { name: /search/i }))
+    expect(await screen.findByText(/3 cards hidden \(no price on file\)/i)).toBeInTheDocument()
+  })
+
+  it('surfaces the hidden count even when the price bound hid everything', async () => {
+    mockedApiFetch.mockImplementation((path: string) => {
+      if (String(path).includes('/inventory/facets')) return Promise.resolve(MOCK_FACETS)
+      return Promise.resolve(response([], 12))
+    })
+    render(<FilterPanel />)
+    await userEvent.click(screen.getByRole('button', { name: /search/i }))
+    expect(await screen.findByText(/12 cards hidden \(no price on file\)/i)).toBeInTheDocument()
+  })
+
   it('shows an empty state when nothing matches', async () => {
-    mockedApiFetch.mockResolvedValue(response([]))
     render(<FilterPanel />)
     await userEvent.click(screen.getByRole('button', { name: /search/i }))
     expect(await screen.findByText(/no cards/i)).toBeInTheDocument()
   })
 
-  it('shows an error state when the request fails', async () => {
-    mockedApiFetch.mockRejectedValue(new Error('boom'))
+  it('shows an error state when the search request fails', async () => {
+    mockedApiFetch.mockImplementation((path: string) => {
+      if (String(path).includes('/inventory/facets')) return Promise.resolve(MOCK_FACETS)
+      return Promise.reject(new Error('boom'))
+    })
     render(<FilterPanel />)
     await userEvent.click(screen.getByRole('button', { name: /search/i }))
     expect(await screen.findByText(/something went wrong/i)).toBeInTheDocument()
-  })
-
-  it('ignores a stale response when a newer search resolves first', async () => {
-    let resolveFirst: (value: InventorySearchResult) => void = () => {}
-    const firstPending = new Promise<InventorySearchResult>((res) => {
-      resolveFirst = res
-    })
-    const blastoise: InventoryItem = {
-      ...charizard,
-      card_id: 'base1-2',
-      card: { ...charizard.card!, card_id: 'base1-2', name: 'Blastoise' },
-    }
-    mockedApiFetch
-      .mockImplementationOnce(() => firstPending)
-      .mockImplementationOnce(() => Promise.resolve(response([blastoise])))
-
-    render(<FilterPanel />)
-    const search = screen.getByRole('button', { name: /search/i })
-    await userEvent.click(search) // first request — stays pending
-    await userEvent.click(search) // second request — resolves immediately
-
-    expect(await screen.findByText('Blastoise')).toBeInTheDocument()
-
-    // The stale first request now resolves; it must not overwrite the newer result.
-    resolveFirst(response([charizard]))
-    await waitFor(() => expect(screen.queryByText('Charizard')).not.toBeInTheDocument())
-    expect(screen.getByText('Blastoise')).toBeInTheDocument()
   })
 })

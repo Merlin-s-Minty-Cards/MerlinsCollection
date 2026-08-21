@@ -23,7 +23,8 @@ export type FlagUnderpricedResult = {
  * threshold of 80 flags anything listed under 80% of market. The comparison is a
  * strict less-than, so a card listed at exactly the threshold is not flagged.
  * Cards without a positive market reference are skipped (they have no meaningful
- * discount and would otherwise divide by zero).
+ * discount and would otherwise divide by zero), as are cards whose price could
+ * not be resolved at all (`null`) — there is no discount against "unknown".
  */
 export async function flagUnderpricedCards(
   repo: InventoryRepository,
@@ -33,8 +34,9 @@ export async function flagUnderpricedCards(
 
   const flaggedCards: UnderpricedCard[] = [];
   for (const card of cards) {
-    // Skip cards without a usable market reference (avoids divide-by-zero on the discount).
-    if (card.marketPrice <= 0) {
+    // Skip cards without a usable market reference (avoids divide-by-zero on the
+    // discount) or without a resolvable listed value to compare against it.
+    if (card.marketPrice == null || card.marketPrice <= 0 || card.value == null) {
       continue;
     }
     if (card.value < card.marketPrice * (thresholdPercent / 100)) {

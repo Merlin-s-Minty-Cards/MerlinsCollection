@@ -1,3 +1,6 @@
+'use client'
+
+import { useSession, signOut } from 'next-auth/react'
 import Link from 'next/link'
 import Image from 'next/image'
 import Container from '@/components/ui/Container'
@@ -17,7 +20,6 @@ const columns: { heading: string; items: Item[] }[] = [
     heading: 'Collect',
     items: [
       { label: 'Inventory', href: '/inventory' },
-      { label: 'Sign in', href: '/inventory' },
       { label: 'Sell to us', href: '/about' },
     ],
   },
@@ -30,19 +32,52 @@ const columns: { heading: string; items: Item[] }[] = [
   },
 ]
 
+const footerLinkClassName = 'block text-[14px] text-[#bcd6c4] py-1 hover:text-mint'
+
 function FooterLink({ item }: { item: Item }) {
-  const className = 'block text-[14px] text-[#bcd6c4] py-1 hover:text-mint'
   if (/^https?:/.test(item.href)) {
     return (
-      <a href={item.href} target="_blank" rel="noopener noreferrer" className={className}>
+      <a href={item.href} target="_blank" rel="noopener noreferrer" className={footerLinkClassName}>
         {item.label}
       </a>
     )
   }
   return (
-    <Link href={item.href} className={className}>
+    <Link href={item.href} className={footerLinkClassName}>
       {item.label}
     </Link>
+  )
+}
+
+/**
+ * The one session-dependent entry in the footer — which is why Footer has to
+ * be a Client Component even though everything else here is static links.
+ * Signed out: a plain "Sign in" link to /inventory, same as before (the
+ * Navbar owns the actual sign-in CTA; this just gets a visitor there).
+ * Signed in: "Sign out", styled identically to every other footer link
+ * rather than as a Button — deliberately low-visibility, per the request,
+ * not a second CTA competing with the Navbar's.
+ */
+function FooterAuthLink() {
+  const { data: session, status } = useSession()
+  const signedOut = status === 'unauthenticated' || Boolean(session?.error)
+
+  if (signedOut) {
+    return (
+      <Link href="/inventory" className={footerLinkClassName}>
+        Sign in
+      </Link>
+    )
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => signOut({ callbackUrl: '/' })}
+      className={`${footerLinkClassName} w-full text-left`}
+    >
+      Sign out
+    </button>
   )
 }
 
@@ -74,6 +109,7 @@ export default function Footer() {
               {col.items.map((item) => (
                 <FooterLink key={item.label + item.href} item={item} />
               ))}
+              {col.heading === 'Collect' && <FooterAuthLink />}
             </div>
           ))}
         </div>

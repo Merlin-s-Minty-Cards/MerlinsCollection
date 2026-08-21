@@ -1,0 +1,595 @@
+'use client'
+
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Check, Pencil, X } from 'lucide-react'
+import { useAdminApi, AdminApiError } from '@/lib/admin-api'
+import { useCardImages } from '@/lib/use-card-images'
+import { useLocations } from '@/lib/use-locations'
+import DataTable, { Column } from '@/components/admin/shared/DataTable'
+import PriceDisplay from '@/components/admin/shared/PriceDisplay'
+import CardImage, { TABLE_THUMB_SIZE, TABLE_THUMB_COLUMN } from '@/components/admin/shared/CardImage'
+import ImageToggle from '@/components/admin/shared/ImageToggle'
+import InlineEditCell from '@/components/admin/shared/InlineEditCell'
+import MoneyInput from '@/components/admin/shared/MoneyInput'
+import { parseMoney } from '@/lib/money'
+import CardDetailModal from '@/components/admin/shared/CardDetailModal'
+import { patchRow } from '@/lib/item-update'
+import TriageRowAction from '@/components/admin/shared/TriageRowAction'
+import HandValuedBadge from '@/components/admin/shared/HandValuedBadge'
+import { isHandValued } from '@/lib/valuation'
+import type { TriageItem } from '@/lib/triage'
+import { adminItemName } from '@/lib/admin-item-name'
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+interface PrepQueueItem {
+  item_id: string
+  card_id?: string
+  name?: string
+  display_name?: string
+  product_name?: string
+  status: string
+  location?: string
+  sticker_price?: string | null
+  cost_basis?: string | null
+  current_market_value?: string | null
+  set_name?: string | null
+  condition?: string | null
+  [key: string]: unknown
+}
+
+// ---------------------------------------------------------------------------
+// Main Page
+// ---------------------------------------------------------------------------
+
+export default function AdminPrepQueuePage() {
+  const api = useAdminApi()
+  const { options: locationOptions } = useLocations()
+
+  // Data state
+  const [items, setItems] = useState<PrepQueueItem[]>([])
+  const [loading, setLoading] = useState(true)
+
+  // Narrowing the queue (RFC 0010 T7). Both are SERVER-side — `location` and
+  // `sort` already exist on /inventory/search, so the rows this page holds are
+  // always exactly the filtered set and the header counts need no second pass.
+  const [locationFilter, setLocationFilter] = useState('')
+  const [sortKey, setSortKey] = useState<string | null>(null)
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
+
+  // Inline location editing (select — not handled by InlineEditCell)
+  const [editingLocation, setEditingLocation] = useState<string | null>(null)
+  const [editLocationValue, setEditLocationValue] = useState('')
+  const [editLocationOriginal, setEditLocationOriginal] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  // Bulk pricing (Round 6 audit item 10 — Prep Queue had no bulk-apply UI)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [bulkStickerValue, setBulkStickerValue] = useState('')
+  const [bulkUpdating, setBulkUpdating] = useState(false)
+
+  // Images — default ON per spec
+  const [showImages, setShowImages] = useState(true)
+  const cardIds = items.map((i) => i.card_id)
+  const { getImageUrl } = useCardImages(showImages ? cardIds : [])
+
+  // Detail modal
+  const [detailItem, setDetailItem] = useState<PrepQueueItem | null>(null)
+
+  // Toast message
+  const [message, setMessage] = useState<string | null>(null)
+
+  // ---------------------------------------------------------------------------
+  // Data fetching
+  // ---------------------------------------------------------------------------
+
+  const fetchItems = useCallback(async () => {
+    if (!api.isAuthenticated) return
+    setLoading(true)
+    try {
+      // This queue IS "available and unstickered" — location and sort narrow
+      // within that, they never replace it.
+      const params: Record<string, string> = {
+        status: 'available',
+        missing_sticker: 'true',
+      }
+      // Omitted entirely when empty: an empty string is a location literally
+      // named "", not "all locations".
+      if (locationFilter) params.location = locationFilter
+      if (sortKey) params.sort = `${sortKey}_${sortDir}`
+      const res = await api.get<{ items: PrepQueueItem[] }>('/inventory/search', params)
+      setItems(res.items ?? [])
+    } catch {
+      setItems([])
+    } finally {
+      setLoading(false)
+    }
+  }, [api, locationFilter, sortKey, sortDir])
+
+  useEffect(() => {
+    fetchItems()
+  }, [fetchItems])
+
+  // First click sorts ASCENDING — deliberately unlike /admin/inventory, which
+  // opens descending. Every sortable column here reads naturally low-to-high:
+  // locations alphabetically, and "cheapest first" is how you find the cards
+  // still worth pricing by hand.
+  const handleSort = (key: string) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setSortKey(key)
+      setSortDir('asc')
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Inline sticker price editing (via InlineEditCell)
+  // ---------------------------------------------------------------------------
+
+  const handleStickerSave = useCallback(
+    async (itemId: string, newValue: string) => {
+      const price = newValue.trim() === '' ? null : newValue.trim()
+      await api.put(`/inventory/${itemId}`, { sticker_price: price })
+      // Patch and drop, never refetch (RFC 0010 T7). A refetch flashes the whole
+      // queue through `loading` and, with a location filter active, throws away
+      // the list the admin is working through. The rule is this queue's own
+      // criterion — "available and no sticker price yet" — so a priced row
+      // leaves and a CLEARED one stays, which is why the toast is not
+      // unconditional: the old refetch used to quietly put a cleared row back
+      // while the message still claimed it had been removed.
+      setItems((rows) =>
+        rows
+          .map((r) => (r.item_id === itemId ? { ...r, sticker_price: price } : r))
+          .filter((r) => r.item_id !== itemId || price == null),
+      )
+      if (price == null) {
+        setMessage('Sticker price cleared')
+        return
+      }
+      // A row that has left the table must leave the selection with it, or the
+      // bulk bar counts a card nobody can see.
+      setSelectedIds((prev) => {
+        if (!prev.has(itemId)) return prev
+        const next = new Set(prev)
+        next.delete(itemId)
+        return next
+      })
+      setMessage('Priced → removed from queue')
+    },
+    [api],
+  )
+
+  const handleStickerError = useCallback(
+    (err: unknown) => {
+      setMessage(
+        err instanceof AdminApiError ? (err.detail ?? 'Update failed') : 'Update failed',
+      )
+    },
+    [],
+  )
+
+  // ---------------------------------------------------------------------------
+  // Bulk sticker pricing
+  // ---------------------------------------------------------------------------
+
+  const handleSelect = (id: string, checked: boolean) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (checked) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
+
+  const handleSelectAll = (checked: boolean) => {
+    if (checked) setSelectedIds(new Set(items.map((i) => i.item_id)))
+    else setSelectedIds(new Set())
+  }
+
+  const handleBulkStickerApply = async () => {
+    if (selectedIds.size === 0 || !bulkStickerValue.trim()) return
+    // Same guard Show Prep's handleBulkStickerUpdate uses — without it a
+    // negative/unreadable value silently applies to every selected item and
+    // drops them all from the queue (its whole criterion is "no sticker price
+    // yet"), per Round 6 audit finding 5. `parseMoney` rejects a negative
+    // outright, so the old `price < 0` arm is folded into the null check.
+    const price = parseMoney(bulkStickerValue)
+    if (price === null) return
+    setBulkUpdating(true)
+    let updated = 0
+    for (const id of selectedIds) {
+      try {
+        // The PARSED value, not the raw text: this used to send the string the
+        // admin typed, which was harmless only while the input was
+        // type="number" and could not hold a comma (RFC 0010 T1).
+        await api.put(`/inventory/${id}`, { sticker_price: String(price) })
+        updated++
+      } catch { /* continue on error, matches show-prep's bulk pattern */ }
+    }
+    setMessage(`Priced ${updated} item${updated !== 1 ? 's' : ''} → removed from queue`)
+    setBulkStickerValue('')
+    setSelectedIds(new Set())
+    setBulkUpdating(false)
+    fetchItems()
+  }
+
+  // ---------------------------------------------------------------------------
+  // Inline location editing
+  // ---------------------------------------------------------------------------
+
+  const startLocationEdit = (itemId: string, currentLocation: string | undefined) => {
+    setEditingLocation(itemId)
+    setEditLocationValue(currentLocation ?? '')
+    setEditLocationOriginal(currentLocation ?? '')
+  }
+
+  const cancelLocationEdit = () => {
+    setEditingLocation(null)
+    setEditLocationValue('')
+    setEditLocationOriginal('')
+  }
+
+  const saveLocationEdit = async (itemId: string) => {
+    // No-op guard: skip the PUT entirely when nothing actually changed. This
+    // also protects null-location items — the inline editor lost its
+    // "— None —" option once location became required (Task 8), so opening
+    // the editor on such an item and blurring without picking anything used
+    // to always send `location: null` and 422 (Round 6 audit finding 6).
+    if (editLocationValue === editLocationOriginal) {
+      cancelLocationEdit()
+      return
+    }
+    setSaving(true)
+    try {
+      const location = editLocationValue.trim() === '' ? null : editLocationValue.trim()
+      await api.put(`/inventory/${itemId}`, { location })
+      setEditingLocation(null)
+      setEditLocationValue('')
+      setMessage('Location updated')
+      fetchItems()
+    } catch (err) {
+      setMessage(err instanceof AdminApiError ? (err.detail ?? 'Update failed') : 'Update failed')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Clear message on timeout
+  // ---------------------------------------------------------------------------
+
+  useEffect(() => {
+    if (message) {
+      const timer = setTimeout(() => setMessage(null), 3000)
+      return () => clearTimeout(timer)
+    }
+  }, [message])
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
+
+  const getItemName = (item: PrepQueueItem): string => {
+    return adminItemName(item)
+  }
+
+  // ---------------------------------------------------------------------------
+  // Table columns
+  // ---------------------------------------------------------------------------
+
+  const columns: Column<PrepQueueItem>[] = [
+    ...(showImages
+      ? [
+          {
+            key: '_image',
+            label: '',
+            className: TABLE_THUMB_COLUMN,
+            render: (item: PrepQueueItem) => (
+              <CardImage
+                imageUrl={getImageUrl(item.card_id)}
+                alt={getItemName(item)}
+                size={TABLE_THUMB_SIZE}
+                loading="eager"
+              />
+            ),
+          },
+        ]
+      : []),
+    {
+      key: 'name',
+      label: 'Card',
+      className: 'min-w-[160px]',
+      render: (item) => (
+        <div className="space-y-0.5">
+          <span className="text-pine-100 text-xs font-medium truncate block max-w-[200px]">
+            {getItemName(item)}
+          </span>
+          {item.set_name && (
+            <span className="text-[10px] text-pine-500 truncate block max-w-[200px]">
+              {item.set_name}
+            </span>
+          )}
+          {/* RFC 0010 T16. This is the sticker screen, and an unlinked row has
+              no market figure to price against — and never will, because no
+              sync reaches it. Left unsaid, an empty Market cell reads as "the
+              price hasn't come through yet", which is the one wrong conclusion
+              available here. */}
+          {isHandValued(item) && <HandValuedBadge />}
+        </div>
+      ),
+    },
+    {
+      key: 'condition',
+      label: 'Cond',
+      className: 'w-16',
+      render: (item) => (
+        <span className="text-[11px] text-pine-300 font-mono">{item.condition || '—'}</span>
+      ),
+    },
+    {
+      key: 'sticker_price',
+      label: 'Sticker',
+      className: 'w-28',
+      render: (item) => (
+        <InlineEditCell
+          value={item.sticker_price ?? ''}
+          type="money"
+          prefix="$"
+          placeholder="0.00"
+          aria-label={`Edit sticker price for ${getItemName(item)}`}
+          displayValue={
+            item.sticker_price ? (
+              <PriceDisplay value={item.sticker_price} className="text-xs text-amber-400" />
+            ) : (
+              <span className="text-xs text-pine-600">—</span>
+            )
+          }
+          onSave={(v) => handleStickerSave(item.item_id, v)}
+          onError={handleStickerError}
+        />
+      ),
+    },
+    {
+      key: 'location',
+      label: 'Location',
+      // The column keys ARE the backend's sort fields — `_sort_admin_results`
+      // splits on the last underscore, so `cost_basis` + `_asc` resolves. Do
+      // not rename a key here without checking that split.
+      sortable: true,
+      className: 'w-36',
+      render: (item) => {
+        if (editingLocation === item.item_id) {
+          return (
+            <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+              <select
+                aria-label={`Edit location for ${getItemName(item)}`}
+                value={editLocationValue}
+                onChange={(e) => setEditLocationValue(e.target.value)}
+                onBlur={() => saveLocationEdit(item.item_id)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') cancelLocationEdit()
+                }}
+                className="vault-field px-2 py-0.5 rounded text-xs max-w-28"
+                autoFocus
+                disabled={saving}
+              >
+                {locationOptions.map((loc) => (
+                  <option key={loc.value} value={loc.value}>
+                    {loc.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => cancelLocationEdit()}
+                className="p-0.5 text-pine-500 hover:text-pine-300"
+                aria-label="Cancel"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          )
+        }
+        return (
+          <div
+            className="flex items-center gap-1 group/loc cursor-pointer"
+            onClick={(e) => {
+              e.stopPropagation()
+              startLocationEdit(item.item_id, item.location)
+            }}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') startLocationEdit(item.item_id, item.location)
+            }}
+            aria-label={`Edit location for ${getItemName(item)}`}
+          >
+            <span className="text-xs text-pine-300 capitalize">{item.location || '—'}</span>
+            <Pencil size={10} className="text-pine-600 opacity-0 group-hover/loc:opacity-100 transition-opacity" />
+          </div>
+        )
+      },
+    },
+    {
+      key: 'cost_basis',
+      label: 'Cost',
+      sortable: true,
+      className: 'text-right w-20',
+      render: (item) => <PriceDisplay value={item.cost_basis} className="text-xs text-pine-400" />,
+    },
+    {
+      key: 'current_market_value',
+      label: 'Market',
+      sortable: true,
+      className: 'text-right w-20',
+      render: (item) => <PriceDisplay value={item.current_market_value} className="text-xs text-pine-400" />,
+    },
+    {
+      key: '_triage',
+      label: '',
+      className: 'w-10',
+      // Same one-click flag as the Inventory table: this queue is exactly where
+      // an unpriced card turns out to be the wrong card.
+      render: (item) => (
+        <TriageRowAction item={item as TriageItem} onChanged={fetchItems} />
+      ),
+    },
+  ]
+
+  // ---------------------------------------------------------------------------
+  // Summary stats
+  // ---------------------------------------------------------------------------
+
+  const queueCount = items.length
+
+  // Both counts describe the FILTERED set, so both say which set that is. An
+  // unqualified "In queue: 3" while the glass case is selected reads as "three
+  // cards left to price" when there are two hundred.
+  const activeLocationLabel = locationFilter
+    ? (locationOptions.find((o) => o.value === locationFilter)?.label ?? locationFilter)
+    : null
+  const scopeSuffix = activeLocationLabel ? ` (${activeLocationLabel})` : ''
+
+  const estValue = useMemo(() => {
+    return items.reduce((sum, item) => {
+      const raw = item.current_market_value ?? item.cost_basis
+      if (raw == null) return sum
+      // parseFloat is safe HERE and only here: this is a server-sent Decimal
+      // string, which is never grouped. Anything a human typed must go through
+      // parseMoney instead — see lib/money.ts.
+      const n = typeof raw === 'string' ? parseFloat(raw) : raw
+      return sum + (isNaN(n) ? 0 : n)
+    }, 0)
+  }, [items])
+
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
+
+  return (
+    <div className="p-6 lg:p-8">
+      <header className="mb-6">
+        <span className="font-mono text-[11px] uppercase tracking-[0.22em] text-mint/70">
+          Prep Queue
+        </span>
+        <h1 className="text-xl font-semibold text-pine-100">Prep Queue</h1>
+        <p className="text-xs text-pine-400 mt-1">
+          New inventory awaiting sticker prices
+        </p>
+      </header>
+
+      {/* Summary cards */}
+      <div className="grid grid-cols-2 gap-3 mb-6">
+        <div className="vault-panel rounded-xl px-4 py-3 border border-pine-700/30">
+          <div className="text-[10px] text-pine-500 uppercase tracking-wider mb-1">
+            In queue{scopeSuffix}
+          </div>
+          <div className="text-lg font-mono text-pine-100">{queueCount}</div>
+        </div>
+        <div className="vault-panel rounded-xl px-4 py-3 border border-pine-700/30">
+          <div className="text-[10px] text-pine-500 uppercase tracking-wider mb-1">
+            Est. value{scopeSuffix}
+          </div>
+          <div className="text-lg font-mono text-amber-400">
+            ${estValue.toFixed(2)}
+          </div>
+        </div>
+      </div>
+
+      {/* Controls — the location filter is the primary one: "we often just
+          price glass". Options come from useLocations(), never a hardcoded
+          list, and `vault-field` is mandatory on an admin control (CLAUDE.md). */}
+      <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
+        <select
+          aria-label="Filter by location"
+          value={locationFilter}
+          onChange={(e) => setLocationFilter(e.target.value)}
+          className="vault-field px-3 py-1.5 rounded-lg text-xs"
+        >
+          <option value="">All locations</option>
+          {locationOptions.map((loc) => (
+            <option key={loc.value} value={loc.value}>
+              {loc.label}
+            </option>
+          ))}
+        </select>
+        <ImageToggle showImages={showImages} onToggle={() => setShowImages(!showImages)} label="Images" />
+      </div>
+
+      {/* Toast message */}
+      {message && (
+        <div className="flex items-center gap-2 text-xs text-mint bg-mint/5 border border-mint/20 rounded-lg px-3 py-2 mb-4">
+          <Check size={14} />
+          {message}
+        </div>
+      )}
+
+      {/* Bulk action bar */}
+      {selectedIds.size > 0 && (
+        <div className="vault-panel rounded-lg px-4 py-2.5 flex items-center gap-3 flex-wrap mb-4">
+          <span className="text-xs text-pine-200">
+            <span className="font-mono text-mint">{selectedIds.size}</span> selected
+          </span>
+          <div className="relative flex flex-col">
+            <span className="absolute left-1.5 top-2 -translate-y-1/2 text-[10px] text-pine-500">$</span>
+            <MoneyInput
+              label="Bulk sticker price"
+              value={bulkStickerValue}
+              onChange={(raw) => setBulkStickerValue(raw)}
+              placeholder="0.00"
+              className="vault-field w-20 pl-4 pr-1.5 py-1 rounded-lg text-xs font-mono"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={handleBulkStickerApply}
+            disabled={!bulkStickerValue.trim() || bulkUpdating}
+            className="px-3 py-1.5 rounded-lg text-[11px] font-medium bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25 disabled:opacity-40 transition-colors"
+          >
+            {bulkUpdating ? 'Updating…' : 'Set Sticker'}
+          </button>
+        </div>
+      )}
+
+      {/* Data table */}
+      <DataTable
+        columns={columns}
+        data={items}
+        keyField="item_id"
+        loading={loading}
+        sortKey={sortKey}
+        sortDir={sortDir}
+        onSort={handleSort}
+        emptyMessage="No items awaiting sticker prices"
+        onRowClick={(item) => setDetailItem(item)}
+        selectedIds={selectedIds}
+        onSelect={handleSelect}
+        onSelectAll={handleSelectAll}
+      />
+
+      {/* Detail modal */}
+      <CardDetailModal
+        item={detailItem as Record<string, unknown> | null}
+        onClose={() => setDetailItem(null)}
+        // Patch, then apply this queue's OWN rule: its whole criterion is
+        // "available and no sticker price yet", so a card priced through the
+        // modal has to leave, exactly as one priced through the inline cell
+        // does. Generic patching alone would strand a priced card in a queue
+        // of unpriced ones.
+        onUpdated={(updated) => {
+          if (!updated) { fetchItems(); return }
+          const id = String(updated.item_id)
+          setItems((rows) =>
+            patchRow(rows, updated).filter(
+              (r) => r.item_id !== id || r.sticker_price == null,
+            ),
+          )
+          if (updated.sticker_price != null) setMessage('Priced → removed from queue')
+        }}
+      />
+    </div>
+  )
+}

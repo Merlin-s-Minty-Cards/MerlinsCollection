@@ -25,10 +25,11 @@ What it produces, per flagged inventory item:
 * an honest HIGH/MEDIUM/LOW confidence band with the reason in plain English,
 * the divergence between the predicted value and what the sheet recorded.
 
-A non-English card gets a fourth band, ``N/A``: the catalog is English-only, so
-no match is possible and none is offered — a Japanese card is a different card at
-a different price, and its value comes from the sheet's own figures. Those rows
-are settled, not uncertain, so they rank below every LOW row.
+A non-English card gets a fourth band, ``N/A``, when the catalog has no cards in
+that language — a Japanese card whose language is present in the catalog is
+matched normally against same-language candidates, but a Japanese card in a
+catalog with no Japanese entries gets N/A because no match is possible. Those
+rows are settled, not uncertain, so they rank below every LOW row.
 
 The page accumulates your decisions into a compact paste-back block you copy
 back into the chat; nothing is applied from here.
@@ -50,12 +51,23 @@ import boto3
 from merlins_collection.config import settings
 from merlins_collection.models.inventory import LANGUAGE_LABELS, Language
 from merlins_collection.services.card_text import (
+    _QUALIFIER_TOKENS,
     SourceText,
+    core_name,
     normalize_name,
     normalize_number,
+    number_keys,
     parse_source_text,
+    sets_agree,
     strip_float_artifact,
 )
+
+# ``core_name`` / ``number_keys`` / ``sets_agree`` moved into ``card_text`` so the
+# importer's matcher and this review page normalize identically (RFC 0001 B.1).
+# Keep the historical private names as thin aliases so the call sites below — and
+# this page's own tests — read unchanged.
+_number_keys = number_keys
+_sets_agree = sets_agree
 
 # --- tuning knobs --------------------------------------------------------
 
@@ -72,91 +84,38 @@ FUZZY_CUTOFF = 0.72
 
 # Two bands beyond HIGH/MEDIUM/LOW.
 #
-# ``NA`` sits below HIGH: the row has no catalog identity to find and never will
-# (a non-English printing). It is a settled answer, not a weak guess, so it ranks
-# last — these rows are not "most likely wrong", they are done.
+# ``NA`` sits below HIGH: the catalog has no cards in this item's language, so
+# no match is possible and none is offered. It is a settled answer, not a weak
+# guess, so it ranks last — these rows are not "most likely wrong", they are done.
 #
-# ``CONTRADICTION`` sits above everything: a non-English item that nevertheless
-# carries a catalog ``card_id``. That state should be unreachable — the importer
-# refuses it and the applier now refuses it — so an item in it was linked by
-# something that predates or bypasses those gates, and it is being priced from
-# the wrong card right now. It is shown even when ``needs_review`` is False,
-# because "resolved" is exactly the lie that hides it.
+# ``CONTRADICTION`` sits above everything: a non-English item linked to a catalog
+# card of a DIFFERENT language (e.g. a JP item holding an EN card_id). A JP item
+# linked to a JP card_id is now the correct state (TCGdex seeds JP cards too).
+# A cross-language link should be unreachable — the importer refuses it and the
+# applier now refuses it — so an item in it was linked by something that predates
+# or bypasses those gates, and it is being priced from the wrong card right now.
+# It is shown even when ``needs_review`` is False, because "resolved" is exactly
+# the lie that hides it.
+#
+# ``DANGLING`` sits just under CONTRADICTION: the item carries a ``card_id`` that
+# is not in the catalog AT ALL. TCGdex advertises many JA sets in set metadata
+# while holding zero card-level data for them (108 of 177 as measured
+# 2026-07-28), so Stage A resolved real-looking ids the reseed then never
+# created. Such a row can never be priced, and — like CONTRADICTION — it is shown
+# even when ``needs_review`` is False, because 9 of the 11 live cases were
+# already "resolved" and would otherwise be invisible forever.
 NO_MATCH_BAND = "NA"
 CONTRADICTION_BAND = "CONTRADICTION"
+DANGLING_BAND = "DANGLING"
 
-CONFIDENCE_RANK = {CONTRADICTION_BAND: 4, "LOW": 3, "MEDIUM": 2, "HIGH": 1,
-                   NO_MATCH_BAND: 0}
-
-# Words that describe the *finish* of a printing, not the card. The sheet writes
-# "Dragonite-Holo"; the catalog calls that card "Dragonite". Dropping these to
-# find a match costs no confidence.
-_FINISH_TOKENS = frozenset({
-    "holo", "holofoil", "foil", "reverse", "rev", "nonholo", "non", "unlimited",
-    "cosmos", "sealed", "graded",
-})
-
-# Words that can mean a materially DIFFERENT card (a gold secret rare, a
-# 1st-edition). They are dropped for lookup, because the catalog name never
-# carries them — but a match that needed one dropped can never be HIGH, since the
-# price of the variant is not the price of the base.
-#
-# Language words are deliberately NOT here. Treating "jp" as a droppable noise
-# word is what let a Japanese card match an English catalog entry and inherit an
-# English price; language is now read out of the text into a field and gates the
-# lookup entirely (see ``predict_card``), so it never reaches this list.
-_QUALIFIER_TOKENS = frozenset({
-    "1st", "first", "ed", "edition", "shadowless", "promo", "staff",
-    "full", "art", "fullart", "alt", "alternate", "rainbow", "gold", "secret",
-    "eng", "english",
-})
-
-_VARIANT_TOKENS = _FINISH_TOKENS | _QUALIFIER_TOKENS
-
+CONFIDENCE_RANK = {CONTRADICTION_BAND: 5, DANGLING_BAND: 4, "LOW": 3,
+                   "MEDIUM": 2, "HIGH": 1, NO_MATCH_BAND: 0}
 
 # --- identifier + name normalization ------------------------------------
-# ``strip_float_artifact`` / ``normalize_name`` / ``normalize_number`` are
-# imported from ``services.card_text`` so this page and the decision applier —
-# the two ends of one paste-back round trip — compare text identically.
-
-def core_name(text) -> str:
-    """``normalize_name`` with printing/finish words removed (``dragonite holo``
-    -> ``dragonite``). Falls back to the full name if everything got stripped."""
-    tokens = [t for t in normalize_name(text).split() if t not in _VARIANT_TOKENS]
-    return " ".join(tokens) or normalize_name(text)
-
-
-def _number_keys(number: str) -> list[str]:
-    """Every form of a card number worth matching on, most literal first.
-
-    The sheet writes collector numbers as ``"182/167"`` and pads with zeros; no
-    catalog number contains a slash, so the part before it is the real number.
-    """
-    if not number:
-        return []
-    keys: list[str] = []
-    for form in (number, number.split("/", 1)[0].strip()):
-        for key in (form, form.lstrip("0")):
-            if key and key not in keys:
-                keys.append(key)
-    return keys
-
-
-def _set_tokens(text) -> frozenset[str]:
-    return frozenset(normalize_name(text).split())
-
-
-def _sets_agree(source_set: str, catalog_set: str) -> bool:
-    """True when one set label is contained in the other, token-wise.
-
-    The sheet writes things like "XY single pack Blister" for a card the catalog
-    files under "XY", so equality is too strict; substring is too loose ("XY"
-    would swallow "XY Evolutions"). Token containment threads the needle.
-    """
-    src, cat = _set_tokens(source_set), _set_tokens(catalog_set)
-    if not src or not cat:
-        return False
-    return src <= cat or cat <= src
+# ``strip_float_artifact`` / ``normalize_name`` / ``normalize_number`` /
+# ``core_name`` / ``number_keys`` / ``sets_agree`` are imported from
+# ``services.card_text`` so this page, the importer's matcher and the decision
+# applier — every end of one paste-back round trip — compare text identically.
 
 
 # --- recovering the importer's source text -------------------------------
@@ -177,12 +136,19 @@ class CatalogIndex:
     by_name: dict = field(default_factory=lambda: defaultdict(list))
     by_core: dict = field(default_factory=lambda: defaultdict(list))
     by_prefix: dict = field(default_factory=lambda: defaultdict(list))
+    by_card_id: dict = field(default_factory=dict)
+    languages: frozenset = field(default_factory=frozenset)
 
     @classmethod
     def build(cls, cards) -> CatalogIndex:
         index = cls()
+        langs: set[str] = set()
         for card in cards:
             index.cards.append(card)
+            card_id = card.get("card_id")
+            if card_id:
+                index.by_card_id[card_id] = card
+            langs.add(card.get("language", Language.EN.value))
             name, core = normalize_name(card.get("name")), core_name(card.get("name"))
             number = normalize_number(card.get("number"))
             index.by_name[name].append(card)
@@ -193,6 +159,7 @@ class CatalogIndex:
         for core in set(index.by_core) | set(index.by_name):
             if core:
                 index.by_prefix[core[:3]].append(core)
+        index.languages = frozenset(langs)
         return index
 
     def cards_for(self, name: str) -> list[dict]:
@@ -248,11 +215,13 @@ def predict_card(source: SourceText, index: CatalogIndex, *, kind: str = "raw",
     # Language gate FIRST, above the kind check: ``language`` lives on the shared
     # item base precisely because every kind can be a non-English printing, so a
     # Japanese sealed box must not be filed under "sealed, look by hand" when the
-    # sharper and more permanent answer is "non-English, no catalog exists".
-    if source.language != Language.EN.value:
+    # sharper and more permanent answer is "no catalog cards in that language".
+    # Since TCGdex seeds JP cards alongside EN ones, this gate only fires when
+    # the catalog genuinely has NO cards in the item's language.
+    if source.language not in index.languages:
         label = LANGUAGE_LABELS.get(Language(source.language), source.language)
         return CardPrediction([], NO_MATCH_BAND, (
-            f"{label} printing — the catalog holds English cards only, so no "
+            f"{label} printing — the catalog has no {label} cards, so no "
             f"catalog match is possible for this card and none is offered. This "
             f"is the correct final answer, not a failed lookup: its value comes "
             f"from your sheet (cost, sticker, market at purchase), shown on the "
@@ -295,6 +264,17 @@ def predict_card(source: SourceText, index: CatalogIndex, *, kind: str = "raw",
         else:
             band, reason, hits = _from_name_only(name, core, number, index, stripped)
             undetermined = len(hits) > 1
+
+    # For non-EN items, only same-language catalog cards are valid candidates.
+    if source.language != Language.EN.value and hits:
+        same_lang = [c for c in hits
+                     if c.get("language", Language.EN.value) == source.language]
+        if not same_lang:
+            label = LANGUAGE_LABELS.get(Language(source.language), source.language)
+            return CardPrediction([], NO_MATCH_BAND, (
+                f"{label} printing — the catalog name matched but no {label} "
+                f"printing of this card exists; its value comes from your sheet"))
+        hits = same_lang
 
     if not hits:
         return CardPrediction([], "LOW", reason)
@@ -415,6 +395,71 @@ def _from_name_only(name, core, number, index: CatalogIndex, stripped: bool):
     return "LOW", f"no catalog candidate found for this name{hint}", []
 
 
+# --- finish -> price band -------------------------------------------------
+# The importer files every raw single as finish="normal" (the singles tab has no
+# finish column), so the print a seller wrote into the NAME — "Mr Mime Reverse",
+# "Charizard Base Holo Unlimited" — never reached the price band, and the item was
+# priced from the normal band and then flagged for a divergence that is really
+# only the wrong band. We read the band back out of the name here.
+#
+# EXACT-TOKEN matching only, never substring: the live 1266-card table is full of
+# Pokemon whose names merely CONTAIN a finish word — Slowpoke, Cosmog, Cosmoem,
+# Revavroom, Rhyperior, Altaria, Ralts, Maushold, Exalted — and a substring test
+# would mis-band every one of them.
+
+# Real misspellings / split forms observed in the live table, each mapped to the
+# token we reason about. Curated by hand from the audit — not guessed at runtime.
+_FINISH_ALIASES = {
+    "reversese": "reverse",   # live typo in the corpus
+    "reverese": "reverse",
+    "revese": "reverse",
+    "rev": "reverse",
+    "holos": "holo",
+    "limited": "unlimited",   # "un limited" (split) -> tokens {un, limited}
+}
+
+_HOLO_WORDS = frozenset({"holo", "holofoil", "foil", "cosmos"})
+
+
+def _finish_tokens(name: str) -> set[str]:
+    """Normalized name tokens with the curated typo/split corrections applied."""
+    return {_FINISH_ALIASES.get(t, t) for t in normalize_name(name).split()}
+
+
+def finish_from_source(source_name: str, stored_finish=None) -> str:
+    """The tcgplayer price-band key implied by a card's name text.
+
+    Returns one of ``normal`` / ``holofoil`` / ``reverseHolofoil`` /
+    ``1stEditionHolofoil`` / ``1stEditionNormal`` / ``unlimitedHolofoil``.
+
+    An explicitly recorded non-normal ``stored_finish`` is authoritative and is
+    returned untouched — the name is consulted only to correct the ``normal``
+    default the importer stamps on every raw single. "Non holo" resolves to the
+    NORMAL print, not a foil, so the negation must be checked before the holo cue.
+    """
+    stored = str(stored_finish or "normal")
+    if stored != "normal":
+        return stored
+    tokens = _finish_tokens(source_name)
+    holo = bool(tokens & _HOLO_WORDS)
+    reverse = "reverse" in tokens
+    non = "non" in tokens or "nonholo" in tokens
+    first = "1st" in tokens or "first" in tokens
+    unlimited = "unlimited" in tokens
+
+    if non and not reverse:
+        return "normal"                       # "non holo" is the normal print
+    if reverse:
+        return "reverseHolofoil"
+    if first:
+        return "1stEditionHolofoil" if holo else "1stEditionNormal"
+    if unlimited:
+        return "unlimitedHolofoil" if holo else "normal"
+    if holo:
+        return "holofoil"
+    return "normal"
+
+
 # --- value prediction ----------------------------------------------------
 
 @dataclass
@@ -422,6 +467,9 @@ class ValuePrediction:
     value: Decimal | None
     basis: str
     note: str = ""
+    # The band the value was actually priced from — lets a caller tell a verified
+    # finish (band == the one asked for) apart from a fallback substitution.
+    finish: str = ""
 
 
 def _as_decimal(value) -> Decimal | None:
@@ -450,8 +498,15 @@ def _catalog_price(card, finish) -> tuple[Decimal | None, str]:
     return None, ""
 
 
-def predict_value(item, card, price_points) -> ValuePrediction:
-    """Predicted market value for one item from its matched card's price data."""
+def predict_value(item, card, price_points, *, finish=None) -> ValuePrediction:
+    """Predicted market value for one item from its matched card's price data.
+
+    ``finish`` overrides the price band to compare against — the caller passes the
+    band read from the card's name (``finish_from_source``) so a "Reverse"/"Holo"
+    single is priced from its own band instead of the ``normal`` default the
+    importer stamps on every raw single. When omitted, the item's stored finish is
+    used, exactly as before.
+    """
     if not card:
         return ValuePrediction(None, "none", "no matched catalog card, so no value to predict")
 
@@ -466,33 +521,36 @@ def predict_value(item, card, price_points) -> ValuePrediction:
         if newest:
             return ValuePrediction(_as_decimal(newest["market"]), "price_point_graded",
                                    f"{company} {grade} price point dated {newest.get('date')}")
-        raw_value, finish = _catalog_price(card, "normal")
+        raw_value, used = _catalog_price(card, "normal")
         raw_point = _latest([p for p in price_points if p.get("kind") == "raw"])
         if raw_point:
-            raw_value, finish = _as_decimal(raw_point["market"]), raw_point.get("finish")
+            raw_value, used = _as_decimal(raw_point["market"]), raw_point.get("finish")
         if raw_value is None:
             return ValuePrediction(None, "none", "no price data at all for this card")
         return ValuePrediction(raw_value, "raw_only", (
-            f"RAW ungraded {finish} price — the catalog carries no {company} {grade} "
-            f"figure, so this is NOT a slab value and is usually far too low"))
+            f"RAW ungraded {used} price — the catalog carries no {company} {grade} "
+            f"figure, so this is NOT a slab value and is usually far too low"),
+            finish=str(used or ""))
 
-    finish = str(item.get("finish") or "normal")
+    finish = finish if finish is not None else str(item.get("finish") or "normal")
     same_finish = [p for p in price_points
                    if p.get("kind") == "raw" and str(p.get("finish") or "") == finish]
     newest = _latest(same_finish)
     if newest:
         return ValuePrediction(_as_decimal(newest["market"]), "price_point",
-                               f"{finish} price point dated {newest.get('date')}")
+                               f"{finish} price point dated {newest.get('date')}",
+                               finish=finish)
     newest = _latest([p for p in price_points if p.get("kind") == "raw"])
     if newest:
+        used = str(newest.get("finish") or "")
         return ValuePrediction(_as_decimal(newest["market"]), "price_point", (
             f"no {finish} price; using the {newest.get('finish')} price point dated "
-            f"{newest.get('date')}"))
+            f"{newest.get('date')}"), finish=used)
     value, used = _catalog_price(card, finish)
     if value is None:
         return ValuePrediction(None, "none", "the matched card carries no price at all")
     note = f"catalog {used} price" + ("" if used == finish else f" (item finish is {finish})")
-    return ValuePrediction(value, "catalog_price", note)
+    return ValuePrediction(value, "catalog_price", note, finish=str(used or ""))
 
 
 def value_divergence(predicted: Decimal | None, item) -> dict | None:
@@ -528,7 +586,7 @@ def _money(value) -> str | None:
     return None if dec is None else f"{dec:f}"
 
 
-def _card_view(card, item=None, points=None) -> dict:
+def _card_view(card, item=None, points=None, *, finish=None) -> dict:
     view = {
         "card_id": card.get("card_id"),
         "name": card.get("name"),
@@ -538,7 +596,7 @@ def _card_view(card, item=None, points=None) -> dict:
         "image": (card.get("images") or {}).get("small"),
     }
     if item is not None:
-        prediction = predict_value(item, card, points or [])
+        prediction = predict_value(item, card, points or [], finish=finish)
         view["value"] = _money(prediction.value)
         view["value_basis"] = prediction.basis
         view["value_note"] = prediction.note
@@ -546,7 +604,7 @@ def _card_view(card, item=None, points=None) -> dict:
 
 
 def _order_by_price_fit(prediction: CardPrediction, item, price_points_by_card,
-                        *, keep: int = 6) -> CardPrediction:
+                        *, keep: int = 6, finish=None) -> CardPrediction:
     """Reorder identity-tied candidates by which one costs what the sheet says.
 
     Only applies when the match is ``undetermined`` — every candidate is an
@@ -566,7 +624,8 @@ def _order_by_price_fit(prediction: CardPrediction, item, price_points_by_card,
                               prediction.reason, prediction.undetermined)
 
     def distance(card):
-        value = predict_value(item, card, price_points_by_card.get(card["card_id"], []))
+        value = predict_value(item, card, price_points_by_card.get(card["card_id"], []),
+                              finish=finish)
         return (value.value is None, abs(value.value - basis) if value.value else 0)
 
     ordered = sorted(prediction.candidates, key=distance)
@@ -576,24 +635,74 @@ def _order_by_price_fit(prediction: CardPrediction, item, price_points_by_card,
         f"only, not identity evidence"), prediction.undetermined)
 
 
-def _contradiction(source: SourceText, item) -> CardPrediction | None:
-    """A non-English item that nevertheless carries a catalog ``card_id``.
+def _contradiction(source: SourceText, item, index: CatalogIndex) -> CardPrediction | None:
+    """A stored ``card_id`` that cannot be right: dangling, or cross-language.
 
-    Nothing should be able to produce this state, which is exactly why it has to
-    be shown: it means something linked the item before the gates existed, or
-    around them. The item is being valued from an English card right now, and
-    because whatever linked it also cleared ``needs_review``, the ordinary filter
-    would hide it forever (Council R7 BLOCKER-1(d)).
+    Two distinct broken states, deliberately NOT conflated:
+
+    * the id is not in the catalog at all -> ``DANGLING`` (it has no language to
+      disagree with, so no language claim is made about it);
+    * the id resolves, but to a card of another language -> ``CONTRADICTION``.
+
+    A JP item holding a JP card_id is the correct state (the catalog now carries
+    JP cards via TCGdex); a JP item holding an EN card_id is still a
+    contradiction. The card's language is looked up in the index; if the card_id
+    is not in the index at all, it is treated as a mismatch (the linked identity
+    is unverifiable).
+
+    This state should be unreachable — the importer and the applier both refuse
+    cross-language links — so an item in it was linked by something that predates
+    or bypasses those gates. It is shown even when ``needs_review`` is False,
+    because "resolved" is exactly the lie that hides it (Council R7 BLOCKER-1(d)).
     """
     card_id = item.get("card_id")
-    if source.language == Language.EN.value or not card_id:
+    if not card_id:
+        return None
+    card = index.by_card_id.get(card_id)
+    if card is None:
+        # The id resolves to NOTHING. Do not guess at the absent card's language
+        # — saying "linked to an English card" here is simply false, and it
+        # buries the genuinely mislinked rows under a wrong diagnosis.
+        return CardPrediction([], DANGLING_BAND, (
+            f"DANGLING LINK — this item is linked to card_id '{card_id}', which "
+            f"is not in the catalog at all, so it can never be priced. TCGdex "
+            f"lists some sets whose cards it holds no data for; a link resolved "
+            f"against one of those does not survive a reseed. Re-match it below "
+            f"or unlink it (REJECT) and take the value from your sheet"))
+    if source.language == Language.EN.value:
+        return None
+    card_language = card.get("language", Language.EN.value)
+    if card_language == source.language:
         return None
     label = LANGUAGE_LABELS.get(Language(source.language), source.language)
     return CardPrediction([], CONTRADICTION_BAND, (
-        f"CONTRADICTION — this is a {label} printing but it is linked to English "
-        f"catalog card '{card_id}', so any market value on it comes from the "
-        f"wrong card. Nothing in the current code can create this state; unlink "
-        f"it (REJECT) and take the value from your sheet"))
+        f"CONTRADICTION — this is a {label} printing but it is linked to "
+        f"catalog card '{card_id}' ({card_language}), so any market value on it "
+        f"comes from the wrong card. Nothing in the current code can create "
+        f"this state; unlink it (REJECT) and take the value from your sheet"))
+
+
+def _finish_caveat(reason: str, finish: str, item, best, value: ValuePrediction) -> str:
+    """Append a 'verify the band' note when a finish READ FROM THE NAME could not
+    be confirmed against the matched card's own prices.
+
+    This is the hybrid seam: the clean cases (the card carries the band the name
+    asks for) are repriced silently and the note stays out of the way; the cases a
+    script cannot safely resolve — the matched card has no such band, or no price
+    at all — are surfaced for a human instead of being quietly repriced off some
+    other band. A verified band adds nothing to the reason.
+    """
+    if finish is None:                       # non-raw item — finish was not inferred
+        return reason
+    inferred = finish != str(item.get("finish") or "normal")
+    if not inferred or best is None or value.finish == finish:
+        return reason
+    if value.value is None:
+        return (f"{reason} — the name reads as a '{finish}' print, but the matched "
+                f"card has no price at all to confirm that band; verify the finish")
+    return (f"{reason} — the name reads as a '{finish}' print, but the matched card "
+            f"has no {finish} price; priced from its {value.finish or 'normal'} band "
+            f"instead — verify the finish/band before trusting this value")
 
 
 def build_card_rows(items, index: CatalogIndex, price_points_by_card) -> list[dict]:
@@ -606,18 +715,26 @@ def build_card_rows(items, index: CatalogIndex, price_points_by_card) -> list[di
     rows = []
     for item in items:
         source = parse_source_text(item)
-        contradiction = _contradiction(source, item)
+        contradiction = _contradiction(source, item, index)
         if not item.get("needs_review") and contradiction is None:
             continue
         kind = str(item.get("kind") or "raw")
+        # The band read from the card's own name — "Mr Mime Reverse" -> the reverse
+        # band — so the value is compared against the right print, not the "normal"
+        # the importer stamps on every single. Only raw singles have a finish band;
+        # a graded slab is priced by grade and a sealed product has no finish, so
+        # they keep the stored finish (None -> predict_value reads item.finish).
+        finish = finish_from_source(source.name, item.get("finish")) if kind == "raw" else None
         if contradiction is not None:
             prediction = contradiction
         else:
             prediction = predict_card(source, index, kind=kind, max_candidates=8)
-            prediction = _order_by_price_fit(prediction, item, price_points_by_card)
+            prediction = _order_by_price_fit(prediction, item, price_points_by_card,
+                                             finish=finish)
         best = prediction.best
         points = price_points_by_card.get(best["card_id"], []) if best else []
-        value = predict_value(item, best, points)
+        value = predict_value(item, best, points, finish=finish)
+        reason = _finish_caveat(prediction.reason, finish, item, best, value)
         divergence = value_divergence(value.value, item)
         rows.append({
             "item_id": item.get("item_id"),
@@ -642,13 +759,14 @@ def build_card_rows(items, index: CatalogIndex, price_points_by_card) -> list[di
                 "card_id": item.get("card_id"),
                 "language": source.language,
             },
-            "prediction": (_card_view(best, item, points) | {
+            "prediction": (_card_view(best, item, points, finish=finish) | {
                 "value": _money(value.value), "value_basis": value.basis,
                 "value_note": value.note}) if best else None,
-            "runners": [_card_view(card, item, price_points_by_card.get(card["card_id"], []))
+            "runners": [_card_view(card, item, price_points_by_card.get(card["card_id"], []),
+                                   finish=finish)
                         for card in prediction.candidates[1:]],
             "confidence": prediction.confidence,
-            "reason": prediction.reason,
+            "reason": reason,
             "divergence": {**divergence, "basis": _money(divergence["basis"]),
                            "delta": _money(divergence["delta"])} if divergence else None,
         })
@@ -748,6 +866,7 @@ font-weight:700;letter-spacing:.04em}
 .LOW{background:var(--low);color:#180a05}
 .NA{background:var(--panel2);color:var(--dim);border:1px solid var(--line)}
 .CONTRADICTION{background:var(--warn);color:#180a05}
+.DANGLING{background:var(--low);color:#180a05;border:1px solid var(--warn)}
 .k{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
 .name{font-weight:600}
 .dim{color:var(--dim)}
@@ -776,6 +895,12 @@ border-radius:6px;padding:6px;font:12px/1.4 ui-monospace,Consolas,monospace;resi
 color:var(--ink);border:1px solid var(--line);border-radius:6px;cursor:pointer;font:inherit}
 .conf-filter{color:var(--dim);display:flex;gap:8px;align-items:center}
 .conf-filter label{gap:3px}
+.bulk{display:flex;gap:6px;align-items:center}
+.bulk button{border:1px solid var(--line);background:var(--panel2);color:var(--ink);
+border-radius:5px;padding:4px 10px;cursor:pointer;font:inherit;font-size:11px}
+.bulk button:hover{border-color:var(--accent)}
+#bulk-accept:hover{border-color:var(--accent);color:var(--accent)}
+#bulk-reject:hover{border-color:var(--low);color:var(--low)}
 .hidden{display:none}
 </style>
 </head>
@@ -788,8 +913,10 @@ color:var(--ink);border:1px solid var(--line);border-radius:6px;cursor:pointer;f
   </div>
   <div class="bar" id="bar">
     <span class="conf-filter">confidence
-      <label title="non-English item linked to an English card — fix these first"><input
+      <label title="non-English item linked to a card of another language — fix these first"><input
         type="checkbox" class="f-conf" value="CONTRADICTION" checked> CONTRADICTION</label>
+      <label title="linked to a card_id that is not in the catalog — cannot be priced"><input
+        type="checkbox" class="f-conf" value="DANGLING" checked> DANGLING</label>
       <label><input type="checkbox" class="f-conf" value="LOW" checked> LOW</label>
       <label><input type="checkbox" class="f-conf" value="MEDIUM" checked> MEDIUM</label>
       <label><input type="checkbox" class="f-conf" value="HIGH"> HIGH</label>
@@ -805,6 +932,13 @@ color:var(--ink);border:1px solid var(--line);border-radius:6px;cursor:pointer;f
       <option value="name">name A-Z</option>
     </select></label>
     <label>search <input type="search" id="f-q" placeholder="name, id, set"></label>
+    <span class="bulk">
+      <button id="bulk-accept"
+        title="Accept the prediction on every row the filters show (e.g. filter HIGH, approve all)"
+        >Approve all shown</button>
+      <button id="bulk-reject"
+        title="Reject every row the current filters show">Reject all shown</button>
+    </span>
   </div>
   <div class="meta" id="count"></div>
 </header>
@@ -902,6 +1036,39 @@ function decide(id, verb, fields){
   var cur = decisions[id];
   if(cur && cur.verb===verb && verb!=="SET"){ delete decisions[id]; }
   else { decisions[id] = {verb: verb, fields: fields||{}}; }
+  save(); draw();
+}
+
+function acceptFields(r){
+  return r.prediction ? {card_id:r.prediction.card_id, name:clean(r.prediction.name),
+    set:clean(r.prediction.set_name), number:clean(r.prediction.number),
+    value:r.prediction.value||""} : {};
+}
+
+// Apply one verb to EVERY row the current filters leave visible — not just the
+// first `limit` rendered — so "filter to HIGH, approve all" does what it says.
+// ACCEPT needs a prediction to take, so rows without one (no candidate / NA /
+// CONTRADICTION) are skipped; REJECT applies to all. Both confirm with a count,
+// because this overwrites any per-row decisions already made on those rows.
+function bulkDecide(verb){
+  var rows = visibleCards();
+  var targets = verb==="ACCEPT" ? rows.filter(function(r){ return !!r.prediction; }) : rows;
+  if(!targets.length){
+    alert(verb==="ACCEPT"
+      ? "None of the shown rows has a prediction to accept."
+      : "No rows are shown to reject."); return;
+  }
+  var skipped = rows.length - targets.length;
+  var msg = (verb==="ACCEPT"?"Approve":"Reject") + " " + targets.length +
+    " shown card" + (targets.length===1?"":"s") + "?" +
+    (verb==="ACCEPT" && skipped ? "\n(" + skipped + " with no prediction will be skipped.)" : "") +
+    "\nThis overwrites any existing decision on those rows.";
+  if(!confirm(msg)) return;
+  targets.forEach(function(r){
+    decisions["CARD:"+r.item_id] = verb==="ACCEPT"
+      ? {verb:"ACCEPT", fields: acceptFields(r)}
+      : {verb:"REJECT", fields:{}};
+  });
   save(); draw();
 }
 
@@ -1018,10 +1185,7 @@ function drawCards(){
     var c6 = el("td");
     c6.appendChild(actions("CARD:"+r.item_id, {
       verbs: [
-        {verb:"ACCEPT", label:"Accept", fields:function(){
-          return r.prediction ? {card_id:r.prediction.card_id,
-            name:clean(r.prediction.name), set:clean(r.prediction.set_name),
-            number:clean(r.prediction.number), value:r.prediction.value||""} : {}; }},
+        {verb:"ACCEPT", label:"Accept", fields:function(){ return acceptFields(r); }},
         {verb:"REJECT", label:"Reject", fields:function(){ return {}; }}
       ],
       inputs: [{name:"card_id", placeholder:"corrected card_id"},
@@ -1085,6 +1249,8 @@ document.getElementById("fold").onclick = function(){
   this.textContent = hidden ? "Hide" : "Show";
 };
 document.getElementById("f-q").oninput = function(){ limit=250; draw(); };
+document.getElementById("bulk-accept").onclick = function(){ bulkDecide("ACCEPT"); };
+document.getElementById("bulk-reject").onclick = function(){ bulkDecide("REJECT"); };
 document.getElementById("more-cards").onclick = function(){ limit+=250; draw(); };
 document.getElementById("copy").onclick = function(){
   var ta = document.getElementById("pb");

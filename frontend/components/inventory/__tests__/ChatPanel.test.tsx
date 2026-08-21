@@ -21,8 +21,23 @@ import ChatPanel from '@/components/inventory/ChatPanel'
 
 const mockedApiFetch = vi.mocked(apiFetch)
 
+let user: ReturnType<typeof userEvent.setup>
+
 beforeEach(() => {
-  vi.clearAllMocks()
+  // `mockReset`, NOT `vi.clearAllMocks()`. Measured 2026-08-10: `clearAllMocks`
+  // clears call records but leaves the `mockResolvedValueOnce` QUEUE intact, and
+  // a queued Once value outranks a later `mockResolvedValue`. So any test that
+  // ends without consuming everything it queued hands its leftovers to the next
+  // test, which then sees another test's fixture. That is what turned one slow
+  // test in here into five failures whose count changed run to run.
+  mockedApiFetch.mockReset()
+
+  // `delay: null` removes user-event's inter-keystroke wait. It sends the same
+  // events in the same order — it just stops charging a macrotask per character.
+  // The history-cap test types ~120 characters and re-renders the panel after
+  // each one; at the default delay it took 3.3s of the 5s budget with the
+  // machine otherwise idle, so under full-suite parallel load it timed out.
+  user = userEvent.setup({ delay: null })
 })
 
 describe('ChatPanel', () => {
@@ -30,8 +45,8 @@ describe('ChatPanel', () => {
     mockedApiFetch.mockResolvedValue({ reply: 'Charizard is about $250.' })
     render(<ChatPanel />)
 
-    await userEvent.type(screen.getByRole('textbox'), 'How much is Charizard?')
-    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    await user.type(screen.getByRole('textbox'), 'How much is Charizard?')
+    await user.click(screen.getByRole('button', { name: /send/i }))
 
     expect(screen.getByText('How much is Charizard?')).toBeInTheDocument()
     expect(await screen.findByText('Charizard is about $250.')).toBeInTheDocument()
@@ -48,12 +63,12 @@ describe('ChatPanel', () => {
     render(<ChatPanel />)
     const box = screen.getByRole('textbox')
 
-    await userEvent.type(box, 'first question')
-    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    await user.type(box, 'first question')
+    await user.click(screen.getByRole('button', { name: /send/i }))
     expect(await screen.findByText('First answer.')).toBeInTheDocument()
 
-    await userEvent.type(box, 'second question')
-    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    await user.type(box, 'second question')
+    await user.click(screen.getByRole('button', { name: /send/i }))
     expect(await screen.findByText('Second answer.')).toBeInTheDocument()
 
     expect(mockedApiFetch).toHaveBeenLastCalledWith(
@@ -79,12 +94,12 @@ describe('ChatPanel', () => {
     render(<ChatPanel />)
     const box = screen.getByRole('textbox')
 
-    await userEvent.type(box, 'doomed question')
-    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    await user.type(box, 'doomed question')
+    await user.click(screen.getByRole('button', { name: /send/i }))
     expect(await screen.findByText(/something went wrong/i)).toBeInTheDocument()
 
-    await userEvent.type(box, 'second question')
-    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    await user.type(box, 'second question')
+    await user.click(screen.getByRole('button', { name: /send/i }))
     expect(await screen.findByText('Recovered.')).toBeInTheDocument()
 
     expect(mockedApiFetch).toHaveBeenLastCalledWith(
@@ -103,8 +118,8 @@ describe('ChatPanel', () => {
     const box = screen.getByRole('textbox')
 
     for (let i = 0; i < 12; i++) {
-      await userEvent.type(box, `question ${i}`)
-      await userEvent.click(screen.getByRole('button', { name: /send/i }))
+      await user.type(box, `question ${i}`)
+      await user.click(screen.getByRole('button', { name: /send/i }))
       expect(await screen.findByText(`answer ${i}`)).toBeInTheDocument()
     }
 
@@ -124,11 +139,11 @@ describe('ChatPanel', () => {
     render(<ChatPanel />)
     const box = screen.getByRole('textbox')
 
-    await userEvent.type(box, 'first question')
-    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    await user.type(box, 'first question')
+    await user.click(screen.getByRole('button', { name: /send/i }))
 
-    await userEvent.type(box, 'second question')
-    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    await user.type(box, 'second question')
+    await user.click(screen.getByRole('button', { name: /send/i }))
     expect(await screen.findByText('Real answer.')).toBeInTheDocument()
 
     expect(mockedApiFetch).toHaveBeenLastCalledWith(
@@ -149,12 +164,12 @@ describe('ChatPanel', () => {
     render(<ChatPanel />)
     const box = screen.getByRole('textbox')
 
-    await userEvent.type(box, 'first question')
-    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    await user.type(box, 'first question')
+    await user.click(screen.getByRole('button', { name: /send/i }))
     expect(await screen.findByText(longReply)).toBeInTheDocument()
 
-    await userEvent.type(box, 'second question')
-    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    await user.type(box, 'second question')
+    await user.click(screen.getByRole('button', { name: /send/i }))
     expect(await screen.findByText('second answer')).toBeInTheDocument()
 
     const lastBody = JSON.parse(
@@ -166,7 +181,7 @@ describe('ChatPanel', () => {
 
   it('does not send an empty message', async () => {
     render(<ChatPanel />)
-    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    await user.click(screen.getByRole('button', { name: /send/i }))
     expect(mockedApiFetch).not.toHaveBeenCalled()
   })
 
@@ -174,8 +189,8 @@ describe('ChatPanel', () => {
     mockedApiFetch.mockResolvedValue({ reply: 'ok' })
     render(<ChatPanel />)
 
-    await userEvent.type(screen.getByRole('textbox'), 'hi')
-    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    await user.type(screen.getByRole('textbox'), 'hi')
+    await user.click(screen.getByRole('button', { name: /send/i }))
     expect(await screen.findByText('ok')).toBeInTheDocument()
 
     expect(mockedApiFetch).toHaveBeenCalledWith(
@@ -189,8 +204,8 @@ describe('ChatPanel', () => {
       new ApiError(429, 'Service is temporarily busy — please try again shortly.'),
     )
     render(<ChatPanel />)
-    await userEvent.type(screen.getByRole('textbox'), 'hi')
-    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    await user.type(screen.getByRole('textbox'), 'hi')
+    await user.click(screen.getByRole('button', { name: /send/i }))
     expect(
       await screen.findByText(/temporarily busy/i),
     ).toBeInTheDocument()
@@ -199,8 +214,8 @@ describe('ChatPanel', () => {
   it('shows a generic error bubble when the request fails without detail', async () => {
     mockedApiFetch.mockRejectedValue(new Error('boom'))
     render(<ChatPanel />)
-    await userEvent.type(screen.getByRole('textbox'), 'hi')
-    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    await user.type(screen.getByRole('textbox'), 'hi')
+    await user.click(screen.getByRole('button', { name: /send/i }))
     expect(await screen.findByText(/something went wrong/i)).toBeInTheDocument()
   })
 
@@ -208,8 +223,8 @@ describe('ChatPanel', () => {
     mockedApiFetch.mockResolvedValue({ reply: 'The **Charizard** is from Base Set.' })
     render(<ChatPanel />)
 
-    await userEvent.type(screen.getByRole('textbox'), 'How much is Charizard?')
-    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    await user.type(screen.getByRole('textbox'), 'How much is Charizard?')
+    await user.click(screen.getByRole('button', { name: /send/i }))
 
     const strong = await screen.findByText('Charizard')
     expect(strong.tagName).toBe('STRONG')
@@ -219,8 +234,8 @@ describe('ChatPanel', () => {
     mockedApiFetch.mockResolvedValue({ reply: 'Sure thing.' })
     render(<ChatPanel />)
 
-    await userEvent.type(screen.getByRole('textbox'), 'What about **this** card?')
-    await userEvent.click(screen.getByRole('button', { name: /send/i }))
+    await user.type(screen.getByRole('textbox'), 'What about **this** card?')
+    await user.click(screen.getByRole('button', { name: /send/i }))
 
     expect(await screen.findByText('What about **this** card?')).toBeInTheDocument()
   })

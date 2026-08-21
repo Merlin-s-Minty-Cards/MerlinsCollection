@@ -1,3 +1,12 @@
+/**
+ * Pure logic — no DOM. Runs in `node` rather than the default jsdom:
+ * constructing a jsdom per file was the single largest cost in this
+ * suite (215s cumulative `environment` time against 55s of actual tests).
+ * If this file ever renders a component or touches window/document,
+ * delete this docblock rather than stubbing the DOM by hand.
+ *
+ * @vitest-environment node
+ */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }))
@@ -6,6 +15,7 @@ import { apiFetch } from '@/lib/api'
 import {
   buildSearchQuery,
   searchInventory,
+  getInventorySummary,
   sendChat,
   formatPrice,
   itemTitle,
@@ -13,6 +23,7 @@ import {
   conditionLabel,
   type InventoryItem,
   type InventorySearchResult,
+  type InventorySummary,
 } from '@/lib/inventory'
 
 const mockedApiFetch = vi.mocked(apiFetch)
@@ -46,6 +57,7 @@ export function makeRawItem(overrides: Record<string, unknown> = {}): InventoryI
       number: '4',
       rarity: 'Rare Holo',
       image_small: 'https://img/charizard.png',
+      market_price: null,
     },
     ...overrides,
   } as InventoryItem
@@ -70,6 +82,7 @@ export function makeGradedItem(overrides: Record<string, unknown> = {}): Invento
       number: '4',
       rarity: 'Rare Holo',
       image_small: 'https://img/charizard.png',
+      market_price: null,
     },
     ...overrides,
   } as InventoryItem
@@ -134,7 +147,7 @@ describe('buildSearchQuery', () => {
 })
 
 describe('searchInventory', () => {
-  const empty: InventorySearchResult = { items: [], total: 0 }
+  const empty: InventorySearchResult = { items: [], total: 0, hidden_no_price: 0 }
 
   it('calls GET /inventory/search with the built query string', async () => {
     mockedApiFetch.mockResolvedValue(empty)
@@ -148,8 +161,16 @@ describe('searchInventory', () => {
     expect(mockedApiFetch.mock.calls[0][0]).toBe('/inventory/search')
   })
 
-  it('returns the backend result untouched ({items, total})', async () => {
-    const result: InventorySearchResult = { items: [makeRawItem()], total: 1 }
+  it('returns the backend result untouched ({items, total, hidden_no_price})', async () => {
+    // hidden_no_price (Phase 12, owner decision 2) is part of the wire
+    // contract: a price-bounded search excludes items with no resolvable
+    // price and reports how many, so the UI can surface them rather than
+    // dropping them invisibly. It must survive the client untouched.
+    const result: InventorySearchResult = {
+      items: [makeRawItem()],
+      total: 1,
+      hidden_no_price: 3,
+    }
     mockedApiFetch.mockResolvedValue(result)
     await expect(searchInventory({})).resolves.toEqual(result)
   })
@@ -159,6 +180,25 @@ describe('searchInventory', () => {
     await searchInventory({}, { token: 'jwt-123' })
     expect(mockedApiFetch).toHaveBeenCalledWith(
       '/inventory/search',
+      expect.objectContaining({ token: 'jwt-123' }),
+    )
+  })
+})
+
+describe('getInventorySummary', () => {
+  const summary: InventorySummary = { cards_in_vault: 312, est_value: '48231.50', sets_tracked: 27 }
+
+  it('calls GET /inventory/summary and returns the parsed body', async () => {
+    mockedApiFetch.mockResolvedValue(summary)
+    await expect(getInventorySummary()).resolves.toEqual(summary)
+    expect(mockedApiFetch.mock.calls[0][0]).toBe('/inventory/summary')
+  })
+
+  it('forwards a bearer token to apiFetch when given', async () => {
+    mockedApiFetch.mockResolvedValue(summary)
+    await getInventorySummary({ token: 'jwt-123' })
+    expect(mockedApiFetch).toHaveBeenCalledWith(
+      '/inventory/summary',
       expect.objectContaining({ token: 'jwt-123' }),
     )
   })
@@ -223,10 +263,114 @@ describe('itemTitle', () => {
     expect(itemTitle(makeSealedItem())).toBe('Scarlet & Violet Booster Box')
   })
 
-  it('falls back to the item_id when neither card nor card_id is present', () => {
+  it('falls back to the item_id when neither card, card_id, nor display_name is present', () => {
     expect(itemTitle(makeRawItem({ card: null, card_id: undefined }))).toBe(
       '01JRAWCHARIZARDNM0000000001',
     )
+  })
+
+  // ---- RFC 0001: notes-derived display_name fallback (RED) ----
+  // docs/rfcs/0001-inventory-catalog-relink-and-display-fallback.md, section C.4.
+  // New precedence: card?.name ?? display_name ?? card_id ?? item_id. display_name
+  // ranks above the card_id and, critically, above the item_id ULID — the bug the
+  // owner reported ("chat/filter results show a ULID instead of a card name").
+
+  it('falls back to display_name when card and card_id are null', () => {
+    expect(
+      itemTitle(
+        makeRawItem({ card: null, card_id: null, display_name: 'Dragonair #181' }),
+      ),
+    ).toBe('Dragonair #181')
+  })
+
+  it('prefers display_name over the item_id ULID', () => {
+    const title = itemTitle(
+      makeRawItem({ card: null, card_id: null, display_name: 'Dragonair #181' }),
+    )
+    expect(title).not.toBe('01JRAWCHARIZARDNM0000000001')
+  })
+
+  it('still prefers the catalog name over a present display_name', () => {
+    // A matched item's catalog name is authoritative even if display_name was
+    // also set (mirrors the backend/MCP precedence tests for the same rule).
+    expect(
+      itemTitle(makeRawItem({ display_name: 'Stale #99' })),
+    ).toBe('Charizard')
+  })
+
+  // ---- T10: admin-authored display_name_override (RED) ----
+  // docs/plans/rfc-0008/t10-jp-english-names.md. Precedence becomes
+  // display_name_override ?? card?.name ?? display_name ?? card_id ?? item_id.
+  // The override is the ONLY thing that outranks the catalog name — it exists
+  // because a JP card's catalog row is in Japanese script and the customer
+  // cannot read it. Everything below the override is unchanged.
+
+  it('prefers an admin display_name_override over the catalog name', () => {
+    expect(
+      itemTitle(
+        makeRawItem({
+          language: 'JP',
+          display_name_override: 'Chespin',
+          card: { ...(makeRawItem().card!), name: 'ハルクジラ' },
+        }),
+      ),
+    ).toBe('Chespin')
+  })
+
+  it('renders the native catalog name for a JP item with no override', () => {
+    // Unchanged fallback: without an admin correction the catalog name stands,
+    // even in Japanese script. No override is invented for us.
+    expect(
+      itemTitle(
+        makeRawItem({
+          language: 'JP',
+          card: { ...(makeRawItem().card!), name: 'ハルクジラ' },
+        }),
+      ),
+    ).toBe('ハルクジラ')
+  })
+
+  it('keeps using the catalog name for an EN item with no override', () => {
+    // The regression guard for the ~249 English items: promoting the messy
+    // sheet-derived display_name ahead of the catalog name would downgrade
+    // every one of them ("Magnezone first #68" instead of "Magnezone").
+    expect(
+      itemTitle(makeRawItem({ display_name: 'Charizard first #4' })),
+    ).toBe('Charizard')
+  })
+
+  it('falls back to display_name for an unmatched item with no override', () => {
+    expect(
+      itemTitle(
+        makeRawItem({
+          card: null,
+          card_id: null,
+          display_name: 'Dragonair #181',
+          display_name_override: null,
+        }),
+      ),
+    ).toBe('Dragonair #181')
+  })
+
+  it('prefers an override over a sealed product_name', () => {
+    // The sealed short-circuit must not swallow the override — correcting a
+    // mis-typed product name is the same admin action as correcting a card.
+    expect(
+      itemTitle(makeSealedItem({ display_name_override: 'Japanese ETB' })),
+    ).toBe('Japanese ETB')
+  })
+
+  it('ignores a blank or whitespace-only override rather than rendering nothing', () => {
+    // `??` only guards null/undefined. An empty string reaching the tile — from
+    // an un-normalized row or an in-flight edit — would render a NAMELESS card.
+    expect(itemTitle(makeRawItem({ display_name_override: '' }))).toBe('Charizard')
+    expect(itemTitle(makeRawItem({ display_name_override: '   ' }))).toBe('Charizard')
+  })
+
+  it('trims a padded override before displaying it', () => {
+    expect(
+      itemTitle(makeRawItem({ display_name_override: '  Chespin  ' })),
+    ).toBe('Chespin')
   })
 })
 
