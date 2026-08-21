@@ -259,3 +259,62 @@ def test_chat_returns_422_on_content_filtered(chat_client, mint_token):
         headers={"Authorization": f"Bearer {mint_token()}"},
     )
     assert resp.status_code == 422
+
+
+# ---- RFC 0016 display envelope RED tests ----
+
+def test_chat_reply_only_response_includes_empty_display_envelope(chat_client, mint_token):
+    from merlins_collection.main import app
+    _override_bedrock(app, _stub_bedrock("No cards to show."))
+
+    resp = chat_client.post(
+        "/chat/",
+        json={"message": "Say hello"},
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "reply": "No cards to show.",
+        "artifacts": [],
+        "panel": {"open": None, "cards": [], "truncated": False},
+    }
+
+
+def test_chat_forwards_round_tripped_panel_item_ids_to_service(chat_client, mint_token):
+    from merlins_collection.main import app
+    svc = _stub_bedrock("Panel retained.")
+    _override_bedrock(app, svc)
+
+    resp = chat_client.post(
+        "/chat/",
+        json={"message": "What is still open?", "panel_item_ids": ["item-1", "item-2"]},
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+
+    assert resp.status_code == 200
+    svc.chat.assert_called_once_with("What is still open?", [], ["item-1", "item-2"])
+
+
+@pytest.mark.parametrize(
+    "panel_item_ids",
+    [
+        [f"item-{i}" for i in range(51)],
+        ["x" * 101],
+        [{"item_id": "item-1", "listed_price": "0.01"}],
+    ],
+    ids=["more-than-50", "oversized-id", "client-supplied-card-data"],
+)
+def test_chat_rejects_malformed_or_oversized_panel_item_ids(
+    chat_client, mint_token, panel_item_ids
+):
+    from merlins_collection.main import app
+    _override_bedrock(app, _stub_bedrock("must not run"))
+
+    resp = chat_client.post(
+        "/chat/",
+        json={"message": "Use this panel", "panel_item_ids": panel_item_ids},
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+
+    assert resp.status_code == 422

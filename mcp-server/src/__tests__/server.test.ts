@@ -1,7 +1,8 @@
 /**
- * The MCP server layer: buildServer(repo) must expose the five inventory tools
- * with names and input schemas matching shared/tool-contract.json — the same
- * file the backend pins its Bedrock tool schemas against.
+ * The MCP server layer: buildServer(repo) must expose the five inventory query
+ * tools with names and input schemas matching the query subset of
+ * shared/tool-contract.json. The six display tools in that contract are
+ * intentionally backend-only and must never be registered here.
  *
  * Tests talk to the server through a real MCP client over an in-memory
  * transport: real protocol, no subprocess.
@@ -19,6 +20,17 @@ import { card } from "./fixtures/card.js";
 const contract = JSON.parse(
   readFileSync(new URL("../../../shared/tool-contract.json", import.meta.url), "utf-8"),
 ) as { tools: Array<{ name: string; properties: string[]; required: string[] }> };
+
+const queryToolNames = new Set([
+  "search_inventory",
+  "get_inventory_summary",
+  "get_card_price_history",
+  "calculate_inventory_value",
+  "flag_underpriced_cards",
+]);
+
+const queryContract = contract.tools.filter((tool) => queryToolNames.has(tool.name));
+const displayContract = contract.tools.filter((tool) => !queryToolNames.has(tool.name));
 
 async function connect(repo: InventoryRepository): Promise<Client> {
   const server = buildServer(repo);
@@ -51,14 +63,26 @@ async function callTool(
 }
 
 describe("tool registration", () => {
-  it("exposes exactly the tools from shared/tool-contract.json with matching schemas", async () => {
+  it("registers only the five query tools while display tools remain backend-only", async () => {
     const client = await connect(new InMemoryInventoryRepository());
     const { tools } = await client.listTools();
 
     const byName = new Map(tools.map((t) => [t.name, t]));
-    expect([...byName.keys()].sort()).toEqual(contract.tools.map((t) => t.name).sort());
+    expect([...byName.keys()].sort()).toEqual(queryContract.map((t) => t.name).sort());
+    expect(queryContract).toHaveLength(5);
+    expect(displayContract.map((tool) => tool.name).sort()).toEqual([
+      "add_to_display",
+      "close_display_panel",
+      "display_card",
+      "open_display_panel",
+      "remove_from_display",
+      "reorder_display",
+    ]);
+    for (const displayTool of displayContract) {
+      expect(byName.has(displayTool.name), displayTool.name).toBe(false);
+    }
 
-    for (const expected of contract.tools) {
+    for (const expected of queryContract) {
       const schema = byName.get(expected.name)!.inputSchema as {
         properties?: Record<string, unknown>;
         required?: string[];

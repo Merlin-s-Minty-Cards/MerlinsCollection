@@ -240,3 +240,207 @@ describe('ChatPanel', () => {
     expect(await screen.findByText('What about **this** card?')).toBeInTheDocument()
   })
 })
+
+
+const displayCard = (itemId: string, name = 'Charizard') => ({
+  item_id: itemId,
+  kind: 'raw' as const,
+  card: {
+    card_id: `en:base1-${itemId}`,
+    name,
+    set_id: 'base1',
+    set_name: 'Base Set',
+    number: '4',
+    rarity: 'Rare Holo',
+    image_small: 'https://assets.tcgdex.net/en/base/base1/4/low.webp',
+    image_large: 'https://assets.tcgdex.net/en/base/base1/4/high.webp',
+    market_price: '450.00',
+  },
+  display_name: null,
+  listed_price: '275.00',
+  current_market_value: '450.00',
+  condition: 'LP',
+  finish: 'holofoil',
+  company: null,
+  grade: null,
+  grade_label: null,
+  cert_number: null,
+  cert_image_url: null,
+})
+
+describe('ChatPanel display artifacts (RFC 0016 RED)', () => {
+  it('sends the currently displayed panel item IDs on the next turn', async () => {
+    mockedApiFetch
+      .mockResolvedValueOnce({
+        reply: 'Opened three cards.',
+        artifacts: [],
+        panel: {
+          open: true,
+          cards: [displayCard('item-1'), displayCard('item-2'), displayCard('item-3')],
+          truncated: false,
+        },
+      })
+      .mockResolvedValueOnce({
+        reply: 'Still open.',
+        artifacts: [],
+        panel: { open: true, cards: [displayCard('item-1')], truncated: false },
+      })
+    render(<ChatPanel />)
+    const box = screen.getByRole('textbox')
+
+    await user.type(box, 'show three')
+    await user.click(screen.getByRole('button', { name: /send/i }))
+    expect(await screen.findByText('Opened three cards.')).toBeInTheDocument()
+    await user.type(box, 'what is open?')
+    await user.click(screen.getByRole('button', { name: /send/i }))
+    expect(await screen.findByText('Still open.')).toBeInTheDocument()
+
+    const body = JSON.parse(
+      String((mockedApiFetch.mock.lastCall![1] as RequestInit).body),
+    ) as { panel_item_ids?: string[] }
+    expect(body.panel_item_ids).toEqual(['item-1', 'item-2', 'item-3'])
+  })
+
+  it('renders inline artifacts from the response', async () => {
+    mockedApiFetch.mockResolvedValue({
+      reply: 'Here is one card.',
+      artifacts: [displayCard('item-1')],
+      panel: { open: null, cards: [], truncated: false },
+    })
+    render(<ChatPanel />)
+    await user.type(screen.getByRole('textbox'), 'show one')
+    await user.click(screen.getByRole('button', { name: /send/i }))
+    expect(await screen.findByRole('heading', { name: 'Charizard' })).toBeInTheDocument()
+  })
+
+  it('renders the display panel only for open true', async () => {
+    mockedApiFetch.mockResolvedValue({
+      reply: 'Panel open.',
+      artifacts: [],
+      panel: { open: true, cards: [displayCard('item-1')], truncated: false },
+    })
+    render(<ChatPanel />)
+    await user.type(screen.getByRole('textbox'), 'open panel')
+    await user.click(screen.getByRole('button', { name: /send/i }))
+    expect(await screen.findByRole('heading', { name: 'Display (1)' })).toBeInTheDocument()
+  })
+
+  it.each([false, null])('does not render the display panel for open %s', async (open) => {
+    mockedApiFetch.mockResolvedValue({
+      reply: 'Panel hidden.',
+      artifacts: [],
+      panel: { open, cards: [displayCard('item-1')], truncated: false },
+    })
+    render(<ChatPanel />)
+    await user.type(screen.getByRole('textbox'), 'hide panel')
+    await user.click(screen.getByRole('button', { name: /send/i }))
+    expect(await screen.findByText('Panel hidden.')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: /Display \(/ })).toBeNull()
+  })
+
+  it('handles reply, inline artifacts, and panel cards together', async () => {
+    mockedApiFetch.mockResolvedValue({
+      reply: 'One inline, one in the panel.',
+      artifacts: [displayCard('inline-1', 'Pikachu')],
+      panel: { open: true, cards: [displayCard('panel-1')], truncated: false },
+    })
+    render(<ChatPanel />)
+    await user.type(screen.getByRole('textbox'), 'show both')
+    await user.click(screen.getByRole('button', { name: /send/i }))
+    expect(await screen.findByText('One inline, one in the panel.')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Pikachu' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Display (1)' })).toBeInTheDocument()
+  })
+
+  it('clears local panel IDs after the user closes the panel', async () => {
+    mockedApiFetch
+      .mockResolvedValueOnce({
+        reply: 'Panel open.',
+        artifacts: [],
+        panel: { open: true, cards: [displayCard('item-1')], truncated: false },
+      })
+      .mockResolvedValueOnce({
+        reply: 'No panel.',
+        artifacts: [],
+        panel: { open: false, cards: [], truncated: false },
+      })
+    render(<ChatPanel />)
+    const box = screen.getByRole('textbox')
+    await user.type(box, 'open')
+    await user.click(screen.getByRole('button', { name: /send/i }))
+    await user.click(await screen.findByRole('button', { name: 'Close' }))
+    await user.type(box, 'next')
+    await user.click(screen.getByRole('button', { name: /send/i }))
+
+    const body = JSON.parse(
+      String((mockedApiFetch.mock.lastCall![1] as RequestInit).body),
+    ) as { panel_item_ids?: string[] }
+    expect(body.panel_item_ids).toEqual([])
+  })
+
+  it('preserves multi-turn add, remove, and close state transitions', async () => {
+    mockedApiFetch
+      .mockResolvedValueOnce({
+        reply: 'Added three.',
+        artifacts: [],
+        panel: {
+          open: true,
+          cards: [displayCard('item-1'), displayCard('item-2'), displayCard('item-3')],
+          truncated: false,
+        },
+      })
+      .mockResolvedValueOnce({
+        reply: 'Removed one.',
+        artifacts: [],
+        panel: {
+          open: true,
+          cards: [displayCard('item-1'), displayCard('item-3')],
+          truncated: false,
+        },
+      })
+      .mockResolvedValueOnce({
+        reply: 'Closed.',
+        artifacts: [],
+        panel: { open: false, cards: [], truncated: false },
+      })
+    render(<ChatPanel />)
+    const box = screen.getByRole('textbox')
+
+    const turns = [
+      ['add three', 'Added three.'],
+      ['remove second', 'Removed one.'],
+      ['close panel', 'Closed.'],
+    ] as const
+    for (const [message, reply] of turns) {
+      await user.type(box, message)
+      await user.click(screen.getByRole('button', { name: /send/i }))
+      expect(await screen.findByText(reply)).toBeInTheDocument()
+    }
+
+    const bodies = mockedApiFetch.mock.calls.map((call) =>
+      JSON.parse(String((call[1] as RequestInit).body)),
+    ) as Array<{ panel_item_ids?: string[] }>
+    expect(bodies[0].panel_item_ids).toEqual([])
+    expect(bodies[1].panel_item_ids).toEqual(['item-1', 'item-2', 'item-3'])
+    expect(bodies[2].panel_item_ids).toEqual(['item-1', 'item-3'])
+    expect(screen.queryByRole('heading', { name: /Display \(/ })).toBeNull()
+  })
+
+  it('ignores a model-authored fullscreen field until the user clicks fullscreen', async () => {
+    mockedApiFetch.mockResolvedValue({
+      reply: 'Panel open.',
+      artifacts: [],
+      panel: {
+        open: true,
+        cards: [displayCard('item-1')],
+        truncated: false,
+        fullscreen: true,
+      },
+    })
+    render(<ChatPanel />)
+    await user.type(screen.getByRole('textbox'), 'open panel')
+    await user.click(screen.getByRole('button', { name: /send/i }))
+    expect(await screen.findByRole('button', { name: 'Fullscreen' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Dock' })).toBeNull()
+  })
+})

@@ -235,6 +235,33 @@ describe('sendChat', () => {
       expect.objectContaining({ token: 'jwt-123' }),
     )
   })
+
+  it('round-trips panel item IDs without sending client-authored card data', async () => {
+    mockedApiFetch.mockResolvedValue({
+      reply: 'Panel retained.',
+      artifacts: [],
+      panel: { open: true, cards: [], truncated: false },
+    })
+
+    await sendChat(
+      'What is still open?',
+      [],
+      ['item-1', 'item-2'],
+      { token: 'jwt-123' },
+    )
+
+    expect(mockedApiFetch).toHaveBeenCalledWith(
+      '/chat/',
+      expect.objectContaining({
+        body: JSON.stringify({
+          message: 'What is still open?',
+          history: [],
+          panel_item_ids: ['item-1', 'item-2'],
+        }),
+        token: 'jwt-123',
+      }),
+    )
+  })
 })
 
 describe('formatPrice', () => {

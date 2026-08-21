@@ -26,3 +26,26 @@ def test_bedrock_tools_match_shared_contract():
         schema = specs[name]["inputSchema"]["json"]
         assert sorted(schema.get("properties", {})) == sorted(tool["properties"]), name
         assert sorted(schema.get("required", [])) == sorted(tool["required"]), name
+
+
+def test_shared_contract_declares_five_query_and_six_backend_display_tools():
+    tools = _contract_tools()
+    names = [tool["name"] for tool in tools]
+
+    assert len(names) == 11
+    assert names[:5] == [
+        "search_inventory",
+        "get_inventory_summary",
+        "get_card_price_history",
+        "calculate_inventory_value",
+        "flag_underpriced_cards",
+    ]
+    assert names[5:] == [
+        "display_card",
+        "open_display_panel",
+        "close_display_panel",
+        "add_to_display",
+        "remove_from_display",
+        "reorder_display",
+    ]
+    assert all("fullscreen" not in tool["properties"] for tool in tools)

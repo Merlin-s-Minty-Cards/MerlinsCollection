@@ -1,5 +1,5 @@
 {
-  "comment": "Single source of truth for the inventory tool contract between backend/src/merlins_collection/services/bedrock.py (_TOOLS, what the model sees) and mcp-server/src/server.ts (registered MCP tools, what actually executes). Both test suites assert against this file — change it first, then both sides.",
+  "comment": "Single source of truth for inventory query tools exposed through MCP and backend-only display tools exposed to Bedrock. Backend schemas cover all 11 tools; the MCP server registers only the 5 query tools.",
   "tools": [
     {
       "name": "search_inventory",
@@ -25,6 +25,36 @@
       "name": "flag_underpriced_cards",
       "properties": ["threshold"],
       "required": ["threshold"]
+    },
+    {
+      "name": "display_card",
+      "properties": ["item_id"],
+      "required": ["item_id"]
+    },
+    {
+      "name": "open_display_panel",
+      "properties": [],
+      "required": []
+    },
+    {
+      "name": "close_display_panel",
+      "properties": [],
+      "required": []
+    },
+    {
+      "name": "add_to_display",
+      "properties": ["item_id"],
+      "required": ["item_id"]
+    },
+    {
+      "name": "remove_from_display",
+      "properties": ["item_id"],
+      "required": ["item_id"]
+    },
+    {
+      "name": "reorder_display",
+      "properties": ["item_ids"],
+      "required": ["item_ids"]
     }
   ]
 }
