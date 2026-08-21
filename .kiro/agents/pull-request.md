@@ -1,7 +1,7 @@
 ---
 name: pull-request
 description: Use when work on a branch is finished and needs a Pull Request description — fills the repository's PR template from the actual diff and returns it as one copy-pasteable block.
-model: claude-haiku-4-5
+model: claude-haiku-4.5
 tools: [read, shell]
 ---
 

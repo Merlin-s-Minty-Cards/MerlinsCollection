@@ -1,7 +1,7 @@
 ---
 name: web-browser
 description: Use when a question needs the live internet — external documentation, a dependency bug or breaking change, current API syntax, or version-specific behavior. Returns distilled findings, not page dumps.
-model: claude-haiku-4-5
+model: claude-haiku-4.5
 tools: [read, web]
 ---
 

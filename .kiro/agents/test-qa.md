@@ -1,7 +1,7 @@
 ---
 name: test-qa
 description: Use after code edits land, or when coverage feels thin — judges existing coverage, writes the missing unit and integration tests, and runs the project's suites to prove no regressions. Writes test code only.
-model: claude-sonnet-4-5
+model: claude-sonnet-4.5
 tools: [read, write, shell]
 ---
 

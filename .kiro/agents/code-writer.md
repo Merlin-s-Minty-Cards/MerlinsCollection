@@ -1,7 +1,7 @@
 ---
 name: code-writer
 description: Use when application code must be written or changed — features, logic edits, or targeted work on the active plan's progress.md item. Also the seat that answers the Council and patches until the Judge issues PASS. Runs no git commands.
-model: auto
+model: gpt-5.6-sol
 tools: [read, write, shell]
 ---
 

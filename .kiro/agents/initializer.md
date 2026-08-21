@@ -1,7 +1,7 @@
 ---
 name: initializer
 description: Use at the start of a feature or work session to audit the project, map dependencies, and set a state baseline before code is written. Produces the plan's progress.md roadmap other agents read.
-model: claude-haiku-4-5
+model: claude-haiku-4.5
 tools: [read, write, shell]
 ---
 

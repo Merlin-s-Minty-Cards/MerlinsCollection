@@ -1,7 +1,7 @@
 ---
 name: doc-writer
 description: Use after implementation lands to bring documentation back in line with the code — READMEs, endpoint docs, docstrings, and inline commentary, so explanation never drifts from what the source now does.
-model: auto
+model: gpt-5.6-luna
 tools: [read, write, shell]
 ---
 
