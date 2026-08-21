@@ -14,10 +14,10 @@ type Props = {
 
 async function loadCardPresentation(): Promise<ComponentType<Props>> {
   try {
-    const module = await vi.importActual<{ CardPresentation: ComponentType<Props> }>(
+    const imported = await vi.importActual<{ CardPresentation: ComponentType<Props> }>(
       '../CardPresentation',
     )
-    return module.CardPresentation
+    return imported.CardPresentation
   } catch (error) {
     expect.fail(`RFC 0016 CardPresentation is not implemented: ${String(error)}`)
   }

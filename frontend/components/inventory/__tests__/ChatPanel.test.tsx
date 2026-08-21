@@ -80,6 +80,7 @@ describe('ChatPanel', () => {
             { role: 'user', content: 'first question' },
             { role: 'assistant', content: 'First answer.' },
           ],
+          panel_item_ids: [],
         }),
       }),
     )
@@ -105,7 +106,11 @@ describe('ChatPanel', () => {
     expect(mockedApiFetch).toHaveBeenLastCalledWith(
       '/chat/',
       expect.objectContaining({
-        body: JSON.stringify({ message: 'second question', history: [] }),
+        body: JSON.stringify({
+          message: 'second question',
+          history: [],
+          panel_item_ids: [],
+        }),
       }),
     )
   })
@@ -149,7 +154,11 @@ describe('ChatPanel', () => {
     expect(mockedApiFetch).toHaveBeenLastCalledWith(
       '/chat/',
       expect.objectContaining({
-        body: JSON.stringify({ message: 'second question', history: [] }),
+        body: JSON.stringify({
+          message: 'second question',
+          history: [],
+          panel_item_ids: [],
+        }),
       }),
     )
   })

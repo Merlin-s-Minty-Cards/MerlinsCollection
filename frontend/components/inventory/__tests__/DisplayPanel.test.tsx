@@ -38,10 +38,10 @@ type Props = {
 
 async function loadDisplayPanel(): Promise<ComponentType<Props>> {
   try {
-    const module = await vi.importActual<{ DisplayPanel: ComponentType<Props> }>(
+    const imported = await vi.importActual<{ DisplayPanel: ComponentType<Props> }>(
       '../DisplayPanel',
     )
-    return module.DisplayPanel
+    return imported.DisplayPanel
   } catch (error) {
     expect.fail(`RFC 0016 DisplayPanel is not implemented: ${String(error)}`)
   }

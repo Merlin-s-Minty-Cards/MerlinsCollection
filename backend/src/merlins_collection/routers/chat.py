@@ -40,7 +40,7 @@ def chat(
     content filtering → 422, any other Bedrock error → 502.
     """
     try:
-        reply = service.chat(body.message, body.history)
+        result = service.chat(body.message, body.history, body.panel_item_ids)
     except BedrockThrottledError as exc:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -61,4 +61,8 @@ def chat(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Upstream AI service error.",
         ) from exc
-    return ChatResponse(reply=reply)
+    # Keep dependency-override stubs and older service implementations compatible
+    # while the real service returns the extended response envelope.
+    if isinstance(result, str):
+        return ChatResponse(reply=result)
+    return ChatResponse.model_validate(result)

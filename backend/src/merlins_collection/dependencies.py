@@ -79,6 +79,7 @@ def get_bedrock_service() -> BedrockChatService:
         client=client,
         model_id=settings.bedrock_model_id,
         tool_executor=get_mcp_executor(),
+        repo=get_repo(),
     )
 
 

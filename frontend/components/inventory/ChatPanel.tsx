@@ -4,32 +4,28 @@ import { useState } from 'react'
 import { useSession } from 'next-auth/react'
 import { Send } from 'lucide-react'
 import { ApiError } from '@/lib/api'
-import { sendChat, type ChatMessage } from '@/lib/inventory'
-import MarkdownMessage from '@/components/inventory/MarkdownMessage'
+import {
+  sendChat,
+  type ChatMessage,
+  type DisplayedCard,
+  type DisplayPanelState,
+} from '@/lib/inventory'
+import { CardPresentation } from './CardPresentation'
+import { DisplayPanel } from './DisplayPanel'
+import MarkdownMessage from './MarkdownMessage'
 
 type Bubble = {
   role: 'user' | 'assistant' | 'error'
   content: string
+  artifacts?: DisplayedCard[]
 }
 
 const GENERIC_ERROR = 'Something went wrong. Try asking again.'
-
-// The backend caps history at 20 turns (10 exchanges) — send only the newest.
 const MAX_HISTORY_TURNS = 20
-
-// The backend caps each turn's content at 4000 chars (ChatTurn.content). A
-// long assistant reply replayed verbatim would 422 the whole request and stick
-// the conversation, so clamp each turn to the same limit before sending.
 const MAX_TURN_CHARS = 4000
+const EMPTY_PANEL: DisplayPanelState = { open: null, cards: [], truncated: false }
 
-/**
- * Build the history the backend will replay into Bedrock. Converse demands
- * strict user/assistant alternation starting with a user turn, so only
- * completed exchanges survive: a user bubble immediately answered by a
- * non-empty assistant bubble. Failed or empty turns are dropped, each surviving
- * turn is clamped to MAX_TURN_CHARS, and the result is capped to the newest
- * MAX_HISTORY_TURNS (an even slice of an even list, so alternation is preserved).
- */
+/** Build completed, bounded user/assistant exchanges for Bedrock replay. */
 function buildHistory(messages: Bubble[]): ChatMessage[] {
   const turns: ChatMessage[] = []
   for (let i = 0; i < messages.length - 1; i++) {
@@ -45,16 +41,31 @@ function buildHistory(messages: Bubble[]): ChatMessage[] {
         { role: 'user', content: question.content.slice(0, MAX_TURN_CHARS) },
         { role: 'assistant', content: answer.content.slice(0, MAX_TURN_CHARS) },
       )
-      i++ // consume the pair
+      i++
     }
   }
   return turns.slice(-MAX_HISTORY_TURNS)
+}
+
+function artifactTitle(card: DisplayedCard): string {
+  return card.display_name || card.card?.name || 'Unknown card'
+}
+
+function artifactCondition(card: DisplayedCard): string {
+  if (card.condition) return card.condition
+  if (card.kind === 'graded') {
+    if (card.grade_label) return card.grade_label
+    const slabGrade = [card.company, card.grade].filter(Boolean).join(' ')
+    if (slabGrade) return slabGrade
+  }
+  return card.kind === 'sealed' ? 'Sealed' : 'N/A'
 }
 
 export default function ChatPanel() {
   const { data: session } = useSession()
   const [input, setInput] = useState('')
   const [messages, setMessages] = useState<Bubble[]>([])
+  const [displayPanel, setDisplayPanel] = useState<DisplayPanelState>(EMPTY_PANEL)
   const [sending, setSending] = useState(false)
 
   async function onSubmit(event: React.FormEvent) {
@@ -62,18 +73,24 @@ export default function ChatPanel() {
     const text = input.trim()
     if (!text || sending) return
 
-    // Prior turns travel with the request — the backend replays them into the
-    // Bedrock conversation so follow-up questions keep their context.
     const history = buildHistory(messages)
+    // Only stable item IDs round-trip. Every visible field is discarded and
+    // re-hydrated by the backend on this request.
+    const panelItemIds = displayPanel.cards.map((card) => card.item_id)
 
     setMessages((prev) => [...prev, { role: 'user', content: text }])
     setInput('')
     setSending(true)
     try {
-      const res = await sendChat(text, history, { token: session?.accessToken })
-      setMessages((prev) => [...prev, { role: 'assistant', content: res.reply }])
+      const res = await sendChat(text, history, panelItemIds, {
+        token: session?.accessToken,
+      })
+      setMessages((prev) => [
+        ...prev,
+        { role: 'assistant', content: res.reply, artifacts: res.artifacts ?? [] },
+      ])
+      setDisplayPanel(res.panel ?? EMPTY_PANEL)
     } catch (err) {
-      // The backend sends actionable detail for 429/503/422 — show it.
       const detail = err instanceof ApiError && err.detail ? err.detail : GENERIC_ERROR
       setMessages((prev) => [...prev, { role: 'error', content: detail }])
     } finally {
@@ -82,55 +99,68 @@ export default function ChatPanel() {
   }
 
   return (
-    <div className="flex h-[560px] flex-col rounded-2xl vault-panel">
-      <div
-        className="vault-scroll flex-1 space-y-4 overflow-y-auto p-4 sm:p-5"
-        aria-live="polite"
-        aria-atomic="false"
-      >
-        {messages.length === 0 && (
-          <div className="flex h-full flex-col items-center justify-center text-center">
-            <p className="text-pine-100">Ask Merlin about the collection</p>
-            <p className="mt-1 max-w-[42ch] text-sm text-pine-300">
-              Try “What Charizards do you have under $300?” or “Show me holo cards from Base
-              set.”
+    <div className="relative">
+      <div className="flex h-[560px] flex-col rounded-2xl vault-panel">
+        <div
+          className="vault-scroll flex-1 space-y-4 overflow-y-auto p-4 sm:p-5"
+          aria-live="polite"
+          aria-atomic="false"
+        >
+          {messages.length === 0 && (
+            <div className="flex h-full flex-col items-center justify-center text-center">
+              <p className="text-pine-100">Ask Merlin about the collection</p>
+              <p className="mt-1 max-w-[42ch] text-sm text-pine-300">
+                Try “What Charizards do you have under $300?” or “Show me holo cards from Base
+                set.”
+              </p>
+            </div>
+          )}
+
+          {messages.map((message, index) => (
+            <ChatBubble key={index} bubble={message} />
+          ))}
+
+          {sending && (
+            <p className="font-mono text-xs text-mint" aria-live="polite">
+              Merlin is thinking…
             </p>
-          </div>
-        )}
+          )}
+        </div>
 
-        {messages.map((m, i) => (
-          <ChatBubble key={i} bubble={m} />
-        ))}
-
-        {sending && (
-          <p className="font-mono text-xs text-mint" aria-live="polite">
-            Merlin is thinking…
-          </p>
-        )}
+        <form
+          onSubmit={onSubmit}
+          className="flex items-center gap-2 border-t border-pine-700 p-3"
+        >
+          <input
+            type="text"
+            aria-label="Message"
+            value={input}
+            onChange={(event) => setInput(event.target.value)}
+            placeholder="Ask about a card, set, or price…"
+            disabled={sending}
+            className="vault-field flex-1 rounded-lg px-3 py-2.5 text-sm disabled:opacity-60"
+          />
+          <button
+            type="submit"
+            disabled={sending}
+            className="flex items-center gap-2 rounded-lg bg-mint px-4 py-2.5 text-sm font-semibold text-pine-950 transition-colors hover:bg-mint-soft disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <Send size={16} aria-hidden />
+            Send
+          </button>
+        </form>
       </div>
 
-      <form
-        onSubmit={onSubmit}
-        className="flex items-center gap-2 border-t border-pine-700 p-3"
-      >
-        <input
-          type="text"
-          aria-label="Message"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="Ask about a card, set, or price…"
-          disabled={sending}
-          className="vault-field flex-1 rounded-lg px-3 py-2.5 text-sm disabled:opacity-60"
+      {displayPanel.open === true && (
+        <DisplayPanel
+          open={displayPanel.open}
+          cards={displayPanel.cards}
+          truncated={displayPanel.truncated}
+          onClose={() =>
+            setDisplayPanel({ open: false, cards: [], truncated: false })
+          }
         />
-        <button
-          type="submit"
-          disabled={sending}
-          className="flex items-center gap-2 rounded-lg bg-mint px-4 py-2.5 text-sm font-semibold text-pine-950 transition-colors hover:bg-mint-soft disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          <Send size={16} aria-hidden />
-          Send
-        </button>
-      </form>
+      )}
     </div>
   )
 }
@@ -153,8 +183,26 @@ function ChatBubble({ bubble }: { bubble: Bubble }) {
     )
   }
   return (
-    <div className="max-w-[85%] rounded-2xl rounded-bl-sm bg-pine-800 px-4 py-2.5 text-sm text-pine-100">
-      <MarkdownMessage content={bubble.content} />
+    <div className="space-y-3">
+      <div className="max-w-[85%] rounded-2xl rounded-bl-sm bg-pine-800 px-4 py-2.5 text-sm text-pine-100">
+        <MarkdownMessage content={bubble.content} />
+      </div>
+      {bubble.artifacts && bubble.artifacts.length > 0 && (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {bubble.artifacts.map((card) => (
+            <CardPresentation
+              key={card.item_id}
+              title={artifactTitle(card)}
+              imageUrl={card.card?.image_small || undefined}
+              setName={card.card?.set_name ?? 'Unknown set'}
+              number={card.card?.number}
+              conditionLabel={artifactCondition(card)}
+              price={card.current_market_value ?? card.listed_price ?? 'Price N/A'}
+              isJapanese={card.card?.card_id.startsWith('ja:') ?? false}
+            />
+          ))}
+        </div>
+      )}
     </div>
   )
 }

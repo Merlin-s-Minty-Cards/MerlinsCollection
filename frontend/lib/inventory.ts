@@ -148,8 +148,44 @@ export interface ChatMessage {
   content: string
 }
 
+export interface DisplayCardSummary {
+  card_id: string
+  name: string
+  set_id: string
+  set_name: string
+  number: string
+  rarity: string | null
+  image_small: string
+  image_large: string
+  market_price: string | null
+}
+
+export interface DisplayedCard {
+  item_id: string
+  kind: 'raw' | 'graded' | 'sealed' | 'bulk'
+  card: DisplayCardSummary | null
+  display_name: string | null
+  listed_price: string | null
+  current_market_value: string | null
+  condition: string | null
+  finish: string | null
+  company: string | null
+  grade: string | null
+  grade_label: string | null
+  cert_number: string | null
+  cert_image_url: string | null
+}
+
+export interface DisplayPanelState {
+  open: boolean | null
+  cards: DisplayedCard[]
+  truncated: boolean
+}
+
 export interface ChatResponse {
   reply: string
+  artifacts?: DisplayedCard[]
+  panel?: DisplayPanelState
 }
 
 export interface RequestOptions {
@@ -204,18 +240,37 @@ export async function getInventoryFacets(
   return apiFetch<InventoryFacets>('/inventory/facets', { token: opts.token })
 }
 
-/** Send a chat message (with prior turns) to the Bedrock-backed endpoint. */
+/** Send a chat message and optional item-ID-only panel state to the backend. */
+export function sendChat(
+  message: string,
+  history: ChatMessage[],
+  opts?: RequestOptions,
+): Promise<ChatResponse>
+export function sendChat(
+  message: string,
+  history: ChatMessage[],
+  panelItemIds: string[],
+  opts?: RequestOptions,
+): Promise<ChatResponse>
 export async function sendChat(
   message: string,
   history: ChatMessage[],
-  opts: RequestOptions = {},
+  panelItemIdsOrOptions: string[] | RequestOptions = {},
+  maybeOptions: RequestOptions = {},
 ): Promise<ChatResponse> {
+  const hasPanelState = Array.isArray(panelItemIdsOrOptions)
+  const panelItemIds = hasPanelState ? panelItemIdsOrOptions : undefined
+  const opts = hasPanelState ? maybeOptions : panelItemIdsOrOptions
+  const body = hasPanelState
+    ? { message, history, panel_item_ids: panelItemIds }
+    : { message, history }
+
   // Trailing slash matters: the backend route is /chat/ and a bare /chat
   // would cost a 307 round-trip.
   return apiFetch<ChatResponse>('/chat/', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, history }),
+    body: JSON.stringify(body),
     token: opts.token,
   })
 }
@@ -223,9 +278,9 @@ export async function sendChat(
 const usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' })
 
 /** Format a backend decimal string as USD, or a friendly fallback. */
-export function formatPrice(value: string | null | undefined): string {
+export function formatPrice(value: number | string | null | undefined): string {
   if (value == null) return 'Price N/A'
-  const parsed = Number.parseFloat(value)
+  const parsed = typeof value === 'number' ? value : Number.parseFloat(value)
   return Number.isNaN(parsed) ? 'Price N/A' : usd.format(parsed)
 }
 

@@ -64,7 +64,7 @@ def test_chat_returns_text_on_end_turn():
     client = MagicMock()
     client.converse.return_value = _end_turn("We have 3 Charizard cards.")
     svc = _make_service(client)
-    assert svc.chat("Do you have Charizard?") == "We have 3 Charizard cards."
+    assert svc.chat("Do you have Charizard?")["reply"] == "We have 3 Charizard cards."
 
 
 def test_chat_sends_user_message_in_first_call():
@@ -129,7 +129,7 @@ def test_chat_calls_tool_and_continues_on_tool_use():
 
     result = svc.chat("Do you have Charizard?")
 
-    assert result == "Found 1 Charizard at $50."
+    assert result["reply"] == "Found 1 Charizard at $50."
     assert client.converse.call_count == 2
     tool_executor.assert_called_once_with("search_inventory", {"name": "Charizard"})
 
@@ -170,7 +170,7 @@ def test_chat_concatenates_multiple_text_blocks():
         "stopReason": "end_turn",
     }
     svc = _make_service(client)
-    assert svc.chat("Tell me about Pikachu") == "First part. Second part."
+    assert svc.chat("Tell me about Pikachu")["reply"] == "First part. Second part."
 
 
 def test_chat_raises_loop_error_when_tool_turns_exceed_limit():
@@ -238,7 +238,7 @@ def test_chat_includes_end_turn_text_after_tool_use():
     ]
     svc = _make_service(client)
     result = svc.chat("Any Mewtwo?")
-    assert result == "Found Mewtwo at $200."
+    assert result["reply"] == "Found Mewtwo at $200."
 
 
 def test_chat_raises_service_error_when_tool_use_has_no_tool_blocks():

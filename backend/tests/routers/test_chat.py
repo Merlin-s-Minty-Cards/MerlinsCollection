@@ -80,7 +80,7 @@ def test_chat_returns_reply_with_valid_auth(chat_client, mint_token):
     )
     assert resp.status_code == 200
     assert resp.json()["reply"] == "We have 5 Charizard cards."
-    svc.chat.assert_called_once_with("Do you have Charizard?", [])
+    svc.chat.assert_called_once_with("Do you have Charizard?", [], [])
 
 
 def test_chat_passes_history_to_service(chat_client, mint_token):
@@ -108,6 +108,7 @@ def test_chat_passes_history_to_service(chat_client, mint_token):
             ChatTurn(role="user", content="What Charizards do you have?"),
             ChatTurn(role="assistant", content="3 in stock."),
         ],
+        [],
     )
 
 
