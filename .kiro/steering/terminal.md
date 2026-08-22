@@ -102,3 +102,71 @@ When it finishes, read `test-results.txt` with the file read tool (workspace-rel
 | Lint backend | `ruff check backend/src` |
 | Frontend dev | `npm run dev --workspace=frontend` |
 | Backend dev | `cd backend && uvicorn merlins_collection.main:app --reload` |
+
+## Cost discipline (learned the expensive way)
+
+A session once burned a quarter of a monthly credit budget on one plan. Almost none of it
+went into the actual work. These are the specific causes.
+
+### Never invoke a pager
+
+**Always `git --no-pager <cmd>`** for `diff`, `log`, `show`, `branch` — anything that pages.
+
+A bare `git diff` left `less` resident in the shell. It then swallowed every following
+command as keystrokes: an `npm ci` "ran" for five minutes installing nothing, and several
+later commands came back as garbled doubled characters or empty output. Recovering cost a
+dozen calls. Symptoms to recognize: output full of `~` lines, `(END)`, `Pattern not found`,
+`(press RETURN)`, or commands echoing back with every character doubled. Recovery: send a
+lone `q`.
+
+Do **not** fix this with `git config core.pager cat` — modifying the user's git config is
+off-limits. Use the flag.
+
+### Poll long jobs rarely, not eagerly
+
+Each poll is a full round-trip and costs the same as real work. A 3-minute pytest run was
+polled ~20 times with `tail -2`; that is ~19 wasted calls.
+
+- Put the waiting **inside** the background command: have it write results to a file and
+  append a done-marker, then read the file **once** when you expect it to be finished.
+- `pytest -q` output is block-buffered, so percentages lag. A stalled-looking percentage is
+  not evidence of a hang. Confirm liveness with `pgrep -fa pytest` **once**, not repeatedly.
+- Budget by the known runtimes in the table above. Backend ~3-4 min: check at ~3 min, then
+  every ~60s. Not every 5 seconds.
+
+### Never re-run a suite that just ran
+
+If a subagent reports suite results, **read its artifact** (`test-results.txt`, a log file)
+instead of re-running the suite to confirm. Re-running the backend suite to verify a report
+costs another 4 minutes for information already on disk.
+
+Verify a subagent's claims cheaply instead:
+- Reconcile the arithmetic. RED 1986 passed + 70 failed → GREEN 2056 passed proves no test
+  was dropped or skipped.
+- `git --no-pager diff --stat -- <test paths>` shows whether tests were weakened. A large
+  deletion count in test files is the red flag; 21 insertions / 11 deletions is not.
+- Read the diff of any pre-existing test file it modified.
+
+Re-run a suite yourself only when the reconciliation is inconsistent or no artifact exists.
+
+### Precheck the toolchain once, at session start
+
+Before planning any work that ends in a test run, confirm the environment in **one** command:
+
+```bash
+test -x backend/.venv/bin/pytest && echo PY_OK; test -d node_modules && echo NM_OK
+```
+
+This clone had no venv and no `node_modules` at all, discovered only after dispatching two
+agents and attempting a full suite. `python` does not exist on this host — only `python3`.
+Backend deps: `python3 -m venv backend/.venv && backend/.venv/bin/python -m pip install -e "backend[dev]"`.
+Node: `npm ci` at root (~1m, 1800 packages).
+
+`npm ci` on this host appends `"packageManager": "yarn@1.22.22..."` to `package.json` and
+reformats `workspaces`. **Revert it every time** (`git checkout -- package.json`) — this repo
+is npm-workspaces with a `package-lock.json`. Check for it before every commit.
+
+### Keep subagent briefs proportionate
+
+A subagent brief is paid for on every dispatch. State the constraints, the files, and the
+definition of done; do not restate the entire RFC that the agent is about to read anyway.
