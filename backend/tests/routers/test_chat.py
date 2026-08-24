@@ -278,7 +278,9 @@ def test_chat_reply_only_response_includes_empty_display_envelope(chat_client, m
     assert resp.json() == {
         "reply": "No cards to show.",
         "artifacts": [],
-        "panel": {"open": None, "cards": [], "truncated": False},
+        # Decision 23 removed the tri-state `open`; a closed panel is simply an
+        # empty cards list, so the wire envelope must not carry an `open` key.
+        "panel": {"cards": [], "truncated": False},
     }
 
 

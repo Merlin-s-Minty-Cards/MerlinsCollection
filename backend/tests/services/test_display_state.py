@@ -31,6 +31,9 @@ def _raw(item_id: str, status: ItemStatus = ItemStatus.AVAILABLE):
         finish="normal",
         condition=Condition.NM,
         display_name=f"Card {item_id}",
+        # Council item 2: hydration requires a display-ready location. This fixture
+        # represents customer-visible stock; withheld cases are explicit elsewhere.
+        location="glass",
     )
 
 
