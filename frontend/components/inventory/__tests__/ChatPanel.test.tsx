@@ -274,7 +274,6 @@ const displayCard = (itemId: string, name = 'Charizard') => ({
   grade: null,
   grade_label: null,
   cert_number: null,
-  cert_image_url: null,
 })
 
 describe('ChatPanel display artifacts (RFC 0016 RED)', () => {

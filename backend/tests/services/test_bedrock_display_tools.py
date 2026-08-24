@@ -83,7 +83,9 @@ def test_display_card_hydrates_item_into_inline_artifacts():
     response = _service(client, FakeRepo([item])).chat("Show one card")
     assert response["reply"] == "Here it is."
     assert [card.item_id for card in response["artifacts"]] == ["item-1"]
-    assert response["panel"].open is None
+    # Inline display must not populate the panel. Closed = empty cards (decision 23
+    # removed the tri-state `open` field; open/closed is inferred from len(cards)).
+    assert response["panel"].cards == []
 
 
 def test_display_card_unknown_item_returns_error_without_calling_mcp():
@@ -121,7 +123,7 @@ def test_set_display_hydrates_items_and_opens_panel():
         _end_turn("Panel set with 2 cards."),
     ]
     response = _service(client, FakeRepo(items)).chat("Set the panel")
-    assert response["panel"].open is True
+    assert len(response["panel"].cards) > 0  # Open = non-empty cards list
     assert [card.item_id for card in response["panel"].cards] == ["item-1", "item-2"]
 
 

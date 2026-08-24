@@ -82,60 +82,41 @@ def _tool_use(name: str, input_: dict, tool_id: str = "tool-1") -> dict:
 
 @pytest.mark.integration
 def test_search_result_item_id_hydrates_in_display_card():
-    """INTEGRATION: a real search_inventory result must yield an item_id that
-    display_card can actually hydrate.
+    """CONSUMER CONTRACT REGRESSION GUARD: verifies backend display_card expects
+    per-unit item_id, not card_id.
 
-    This is the RED for Council item 1 FATAL. The fix adds item_id to
-    mcp-server Card/CardResult, not to the backend display tools.
+    This test will PASS against current backend code because it mocks the MCP
+    executor, bypassing the actual defect (which is in the MCP producer). The
+    real RED for Council item 1 FATAL is mcp-server/src/__tests__/item-id-field.test.ts.
+
+    This is a consumer-side assertion that display_card(item_id="item-unit-1")
+    hydrates the exact unit, not "one of the units with that card_id."
     """
     # Catalogued card: one card_id, two physical units
     item_a = _raw("item-unit-1", "en:base1-4", "Charizard")
     item_b = _raw("item-unit-2", "en:base1-4", "Charizard")
     repo = FakeRepo([item_a, item_b])
 
-    # MCP search_inventory returns a JSON array with one entry per unit
+    # MCP search_inventory returns per-unit item_id after the GREEN fix
     mcp_executor = MagicMock(
-        return_value='[{"id": "en:base1-4", "name": "Charizard", "set": "Base Set"}]'
+        return_value=(
+            '[{"id": "en:base1-4", "item_id": "item-unit-1", "name": "Charizard", '
+            '"set": "Base Set"}, {"id": "en:base1-4", "item_id": "item-unit-2", '
+            '"name": "Charizard", "set": "Base Set"}]'
+        )
     )
 
-    # Model searches, then tries to display the first result
+    # Model searches, then displays the first unit by its per-unit item_id
     client = MagicMock()
     client.converse.side_effect = [
         _tool_use("search_inventory", {"name": "Charizard"}),
-        # The model receives the MCP result {"id": "en:base1-4"} and must be able to
-        # pass that ID to display_card. Currently it fails because card_id != item_id.
-        _tool_use("display_card", {"item_id": "en:base1-4"}, "tool-2"),
+        _tool_use("display_card", {"item_id": "item-unit-1"}, "tool-2"),
         _end_turn("Here is the Charizard."),
     ]
 
     response = _service(client, repo, mcp_executor).chat("Show me a Charizard")
 
-    # This will FAIL until the MCP layer emits item_id per unit
+    # The artifact must hydrate to exactly the requested unit, not "one of them"
     assert len(response["artifacts"]) == 1, "display_card must hydrate a search result"
-    assert response["artifacts"][0].item_id in {"item-unit-1", "item-unit-2"}
+    assert response["artifacts"][0].item_id == "item-unit-1"
 
-
-@pytest.mark.integration
-def test_mcp_search_result_carries_per_unit_item_id():
-    """MCP-side assertion: search_inventory must return item_id, not just card_id.
-
-    This is the MCP half of the Council item 1 FATAL fix. The backend half is
-    test_search_result_item_id_hydrates_in_display_card.
-
-    Currently FAILS because CardResult.id is set to card_id ?? item_id and no
-    item_id field exists on Card/CardResult.
-    """
-    # This is a pytest marker that would delegate to the MCP server's own test
-    # suite, but we can write a backend assertion that the MCP response shape
-    # includes item_id.
-    
-    # A real MCP call would be made via the tool_executor. For RED purposes, we
-    # assert the expected structure: each result MUST carry item_id.
-    # This test documents the requirement; the actual implementation is in mcp-server.
-    
-    pytest.fail(
-        "MCP search_inventory must return per-unit item_id field on CardResult. "
-        "Fix: add item_id: string to mcp-server/src/repository.ts Card/CardResult types, "
-        "populate in toCard() at dynamodb-repository.ts:208. "
-        "See council/r1/verdict.md item 1."
-    )

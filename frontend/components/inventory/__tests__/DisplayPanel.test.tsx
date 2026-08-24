@@ -26,7 +26,6 @@ type DisplayedCard = {
   grade: null
   grade_label: null
   cert_number: null
-  cert_image_url: null
 }
 
 type Props = {
@@ -70,7 +69,6 @@ function card(item_id = 'item-1'): DisplayedCard {
     grade: null,
     grade_label: null,
     cert_number: null,
-    cert_image_url: null,
   }
 }
 

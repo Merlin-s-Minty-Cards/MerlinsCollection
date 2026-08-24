@@ -101,7 +101,10 @@ def test_hydrates_available_graded_item_from_repository(dynamo_repo):
     assert displayed.grade == Decimal("9.5")
     assert displayed.grade_label == "MINT 9.5"
     assert displayed.cert_number == "12345678"
-    assert displayed.cert_image_url == "https://example.com/cert.jpg"
+    # Checklist item 5: cert_image_url removed from customer projection
+    assert not hasattr(displayed, "cert_image_url"), (
+        "cert_image_url must not appear in displayed projection (Checklist item 5)"
+    )
 
 
 def test_hydration_returns_none_for_unknown_item_id(dynamo_repo):

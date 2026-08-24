@@ -36,5 +36,11 @@
       "properties": ["item_ids"],
       "required": ["item_ids"]
     }
-  ]
+  ],
+  "resultShapes": {
+    "search_inventory": {
+      "comment": "Each entry must carry item_id (per-unit identifier) in addition to id (card_id). Council r1 item 1 FATAL: one card_id can map to multiple physical units, so the producer must emit item_id for the consumer (display_card) to hydrate the exact unit.",
+      "requiredFields": ["id", "item_id", "name"]
+    }
+  }
 }

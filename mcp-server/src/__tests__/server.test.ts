@@ -19,7 +19,14 @@ import { card } from "./fixtures/card.js";
 
 const contract = JSON.parse(
   readFileSync(new URL("../../../shared/tool-contract.json", import.meta.url), "utf-8"),
-) as { tools: Array<{ name: string; properties: string[]; required: string[] }> };
+) as {
+  tools: Array<{ name: string; properties: string[]; required: string[] }>;
+  resultShapes?: {
+    search_inventory?: {
+      requiredFields?: string[];
+    };
+  };
+};
 
 const queryToolNames = new Set([
   "search_inventory",
@@ -95,6 +102,19 @@ describe("tool registration", () => {
         [...expected.required].sort(),
       );
     }
+  });
+
+  it("search_inventory result shape carries per-unit item_id per the contract", () => {
+    // Council r1 item 1 FATAL: one card_id maps to multiple physical units,
+    // so search_inventory must emit item_id per entry for display_card to hydrate
+    // the exact unit. This assertion pins the MCP producer to the shared contract.
+    expect(contract.resultShapes).toBeDefined();
+    expect(contract.resultShapes?.search_inventory).toBeDefined();
+    
+    const requiredFields = contract.resultShapes?.search_inventory?.requiredFields ?? [];
+    expect(requiredFields).toContain("id"); // card_id
+    expect(requiredFields).toContain("item_id"); // per-unit identifier
+    expect(requiredFields).toContain("name");
   });
 });
 

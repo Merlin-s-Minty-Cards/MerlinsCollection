@@ -240,7 +240,8 @@ describe('sendChat', () => {
     mockedApiFetch.mockResolvedValue({
       reply: 'Panel retained.',
       artifacts: [],
-      panel: { open: true, cards: [], truncated: false },
+      // Decision 23 removed the tri-state `open`; open/closed is inferred from cards.
+      panel: { cards: [], truncated: false },
     })
 
     await sendChat(

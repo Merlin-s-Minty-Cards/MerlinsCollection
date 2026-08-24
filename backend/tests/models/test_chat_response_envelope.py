@@ -81,7 +81,10 @@ def test_chat_request_rejects_client_supplied_card_data_in_panel_item_ids():
 def test_chat_response_reply_only_has_empty_display_defaults():
     response = chat_models.ChatResponse(reply="No display needed")
     assert response.artifacts == []
-    assert response.panel.open is None
+    # Decision 23: open field removed, panel state derived from len(cards)
+    assert not hasattr(response.panel, "open"), (
+        "DisplayPanel.open removed per decision 23, state derived from len(cards)"
+    )
     assert response.panel.cards == []
     assert response.panel.truncated is False
 
@@ -95,9 +98,10 @@ def test_chat_response_accepts_explicit_panel_state():
     DisplayPanel = _model("DisplayPanel")
     response = chat_models.ChatResponse(
         reply="Panel opened",
-        panel=DisplayPanel(open=True, cards=[_displayed_card()], truncated=False),
+        panel=DisplayPanel(cards=[_displayed_card()], truncated=False),
     )
-    assert response.panel.open is True
+    # Decision 23: open derived from len(cards); cards present = open
+    assert len(response.panel.cards) > 0, "Panel with cards is considered open"
     assert [card.item_id for card in response.panel.cards] == ["item-1"]
 
 
@@ -106,7 +110,7 @@ def test_chat_response_accepts_reply_artifacts_and_panel_together():
     response = chat_models.ChatResponse(
         reply="One inline and one docked",
         artifacts=[_displayed_card(1)],
-        panel=DisplayPanel(open=True, cards=[_displayed_card(2)]),
+        panel=DisplayPanel(cards=[_displayed_card(2)]),
     )
     assert response.reply == "One inline and one docked"
     assert [card.item_id for card in response.artifacts] == ["item-1"]
@@ -133,19 +137,33 @@ def test_display_panel_rejects_more_than_50_cards():
         DisplayPanel(cards=[_displayed_card(i) for i in range(51)])
 
 
-def test_display_panel_open_preserves_never_opened_closed_and_open_states():
-    DisplayPanel = _model("DisplayPanel")
-    assert DisplayPanel().open is None
-    assert DisplayPanel(open=False).open is False
-    assert DisplayPanel(open=True).open is True
-
-
 def test_display_panel_truncated_defaults_false():
     DisplayPanel = _model("DisplayPanel")
     assert DisplayPanel().truncated is False
 
 
+def test_display_panel_open_state_derived_from_cards_not_stored():
+    """Decision 23: DisplayPanel.open removed, state derived from len(cards)."""
+    DisplayPanel = _model("DisplayPanel")
+    
+    # Never opened = no cards
+    never_opened = DisplayPanel()
+    assert never_opened.cards == []
+    assert not hasattr(never_opened, "open"), "open field must not exist"
+    
+    # Closed = explicitly no cards
+    closed = DisplayPanel(cards=[])
+    assert closed.cards == []
+    assert not hasattr(closed, "open"), "open field must not exist"
+    
+    # Open = has cards
+    opened = DisplayPanel(cards=[_displayed_card()])
+    assert len(opened.cards) > 0
+    assert not hasattr(opened, "open"), "open field must not exist"
+
+
 def test_display_panel_schema_has_no_model_controlled_fullscreen_field():
     DisplayPanel = _model("DisplayPanel")
-    panel = DisplayPanel(open=True, fullscreen=True)
+    panel = DisplayPanel(cards=[_displayed_card()], fullscreen=True)
     assert "fullscreen" not in panel.model_dump()
+
