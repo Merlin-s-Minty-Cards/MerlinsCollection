@@ -74,13 +74,23 @@ class DisplayedCard(BaseModel):
     grade: Decimal | None = None
     grade_label: str | None = None
     cert_number: str | None = None
-    cert_image_url: str | None = None
+    # cert_image_url intentionally NOT a field here (RFC 0016 Council r1
+    # checklist item 5): it is admin-scoped, provider-supplied, and only
+    # scheme-validated (not content-validated) — see InventoryItem's own
+    # field docs. It must not reach the customer-facing /chat wire.
 
 
 class DisplayPanel(BaseModel):
-    """Hydrated panel state; fullscreen deliberately remains client-only."""
+    """Hydrated panel state; fullscreen deliberately remains client-only.
 
-    open: bool | None = None
+    No ``open`` field (decision 23): open/closed is inferred purely from
+    whether ``cards`` is non-empty. The five panel-mutation tools
+    (open/close/add/remove/reorder) were collapsed into a single
+    ``set_display(item_ids)``; an empty list IS the explicit close
+    primitive, so there is no longer any incremental state that could
+    desynchronize from what the cards list itself says.
+    """
+
     cards: list[DisplayedCard] = Field(default_factory=list, max_length=50)
     truncated: bool = False
 

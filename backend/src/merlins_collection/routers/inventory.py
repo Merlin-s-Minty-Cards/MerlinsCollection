@@ -34,28 +34,16 @@ from merlins_collection.models.inventory import (
     EnrichedSealedInventoryItem,
     InventoryItem,
     InventorySearchResult,
-    ItemStatus,
     Language,
     _market_price,
     normalize_condition,
 )
 from merlins_collection.rate_limit import rate_limit_search
 from merlins_collection.services.condition_pricing import apply_condition_adjustment
+from merlins_collection.services.customer_visibility import is_customer_visible
 from merlins_collection.services.dynamodb import InventoryRepository
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
-
-# Cards-only customer surface (RFC 0001 owner decision, binding): bulk lots are
-# internal-only, and sealed products are hidden too — the search surfaces single
-# cards, not booster packs. Only available raw/graded items reach a customer.
-_CUSTOMER_KINDS = {"raw", "graded"}
-
-# Phase 5 (D3, display scoping): only items physically stored in a
-# customer-facing location (the glass display case or a toploader binder page)
-# are shown. ``factory_sealed`` items (still in original plastic wrap — a
-# condition premium, not a physical location) are also visible regardless of
-# location. Items in storage, binders, or with no recorded location stay hidden.
-_CUSTOMER_VISIBLE_LOCATIONS = frozenset({"glass", "toploader"})
 
 
 def customer_visible_items(repo: InventoryRepository) -> list[InventoryItem]:
@@ -63,25 +51,16 @@ def customer_visible_items(repo: InventoryRepository) -> list[InventoryItem]:
     of a customer-visible kind stored in a customer-visible location.
 
     This is a security boundary (leaking sold/held or bulk/sealed stock is the
-    failure mode), so the predicate lives in exactly one place. Search, the authed
-    dashboard summary, and the ANONYMOUS public featured endpoint all call this —
-    a future exclusion (a ``needs_review`` gate, a new ``RESERVED`` status) is then
-    made once here and can never drift on the public endpoint.
-
-    The location gate (Phase 5, D3) ensures that only items in a display-ready
-    location (glass case, toploader) or marked ``factory_sealed`` are surfaced.
-    ``getattr`` is used because ``factory_sealed`` exists only on
-    ``RawInventoryItem``; graded slabs must have a visible location.
+    failure mode), so the per-item predicate lives in exactly one place —
+    ``services/customer_visibility.py::is_customer_visible`` — which
+    ``services/bedrock.py``'s chat display hydration also calls (RFC 0016
+    Council r1 checklist item 2). Search, the authed dashboard summary, the
+    ANONYMOUS public featured endpoint, and chat all call through here or
+    directly through that predicate — a future exclusion (a ``needs_review``
+    gate, a new ``RESERVED`` status) is then made once and can never drift on
+    any one of them.
     """
-    return [
-        i for i in repo.list_inventory()
-        if i.kind in _CUSTOMER_KINDS
-        and i.status == ItemStatus.AVAILABLE
-        and (
-            getattr(i, "location", None) in _CUSTOMER_VISIBLE_LOCATIONS
-            or getattr(i, "factory_sealed", False)
-        )
-    ]
+    return [i for i in repo.list_inventory() if is_customer_visible(i)]
 
 
 def _display_price(item: EnrichedInventoryItem) -> Decimal | None:

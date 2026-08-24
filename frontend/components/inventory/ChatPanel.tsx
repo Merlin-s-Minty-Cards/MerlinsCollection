@@ -23,7 +23,7 @@ type Bubble = {
 const GENERIC_ERROR = 'Something went wrong. Try asking again.'
 const MAX_HISTORY_TURNS = 20
 const MAX_TURN_CHARS = 4000
-const EMPTY_PANEL: DisplayPanelState = { open: null, cards: [], truncated: false }
+const EMPTY_PANEL: DisplayPanelState = { cards: [], truncated: false }
 
 /** Build completed, bounded user/assistant exchanges for Bedrock replay. */
 function buildHistory(messages: Bubble[]): ChatMessage[] {
@@ -151,14 +151,11 @@ export default function ChatPanel() {
         </form>
       </div>
 
-      {displayPanel.open === true && (
+      {displayPanel.cards.length > 0 && (
         <DisplayPanel
-          open={displayPanel.open}
           cards={displayPanel.cards}
           truncated={displayPanel.truncated}
-          onClose={() =>
-            setDisplayPanel({ open: false, cards: [], truncated: false })
-          }
+          onClose={() => setDisplayPanel({ cards: [], truncated: false })}
         />
       )}
     </div>

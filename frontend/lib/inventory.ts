@@ -173,11 +173,17 @@ export interface DisplayedCard {
   grade: string | null
   grade_label: string | null
   cert_number: string | null
-  cert_image_url: string | null
+  // cert_image_url intentionally NOT a field here (RFC 0016 Council r1
+  // checklist item 5): admin-scoped, provider-supplied, and only
+  // scheme-validated on the backend — must not reach the customer wire.
 }
 
 export interface DisplayPanelState {
-  open: boolean | null
+  // No `open` field (decision 23): open/closed is inferred purely from
+  // whether `cards` is non-empty. The five panel-mutation tools were
+  // collapsed into a single `set_display(item_ids)`; an empty list is the
+  // explicit close primitive, so there's no incremental state left to
+  // desynchronize from what `cards` itself says.
   cards: DisplayedCard[]
   truncated: boolean
 }

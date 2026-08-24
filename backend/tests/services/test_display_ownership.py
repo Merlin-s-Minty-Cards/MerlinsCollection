@@ -141,8 +141,8 @@ def test_hydrate_factory_sealed_without_location_succeeds(dynamo_repo):
 
 def test_hydrate_graded_in_glass_location_succeeds(dynamo_repo):
     """Graded slabs in glass/toploader are customer-visible."""
-    from merlins_collection.models.inventory import GradedInventoryItem
-    
+    from merlins_collection.models.inventory import GradedInventoryItem, GradingCompany
+
     graded = GradedInventoryItem(
         item_id="graded-slab",
         card_id="en:base1-4",
@@ -151,8 +151,8 @@ def test_hydrate_graded_in_glass_location_succeeds(dynamo_repo):
         cost_basis=Decimal("300.00"),
         acquired_at=date.today(),
         cert_number="12345678",
-        grader="PSA",
-        grade="10",
+        company=GradingCompany.PSA,
+        grade=Decimal("10"),
         location="glass",
     )
     dynamo_repo.put_inventory_item(graded)

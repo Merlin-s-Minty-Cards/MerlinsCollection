@@ -193,6 +193,11 @@ def test_set_display_empty_list_closes_panel_and_echoes_closed_state():
             },
             "stopReason": "tool_use",
         },
+        # Completes the FIRST chat() call's tool loop. Without this the mock's
+        # side_effect queue is one response short (each chat() call needs a
+        # tool_use + an end_turn), and the second chat() call below starves
+        # partway through with StopIteration.
+        _end_turn("Panel set."),
         # Then close it
         {
             "output": {

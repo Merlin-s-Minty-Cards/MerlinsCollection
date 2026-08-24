@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from merlins_collection.models.inventory import GradedInventoryItem, ItemStatus
+from merlins_collection.models.inventory import GradedInventoryItem, GradingCompany, ItemStatus
 from merlins_collection.services import bedrock
 
 
@@ -28,8 +28,8 @@ def _graded(item_id: str, cert_image_url: str | None = None):
         cost_basis=Decimal("300.00"),
         acquired_at=date.today(),
         cert_number="12345678",
-        grader="PSA",
-        grade="10",
+        company=GradingCompany.PSA,
+        grade=Decimal("10"),
         location="glass",
         cert_image_url=cert_image_url,
     )

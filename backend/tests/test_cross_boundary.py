@@ -15,7 +15,9 @@ import re
 from pathlib import Path
 
 from merlins_collection.models.inventory import _MARKET_FINISH_FALLBACK
-from merlins_collection.routers.inventory import _CUSTOMER_VISIBLE_LOCATIONS
+from merlins_collection.services.customer_visibility import (
+    CUSTOMER_VISIBLE_LOCATIONS as _CUSTOMER_VISIBLE_LOCATIONS,
+)
 from merlins_collection.services.dynamodb import INVENTORY_SHARD_COUNT
 
 REPO_ROOT = Path(__file__).resolve().parents[2]

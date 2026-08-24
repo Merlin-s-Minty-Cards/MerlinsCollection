@@ -11,12 +11,12 @@ A DMG card's chat price would ship the NM figure once anything reads
 CardSummary.market_price, because apply_condition_adjustment is never called.
 """
 
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
 
-from merlins_collection.models.catalog import CatalogCard
+from merlins_collection.models.catalog import CatalogCard, FinishPrice
 from merlins_collection.models.inventory import Condition, ItemStatus, RawInventoryItem
 from merlins_collection.services import bedrock
 
@@ -60,6 +60,9 @@ def _raw(
 
 
 def _catalog_card(card_id: str, nm_price: str):
+    # RawInventoryItem's finish defaults to "normal" in this file's _raw()
+    # helper, so the price band must be keyed "normal" for
+    # market_price_and_finish to find it.
     return CatalogCard(
         card_id=card_id,
         name="Test Card",
@@ -67,8 +70,8 @@ def _catalog_card(card_id: str, nm_price: str):
         set_name="Test Set",
         number="1",
         rarity="common",
-        image_small="https://example.com/small.jpg",
-        tcg_player_normal=Decimal(nm_price),
+        prices={"normal": FinishPrice(market=Decimal(nm_price))},
+        last_synced_at=datetime.now(tz=timezone.utc),
     )
 
 
@@ -145,8 +148,8 @@ def test_hydrate_graded_item_uses_listed_price_not_catalog():
     This is _display_price's second branch: for kind=graded, market_price is
     skipped and listed_price is authoritative. _hydrate_item must match.
     """
-    from merlins_collection.models.inventory import GradedInventoryItem
-    
+    from merlins_collection.models.inventory import GradedInventoryItem, GradingCompany
+
     graded = GradedInventoryItem(
         item_id="graded-slab",
         card_id="en:test-3",
@@ -155,8 +158,8 @@ def test_hydrate_graded_item_uses_listed_price_not_catalog():
         cost_basis=Decimal("1000.00"),
         acquired_at=date.today(),
         cert_number="12345678",
-        grader="PSA",
-        grade="10",
+        company=GradingCompany.PSA,
+        grade=Decimal("10"),
         location="glass",
     )
     catalog = _catalog_card("en:test-3", nm_price="500.00")  # Ungraded NM

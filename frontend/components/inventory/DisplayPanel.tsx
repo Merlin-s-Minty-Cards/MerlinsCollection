@@ -22,23 +22,24 @@ function cardCondition(card: DisplayedCard): string {
 }
 
 export function DisplayPanel({
-  open,
   cards,
   truncated,
   onClose,
 }: {
-  open: boolean | null
   cards: DisplayedCard[]
   truncated: boolean
   onClose: () => void
 }) {
   const [mode, setMode] = useState<PanelMode>('docked')
 
+  // Decision 23: no `open` prop. Open/closed is inferred purely from whether
+  // `cards` is non-empty — reset to docked whenever the panel closes (goes to
+  // empty) so a later reopen doesn't inherit a stale fullscreen mode.
   useEffect(() => {
-    if (open !== true) setMode('docked')
-  }, [open])
+    if (cards.length === 0) setMode('docked')
+  }, [cards.length])
 
-  if (open !== true) return null
+  if (cards.length === 0) return null
 
   const containerClass =
     mode === 'fullscreen'
