@@ -1141,8 +1141,9 @@ a fresh/empty table, which the live one is not. With AWS creds, from `backend/`:
 
 ```bash
 cd backend
-../.venv/Scripts/python.exe scripts/seed_catalog.py --help    # dry-run by default
-../.venv/Scripts/python.exe scripts/seed_catalog.py --execute --confirm-table merlins-cards
+# Linux/WSL: .venv/bin/python   Windows: ../.venv/Scripts/python.exe
+.venv/bin/python scripts/seed_catalog.py --help    # dry-run by default
+.venv/bin/python scripts/seed_catalog.py --execute --confirm-table merlins-cards
 ```
 
 then press **Sync Prices** on `/admin/market`, or run `scripts/daily_sync.py`
@@ -1192,8 +1193,9 @@ from 31,603 card rows; `GET /admin/catalog/sets` now returns all 284, of which
 
 ```bash
 cd backend
-../.venv/Scripts/python.exe scripts/backfill_catalog_sets.py            # DRY RUN
-../.venv/Scripts/python.exe scripts/backfill_catalog_sets.py --execute
+# Linux/WSL: .venv/bin/python   Windows: ../.venv/Scripts/python.exe
+.venv/bin/python scripts/backfill_catalog_sets.py            # DRY RUN
+.venv/bin/python scripts/backfill_catalog_sets.py --execute
 ```
 
 Until it has run, `GET /admin/catalog/sets` honestly returns `[]` and the Set
@@ -1216,25 +1218,45 @@ is the bug.**
 
 # Test Commands
 
-| Layer      | Command                                        |
-|------------|------------------------------------------------|
-| All        | `npm test` (from repo root)                    |
-| Frontend   | `npm test --workspace=frontend`                |
-| MCP Server | `npm test --workspace=mcp-server`              |
-| Backend    | `./.venv/Scripts/python.exe -m pytest backend/tests -q --tb=short` |
-| Lint (FE)  | `cd frontend && npm run lint`                  |
-| Lint (BE)  | `./.venv/Scripts/python.exe -m ruff check backend/src` |
-
-**Use `./.venv/Scripts/python.exe` explicitly, not bare `python`.** The `python`
-on PATH resolves to an unrelated hermes-agent venv with no pytest and no ruff
-installed, so the bare form fails with "No module named pytest". This checkout
-is also a git worktree, and a global editable install can make Python import the
-**sibling** repo's backend — if results look impossible, check which package
-actually loaded before debugging anything else:
+**Two venv layouts coexist across this project's clones — check which one is
+present before picking a command.** Windows clones keep the venv at the repo
+root (`.venv/Scripts/python.exe`); the WSL clone (this one, as of the
+2026-08-24 migration off Windows) keeps it at `backend/.venv/bin/python`.
+Never assume — check first:
 
 ```bash
+test -x backend/.venv/bin/python && echo "Linux venv: backend/.venv/bin/python"
+test -x .venv/Scripts/python.exe && echo "Windows venv: .venv/Scripts/python.exe"
+```
+
+| Layer      | Command (Linux/WSL)                                    | Command (Windows)                                      |
+|------------|----------------------------------------------------------|----------------------------------------------------------|
+| All        | `npm test` (from repo root)                               | `npm test` (from repo root)                               |
+| Frontend   | `npm test --workspace=frontend`                            | `npm test --workspace=frontend`                            |
+| MCP Server | `npm test --workspace=mcp-server`                          | `npm test --workspace=mcp-server`                          |
+| Backend    | `backend/.venv/bin/python -m pytest backend/tests -q --tb=short` | `./.venv/Scripts/python.exe -m pytest backend/tests -q --tb=short` |
+| Lint (FE)  | `cd frontend && npm run lint`                              | `cd frontend && npm run lint`                              |
+| Lint (BE)  | `backend/.venv/bin/python -m ruff check backend/src`       | `./.venv/Scripts/python.exe -m ruff check backend/src`     |
+
+**Use the venv interpreter explicitly, not bare `python`.** A bare `python`
+on PATH can resolve to an unrelated environment with no pytest and no ruff
+installed, failing with "No module named pytest" rather than a clear error.
+This checkout is also a git worktree, and a global editable install can make
+Python import the **sibling** repo's backend — if results look impossible,
+check which package actually loaded before debugging anything else:
+
+```bash
+# Linux/WSL
+backend/.venv/bin/python -c "import merlins_collection,os;print(os.path.dirname(merlins_collection.__file__))"
+# Windows
 ./.venv/Scripts/python.exe -c "import merlins_collection,os;print(os.path.dirname(merlins_collection.__file__))"
 ```
+
+`bash scripts/run-tests.sh {all|backend|frontend|mcp}` (Linux/WSL) already
+encodes this resolution — it prefers `backend/.venv/bin/python`, falls back to
+`python3`/`python` on PATH, and fails loudly rather than silently running zero
+tests. `scripts/run-tests.cmd` is the Windows equivalent. Both write to
+`test-results.txt` at the repo root, ending with `[test-runner] Status: DONE`.
 
 ## Running Tests in Kiro/Cursor (Agent-Specific)
 
