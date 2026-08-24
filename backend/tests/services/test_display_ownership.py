@@ -12,7 +12,14 @@ def _hydrate(repo, item_id: str):
     return bedrock._hydrate_item(repo, item_id)
 
 
-def _item(item_id: str, status: ItemStatus = ItemStatus.AVAILABLE):
+def _item(
+    item_id: str,
+    status: ItemStatus = ItemStatus.AVAILABLE,
+    *,
+    location: str | None = None,
+):
+    """A raw item. `location` defaults to None (WITHHELD) so visibility is always
+    stated explicitly in this file — it is the file that tests the gate."""
     return RawInventoryItem(
         item_id=item_id,
         card_id=None,
@@ -22,6 +29,7 @@ def _item(item_id: str, status: ItemStatus = ItemStatus.AVAILABLE):
         acquired_at=date.today(),
         finish="normal",
         condition=Condition.NM,
+        location=location,
     )
 
 
@@ -35,16 +43,17 @@ def test_unavailable_item_cannot_be_hydrated(dynamo_repo):
     assert _hydrate(dynamo_repo, item.item_id) is None
 
 
-def test_any_available_shared_inventory_item_can_be_hydrated(dynamo_repo):
+def test_shared_inventory_has_no_per_user_owner_gate(dynamo_repo):
     """Phase 1 inventory is shared; there is deliberately no per-user owner field.
-    
-    NOTE: This test WILL BE DELETED OR REWRITTEN with the Council item 2 fix.
-    It currently encodes the bug: _hydrate_item gates only on status==AVAILABLE,
-    but customer_visible_items gates on status + kind ∈ {raw, graded} + location
-    ∈ {glass, toploader} (or factory_sealed). This loosest-gate behavior is the
-    defect, not the correct contract.
+
+    This replaces `test_any_available_shared_inventory_item_can_be_hydrated`, which
+    encoded the Council item 2 bug: it asserted an AVAILABLE item with no location
+    hydrates, pinning the status-only gate as correct. The "no per-user owner"
+    property it was really protecting is preserved here — a customer-visible item
+    hydrates for any caller, with no owner check — while the visibility gate itself
+    is enforced. Withheld-stock cases live in the item 2 section below.
     """
-    item = _item("shared-item")
+    item = _item("shared-item", location="glass")
     dynamo_repo.put_inventory_item(item)
     assert _hydrate(dynamo_repo, item.item_id).item_id == "shared-item"
 

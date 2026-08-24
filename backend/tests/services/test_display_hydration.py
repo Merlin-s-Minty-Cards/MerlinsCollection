@@ -58,6 +58,10 @@ def _raw(
         condition=Condition.NM,
         condition_modifier=ConditionModifier.PLUS,
         display_name="Charizard #4",
+        # Council item 2: hydration uses the customer-visibility predicate, which
+        # requires a display-ready location. This fixture represents visible stock;
+        # withheld-stock cases set location explicitly (see test_display_ownership).
+        location="glass",
     )
 
 
@@ -74,6 +78,9 @@ def _graded(*, item_id: str = "graded-1") -> GradedInventoryItem:
         grade_label="MINT 9.5",
         cert_number="12345678",
         cert_image_url="https://example.com/cert.jpg",
+        # Graded slabs have no factory_sealed flag, so they must have a visible
+        # location to be customer-visible (Council item 2).
+        location="glass",
     )
 
 
@@ -139,7 +146,19 @@ def test_hydration_populates_catalog_projection_when_card_id_resolves(dynamo_rep
     }
 
 
-def test_hydration_has_no_catalog_projection_for_sealed_item(dynamo_repo):
+def test_hydration_refuses_sealed_item_because_kind_is_not_customer_visible(dynamo_repo):
+    """A sealed product is NOT customer-visible, so it must not hydrate at all.
+
+    Council item 2 / RFC-0016 [AMENDED POST-R1]: hydration uses the same predicate
+    as `routers/inventory.py::customer_visible_items`, whose `_CUSTOMER_KINDS` is
+    `{"raw", "graded"}` by binding owner decision (RFC-0001) — "bulk lots are
+    internal-only, and sealed products are hidden too". This test previously
+    asserted a sealed item hydrates with `card is None`, which encoded the loose
+    status-only gate.
+
+    Note `factory_sealed` (a RawInventoryItem condition premium, which DOES confer
+    visibility) is a different thing from `kind == "sealed"` (a booster box).
+    """
     sealed = SealedInventoryItem(
         item_id="sealed-1",
         product_name="Base Set Booster Box",
@@ -147,10 +166,11 @@ def test_hydration_has_no_catalog_projection_for_sealed_item(dynamo_repo):
         listed_price=Decimal("12000.00"),
         cost_basis=Decimal("5000.00"),
         acquired_at=date.today(),
+        location="glass",
     )
     dynamo_repo.put_inventory_item(sealed)
 
-    assert _hydrate(dynamo_repo, sealed.item_id).card is None
+    assert _hydrate(dynamo_repo, sealed.item_id) is None
 
 
 def test_hydration_has_no_catalog_projection_for_orphaned_card_id(dynamo_repo):
