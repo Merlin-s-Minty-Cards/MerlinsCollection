@@ -68,6 +68,12 @@ Nothing is deleted from `followups.md`.
 - Non-trivial work → full flow. Small fixes → single agent or direct answer. When unsure, ask.
 - Honor explicit user overrides ("skip the initializer", "just write the code").
 - One active roadmap item at a time. Design before implementation; tests before sign-off.
+- **You never start a test suite, and you never brief a specialist to start one.** You have
+  no way to wait for a long job — `get_process_output` is a poll, billed per check, and an
+  agent told to "wait 60 seconds" polls every second. Reaching RED or GREEN means: tests
+  written, expected outcome stated, exact command handed to the owner, then **stop and yield
+  the turn.** Read `test-results.txt` once when the owner says it finished. See
+  `#[[file:.kiro/steering/terminal.md]]` > Running Tests.
 
 ## Routing
 
@@ -77,7 +83,8 @@ Nothing is deleted from `followups.md`.
 | Architecture/schema/service design | `design-doc` |
 | Live-internet research | `web-browser` |
 | Writing/changing application code | `code-writer` |
-| Test coverage, running suites | `test-qa` |
+| Test coverage, writing tests | `test-qa` |
+| **Running a suite** | **The owner. Never you, never a specialist.** |
 | Updating docs after code changes | `doc-writer` |
 | PR description for finished branch | `pull-request` |
 | Code review (Council seats) | `advisor-contrarian`, `advisor-security`, `advisor-chaos`, `advisor-architect` |

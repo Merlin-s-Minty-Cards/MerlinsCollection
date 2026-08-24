@@ -3,7 +3,8 @@
 Shell: `Linux EthansLaptop 6.18.33.1-microsoft-standard-WSL2`
 Working directory: `/home/ethar/kiro/projects/MerlinsCollection` (the shell starts here)
 
-Tools: `execute_bash` and `control_bash_process`.
+Tools: `execute_bash` for short commands. **`control_bash_process` is effectively
+off-limits** — see "Running Tests" below; long jobs belong to the owner.
 
 ## Which clone you are in
 
@@ -24,9 +25,9 @@ All three share the same `origin`, so `git log` alone will not tell you which on
 4. **Exit code 1 is often fine.** Judge success by output content, not exit code. Every command in this workspace tends to return 1 regardless.
 5. **If a command fails, stop and ask the user** before retrying a different approach.
 6. **Forward slashes in git paths:** `git add .kiro/steering/file.md`
-7. **`execute_bash` has a hard ~10-15 second effective timeout** regardless of the `timeout` parameter you pass. Quick commands (`ls`, `git status`, `cat`) are fine. Anything longer (tests, builds, installs) returns early with partial or empty output. **Use `control_bash_process` for anything over ~10 seconds.**
+7. **`execute_bash` has a hard ~10-15 second effective timeout** regardless of the `timeout` parameter you pass. Quick commands (`ls`, `git status`, `cat`, linters) are fine. Anything longer (tests, builds, installs) returns early with partial or empty output. **Do not reach for `control_bash_process` instead — hand the command to the owner.** See "Running Tests" below: there is no way to wait for a background job, only to poll it, and polling is what burned a quarter of a month's budget.
 8. **Avoid `/mnt/c/` entirely.** Reading the Windows filesystem from WSL is slow enough to blow the timeout on its own — a bare `git status` against a `/mnt/c/` clone timed out twice. Combined with rule 5, treat a `/mnt/c/` timeout as a signal you are in the wrong clone, not as a command to retry.
-9. **Long loops over many files will time out.** `for f in $(git ls-files); do file "$f"; done` never returned. Narrow the scope (`git ls-files .kiro`) or run it through `control_bash_process`.
+9. **Long loops over many files will time out.** `for f in $(git ls-files); do file "$f"; done` never returned. Narrow the scope (`git ls-files .kiro`) rather than backgrounding it.
 
 ## Line endings
 
@@ -40,45 +41,60 @@ diff -q <(git show HEAD:<path> | tr -d '\r') <(tr -d '\r' < <path>)
 
 Silence means the change is pure EOL churn and can be discarded.
 
-## Running Tests
+## Running Tests — THE OWNER RUNS THEM. NOT YOU.
 
-The shell tool cannot capture full test output because tests exceed the effective timeout. Use `control_bash_process` instead.
+**No agent in this repo starts a test suite. Not the orchestrator, not `test-qa`, not
+`code-writer`. The owner runs suites and tells you when they are finished.**
 
-**Step 1: Start tests as background processes.**
+This is not a style preference. It is a hard capability limit with a direct cost:
 
-```
-control_bash_process start:
-  command: "python -m pytest backend/tests -q --tb=short 2>&1"
-```
+- There is **no sleep-and-resume primitive.** Nothing can suspend an agent for four
+  minutes and wake it when a process exits.
+- `execute_bash` has a hard ~10-15s effective timeout, so it cannot host a suite.
+- `control_bash_process` + `get_process_output` **is polling.** Every check is a full
+  billed round-trip. An agent that believes it is "waiting 60 seconds" is in fact
+  emitting a poll per second. This was observed live and aborted twice by the owner:
+  the intent to wait does not produce waiting, it produces a poll storm.
 
-```
-control_bash_process start:
-  command: "cd frontend && npx vitest run --reporter=verbose 2>&1"
-```
+There is no phrasing of "wait patiently" that fixes this, because the agent has no
+mechanism to wait. Do not try to engineer one — not `sleep && cat`, not a done-marker
+file you check "just once", not a longer `timeout` parameter. The instruction that
+works is the one that never starts the job.
 
-```
-control_bash_process start:
-  command: "cd mcp-server && npx vitest run --reporter=verbose 2>&1"
-```
+### The protocol
 
-**Step 2: Wait, then poll output.** Tests take time (backend: ~10 min, frontend: ~25s, mcp-server: ~60s). Use `get_process_output` to check results. Wait at least 30 seconds between checks for backend, 15 seconds for frontend/mcp-server.
+1. Write the tests and/or the code. Report what you changed and **what you expect the
+   result to be** (which tests should fail and on which missing symbol, for RED; or
+   which should now pass, for GREEN).
+2. **Stop. Hand back to the owner** with the exact command to run, e.g.
+   `bash scripts/run-tests.sh backend`. Arguments: `all`, `backend`, `frontend`, `mcp`.
+3. The owner runs it. `scripts/run-tests.sh` writes everything to `test-results.txt`
+   in the repo root, ending with `[test-runner] Status: DONE`.
+4. When the owner says it is done, **read `test-results.txt` once** with the file read
+   tool (workspace-relative path: `test-results.txt`). One read. Confirm the
+   `Status: DONE` marker is present so you know you are not reading a stale or partial
+   file, then reconcile the numbers.
 
-**Step 3: Look for final summary lines** in the output:
-- pytest: `X passed, Y failed, Z skipped in Ns`
-- vitest: `Test Files X passed (Y)` or `FAIL` lines with error details
+Summary lines to look for: pytest `X passed, Y failed, Z skipped in Ns`; vitest
+`Test Files X passed (Y)` or `FAIL` blocks.
 
-### Alternative: File-Based Test Runner Script
+`test-results.txt` is a single shared file, so suites cannot run concurrently.
 
-A wrapper script at `scripts/run-tests.sh` runs tests and writes all output to `test-results.txt` in the repo root. This avoids polling — just start it and read the file when done.
+### The two exceptions
 
-```
-control_bash_process start:
-  command: "bash scripts/run-tests.sh frontend 2>&1"
-```
+Linters are fast enough for `execute_bash` and may be run directly:
+`ruff check backend/src` (~3s), `npm run lint --workspace=frontend` (~5s).
 
-Arguments: `all`, `backend`, `frontend`, `mcp`
+### Reading results you did not produce
 
-When it finishes, read `test-results.txt` with the file read tool (workspace-relative path: `test-results.txt`). Look for `[test-runner] Status: DONE` at the end to confirm completion.
+Never re-run a suite whose artifact is already on disk. If a prior session or a
+subagent reports results, read the artifact and verify the claim cheaply instead:
+
+- Reconcile the arithmetic (RED 1986 passed + 70 failed → GREEN 2056 proves nothing
+  was dropped or skipped).
+- `git --no-pager diff --stat -- <test paths>` shows whether tests were weakened; a
+  large deletion count in test files is the red flag.
+- Read the diff of any pre-existing test file that was modified.
 
 ### Runtimes (approximate)
 
@@ -122,17 +138,19 @@ lone `q`.
 Do **not** fix this with `git config core.pager cat` — modifying the user's git config is
 off-limits. Use the flag.
 
-### Poll long jobs rarely, not eagerly
+### Do not poll long jobs at all — do not start them
 
 Each poll is a full round-trip and costs the same as real work. A 3-minute pytest run was
 polled ~20 times with `tail -2`; that is ~19 wasted calls.
 
-- Put the waiting **inside** the background command: have it write results to a file and
-  append a done-marker, then read the file **once** when you expect it to be finished.
-- `pytest -q` output is block-buffered, so percentages lag. A stalled-looking percentage is
-  not evidence of a hang. Confirm liveness with `pgrep -fa pytest` **once**, not repeatedly.
-- Budget by the known runtimes in the table above. Backend ~3-4 min: check at ~3 min, then
-  every ~60s. Not every 5 seconds.
+An earlier version of this section said "poll rarely, budget by the known runtimes." That
+was wrong, and it failed in practice: an agent cannot pace itself, because it has no way to
+wait. Told to check "at ~3 min, then every ~60s," it polls every second. The rule is
+therefore not *poll less* but **do not start the job.** See "Running Tests" above — the
+owner runs suites.
+
+This applies to any job longer than the ~10-15s `execute_bash` window, not just tests:
+installs, builds, `cdk deploy`. Hand the command to the owner and stop.
 
 ### Never re-run a suite that just ran
 
