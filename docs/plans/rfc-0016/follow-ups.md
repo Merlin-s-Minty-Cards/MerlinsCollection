@@ -81,10 +81,29 @@ of them.
 - [ ] (MINOR) `panel_item_ids` has no shape validation beyond length. Moot
       once the visibility gate lands, since visibility gates regardless of
       input shape. — origin: advisor-security
-- [ ] (MINOR) `artifacts` array was unbounded. Now specified as capped at 50
-      in the amended RFC — verify the cap actually lands in the r2
-      implementation. — origin: advisor-security, folded into blocking
-      item 11
+- [x] `artifacts` array was unbounded. Now specified as capped at 50 in the
+      amended RFC — the cap landed in the r2 implementation 2026-08-24
+      (`_MAX_ARTIFACTS = 50` in `bedrock.py`, `test_artifacts_array_is_bounded`
+      passes). — origin: advisor-security, folded into blocking item 11
+- [ ] (MAJOR — found during r2 self-review, 2026-08-24; not fixed) Frontend
+      price display has its precedence backwards relative to checklist item
+      3's backend fix. `DisplayPanel.tsx` and `ChatPanel.tsx` both compute
+      `card.current_market_value ?? card.listed_price`. Before r2,
+      `listed_price` was the item's raw, unadjusted stored price and either
+      order was defensible; after r2, `listed_price` is the RESOLVED,
+      condition-adjusted display price (mirrors
+      `routers/inventory.py::_display_price`) while `current_market_value`
+      is a separate, potentially stale, unadjusted pass-through — so the
+      frontend now prefers the wrong figure whenever both are present. Not
+      fixed in r2 because no current test pins the correct precedence and
+      fixing it means changing a `DisplayPanel.test.tsx` assertion that
+      predates this remediation (a real design call: should the frontend
+      even keep reading `current_market_value` at all). Needs an owner or
+      Council ruling, then a one-line fix (`card.listed_price ??
+      card.current_market_value`, or drop `current_market_value` from the
+      precedence entirely) plus the corresponding test update in both
+      `DisplayPanel.tsx`/`.test.tsx` and `ChatPanel.tsx`. — origin: this
+      session's own council-r2-self-review.md
 - [ ] (MINOR) `fs_write` (Kiro's file-write tool) emits CRLF on every file it
       creates. `.gitattributes` normalizes at commit time so nothing wrong
       lands in history, but files are CRLF on disk until then. Kiro-specific

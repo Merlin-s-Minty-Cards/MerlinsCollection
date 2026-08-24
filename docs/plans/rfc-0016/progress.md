@@ -294,11 +294,186 @@ surface.
       test. Backend/frontend untouched by this item (RFC §6: "the MCP server
       keeps its existing 5 query tools unchanged... display tools are purely
       backend-side" — item 1 is producer-side only).
-- [ ] **GREEN: checklist items 2-6, 9 (reduced), 11 — not started.** See
-      README.md's task table for the compressed list, `council-r1-verdict.md`
-      for full detail.
-- [ ] Council r2 — re-review per the verdict's re-review scope (all four
-      lenses: contrarian, architect, chaos, security)
+- [x] **GREEN items 2-6, 9 (reduced), 11, and the frontend half of decision
+      23 — 2026-08-24.** Delivered as one rewrite, per the verdict's own
+      grouping ("items 1-6 all touch `_hydrate_item`/`_DisplayState.__init__`/
+      `_run_display_tool` and should be delivered as one rewrite").
+
+      **Item 2** (customer-visibility predicate): extracted into a new
+      module, `services/customer_visibility.py::is_customer_visible` —
+      logic is byte-for-byte what `customer_visible_items` already had, just
+      given one shared home. It could NOT live in `routers/inventory.py`
+      itself as the verdict's own wording suggested: `bedrock.py` cannot
+      import from there without a circular import (`routers/inventory.py`
+      imports `dependencies.py` for `get_repo`, and `dependencies.py`
+      imports `BedrockChatService` from `bedrock.py`). The new module sits
+      below both, like `services/condition_pricing.py` already does — both
+      `routers/inventory.py::customer_visible_items` and
+      `bedrock.py::_hydrate_item` now call the one function.
+      `test_display_ownership.py` (7 tests, storage/bulk/factory-sealed/
+      graded-glass cases) all pass.
+
+      **Item 3** (price derivation): `_hydrate_item` now resolves
+      `DisplayedCard.listed_price` the same way
+      `routers/inventory.py::_display_price` does — for raw items, the live
+      catalog price via `market_price_and_finish` (the same shared lookup
+      `CardSummary.from_catalog` uses internally), condition-adjusted via
+      `apply_condition_adjustment` exactly as `_condition_adjust` applies it
+      at enrichment, falling back to the item's own `listed_price` when no
+      catalog price exists. For graded, always `listed_price` (a slab's
+      grade premium, never the ungraded catalog figure) — matches
+      `_display_price`'s own graded branch. **Mirrored, not imported**: same
+      circular-import constraint as item 2 blocks importing
+      `_display_price`/`_enrich` directly (`_enrich` lives in
+      `routers/inventory.py` too). Documented explicitly in `_hydrate_item`'s
+      docstring so a future reader isn't left to guess why. `current_market_value`
+      is unchanged — a separate, raw pass-through of the item's own stored
+      figure, not the resolved display price. `test_display_price_derivation.py`
+      (4 tests: DMG-adjustment, live-vs-stale, graded-skips-catalog,
+      uncatalogued-fallback) all pass, after fixing two genuine fixture bugs
+      unrelated to the behavior under test (see "Fixture bugs found and
+      fixed" below).
+
+      **Item 4** (error isolation): `_hydrate_item` never raises — wraps its
+      body in `try/except (ClientError, ValidationError, AttributeError,
+      TypeError, KeyError)`, logs a warning, returns `None` (treated as "not
+      available" by every caller). Broader than the verdict's literal
+      `ClientError`/`ValidationError` pairing because the RED test's
+      `CorruptRepo` returns a bare dict rather than a validated model,
+      which fails attribute access with `AttributeError`, not
+      `ValidationError` — matches this codebase's existing
+      `except Exception as exc:  # noqa: BLE001` precedent elsewhere
+      (`catalog_sync.py`, `spreadsheet_import.py`) for exactly this class of
+      per-item isolation boundary. `test_display_error_isolation.py` (4
+      tests: throttled restore, corrupt data, tool-call throttle, 50-card
+      partial-throttle) all pass.
+
+      **Item 5** (`cert_image_url`): removed from `DisplayedCard`
+      (`models/chat.py`) entirely — not nulled, not filtered at
+      serialization, the field does not exist on the model — and from the
+      frontend's `DisplayedCard` type (`lib/inventory.ts`). `_hydrate_item`
+      never sets it (it was never added to the new hydration code).
+
+      **Item 6** (JSON safety): every tool-result string in `bedrock.py` is
+      now built with `json.dumps`, not f-string interpolation — verified
+      against `test_display_tool_json.py`'s quoted/backslash item_id and
+      display_name cases (6 tests) and `test_display_security.py`'s
+      matching pair.
+
+      **Item 9, reduced** (panel contents told to the model): two
+      mechanisms. (a) At `chat()`'s start, if the restored panel is
+      non-empty, a text block naming each card (`"Charizard (item-1),
+      Pikachu (item-2)"`) is inserted before the user's message — both the
+      names (useful) and the raw item_ids (composable) per
+      `test_panel_context_includes_card_names_not_just_ids` and
+      `test_restored_panel_item_ids_are_injected_into_initial_messages`.
+      (b) `set_display`'s tool result always echoes the resulting panel's
+      `item_id` + name per card (or `{"status":"closed","cards":[]}` for an
+      empty list), so "remove the Charizard" composes as
+      `set_display(echoed_ids - {that one})` without a read tool. Verified
+      via `test_set_display_composes_remove_operation` (the actual use case)
+      plus `test_display_panel_context_injection.py` and
+      `test_display_panel_visibility.py`.
+
+      **Item 11** (work ceiling): two independent bounds, both checked
+      BEFORE I/O, not after. `_DisplayState.__init__` dedupes+caps
+      `panel_item_ids` before any repository read (50 duplicate IDs now cost
+      1 read, not 50). `_run_set_display` dedupes+caps `item_ids` before
+      hydrating (100 IDs now cost ≤50 reads, not 100). A new per-request
+      ceiling, `_MAX_HYDRATION_BLOCKS_PER_REQUEST = 10`, bounds the number of
+      display-tool *invocations* (not items hydrated within one) — 60
+      separate `display_card` calls in one turn now execute only the first
+      10. `artifacts` is capped at `_MAX_ARTIFACTS = 50`, matching
+      `panel.cards`'s existing cap. `test_display_work_ceiling.py` (5 tests)
+      all pass.
+
+      **The `set_display` collapse itself (decision 23):** `_TOOLS` now
+      lists exactly 7 entries (5 query + `display_card` + `set_display`);
+      the five panel-mutation tools and their `_DisplayState` methods
+      (`open_panel`/`close_panel`/`add_to_panel`/`remove_from_panel`/
+      `reorder_panel`) are deleted, replaced by one `set_panel(cards)` that
+      replaces the panel wholesale (dedupe by item_id, cap at 50, self-detects
+      truncation when called directly with >50 — or accepts an explicit
+      `input_truncated` flag from a caller that already capped IDs before
+      hydrating, so the truncation notice survives item 11's "cap before I/O"
+      requirement even though the hydrated list arrives already ≤50).
+      `DisplayPanel.open` deleted from the model (verified via
+      `not hasattr`, not just a default check). `_MAX_TOOL_TURNS` reverted
+      to 5. `test_set_display_state_machine.py` (11 tests) and
+      `test_bedrock_display_tools.py`'s updated set_display cases pass.
+
+      **Frontend (item 10 in this directory's numbering):**
+      `DisplayPanel.tsx` takes no `open` prop, renders `null` when
+      `cards.length === 0`; `ChatPanel.tsx` gates the `<DisplayPanel>` render
+      on `displayPanel.cards.length > 0` and drops `open` from its
+      `EMPTY_PANEL`/close-handler state; `lib/inventory.ts` drops `open` from
+      `DisplayPanelState` and `cert_image_url` from `DisplayedCard`.
+
+      **Fixture bugs found and fixed (not behavioral changes):** three
+      RED test files constructed `GradedInventoryItem` with a field name
+      that doesn't exist (`grader="PSA"` instead of `company=GradingCompany.PSA`,
+      and `grade="10"` as a string instead of `Decimal("10")`) —
+      `test_display_ownership.py`, `test_display_price_derivation.py`,
+      `test_display_security.py`. One (`test_display_price_derivation.py`'s
+      `_catalog_card` helper) was also missing the required `last_synced_at`
+      field and used a non-existent `tcg_player_normal` kwarg instead of the
+      real `prices={"normal": FinishPrice(market=...)}` shape — meaning even
+      once the missing-field error was fixed, the fixture still wouldn't
+      have exercised the price-adjustment path it exists to test, since
+      `catalog.prices` would have stayed empty. One test in
+      `test_display_panel_visibility.py`
+      (`test_set_display_empty_list_closes_panel_and_echoes_closed_state`)
+      had a mock `converse()` `side_effect` queue one response short (each
+      of the test's two `chat()` calls needs its own tool_use + end_turn
+      pair; only 3 responses were queued for 4 needed calls), causing
+      `StopIteration` on the second call — added the missing `end_turn`.
+      None of these touched an assertion; all were setup-code bugs unrelated
+      to the behavior each test exists to verify. Also updated
+      `tests/test_cross_boundary.py`'s import of `_CUSTOMER_VISIBLE_LOCATIONS`
+      (a pre-existing, non-RFC-0016 test) to the new
+      `services/customer_visibility.py` home — the assertion itself is
+      untouched.
+
+      **Verified, full suites, all three:**
+
+      | Suite | Result |
+      |---|---|
+      | Backend (pytest) | **2087 passed, 0 failed** |
+      | Frontend (vitest) | **1020 passed, 0 failed** (100/100 files) |
+      | MCP server (vitest) | **101 passed, 0 failed** |
+      | `ruff check backend/src` | clean |
+      | `tsc --noEmit` (mcp-server) | clean |
+      | `next lint` | 0 errors, 2 pre-existing warnings (unrelated files) |
+
+      Matches the plan's stated "Definition of done" exactly.
+
+      Pre-change and post-change adversarial review both done inline
+      (logic/security/chaos/bloat), per item and again across the full
+      diff at the end. No blocking findings either pass. See
+      `council-r2-self-review.md` for the systematic per-checklist-item
+      walkthrough and two findings surfaced (not silently fixed):
+
+      1. `DisplayedCard.kind` still admits `'sealed'`/`'bulk'` on the wire —
+         unchanged from the original flag in `council-r1-verdict.md`.
+      2. **New finding**: the frontend's price display
+         (`card.current_market_value ?? card.listed_price` in both
+         `DisplayPanel.tsx` and `ChatPanel.tsx`) now has its precedence
+         backwards relative to what item 3 just fixed on the backend.
+         `listed_price` is now the resolved, condition-adjusted display
+         price (mirroring `_display_price`); `current_market_value` is a
+         separate, potentially-stale raw pass-through. The frontend still
+         prefers the stale one. Not fixed here: no current test pins either
+         behavior, and changing it means updating an assertion in
+         `DisplayPanel.test.tsx` that predates this remediation — a real
+         call, but one for the owner/Council to make rather than a
+         unilateral change during a "make RED green" pass.
+- [ ] Council r2 — a full independent 4-lens re-review (contrarian,
+      architect, chaos, security) is still open. This session did a
+      systematic self-review (`council-r2-self-review.md`) covering the
+      same ground the TDD skill's own adversarial-review pass requires, but
+      it was not an independent second opinion. Recommended next step:
+      dispatch a fresh review (subagent, or a later session with no memory
+      of writing this code) against the diff plus the two findings above.
 
 ### Phase 2 — RFC-0017 history (not started)
 - [ ] RFC-0017 written
