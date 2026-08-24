@@ -176,6 +176,7 @@ describe("listCards", () => {
     expect(cards).toEqual([
       {
         id: "base1-4",
+        itemId: "01JRAW000000000000000001",
         name: "Charizard",
         set: "base1",
         condition: "NM",

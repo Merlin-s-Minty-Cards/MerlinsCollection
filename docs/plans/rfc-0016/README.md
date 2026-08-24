@@ -25,7 +25,8 @@ fix these as a side errand while doing GREEN.
 
 ## Status (as of 2026-08-24)
 
-**RED is done and committed. GREEN has not started.**
+**RED is done and committed. GREEN item 1 (FATAL) is done. Items 2-6, 9
+(reduced), 11 remain.**
 
 Branch `Inventory-Chat-Design`, commit `f35393c` (RED) plus `06d86f1` (an
 unrelated docs cleanup commit made during this migration — see progress.md's
@@ -57,7 +58,7 @@ tests targeting them — do not implement them.
 
 | # | What | Where |
 |---|---|---|
-| 1 | **FATAL, do first.** Add a distinct per-unit `item_id` to `Card`/`CardResult` in `mcp-server/src/`, populate in `toCard()`, carry through `tools/**`. Do NOT widen backend display tools to accept `card_id`. | `mcp-server/src/dynamodb-repository.ts`, `mcp-server/src/repository.ts`; real RED is `mcp-server/src/__tests__/item-id-field.test.ts` |
+| 1 | ~~**FATAL, do first.**~~ **DONE 2026-08-24.** Added a distinct per-unit `item_id` to `Card`/`CardResult` in `mcp-server/src/`, populated in `toCard()`, carried through `tools/**`. See `progress.md` for the full record. | `mcp-server/src/dynamodb-repository.ts`, `mcp-server/src/repository.ts`; real RED was `mcp-server/src/__tests__/item-id-field.test.ts`, now passing (101/101 mcp-server suite) |
 | 2 | Extract the shared customer-visibility predicate; `_hydrate_item` must use the same one as `routers/inventory.py::customer_visible_items`. | `backend/src/merlins_collection/services/bedrock.py` |
 | 3 | Hydrate prices through `CardSummary.from_catalog` + `apply_condition_adjustment` + `_display_price` — never a local derivation. | same |
 | 4 | Catch `ClientError`/`ValidationError` per-item during hydration and restore; partial results, never a 500. | same |

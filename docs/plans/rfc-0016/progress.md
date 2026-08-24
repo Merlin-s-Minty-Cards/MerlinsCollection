@@ -274,7 +274,27 @@ surface.
       | Frontend (vitest) | 10 | 1010 | 1020 |
       | MCP server (vitest) | 2 | 99 | 101 |
 
-- [ ] **GREEN: checklist items 1-6, 9 (reduced), 11 — not started.** See
+- [x] **GREEN item 1 (FATAL)** — 2026-08-24. Added `itemId: string` to the MCP
+      `Card` type (`repository.ts`), `item_id: string` to `CardResult`
+      (`tools/search-inventory.ts`, mapped from `card.itemId`), and populated
+      `itemId: String(row.item_id)` in both branches of `toCard()`
+      (`dynamodb-repository.ts` — sealed and raw/graded; sealed is confirmed
+      dead code today per `isPublicInventory`'s kind gate, added anyway for
+      type correctness). Two pre-existing tests needed a companion update
+      (exact `.toEqual` assertions that didn't yet know about the new field):
+      `search-inventory.test.ts`'s "returns all cards" case, and
+      `dynamodb-repository.test.ts`'s "joins inventory items with catalog
+      metadata" case — the latter is the one that actually proves `toCard()`
+      populates `itemId` through the real `DynamoDbInventoryRepository` path,
+      not just the in-memory test double `item-id-field.test.ts` uses.
+      Pre-change and post-change adversarial review both PASS (no blocking
+      findings either pass). Verified: `tsc --noEmit` clean,
+      `npx vitest run` — **101/101 passing** (was 99/101), including both
+      `item-id-field.test.ts` cases and `server.test.ts`'s contract-shape
+      test. Backend/frontend untouched by this item (RFC §6: "the MCP server
+      keeps its existing 5 query tools unchanged... display tools are purely
+      backend-side" — item 1 is producer-side only).
+- [ ] **GREEN: checklist items 2-6, 9 (reduced), 11 — not started.** See
       README.md's task table for the compressed list, `council-r1-verdict.md`
       for full detail.
 - [ ] Council r2 — re-review per the verdict's re-review scope (all four
