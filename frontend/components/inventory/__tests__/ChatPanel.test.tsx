@@ -284,7 +284,6 @@ describe('ChatPanel display artifacts (RFC 0016 RED)', () => {
         reply: 'Opened three cards.',
         artifacts: [],
         panel: {
-          open: true,
           cards: [displayCard('item-1'), displayCard('item-2'), displayCard('item-3')],
           truncated: false,
         },
@@ -292,7 +291,7 @@ describe('ChatPanel display artifacts (RFC 0016 RED)', () => {
       .mockResolvedValueOnce({
         reply: 'Still open.',
         artifacts: [],
-        panel: { open: true, cards: [displayCard('item-1')], truncated: false },
+        panel: { cards: [displayCard('item-1')], truncated: false },
       })
     render(<ChatPanel />)
     const box = screen.getByRole('textbox')
@@ -314,7 +313,7 @@ describe('ChatPanel display artifacts (RFC 0016 RED)', () => {
     mockedApiFetch.mockResolvedValue({
       reply: 'Here is one card.',
       artifacts: [displayCard('item-1')],
-      panel: { open: null, cards: [], truncated: false },
+      panel: { cards: [], truncated: false },
     })
     render(<ChatPanel />)
     await user.type(screen.getByRole('textbox'), 'show one')
@@ -322,11 +321,11 @@ describe('ChatPanel display artifacts (RFC 0016 RED)', () => {
     expect(await screen.findByRole('heading', { name: 'Charizard' })).toBeInTheDocument()
   })
 
-  it('renders the display panel only for open true', async () => {
+  it('renders the display panel when cards is non-empty', async () => {
     mockedApiFetch.mockResolvedValue({
       reply: 'Panel open.',
       artifacts: [],
-      panel: { open: true, cards: [displayCard('item-1')], truncated: false },
+      panel: { cards: [displayCard('item-1')], truncated: false },
     })
     render(<ChatPanel />)
     await user.type(screen.getByRole('textbox'), 'open panel')
@@ -334,11 +333,11 @@ describe('ChatPanel display artifacts (RFC 0016 RED)', () => {
     expect(await screen.findByRole('heading', { name: 'Display (1)' })).toBeInTheDocument()
   })
 
-  it.each([false, null])('does not render the display panel for open %s', async (open) => {
+  it('does not render the display panel when cards is empty', async () => {
     mockedApiFetch.mockResolvedValue({
       reply: 'Panel hidden.',
       artifacts: [],
-      panel: { open, cards: [displayCard('item-1')], truncated: false },
+      panel: { cards: [], truncated: false },
     })
     render(<ChatPanel />)
     await user.type(screen.getByRole('textbox'), 'hide panel')
@@ -351,7 +350,7 @@ describe('ChatPanel display artifacts (RFC 0016 RED)', () => {
     mockedApiFetch.mockResolvedValue({
       reply: 'One inline, one in the panel.',
       artifacts: [displayCard('inline-1', 'Pikachu')],
-      panel: { open: true, cards: [displayCard('panel-1')], truncated: false },
+      panel: { cards: [displayCard('panel-1')], truncated: false },
     })
     render(<ChatPanel />)
     await user.type(screen.getByRole('textbox'), 'show both')
@@ -366,12 +365,12 @@ describe('ChatPanel display artifacts (RFC 0016 RED)', () => {
       .mockResolvedValueOnce({
         reply: 'Panel open.',
         artifacts: [],
-        panel: { open: true, cards: [displayCard('item-1')], truncated: false },
+        panel: { cards: [displayCard('item-1')], truncated: false },
       })
       .mockResolvedValueOnce({
         reply: 'No panel.',
         artifacts: [],
-        panel: { open: false, cards: [], truncated: false },
+        panel: { cards: [], truncated: false },
       })
     render(<ChatPanel />)
     const box = screen.getByRole('textbox')
@@ -393,7 +392,6 @@ describe('ChatPanel display artifacts (RFC 0016 RED)', () => {
         reply: 'Added three.',
         artifacts: [],
         panel: {
-          open: true,
           cards: [displayCard('item-1'), displayCard('item-2'), displayCard('item-3')],
           truncated: false,
         },
@@ -402,7 +400,6 @@ describe('ChatPanel display artifacts (RFC 0016 RED)', () => {
         reply: 'Removed one.',
         artifacts: [],
         panel: {
-          open: true,
           cards: [displayCard('item-1'), displayCard('item-3')],
           truncated: false,
         },
@@ -410,7 +407,7 @@ describe('ChatPanel display artifacts (RFC 0016 RED)', () => {
       .mockResolvedValueOnce({
         reply: 'Closed.',
         artifacts: [],
-        panel: { open: false, cards: [], truncated: false },
+        panel: { cards: [], truncated: false },
       })
     render(<ChatPanel />)
     const box = screen.getByRole('textbox')
@@ -440,7 +437,6 @@ describe('ChatPanel display artifacts (RFC 0016 RED)', () => {
       reply: 'Panel open.',
       artifacts: [],
       panel: {
-        open: true,
         cards: [displayCard('item-1')],
         truncated: false,
         fullscreen: true,

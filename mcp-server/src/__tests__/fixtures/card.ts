@@ -32,6 +32,7 @@ export const card = (overrides: Partial<Card> = {}): Card => {
 
   return {
     id: overrides.id ?? "id",
+    itemId: overrides.itemId ?? `item-${overrides.id ?? "id"}`,
     name: overrides.name ?? "Card",
     set: overrides.set ?? "Base Set",
     condition: overrides.condition ?? "Near Mint",

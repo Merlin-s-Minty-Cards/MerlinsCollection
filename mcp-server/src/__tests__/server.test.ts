@@ -70,16 +70,17 @@ describe("tool registration", () => {
     const byName = new Map(tools.map((t) => [t.name, t]));
     expect([...byName.keys()].sort()).toEqual(queryContract.map((t) => t.name).sort());
     expect(queryContract).toHaveLength(5);
+    
+    // Decision 23: display tools collapsed to display_card + set_display (2 tools)
+    // The contract now has 7 total: 5 query + 2 display
+    expect(contract.tools).toHaveLength(7);
     expect(displayContract.map((tool) => tool.name).sort()).toEqual([
-      "add_to_display",
-      "close_display_panel",
       "display_card",
-      "open_display_panel",
-      "remove_from_display",
-      "reorder_display",
+      "set_display",
     ]);
+    
     for (const displayTool of displayContract) {
-      expect(byName.has(displayTool.name), displayTool.name).toBe(false);
+      expect(byName.has(displayTool.name), `${displayTool.name} must not be registered`).toBe(false);
     }
 
     for (const expected of queryContract) {

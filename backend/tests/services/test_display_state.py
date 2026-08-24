@@ -54,7 +54,7 @@ def _card(item_id: str):
 def test_empty_initial_state_is_never_opened():
     state = _state()
     assert state.panel_cards == []
-    assert state.panel_open is None
+    assert len(state.panel_cards) == 0  # Closed = empty cards list
     assert state.panel_truncated is False
 
 
@@ -62,14 +62,14 @@ def test_initial_item_ids_are_rehydrated_and_open_the_panel():
     item = _raw("item-1")
     state = _state(FakeRepo([item]), [item.item_id])
     assert [card.item_id for card in state.panel_cards] == ["item-1"]
-    assert state.panel_open is True
+    assert len(state.panel_cards) > 0  # Open = non-empty cards list
 
 
 def test_unavailable_initial_ids_are_dropped_and_do_not_mark_panel_open():
     item = _raw("sold-1", ItemStatus.SOLD)
     state = _state(FakeRepo([item]), [item.item_id])
     assert state.panel_cards == []
-    assert state.panel_open is None
+    assert len(state.panel_cards) == 0  # Closed = empty cards list
 
 
 def test_internal_state_defensively_caps_initial_ids_at_50_without_truncation():
@@ -86,117 +86,73 @@ def test_display_inline_appends_artifact_and_returns_confirmation():
     assert "display" in result.lower()
 
 
-def test_open_panel_distinguishes_first_open_from_already_open():
+def test_set_panel_replaces_contents_wholesale():
+    """set_panel(ids) replaces all panel contents (decision 23 state machine)."""
     state = _state()
-    assert "open" in state.open_panel().lower()
-    assert state.panel_open is True
-    assert "already" in state.open_panel().lower()
+    result = state.set_panel([_card("item-1"), _card("item-2")])
+    assert [card.item_id for card in state.panel_cards] == ["item-1", "item-2"]
+    assert len(state.panel_cards) > 0  # Open = non-empty cards list
+    assert "set" in result.lower() or "panel" in result.lower()
 
 
-def test_close_panel_distinguishes_first_close_from_already_closed():
+def test_set_panel_empty_list_closes_panel():
+    """set_panel([]) closes the panel and clears contents."""
     state = _state()
-    assert "close" in state.close_panel().lower()
-    assert state.panel_open is False
-    assert "already" in state.close_panel().lower()
+    state.set_panel([_card("item-1")])
+    result = state.set_panel([])
+    assert state.panel_cards == []
+    assert len(state.panel_cards) == 0  # Closed = empty cards list
 
 
-def test_add_to_panel_auto_opens_never_opened_panel():
+def test_set_panel_caps_at_50_and_returns_truncation_notice():
     state = _state()
-    state.add_to_panel(_card("item-1"))
-    assert state.panel_open is True
-
-
-def test_add_to_panel_keeps_open_panel_open():
-    state = _state()
-    state.open_panel()
-    state.add_to_panel(_card("item-1"))
-    assert state.panel_open is True
-
-
-def test_add_to_panel_appends_card_under_cap():
-    state = _state()
-    result = state.add_to_panel(_card("item-1"))
-    assert [card.item_id for card in state.panel_cards] == ["item-1"]
-    assert "added" in result.lower()
-
-
-def test_add_to_panel_caps_at_50_and_returns_truncation_notice():
-    state = _state()
-    for i in range(50):
-        state.add_to_panel(_card(f"item-{i}"))
-
-    result = state.add_to_panel(_card("overflow"))
+    cards = [_card(f"item-{i}") for i in range(51)]
+    result = state.set_panel(cards)
 
     assert len(state.panel_cards) == 50
     assert state.panel_truncated is True
     assert "50" in result
-    assert "full" in result.lower()
+    assert "full" in result.lower() or "truncat" in result.lower()
 
 
-def test_add_to_panel_deduplicates_by_item_id():
+def test_set_panel_deduplicates_by_item_id():
+    """set_panel deduplicates before setting (work ceiling requirement)."""
     state = _state()
-    state.add_to_panel(_card("item-1"))
-    result = state.add_to_panel(_card("item-1"))
-    assert [card.item_id for card in state.panel_cards] == ["item-1"]
-    assert "already" in result.lower()
+    cards = [_card("item-1"), _card("item-2"), _card("item-1")]  # duplicate item-1
+    state.set_panel(cards)
+    assert [card.item_id for card in state.panel_cards] == ["item-1", "item-2"]
 
 
-def test_remove_from_panel_removes_existing_card():
+def test_set_panel_preserves_order():
+    """Panel order is the order in the input list (model-driven reorder)."""
     state = _state()
-    state.add_to_panel(_card("item-1"))
-    result = state.remove_from_panel("item-1")
-    assert state.panel_cards == []
-    assert "removed" in result.lower()
-
-
-def test_remove_from_panel_reports_unknown_id():
-    state = _state()
-    assert "not found" in state.remove_from_panel("missing").lower()
-
-
-def test_removing_last_card_leaves_panel_open_and_empty():
-    state = _state()
-    state.add_to_panel(_card("item-1"))
-    state.remove_from_panel("item-1")
-    assert state.panel_cards == []
-    assert state.panel_open is True
-
-
-def test_reorder_panel_accepts_exact_permutation():
-    state = _state()
-    for item_id in ("item-1", "item-2", "item-3"):
-        state.add_to_panel(_card(item_id))
-    result = state.reorder_panel(["item-3", "item-1", "item-2"])
+    cards = [_card("item-3"), _card("item-1"), _card("item-2")]
+    state.set_panel(cards)
     assert [card.item_id for card in state.panel_cards] == ["item-3", "item-1", "item-2"]
-    assert "reordered" in result.lower()
 
 
-@pytest.mark.parametrize(
-    "item_ids",
-    [
-        ["item-1"],
-        ["item-1", "item-2", "extra"],
-        ["item-1", "item-1", "item-2"],
-    ],
-    ids=["missing", "extra", "duplicate"],
-)
-def test_reorder_panel_rejects_non_exact_contents(item_ids):
-    state = _state()
-    state.add_to_panel(_card("item-1"))
-    state.add_to_panel(_card("item-2"))
-    original = [card.item_id for card in state.panel_cards]
-    result = state.reorder_panel(item_ids)
-    assert [card.item_id for card in state.panel_cards] == original
-    assert "failed" in result.lower()
-
-
-def test_response_fields_preserve_artifacts_and_three_state_panel():
+def test_response_fields_preserve_artifacts_and_panel():
     state = _state()
     state.display_inline(_card("inline"))
-    state.open_panel()
-    state.add_to_panel(_card("panel"))
+    state.set_panel([_card("panel-1"), _card("panel-2")])
     fields = state.to_response_fields()
     assert [card.item_id for card in fields["artifacts"]] == ["inline"]
-    assert fields["panel"].open is True
-    assert [card.item_id for card in fields["panel"].cards] == ["panel"]
+    assert len(fields["panel"].cards) > 0  # Open = non-empty cards list
+    assert [card.item_id for card in fields["panel"].cards] == ["panel-1", "panel-2"]
     assert fields["panel"].truncated is False
+
+
+def test_display_panel_has_no_open_field():
+    """RFC 0016 decision 23: DisplayPanel must not have an 'open' field.
+    
+    The tri-state open field was removed. Panel open/closed is inferred purely
+    from whether cards is non-empty (len(cards) > 0 means open).
+    """
+    from merlins_collection.models import chat as chat_models
+    
+    assert hasattr(chat_models, "DisplayPanel"), "RFC 0016 DisplayPanel is not implemented"
+    panel_class = chat_models.DisplayPanel
+    assert "open" not in panel_class.model_fields, (
+        "DisplayPanel must not have an 'open' field (RFC 0016 decision 23). "
+        "Open/closed is inferred from len(cards) > 0."
+    )

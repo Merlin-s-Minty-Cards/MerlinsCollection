@@ -28,24 +28,32 @@ def test_bedrock_tools_match_shared_contract():
         assert sorted(schema.get("required", [])) == sorted(tool["required"]), name
 
 
-def test_shared_contract_declares_five_query_and_six_backend_display_tools():
+def test_shared_contract_has_seven_tools_after_decision_23():
+    """Contract sync: decision 23 collapsed display tools to 7 total.
+    
+    Five query tools (MCP-registered) + two display tools (backend-only):
+    display_card and set_display. The five incremental panel-mutation tools
+    (open/close/add/remove/reorder) are removed.
+    """
     tools = _contract_tools()
     names = [tool["name"] for tool in tools]
 
-    assert len(names) == 11
+    assert len(names) == 7, (
+        f"Contract must have 7 tools (5 query + 2 display), got {len(names)}. "
+        f"Decision 23 collapsed display tools. See council/r1/verdict.md."
+    )
     assert names[:5] == [
         "search_inventory",
         "get_inventory_summary",
         "get_card_price_history",
         "calculate_inventory_value",
         "flag_underpriced_cards",
-    ]
+    ], "First 5 tools must be the query tools (unchanged)"
+    
     assert names[5:] == [
         "display_card",
-        "open_display_panel",
-        "close_display_panel",
-        "add_to_display",
-        "remove_from_display",
-        "reorder_display",
-    ]
-    assert all("fullscreen" not in tool["properties"] for tool in tools)
+        "set_display",
+    ], (
+        f"Last 2 tools must be display_card and set_display, got {names[5:]}. "
+        f"open/close/add/remove/reorder are removed per decision 23."
+    )

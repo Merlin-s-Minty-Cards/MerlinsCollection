@@ -112,39 +112,36 @@ def test_display_card_sold_item_returns_error_without_crashing():
     assert "unavailable" in result["toolResult"]["content"][0]["text"].lower()
 
 
-def test_add_to_display_hydrates_item_and_opens_panel():
+def test_set_display_hydrates_items_and_opens_panel():
+    """set_display replaces the five removed tools (add/remove/reorder/open/close)."""
+    items = [_raw("item-1"), _raw("item-2")]
+    client = MagicMock()
+    client.converse.side_effect = [
+        _tool_use("set_display", {"item_ids": [item.item_id for item in items]}),
+        _end_turn("Panel set with 2 cards."),
+    ]
+    response = _service(client, FakeRepo(items)).chat("Set the panel")
+    assert response["panel"].open is True
+    assert [card.item_id for card in response["panel"].cards] == ["item-1", "item-2"]
+
+
+def test_set_display_unknown_item_filters_out():
+    """set_display with unknown items filters them out during hydration."""
     item = _raw("item-1")
     client = MagicMock()
     client.converse.side_effect = [
-        _tool_use("add_to_display", {"item_id": item.item_id}),
-        _end_turn("Added it."),
+        _tool_use("set_display", {"item_ids": ["item-1", "missing"]}),
+        _end_turn("One item was unavailable."),
     ]
-    response = _service(client, FakeRepo([item])).chat("Put it in the panel")
-    assert response["panel"].open is True
+    response = _service(client, FakeRepo([item])).chat("Set panel")
     assert [card.item_id for card in response["panel"].cards] == ["item-1"]
-
-
-def test_add_to_display_unknown_item_returns_error():
-    client = MagicMock()
-    client.converse.side_effect = [
-        _tool_use("add_to_display", {"item_id": "missing"}),
-        _end_turn("That item is unavailable."),
-    ]
-    response = _service(client, FakeRepo()).chat("Add it")
-    assert response["panel"].cards == []
-    result = client.converse.call_args_list[1].kwargs["messages"][2]["content"][0]
-    assert "not found" in result["toolResult"]["content"][0]["text"].lower()
 
 
 def test_panel_caps_at_50_and_tool_result_contains_truncation_notice():
     items = [_raw(f"item-{i}") for i in range(51)]
-    calls = [
-        ("add_to_display", {"item_id": item.item_id}, f"tool-{i}")
-        for i, item in enumerate(items)
-    ]
     client = MagicMock()
     client.converse.side_effect = [
-        _tool_use_many(calls),
+        _tool_use("set_display", {"item_ids": [item.item_id for item in items]}),
         _end_turn("The panel is limited to 50 cards; one result was not shown."),
     ]
     response = _service(client, FakeRepo(items)).chat("Show all 51")
@@ -152,47 +149,8 @@ def test_panel_caps_at_50_and_tool_result_contains_truncation_notice():
     assert response["panel"].truncated is True
     assert "50" in response["reply"]
     tool_results = client.converse.call_args_list[1].kwargs["messages"][2]["content"]
-    assert "full" in tool_results[-1]["toolResult"]["content"][0]["text"].lower()
-
-
-def test_open_and_close_tools_preserve_explicit_three_state_panel_flag():
-    client = MagicMock()
-    client.converse.side_effect = [
-        _tool_use("open_display_panel", {}),
-        _tool_use("close_display_panel", {}, "tool-2"),
-        _end_turn("Closed it."),
-    ]
-    response = _service(client, FakeRepo()).chat("Open then close")
-    assert response["panel"].open is False
-    assert response["panel"].cards == []
-
-
-def test_remove_from_display_operates_on_round_tripped_panel_state():
-    item = _raw("item-1")
-    client = MagicMock()
-    client.converse.side_effect = [
-        _tool_use("remove_from_display", {"item_id": item.item_id}),
-        _end_turn("Removed it."),
-    ]
-    response = _service(client, FakeRepo([item])).chat(
-        "Remove it", panel_item_ids=[item.item_id]
-    )
-    assert response["panel"].open is True
-    assert response["panel"].cards == []
-
-
-def test_reorder_display_operates_on_round_tripped_panel_state():
-    items = [_raw(f"item-{i}") for i in range(3)]
-    reordered = ["item-2", "item-0", "item-1"]
-    client = MagicMock()
-    client.converse.side_effect = [
-        _tool_use("reorder_display", {"item_ids": reordered}),
-        _end_turn("Reordered them."),
-    ]
-    response = _service(client, FakeRepo(items)).chat(
-        "Reorder them", panel_item_ids=[item.item_id for item in items]
-    )
-    assert [card.item_id for card in response["panel"].cards] == reordered
+    assert "full" in tool_results[0]["toolResult"]["content"][0]["text"].lower() or \
+           "truncat" in tool_results[0]["toolResult"]["content"][0]["text"].lower()
 
 
 def test_query_tools_still_delegate_to_mcp_executor():
@@ -243,17 +201,11 @@ def test_model_tool_schema_cannot_request_fullscreen():
         )
         for tool in bedrock._TOOLS
     }
-    display_names = {
-        "display_card",
-        "open_display_panel",
-        "close_display_panel",
-        "add_to_display",
-        "remove_from_display",
-        "reorder_display",
-    }
+    display_names = {"display_card", "set_display"}
     assert display_names <= names_and_properties.keys()
     assert all("fullscreen" not in names_and_properties[name] for name in display_names)
 
 
-def test_display_sequences_have_twelve_tool_turn_budget():
-    assert bedrock._MAX_TOOL_TURNS == 12
+def test_display_sequences_stay_at_five_tool_turn_budget():
+    """Decision 23 resolved the turn ceiling: stays at 5 (Phase 1 raised to 12)."""
+    assert bedrock._MAX_TOOL_TURNS == 5

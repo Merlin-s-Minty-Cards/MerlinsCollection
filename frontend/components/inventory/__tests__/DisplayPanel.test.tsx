@@ -30,7 +30,6 @@ type DisplayedCard = {
 }
 
 type Props = {
-  open: boolean | null
   cards: DisplayedCard[]
   truncated: boolean
   onClose: () => void
@@ -76,38 +75,33 @@ function card(item_id = 'item-1'): DisplayedCard {
 }
 
 describe('DisplayPanel', () => {
-  it.each([null, false])('renders nothing when open is %s', async (open) => {
+  it('renders nothing when cards is empty (closed state)', async () => {
     const DisplayPanel = await loadDisplayPanel()
+    
+    // Empty cards = closed, component renders nothing
     const { container } = render(
-      <DisplayPanel open={open} cards={[card()]} truncated={false} onClose={vi.fn()} />,
+      <DisplayPanel cards={[]} truncated={false} onClose={vi.fn()} />,
     )
     expect(container).toBeEmptyDOMElement()
   })
 
-  it('renders docked when explicitly open with cards', async () => {
+  it('renders docked when cards is non-empty (open state)', async () => {
     const DisplayPanel = await loadDisplayPanel()
-    render(<DisplayPanel open cards={[card()]} truncated={false} onClose={vi.fn()} />)
+    render(<DisplayPanel cards={[card()]} truncated={false} onClose={vi.fn()} />)
     expect(screen.getByRole('heading', { name: 'Display (1)' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Fullscreen' })).toBeInTheDocument()
   })
 
-  it('preserves the open-but-empty state', async () => {
-    const DisplayPanel = await loadDisplayPanel()
-    render(<DisplayPanel open cards={[]} truncated={false} onClose={vi.fn()} />)
-    expect(screen.getByRole('heading', { name: 'Display (0)' })).toBeInTheDocument()
-    expect(screen.getByText(/no cards in the display/i)).toBeInTheDocument()
-  })
-
   it('renders hydrated cards in the docked grid', async () => {
     const DisplayPanel = await loadDisplayPanel()
-    render(<DisplayPanel open cards={[card()]} truncated={false} onClose={vi.fn()} />)
+    render(<DisplayPanel cards={[card()]} truncated={false} onClose={vi.fn()} />)
     expect(screen.getByRole('heading', { name: 'Charizard' })).toBeInTheDocument()
     expect(screen.getByText('$450.00')).toBeInTheDocument()
   })
 
   it('shows the 50-card truncation notice', async () => {
     const DisplayPanel = await loadDisplayPanel()
-    render(<DisplayPanel open cards={[card()]} truncated onClose={vi.fn()} />)
+    render(<DisplayPanel cards={[card()]} truncated onClose={vi.fn()} />)
     expect(screen.getByText(/limited to 50 cards/i)).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Display (1+)' })).toBeInTheDocument()
   })
@@ -115,14 +109,14 @@ describe('DisplayPanel', () => {
   it('calls onClose when the user closes the panel', async () => {
     const DisplayPanel = await loadDisplayPanel()
     const onClose = vi.fn()
-    render(<DisplayPanel open cards={[card()]} truncated={false} onClose={onClose} />)
+    render(<DisplayPanel cards={[card()]} truncated={false} onClose={onClose} />)
     await userEvent.click(screen.getByRole('button', { name: 'Close' }))
     expect(onClose).toHaveBeenCalledOnce()
   })
 
   it('fullscreen is controlled only by local user button clicks', async () => {
     const DisplayPanel = await loadDisplayPanel()
-    render(<DisplayPanel open cards={[card()]} truncated={false} onClose={vi.fn()} />)
+    render(<DisplayPanel cards={[card()]} truncated={false} onClose={vi.fn()} />)
 
     expect(screen.queryByRole('button', { name: 'Dock' })).toBeNull()
     await userEvent.click(screen.getByRole('button', { name: 'Fullscreen' }))
@@ -134,7 +128,7 @@ describe('DisplayPanel', () => {
   it('is desktop-only through responsive visibility classes', async () => {
     const DisplayPanel = await loadDisplayPanel()
     const { container } = render(
-      <DisplayPanel open cards={[card()]} truncated={false} onClose={vi.fn()} />,
+      <DisplayPanel cards={[card()]} truncated={false} onClose={vi.fn()} />,
     )
     const root = container.firstElementChild
     expect(root).toHaveClass('hidden')

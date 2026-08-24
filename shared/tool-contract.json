@@ -1,5 +1,5 @@
 {
-  "comment": "Single source of truth for inventory query tools exposed through MCP and backend-only display tools exposed to Bedrock. Backend schemas cover all 11 tools; the MCP server registers only the 5 query tools.",
+  "comment": "Single source of truth for inventory query tools exposed through MCP and backend-only display tools exposed to Bedrock. Backend schemas cover all 7 tools; the MCP server registers only the 5 query tools.",
   "tools": [
     {
       "name": "search_inventory",
@@ -32,27 +32,7 @@
       "required": ["item_id"]
     },
     {
-      "name": "open_display_panel",
-      "properties": [],
-      "required": []
-    },
-    {
-      "name": "close_display_panel",
-      "properties": [],
-      "required": []
-    },
-    {
-      "name": "add_to_display",
-      "properties": ["item_id"],
-      "required": ["item_id"]
-    },
-    {
-      "name": "remove_from_display",
-      "properties": ["item_id"],
-      "required": ["item_id"]
-    },
-    {
-      "name": "reorder_display",
+      "name": "set_display",
       "properties": ["item_ids"],
       "required": ["item_ids"]
     }
