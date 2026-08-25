@@ -467,13 +467,139 @@ surface.
          `DisplayPanel.test.tsx` that predates this remediation — a real
          call, but one for the owner/Council to make rather than a
          unilateral change during a "make RED green" pass.
-- [ ] Council r2 — a full independent 4-lens re-review (contrarian,
-      architect, chaos, security) is still open. This session did a
-      systematic self-review (`council-r2-self-review.md`) covering the
-      same ground the TDD skill's own adversarial-review pass requires, but
-      it was not an independent second opinion. Recommended next step:
-      dispatch a fresh review (subagent, or a later session with no memory
-      of writing this code) against the diff plus the two findings above.
+- [x] **Council r2 — genuine independent re-review, 2026-08-24.** A fresh
+      session (no memory of writing the GREEN code) re-read every touched
+      file from source rather than trusting `council-r2-self-review.md`'s
+      account of it, cross-referenced `follow-ups.md` and
+      `council-r1-verdict.md`'s appendix against the actual current code
+      (not the verdict's original file/line citations, which had moved),
+      and used the `adversarial-review` skill for a second, formal sweep
+      over the resulting fix diff. Verified with grep/read, not assumed:
+      every claimed "no reader" in M3/M5 (see below), the sole production
+      call site of `DisplayedCard(...)` (confirms the kind-narrowing fix is
+      fully contained inside `_hydrate_item`'s try/except), and the sole
+      real caller of `BedrockChatService.chat()` (confirms removing the
+      dead `isinstance(result, str)` branch could only affect
+      `routers/chat.py`, not some other, unaudited caller).
+
+      Both r1-carried findings resolved, plus three more follow-ups picked
+      up along the way — five fixes in total:
+
+      1. **Frontend price-precedence bug (MAJOR, r2 self-review finding
+         2).** `DisplayPanel.tsx` and `ChatPanel.tsx` both computed
+         `card.current_market_value ?? card.listed_price`; swapped to
+         `card.listed_price ?? card.current_market_value ?? 'Price N/A'` —
+         `listed_price` is the resolved, condition-adjusted figure since
+         item 3, `current_market_value` a separate, potentially-stale
+         pass-through kept only as a fallback for the real case where an
+         item has no `listed_price` at all (`InventoryItem.listed_price` is
+         nullable). New tests: `DisplayPanel.test.tsx`'s existing "renders
+         hydrated cards" assertion flipped to pin `$275.00` (not `$450.00`)
+         plus an explicit `queryByText('$450.00')).not.toBeInTheDocument()`
+         negative check, a new "falls back to current_market_value when
+         listed_price is null" case, and the same pair of assertions added
+         to `ChatPanel.test.tsx`'s inline-artifact test.
+      2. **`DisplayedCard.kind` narrowed** from
+         `Literal["raw","graded","sealed","bulk"]` to
+         `Literal["raw","graded"]` (`models/chat.py`, mirrored in
+         `lib/inventory.ts`) — the r1-carried "known consequence," now
+         ruled on rather than left open. `is_customer_visible`'s
+         `CUSTOMER_KINDS` is `{"raw","graded"}` and `_hydrate_item` returns
+         `None` before ever constructing a `DisplayedCard` of another kind,
+         so the wider literal admitted values that were provably
+         unreachable. Narrowing makes that a second, independent
+         enforcement layer: a future regression in the visibility gate now
+         fails closed (a pydantic `ValidationError`, caught by
+         `_hydrate_item`'s own broad `except`) instead of silently
+         constructing a `DisplayedCard` the wire was never meant to carry.
+         New test: `test_displayed_card_kind_is_narrowed_to_reachable_values`
+         (`test_chat_response_envelope.py`). Two now-genuinely-dead branches
+         removed as a consequence: `_display_name`'s `item.kind ==
+         "sealed"/"bulk"` checks (`bedrock.py` — single caller, always
+         post-gate) and `DisplayPanel.tsx`/`ChatPanel.tsx`'s
+         `card.kind === 'sealed' ? 'Sealed' : 'N/A'` ternaries (would have
+         been a TypeScript "no overlap" error against the narrowed type
+         regardless; replaced with a flat `'N/A'`).
+      3. **JP badge fixed for uncatalogued items (advisor-architect M4 /
+         advisor-contrarian, carried from r1).** The badge was inferred
+         from `card.card_id.startsWith('ja:')` — unavailable whenever the
+         item has no catalog match (`card: null`), which is exactly the
+         uncatalogued-JP case the bug report was about. Added
+         `DisplayedCard.language` (backend `models/chat.py` +
+         `lib/inventory.ts`), populated in `_hydrate_item` from
+         `item.language` (the `Language` enum already on the base
+         `InventoryItem` model, independent of any catalog join); both
+         frontend components' `isJapanese` prop now reads
+         `card.language === 'JP'` directly. New backend tests:
+         `test_hydration_carries_language_so_uncatalogued_jp_items_keep_the_badge`,
+         `test_hydration_carries_english_language_by_default`
+         (`test_display_hydration.py`). New frontend test: "shows the JP
+         badge for an uncatalogued Japanese item" (`DisplayPanel.test.tsx`).
+      4. **Dead wire fields trimmed (advisor-architect M5).** `CardSummary`
+         (`models/chat.py` / `DisplayCardSummary` in `lib/inventory.ts`)
+         lost `set_id`, `rarity`, `image_large`, and `market_price` — the
+         last a literal duplicate of the exact same condition-adjusted
+         figure already on `DisplayedCard.listed_price` for a raw item
+         (both were set from the same local variable in `_hydrate_item`).
+         `DisplayedCard` lost `finish`. All five confirmed as genuinely
+         dead by grep before removal — zero readers anywhere in
+         `DisplayPanel.tsx`, `ChatPanel.tsx`, or `CardPresentation.tsx`
+         (`card_id` survives despite losing its only reader to fix #3
+         above — a defensible general-purpose identity field on its own,
+         unlike the other four, and the only one of the five M5 explicitly
+         named). Existing tests updated to match (assertion targets moved
+         from `.card.market_price` to `.listed_price`, fixture literals
+         trimmed, `not hasattr(displayed, "finish")` added alongside the
+         existing `cert_image_url` pattern).
+      5. **Dead `isinstance(result, str)` branch removed (advisor-architect
+         M6).** `routers/chat.py`'s compatibility branch for a
+         string-returning `chat()` had no real caller — every production
+         path returns the dict envelope — and was kept alive only by two
+         test doubles that predated the envelope shape. **Discovered while
+         verifying this fix**: a THIRD such double existed in
+         `test_rate_limit.py` (missed on the first full-suite pass, caught
+         by 6 failures on the second) — all three (`test_chat.py`'s
+         `_stub_bedrock`, `test_rate_limit.py`'s inline `bedrock` mock)
+         fixed to return `{"reply": ..., "artifacts": [], "panel":
+         {"cards": [], "truncated": False}}`, matching the real contract,
+         rather than restoring the branch to accommodate them.
+
+      **Left open, with reasoning** (updated in `follow-ups.md` alongside
+      this entry): the structural duplication across four separate
+      catalog-projection type definitions (M3) — trimming the dead fields
+      above shrinks the immediate concern but the duplication itself is a
+      bigger refactor, out of scope for a follow-up triage pass; the wire
+      payload's lack of an enforceable byte ceiling (M5's other half);
+      `truncated`'s per-turn (not cross-turn) freshness, confirmed
+      deliberate on re-reading `_DisplayState.__init__`'s own comment, not
+      a bug; `max_tokens`/`stop_sequence` Bedrock stop reasons falling
+      through to a generic 502 — pre-existing, not worsened by this plan;
+      a restoration notice for stale/sold IDs dropped from a restored
+      panel. `reorder_panel([])` and the `open !== true` guard are
+      confirmed DISSOLVED (the underlying tools/fields no longer exist).
+      `panel_item_ids` shape validation is confirmed MOOT (the visibility
+      gate rejects on content regardless of shape).
+
+      **Verified, full suites, all three, after all five fixes:**
+
+      | Suite | Result |
+      |---|---|
+      | Backend (pytest) | **2090 passed, 0 failed** |
+      | Frontend (vitest) | **1022 passed, 0 failed** |
+      | MCP server (vitest) | **101 passed, 0 failed** (untouched by this round) |
+      | `ruff check backend/src` | clean |
+      | `tsc --noEmit` (frontend) | clean |
+      | `next lint` | 0 errors, 2 pre-existing warnings (unrelated files) |
+
+      Adversarial review (via the `adversarial-review` skill, formally
+      invoked) against the fix diff: **PASS**, no blocking findings.
+      Verified rather than assumed: no other consumer of any trimmed
+      field exists (grep across both `backend/src`+`backend/tests` and the
+      frontend tree); the kind-narrowing's only production call site is
+      inside `_hydrate_item`'s try/except; the `language.value if language
+      is not None else None` pattern mirrors the existing `company` field's
+      idiom two lines above it in the same function; no caller of
+      `BedrockChatService.chat()` exists outside `routers/chat.py`.
 
 ### Phase 2 — RFC-0017 history (not started)
 - [ ] RFC-0017 written
@@ -588,3 +714,26 @@ before content.
   one-time sanity check: 53 failed / 2034 passed / 2087 total, matching the
   handoff's claimed baseline closely enough to trust it. GREEN work
   (checklist items 1-6, 9 reduced, 11) has not started.
+- 2026-08-24 — GREEN for checklist items 1-6, 9 (reduced), 11, and the
+  `set_display` collapse (decision 23), both backend and frontend halves.
+  All three suites closed to 0 failures (backend 2087/2087, frontend
+  1020/1020, MCP 101/101); `ruff`/`tsc`/`next lint` all clean. Full detail
+  under "Items" above. Self-review only at this point
+  (`council-r2-self-review.md`) — flagged two findings rather than fixing
+  them: the carried-forward `DisplayedCard.kind` sealed/bulk admission, and
+  a newly-found frontend price-precedence bug. Both deferred to an
+  independent Council r2 pass.
+- 2026-08-24 — **Council r2**, a genuinely independent re-review (fresh
+  session, re-verified every claim from source rather than trusting the
+  self-review's account). Both deferred findings resolved, plus three more
+  follow-ups (M4's JP badge bug, M5's dead wire fields, M6's dead branch)
+  picked up in the same pass. Five fixes total, full TDD (RED confirmed
+  failing, then GREEN) for the two behavioral ones (price precedence, JP
+  badge/language) and verified-safe refactor for the other three (kind
+  narrowing, dead-field trim, dead-branch removal). One regression caught
+  mid-pass and fixed before it could ship: a third bare-string bedrock test
+  double in `test_rate_limit.py`, missed on the first full-suite run after
+  removing the dead branch, caught by 6 failures on the second run. Final:
+  backend 2090/2090, frontend 1022/1022, MCP 101/101 (untouched), all
+  lint/typecheck clean. Formal `adversarial-review` skill pass against the
+  fix diff: PASS, no blocking findings. Full detail under "Items" above.

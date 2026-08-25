@@ -257,23 +257,19 @@ const displayCard = (itemId: string, name = 'Charizard') => ({
   card: {
     card_id: `en:base1-${itemId}`,
     name,
-    set_id: 'base1',
     set_name: 'Base Set',
     number: '4',
-    rarity: 'Rare Holo',
     image_small: 'https://assets.tcgdex.net/en/base/base1/4/low.webp',
-    image_large: 'https://assets.tcgdex.net/en/base/base1/4/high.webp',
-    market_price: '450.00',
   },
   display_name: null,
   listed_price: '275.00',
   current_market_value: '450.00',
   condition: 'LP',
-  finish: 'holofoil',
   company: null,
   grade: null,
   grade_label: null,
   cert_number: null,
+  language: 'EN',
 })
 
 describe('ChatPanel display artifacts (RFC 0016 RED)', () => {
@@ -318,6 +314,11 @@ describe('ChatPanel display artifacts (RFC 0016 RED)', () => {
     await user.type(screen.getByRole('textbox'), 'show one')
     await user.click(screen.getByRole('button', { name: /send/i }))
     expect(await screen.findByRole('heading', { name: 'Charizard' })).toBeInTheDocument()
+    // listed_price ($275.00, displayCard's fixture) must win over
+    // current_market_value ($450.00) — same precedence fix as DisplayPanel;
+    // Council r2 self-review flagged both surfaces sharing the bug.
+    expect(screen.getByText('$275.00')).toBeInTheDocument()
+    expect(screen.queryByText('$450.00')).not.toBeInTheDocument()
   })
 
   it('renders the display panel when cards is non-empty', async () => {

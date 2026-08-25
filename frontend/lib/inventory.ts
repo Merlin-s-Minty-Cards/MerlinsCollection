@@ -149,30 +149,43 @@ export interface ChatMessage {
 }
 
 export interface DisplayCardSummary {
+  // Council r2 self-review M5: set_id, rarity, image_large and market_price
+  // were on the wire with no reader on either display surface (DisplayPanel,
+  // ChatPanel) -- market_price in particular duplicated the exact same
+  // condition-adjusted figure already carried on DisplayedCard.listed_price
+  // for a raw item. All four dropped. card_id survives even though its only
+  // reader (a JP-badge `.startsWith('ja:')` inference) was replaced by
+  // DisplayedCard.language below -- it's a reasonable identity field on its
+  // own, unlike the other four.
   card_id: string
   name: string
-  set_id: string
   set_name: string
   number: string
-  rarity: string | null
   image_small: string
-  image_large: string
-  market_price: string | null
 }
 
 export interface DisplayedCard {
   item_id: string
-  kind: 'raw' | 'graded' | 'sealed' | 'bulk'
+  // Narrowed from 'raw' | 'graded' | 'sealed' | 'bulk' (RFC-0016 Council r2):
+  // sealed/bulk are unreachable -- see DisplayedCard.kind's docstring in
+  // backend models/chat.py for the full reasoning.
+  kind: 'raw' | 'graded'
   card: DisplayCardSummary | null
   display_name: string | null
   listed_price: string | null
   current_market_value: string | null
   condition: string | null
-  finish: string | null
+  // finish dropped (Council r2 self-review M5): no reader on either display
+  // surface.
   company: string | null
   grade: string | null
   grade_label: string | null
   cert_number: string | null
+  // Council r2 (advisor-architect M4 / advisor-contrarian): the JP badge
+  // used to be inferred from card.card_id.startsWith('ja:'), unavailable for
+  // an uncatalogued item (card is null) -- an uncatalogued Japanese card
+  // silently lost its badge. "EN" | "JP", independent of any catalog match.
+  language: string | null
   // cert_image_url intentionally NOT a field here (RFC 0016 Council r1
   // checklist item 5): admin-scoped, provider-supplied, and only
   // scheme-validated on the backend — must not reach the customer wire.

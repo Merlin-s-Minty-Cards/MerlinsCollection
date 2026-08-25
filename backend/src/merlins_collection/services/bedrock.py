@@ -199,20 +199,20 @@ class BedrockContentFilteredError(BedrockServiceError):
 
 
 def _display_name(item, catalog) -> str | None:
-    """Preserve existing tile title precedence in the compact display shape."""
+    """Preserve existing tile title precedence in the compact display shape.
+
+    No sealed/bulk branch: this is called only from ``_hydrate_item``, always
+    after the customer-visibility gate, whose ``CUSTOMER_KINDS`` is
+    ``{"raw", "graded"}`` — a sealed or bulk item never reaches here (Council
+    r2 self-review, resolving the r1 "dead/unreachable branches" note by
+    removing them rather than leaving them defensively unreachable).
+    """
     override = getattr(item, "display_name_override", None)
     if override:
         return override
     if catalog is not None:
         return None
-    fallback = getattr(item, "display_name", None)
-    if fallback:
-        return fallback
-    if item.kind == "sealed":
-        return item.product_name
-    if item.kind == "bulk":
-        return item.description
-    return None
+    return getattr(item, "display_name", None) or None
 
 
 def _hydrate_item(repo, item_id: str) -> DisplayedCard | None:
@@ -263,13 +263,9 @@ def _hydrate_item(repo, item_id: str) -> DisplayedCard | None:
             card_summary = CardSummary(
                 card_id=catalog.card_id,
                 name=catalog.name,
-                set_id=catalog.set_id,
                 set_name=catalog.set_name,
                 number=catalog.number,
-                rarity=catalog.rarity,
                 image_small=catalog.images.small,
-                image_large=catalog.images.large,
-                market_price=market_price,
             )
 
         # Council item 3: mirrors routers/inventory.py::_display_price — "THE
@@ -293,6 +289,7 @@ def _hydrate_item(repo, item_id: str) -> DisplayedCard | None:
             condition = f"{item.condition.value}{modifier.value if modifier else ''}"
 
         company = getattr(item, "company", None)
+        language = getattr(item, "language", None)
         return DisplayedCard(
             item_id=item.item_id,
             kind=item.kind,
@@ -301,11 +298,14 @@ def _hydrate_item(repo, item_id: str) -> DisplayedCard | None:
             listed_price=display_price,
             current_market_value=getattr(item, "current_market_value", None),
             condition=condition,
-            finish=getattr(item, "finish", None),
             company=company.value if company is not None else None,
             grade=getattr(item, "grade", None),
             grade_label=getattr(item, "grade_label", None),
             cert_number=getattr(item, "cert_number", None),
+            # Council r2 (advisor-architect M4 / advisor-contrarian): carried
+            # independent of any catalog match, so an uncatalogued JP item
+            # still gets the badge — see DisplayedCard.language's docstring.
+            language=language.value if language is not None else None,
             # cert_image_url intentionally omitted -- Council item 5: it is
             # admin-scoped, provider-supplied, and only scheme-validated (not
             # content-validated), so it must not reach the customer /chat wire.

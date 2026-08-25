@@ -44,24 +44,41 @@ class ChatRequest(BaseModel):
 
 
 class CardSummary(BaseModel):
-    """The catalog projection needed by display surfaces."""
+    """The catalog projection needed by display surfaces.
+
+    Council r2 self-review (M5, carried from council-r1-verdict.md advisor-
+    architect M5): ``set_id``, ``rarity``, ``image_large`` and ``market_price``
+    were on the wire with no reader on either display surface
+    (``DisplayPanel.tsx``, ``ChatPanel.tsx``) — ``market_price`` in particular
+    duplicated the exact same condition-adjusted figure already carried on
+    ``DisplayedCard.listed_price`` for a raw item (see ``_hydrate_item``). All
+    four were dropped. ``card_id`` survives even though its only reader
+    (an ``.startswith('ja:')`` JP-badge inference) was replaced by
+    ``DisplayedCard.language`` — it is a reasonable general-purpose identity
+    field, unlike the other four, and wasn't independently flagged.
+    """
 
     card_id: str
     name: str
-    set_id: str
     set_name: str
     number: str
-    rarity: str | None = None
     image_small: str
-    image_large: str
-    market_price: Decimal | None = None
 
 
 class DisplayedCard(BaseModel):
     """A server-hydrated inventory item safe to render in the UI."""
 
     item_id: str
-    kind: Literal["raw", "graded", "sealed", "bulk"]
+    # Council r2 ruling on the r1 "known consequence": narrowed from
+    # Literal["raw", "graded", "sealed", "bulk"]. is_customer_visible's
+    # CUSTOMER_KINDS is {"raw", "graded"} and _hydrate_item returns None
+    # before ever constructing a DisplayedCard for any other kind, so
+    # "sealed"/"bulk" were provably unreachable here. Narrowing makes that a
+    # second, independent enforcement layer: a regression in the visibility
+    # gate now fails closed (pydantic ValidationError, caught by
+    # _hydrate_item's broad except) instead of silently emitting a
+    # DisplayedCard the customer wire was never meant to carry.
+    kind: Literal["raw", "graded"]
     card: CardSummary | None = None
     display_name: str | None = None
     # Inventory rows may honestly be unpriced. The field remains required so a
@@ -69,11 +86,21 @@ class DisplayedCard(BaseModel):
     listed_price: Decimal | None
     current_market_value: Decimal | None = None
     condition: str | None = None
-    finish: str | None = None
+    # Council r2 self-review M5: had no reader on either display surface —
+    # dropped, same rationale as CardSummary's trim above.
     company: str | None = None
     grade: Decimal | None = None
     grade_label: str | None = None
     cert_number: str | None = None
+    # Council r2 (advisor-architect M4 / advisor-contrarian, carried from
+    # council-r1-verdict.md): the JP badge on both display surfaces used to be
+    # inferred from `card.card_id.startswith('ja:')`, which is unavailable for
+    # an uncatalogued item (card is None) — an uncatalogued Japanese card
+    # silently lost its badge. `language` lives on the base InventoryItem
+    # independent of any catalog match, so it survives exactly that case.
+    # "EN"/"JP", mirroring models.inventory.Language; None only when hydration
+    # itself failed upstream (never for a real customer-visible item).
+    language: str | None = None
     # cert_image_url intentionally NOT a field here (RFC 0016 Council r1
     # checklist item 5): it is admin-scoped, provider-supplied, and only
     # scheme-validated (not content-validated) — see InventoryItem's own

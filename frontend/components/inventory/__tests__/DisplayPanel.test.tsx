@@ -9,23 +9,19 @@ type DisplayedCard = {
   card: {
     card_id: string
     name: string
-    set_id: string
     set_name: string
     number: string
-    rarity: string | null
     image_small: string
-    image_large: string
-    market_price: string | null
   }
   display_name: string | null
   listed_price: string
   current_market_value: string | null
   condition: string | null
-  finish: string | null
   company: null
   grade: null
   grade_label: null
   cert_number: null
+  language: string | null
 }
 
 type Props = {
@@ -52,23 +48,19 @@ function card(item_id = 'item-1'): DisplayedCard {
     card: {
       card_id: 'en:base1-4',
       name: 'Charizard',
-      set_id: 'base1',
       set_name: 'Base Set',
       number: '4',
-      rarity: 'Rare Holo',
       image_small: 'https://assets.tcgdex.net/en/base/base1/4/low.webp',
-      image_large: 'https://assets.tcgdex.net/en/base/base1/4/high.webp',
-      market_price: '450.00',
     },
     display_name: null,
     listed_price: '275.00',
     current_market_value: '450.00',
     condition: 'LP',
-    finish: 'holofoil',
     company: null,
     grade: null,
     grade_label: null,
     cert_number: null,
+    language: 'EN',
   }
 }
 
@@ -94,7 +86,32 @@ describe('DisplayPanel', () => {
     const DisplayPanel = await loadDisplayPanel()
     render(<DisplayPanel cards={[card()]} truncated={false} onClose={vi.fn()} />)
     expect(screen.getByRole('heading', { name: 'Charizard' })).toBeInTheDocument()
+    // listed_price ($275.00) must win over current_market_value ($450.00):
+    // after RFC-0016's backend fix, listed_price is the RESOLVED,
+    // condition-adjusted price (mirrors routers/inventory.py::_display_price)
+    // while current_market_value is a separate, potentially stale pass-through.
+    // Council r2 self-review flagged this precedence as backwards; fixed here.
+    expect(screen.getByText('$275.00')).toBeInTheDocument()
+    expect(screen.queryByText('$450.00')).not.toBeInTheDocument()
+  })
+
+  it('falls back to current_market_value when listed_price is null', async () => {
+    const DisplayPanel = await loadDisplayPanel()
+    const noListedPrice = { ...card(), listed_price: null as unknown as string }
+    render(<DisplayPanel cards={[noListedPrice]} truncated={false} onClose={vi.fn()} />)
     expect(screen.getByText('$450.00')).toBeInTheDocument()
+  })
+
+  it('shows the JP badge for an uncatalogued Japanese item', async () => {
+    // RFC-0016 Council r2 (advisor-architect M4 / advisor-contrarian): the
+    // badge used to be inferred from card.card_id.startsWith('ja:'), which
+    // is unavailable when the item has no catalog match (card: null) --
+    // exactly the case this test pins. language is on DisplayedCard itself,
+    // independent of any catalog match.
+    const DisplayPanel = await loadDisplayPanel()
+    const uncataloguedJp = { ...card(), card: null, language: 'JP' }
+    render(<DisplayPanel cards={[uncataloguedJp]} truncated={false} onClose={vi.fn()} />)
+    expect(screen.getByTitle('Japanese print')).toBeInTheDocument()
   })
 
   it('shows the 50-card truncation notice', async () => {

@@ -131,6 +131,25 @@ def test_displayed_card_allows_missing_catalog_summary():
     assert card.card is None
 
 
+def test_displayed_card_kind_is_narrowed_to_reachable_values():
+    """RFC 0016 Council r2 ruling on the r1 'known consequence': sealed/bulk are
+    unreachable on a real DisplayedCard -- is_customer_visible's CUSTOMER_KINDS
+    is {"raw", "graded"} and _hydrate_item returns None before ever constructing
+    one for another kind. Narrowing the Literal turns that invariant into a
+    second, independent enforcement layer: if the visibility gate ever
+    regresses, pydantic now rejects the construction (caught by
+    _hydrate_item's broad except and treated as a failed hydration) instead of
+    silently emitting a DisplayedCard the customer wire was never meant to
+    carry.
+    """
+    DisplayedCard = _model("DisplayedCard")
+    for unreachable_kind in ("sealed", "bulk"):
+        with pytest.raises(ValidationError):
+            DisplayedCard(
+                item_id="item-1", kind=unreachable_kind, listed_price=Decimal("1.00")
+            )
+
+
 def test_display_panel_rejects_more_than_50_cards():
     DisplayPanel = _model("DisplayPanel")
     with pytest.raises(ValidationError):

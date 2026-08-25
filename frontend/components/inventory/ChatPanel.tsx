@@ -58,7 +58,10 @@ function artifactCondition(card: DisplayedCard): string {
     const slabGrade = [card.company, card.grade].filter(Boolean).join(' ')
     if (slabGrade) return slabGrade
   }
-  return card.kind === 'sealed' ? 'Sealed' : 'N/A'
+  // kind is narrowed to 'raw' | 'graded' (RFC-0016 Council r2): a 'sealed'
+  // branch here was dead code, since a DisplayedCard can never carry that
+  // kind (see DisplayedCard.kind's docstring in models/chat.py).
+  return 'N/A'
 }
 
 export default function ChatPanel() {
@@ -194,8 +197,12 @@ function ChatBubble({ bubble }: { bubble: Bubble }) {
               setName={card.card?.set_name ?? 'Unknown set'}
               number={card.card?.number}
               conditionLabel={artifactCondition(card)}
-              price={card.current_market_value ?? card.listed_price ?? 'Price N/A'}
-              isJapanese={card.card?.card_id.startsWith('ja:') ?? false}
+              // listed_price is the RESOLVED, condition-adjusted price
+              // (mirrors routers/inventory.py::_display_price); it must win
+              // over current_market_value, a separate, potentially stale
+              // pass-through (RFC-0016 Council r2 self-review).
+              price={card.listed_price ?? card.current_market_value ?? 'Price N/A'}
+              isJapanese={card.language === 'JP'}
             />
           ))}
         </div>

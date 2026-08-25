@@ -61,8 +61,4 @@ def chat(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Upstream AI service error.",
         ) from exc
-    # Keep dependency-override stubs and older service implementations compatible
-    # while the real service returns the extended response envelope.
-    if isinstance(result, str):
-        return ChatResponse(reply=result)
     return ChatResponse.model_validate(result)

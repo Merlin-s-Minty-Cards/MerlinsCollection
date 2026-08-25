@@ -4,9 +4,20 @@ Written 2026-08-24, by the same session that implemented GREEN. This is a
 systematic walkthrough of `council-r1-verdict.md`'s checklist against the
 actual diff, done as part of the TDD skill's required post-change
 adversarial-review step. **It is not a substitute for an independent
-re-review** — see `progress.md`'s open Council r2 item. Recorded here so a
-later independent review has a concrete self-assessment to check (and
-disagree with) rather than starting from nothing.
+re-review.**
+
+**Update, same day:** the independent re-review this document called for
+has since happened — see `README.md`'s "Council r2 — done 2026-08-24" and
+`progress.md`'s Council r2 item under "Items". That later pass checked this
+self-review rather than starting from nothing, exactly as intended below:
+it fixed both findings this document flagged as unresolved (the
+`DisplayedCard.kind` admission, the frontend price-precedence bug),
+corrected a stale `truncated`-staleness claim it found in
+`follow-ups.md`'s Council r1 appendix (not made by this document — that
+claim turned out to be only half right on re-read against the actual
+`_DisplayState.set_panel` code), and picked up three more follow-ups along
+the way. This file is kept as the historical self-review record, not
+updated in place.
 
 ## Checklist items, verified one by one
 

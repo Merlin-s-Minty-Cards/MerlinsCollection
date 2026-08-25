@@ -49,8 +49,20 @@ def chat_client(cognito_config, jwks, _clean_aws):
 
 
 def _stub_bedrock(reply: str):
+    """A double matching the REAL BedrockChatService.chat() contract: a dict
+    with reply/artifacts/panel, not a bare string. (RFC 0016 Council r2
+    self-review: the router's `isinstance(result, str)` branch was dead code
+    -- no real implementation of chat() has returned a string since this
+    plan's GREEN landed -- kept alive only by this double. Removed in the
+    router; the double is fixed to match reality instead of the other way
+    around.)
+    """
     svc = MagicMock()
-    svc.chat.return_value = reply
+    svc.chat.return_value = {
+        "reply": reply,
+        "artifacts": [],
+        "panel": {"cards": [], "truncated": False},
+    }
     return svc
 
 

@@ -10,6 +10,7 @@ from merlins_collection.models.inventory import (
     GradedInventoryItem,
     GradingCompany,
     ItemStatus,
+    Language,
     RawInventoryItem,
     SealedInventoryItem,
     SealedProductType,
@@ -45,6 +46,7 @@ def _raw(
     card_id: str | None = "en:base1-4",
     status: ItemStatus = ItemStatus.AVAILABLE,
     finish: str = "holofoil",
+    language: Language = Language.EN,
 ) -> RawInventoryItem:
     return RawInventoryItem(
         item_id=item_id,
@@ -58,6 +60,7 @@ def _raw(
         condition=Condition.NM,
         condition_modifier=ConditionModifier.PLUS,
         display_name="Charizard #4",
+        language=language,
         # Council item 2: hydration uses the customer-visibility predicate, which
         # requires a display-ready location. This fixture represents visible stock;
         # withheld-stock cases set location explicitly (see test_display_ownership).
@@ -94,7 +97,12 @@ def test_hydrates_available_raw_item_from_repository(dynamo_repo):
     assert displayed.kind == "raw"
     assert displayed.listed_price == Decimal("275.00")
     assert displayed.current_market_value == Decimal("450.00")
-    assert displayed.finish == "holofoil"
+    assert displayed.language == "EN"
+    # Council r2 self-review M5: finish had no reader on either display surface
+    # (DisplayPanel.tsx, ChatPanel.tsx) -- dropped from the wire projection.
+    assert not hasattr(displayed, "finish"), (
+        "finish must not appear on DisplayedCard (dead field, no reader)"
+    )
 
 
 def test_hydrates_available_graded_item_from_repository(dynamo_repo):
@@ -133,16 +141,16 @@ def test_hydration_populates_catalog_projection_when_card_id_resolves(dynamo_rep
 
     displayed = _hydrate(dynamo_repo, item.item_id)
 
+    # Council r2 self-review M5: set_id, rarity, image_large and market_price
+    # (this nested copy — the resolved figure lives on DisplayedCard.listed_price,
+    # see test_hydration_uses_exact_finish_market_price below) had no reader on
+    # either display surface. Trimmed from the wire projection.
     assert displayed.card.model_dump() == {
         "card_id": "en:base1-4",
         "name": "Charizard",
-        "set_id": "base1",
         "set_name": "Base Set",
         "number": "4",
-        "rarity": "Rare Holo",
         "image_small": "https://assets.tcgdex.net/en/base/base1/4/low.webp",
-        "image_large": "https://assets.tcgdex.net/en/base/base1/4/high.webp",
-        "market_price": None,
     }
 
 
@@ -197,7 +205,10 @@ def test_hydration_uses_exact_finish_market_price(dynamo_repo):
     item = _raw(finish="holofoil")
     dynamo_repo.put_inventory_item(item)
 
-    assert _hydrate(dynamo_repo, item.item_id).card.market_price == Decimal("450.00")
+    # The resolved price now lives only on DisplayedCard.listed_price — the
+    # nested CardSummary.market_price copy of the same value was dropped
+    # (Council r2 self-review M5: a duplicate, unread field).
+    assert _hydrate(dynamo_repo, item.item_id).listed_price == Decimal("450.00")
 
 
 def test_hydration_falls_back_to_an_available_finish_market_price(dynamo_repo):
@@ -207,4 +218,27 @@ def test_hydration_falls_back_to_an_available_finish_market_price(dynamo_repo):
     item = _raw(finish="holofoil")
     dynamo_repo.put_inventory_item(item)
 
-    assert _hydrate(dynamo_repo, item.item_id).card.market_price == Decimal("325.00")
+    assert _hydrate(dynamo_repo, item.item_id).listed_price == Decimal("325.00")
+
+
+def test_hydration_carries_language_so_uncatalogued_jp_items_keep_the_badge(dynamo_repo):
+    """RFC-0016 Council r2 (advisor-architect M4 / advisor-contrarian): the JP
+    badge on DisplayPanel/ChatPanel used to be inferred from
+    `card.card_id.startswith('ja:')`, which is `null` for an uncatalogued item
+    (no `card` at all) — an uncatalogued Japanese card silently lost its badge.
+    `language` is on the base InventoryItem, independent of any catalog match,
+    so it survives exactly the case the card_id inference couldn't cover.
+    """
+    item = _raw(item_id="jp-uncatalogued", card_id=None, language=Language.JP)
+    dynamo_repo.put_inventory_item(item)
+
+    displayed = _hydrate(dynamo_repo, item.item_id)
+    assert displayed.card is None  # uncatalogued -- exactly the case that matters
+    assert displayed.language == "JP"
+
+
+def test_hydration_carries_english_language_by_default(dynamo_repo):
+    item = _raw(item_id="en-item", language=Language.EN)
+    dynamo_repo.put_inventory_item(item)
+
+    assert _hydrate(dynamo_repo, item.item_id).language == "EN"
