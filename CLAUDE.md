@@ -538,6 +538,22 @@ already takes.
 **Condition and grade are never rendered together.** They are alternatives,
 and the backend 422s a raw leg carrying graded fields.
 
+**A trade's incoming cost basis is fully automatic — no mode, no manual
+entry.** `_compute_basis_pool` (`routers/admin/trades.py`) is always
+`outgoing legs' cost basis + cash we pay − cash they pay`, floored at zero,
+then allocated pro-rata across incoming legs exactly as before. This
+retired an earlier three-mode system (Transfer/Split/Manual) that required
+a human to type a basis whenever cash was part of the trade — the owner
+reviewed the pre-mode history (visible in old test comments) and asked for
+the automatic version back, deliberately, with no exceptions for cash. The
+`GET /admin/trades/{id}/balance` preview uses the identical function, so
+the number an operator sees before confirming always matches what gets
+stored. The already-separately-retired `margin_split` field stays storable
+via `PATCH /admin/trades/{id}` (unrelated tests cover that) but has no
+effect on the pool; `basis_mode`/`manual_basis` are no longer accepted
+fields at all — sending them is a silent no-op, not a 422, matching how any
+other unlisted key on that endpoint is already treated.
+
 **The displayed trade `balance` NETS cash against the card totals — it does
 not add them.** Diagnosed 2026-08-14 (RFC 0013): a $125-in / $1025-out /
 $900-cash-received trade — genuinely settled at $0 — displayed as **+$1800**,
@@ -1136,6 +1152,22 @@ this stack uses, not just the one being changed: `AUTH_SECRET`,
 in `frontend/.env.local`. Same failure mode applies to any future secret
 added to either stack's environment map.
 
+**`MerlinsCognitoBrandingStack` (`infra/lib/cognito-branding-stack.ts`) is a
+third, deliberately independent stack — this incident is exactly why.** It
+applies classic Hosted UI CSS branding (cream background, forest-green
+submit button, the site logo — matching `frontend/tailwind.config.ts`'s
+Spriggatito palette) to the Cognito login page via `SetUICustomization`,
+called through an `AwsCustomResource` since the native CloudFormation
+resource (`AWS::Cognito::UserPoolUICustomizationAttachment`) exposes only
+`css`, not the logo image, and Cognito's own docs say the two can't be set
+separately. It shares no resource with `MerlinsFrontendStack` or
+`MerlinsBackendStack` and is deployed on its own
+(`cdk deploy MerlinsCognitoBrandingStack`), so a branding-only change is
+structurally incapable of ever touching those stacks' Lambda environment
+variables — the general shape to copy whenever a new piece of infra has a
+meaningfully different blast radius than what already exists, rather than
+folding it into a stack that also carries this secret-wipe risk.
+
 **Catalog seed + sync (one-time owner action, not scheduled).** Needed only for
 a fresh/empty table, which the live one is not. With AWS creds, from `backend/`:
 
@@ -1221,6 +1253,7 @@ is the bug.**
 | All        | `npm test` (from repo root)                    |
 | Frontend   | `npm test --workspace=frontend`                |
 | MCP Server | `npm test --workspace=mcp-server`              |
+| Infra (CDK) | `npm test --workspace=infra`                  |
 | Backend    | `./.venv/Scripts/python.exe -m pytest backend/tests -q --tb=short` |
 | Lint (FE)  | `cd frontend && npm run lint`                  |
 | Lint (BE)  | `./.venv/Scripts/python.exe -m ruff check backend/src` |
