@@ -30,10 +30,6 @@ export interface ConfirmMeta {
   /** `YYYY-MM-DD`, from `todayLocal()` — never built with `new Date()`. */
   date?: string | null
   payment_method?: string
-  /** trade only */
-  basis_mode?: 'transfer' | 'split' | 'manual'
-  /** trade, manual mode only */
-  manual_basis?: string
 }
 
 export interface ConfirmResult {
@@ -64,7 +60,7 @@ export interface DealSessionApi {
   updateOutgoing(id: string, itemId: string, value: number): Promise<void>
   setCash(id: string, components: CashComponent[]): Promise<void>
   confirm(id: string, meta: ConfirmMeta): Promise<ConfirmResult>
-  supports: { incoming: boolean; outgoing: boolean; costBasisMode: boolean }
+  supports: { incoming: boolean; outgoing: boolean }
 }
 
 /**
@@ -85,7 +81,7 @@ export function sessionApiFor(mode: DealMode, api: AdminApi): DealSessionApi {
 
 function buyApi(api: AdminApi): DealSessionApi {
   return {
-    supports: { incoming: true, outgoing: false, costBasisMode: false },
+    supports: { incoming: true, outgoing: false },
     async create() {
       const res = await api.post<{ buy_id: string }>('/purchases', { payment_method: 'cash' })
       return res.buy_id
@@ -144,7 +140,7 @@ function buyApi(api: AdminApi): DealSessionApi {
 
 function sellApi(api: AdminApi): DealSessionApi {
   return {
-    supports: { incoming: false, outgoing: true, costBasisMode: false },
+    supports: { incoming: false, outgoing: true },
     async create() {
       const res = await api.post<{ sell_id: string }>('/sales', { payment_method: 'cash' })
       return res.sell_id
@@ -186,7 +182,7 @@ function sellApi(api: AdminApi): DealSessionApi {
 
 function tradeApi(api: AdminApi): DealSessionApi {
   return {
-    supports: { incoming: true, outgoing: true, costBasisMode: true },
+    supports: { incoming: true, outgoing: true },
     async create() {
       const res = await api.post<{ trade_id: string }>('/trades', {})
       return res.trade_id
@@ -221,12 +217,6 @@ function tradeApi(api: AdminApi): DealSessionApi {
       await api.put(`/trades/${id}/cash`, { cash_components: components })
     },
     async confirm(id, meta) {
-      if (meta.basis_mode) {
-        await api.patch(`/trades/${id}`, { basis_mode: meta.basis_mode })
-      }
-      if (meta.manual_basis !== undefined) {
-        await api.patch(`/trades/${id}`, { manual_basis: meta.manual_basis })
-      }
       await api.patch(`/trades/${id}`, {
         counterparty: meta.counterparty ?? null,
         trade_date: meta.date ?? null,

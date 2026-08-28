@@ -85,35 +85,24 @@ def _has_cash(session: dict[str, Any]) -> bool:
     return (we_pay + they_pay) > 0
 
 
-def _effective_basis_mode(session: dict[str, Any]) -> tuple[str, str | None]:
-    """Determine the effective basis mode and any blocking error.
+def _compute_basis_pool(session: dict[str, Any], total_out_basis: Decimal) -> Decimal:
+    """The incoming cost-basis pool for a trade: what it actually cost us.
 
-    Returns ``(mode, error_string_or_None)``.  The error string is one of the
-    three pinned strings from the contract (task-3.0-contract.md section 4);
-    when non-null, the trade MUST NOT be confirmed.
+    Always automatic — no mode to choose, no manual override. The pool is
+    the outgoing cards' original cost, plus any cash we paid out, minus any
+    cash we received: cash changes hands as part of the deal exactly like a
+    card does, so it belongs in the same total. `margin_split` (the older,
+    already-retired percent-based scheme) is not consulted here — it stays
+    storable via PATCH for backward compatibility but has no effect on this
+    figure.
+
+    Floored at zero: a heavily cash-subsidized trade can't leave a card with
+    a negative book cost, mirroring `_allocate_incoming_basis`'s own
+    no-negative-leg guarantee.
     """
-    explicit_mode = session.get("basis_mode")
-    margin_split = session.get("margin_split")
-    has_cash = _has_cash(session)
-
-    # Legacy: margin_split.enabled == True and no explicit basis_mode
-    if explicit_mode is None and margin_split and margin_split.get("enabled"):
-        return "transfer", (
-            "This trade uses the retired percent-based margin split; "
-            "choose a basis mode"
-        )
-
-    mode = explicit_mode or "transfer"
-
-    # Cash blocks transfer / split
-    if mode in ("transfer", "split") and has_cash:
-        return mode, "Cash components require Manual basis mode"
-
-    # Manual requires manual_basis
-    if mode == "manual" and not session.get("manual_basis"):
-        return mode, "Manual basis mode requires a total basis amount"
-
-    return mode, None
+    cash_we_pay, cash_they_pay = _cash_totals(session)
+    pool = _cents(total_out_basis + cash_we_pay - cash_they_pay)
+    return max(pool, Decimal("0"))
 
 
 def _allocate_incoming_basis(
@@ -267,7 +256,14 @@ def update_trade_session(
     body: dict[str, Any],
     repo: InventoryRepository = Depends(get_repo),
 ) -> dict[str, Any]:
-    """Update trade metadata (mode, counterparty, notes, margin_split)."""
+    """Update trade metadata (mode, counterparty, notes, margin_split).
+
+    ``basis_mode`` / ``manual_basis`` are retired (the basis pool is now
+    always automatic — see `_compute_basis_pool`) and deliberately absent
+    from this allowlist: a caller that still sends them gets a silent
+    no-op, the same treatment any other unlisted key already gets here,
+    not a 422 — there is nothing left to validate.
+    """
     session = repo.get_trade_session(trade_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Trade session not found")
@@ -275,7 +271,7 @@ def update_trade_session(
         raise HTTPException(status_code=409, detail="Can only update draft sessions")
 
     for key in ("mode", "counterparty", "notes", "show_id", "trade_date",
-                "margin_split", "basis_mode", "manual_basis"):
+                "margin_split"):
         if key in body:
             session[key] = body[key]
 
@@ -625,21 +621,10 @@ def get_trade_balance(
             .quantize(Decimal("0.1"))
         )
 
-    # ------------------------------------------------------------------
-    # 3.0: basis mode fields
-    # ------------------------------------------------------------------
+    # The automatic basis-pool preview — mirrors confirm's own computation
+    # exactly, so what the operator sees here is what actually gets stored.
     has_cash = _has_cash(session)
-    mode, basis_mode_error = _effective_basis_mode(session)
-
-    projected_basis_pool: str | None = None
-    if basis_mode_error is None:
-        if mode == "transfer":
-            projected_basis_pool = str(_cents(total_cost_out))
-        elif mode == "split":
-            projected_basis_pool = str(_cents((total_cost_out + total_in) / 2))
-        elif mode == "manual":
-            mb = session.get("manual_basis")
-            projected_basis_pool = str(_cents(_money(mb))) if mb else None
+    projected_basis_pool = str(_compute_basis_pool(session, total_cost_out))
 
     return {
         "trade_id": session["trade_id"],
@@ -650,10 +635,8 @@ def get_trade_balance(
         "cash_components_net": str(cash_delta),
         "margin_pct": margin_pct,
         "is_balanced": abs(total_out - total_in - cash_delta) < Decimal("0.01"),
-        "basis_mode": mode,
         "has_cash": has_cash,
         "projected_basis_pool": projected_basis_pool,
-        "basis_mode_error": basis_mode_error,
     }
 
 
@@ -689,37 +672,20 @@ def confirm_trade_session(
     txns_created = 0
 
     # ------------------------------------------------------------------
-    # 3.0: Basis-mode validation and basis-pool computation
+    # Basis-pool computation — what the incoming cards actually cost us.
     #
-    # Three named modes replace the retired percent-based margin split:
-    #   transfer → basis_pool = total outgoing cost basis
-    #   split    → basis_pool = (total_out_basis + total_in_agreed) / 2
-    #   manual   → basis_pool = operator-supplied total
-    #
-    # Cash BLOCKS transfer and split — the operator must pick Manual
-    # whenever money moves, so a human decides the basis.
+    # Always automatic (see `_compute_basis_pool`): outgoing cards' original
+    # cost, plus any cash we paid, minus any cash we received. No mode to
+    # choose, no manual entry, no case where a trade can't be confirmed
+    # because of how money moved.
     # ------------------------------------------------------------------
-    mode, basis_mode_error = _effective_basis_mode(session)
-    if basis_mode_error:
-        raise HTTPException(status_code=422, detail=basis_mode_error)
-
     total_out_basis = sum(
         (_money(leg.get("our_cost_basis") or leg.get("agreed_value")) for leg in outgoing),
         Decimal("0"),
     )
-    total_in_agreed = sum((_money(leg.get("agreed_value")) for leg in incoming), Decimal("0"))
     total_out_agreed = sum((_money(leg.get("agreed_value")) for leg in outgoing), Decimal("0"))
 
-    if mode == "transfer":
-        basis_pool = _cents(total_out_basis)
-    elif mode == "split":
-        basis_pool = _cents((total_out_basis + total_in_agreed) / 2)
-    elif mode == "manual":
-        basis_pool = _cents(_money(session.get("manual_basis")))
-    else:
-        basis_pool = _cents(total_out_basis)
-
-    basis_pool = max(basis_pool, Decimal("0"))
+    basis_pool = _compute_basis_pool(session, total_out_basis)
     incoming_basis = _allocate_incoming_basis(basis_pool, incoming)
 
     # For card-only trades, record outgoing sales at pro-rata shares of
@@ -961,7 +927,6 @@ def confirm_trade_session(
     session["confirmed_at"] = datetime.now(tz=timezone.utc).isoformat()
     session["total_out_value"] = str(total_out)
     session["total_in_value"] = str(total_in)
-    session["basis_mode"] = mode
     repo.put_trade_session(session)
 
     return {
