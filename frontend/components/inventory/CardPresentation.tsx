@@ -1,6 +1,17 @@
 import Image from 'next/image'
 import { formatPrice } from '@/lib/inventory'
 
+// Shared by DisplayPanel (both docked and fullscreen) and ChatPanel's inline
+// artifact grid, so a card is the same size everywhere it renders — fixed
+// 2026-08-25 after both surfaces shipped cards roughly 2x this size (a
+// single inline chat card spanned most of the chat pane; the docked sidebar
+// was a one-per-row vertical stack, not a grid at all). `auto-fill` +
+// `minmax` rather than fixed `grid-cols-N` breakpoints: it's what makes the
+// sidebar's card count respond automatically to its own resizable width
+// instead of needing separate width-keyed breakpoints.
+export const CARD_GRID_CLASS =
+  'grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] items-start gap-3'
+
 export interface CardPresentationProps {
   title: string
   imageUrl?: string

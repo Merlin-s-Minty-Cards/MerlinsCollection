@@ -32,7 +32,7 @@ from decimal import Decimal
 from enum import Enum
 
 import boto3
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 
 from merlins_collection.config import settings
@@ -49,6 +49,12 @@ from merlins_collection.models.business import (
     Transaction,
 )
 from merlins_collection.models.catalog import CatalogCard, PricePoint
+from merlins_collection.models.chat import (
+    ADMIN_SURFACE,
+    CUSTOMER_SURFACE,
+    in_surface,
+    surface_of,
+)
 from merlins_collection.models.inventory import InventoryItemAdapter
 
 logger = logging.getLogger(__name__)
@@ -87,6 +93,32 @@ def _price_history_ttl(day: date) -> int:
     """
     moment = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
     return int((moment + timedelta(days=settings.price_history_retention_days)).timestamp())
+
+
+def _conversation_ttl(moment: datetime, surface: str = CUSTOMER_SURFACE) -> int:
+    """Epoch seconds a conversation-history row should expire (RFC 0017/0018).
+
+    Derived from the row's own logical timestamp, same idiom as
+    ``_price_history_ttl``. Callers pass ``updated_at`` for a conversation row
+    (so using a thread pushes its expiry forward) and the message's own
+    ``created_at`` for a message row (so a written message keeps its own
+    clock). Because ``updated_at`` is always >= the newest message's
+    ``created_at``, the conversation row always outlives its own messages --
+    which is what makes ownership impossible to orphan by expiry.
+
+    **THE SURFACE BRANCH LIVES HERE AND NOWHERE ELSE** (RFC 0018, Open Question
+    3): admin analyst threads are kept two years, customer threads six months.
+    A second writer computing its own TTL is how half a thread expires early,
+    and a message row that outlives or under-lives its own thread is either an
+    orphan or an empty transcript. Same single-authority rule CLAUDE.md records
+    for ``ledger.is_countable`` and for condition pricing.
+    """
+    days = (
+        settings.admin_conversation_retention_days
+        if surface == ADMIN_SURFACE
+        else settings.conversation_retention_days
+    )
+    return int((moment + timedelta(days=days)).timestamp())
 
 
 def _bucket(key: str) -> int:
@@ -2159,3 +2191,195 @@ class InventoryRepository:
         if not item:
             return None
         return item["locations"], item.get("gen", 0)
+
+    # ---- conversation history (RFC 0017) ----
+    #
+    # Two row shapes, both on the shared table:
+    #   index:    PK=USER#<sub>       SK=CONV#<created_at>#<conv_id>
+    #   messages: PK=CONV#<conv_id>   SK=MSG#<seq:06d>
+    #
+    # OWNERSHIP IS ALWAYS PROVEN THROUGH THE INDEX ROW. Message rows are keyed
+    # by conv_id alone and carry no authority of their own, so every read and
+    # write here resolves the caller's own conversation list first. That query
+    # is bounded at 50 rows by the per-user cap, so it is cheap and doubles as
+    # the backing read for the list route.
+
+    def list_conversations(self, sub: str) -> list[dict]:
+        """Every conversation owned by ``sub``, most recently USED first.
+
+        Sorted in memory rather than by key: the sort key embeds ``created_at``
+        and cannot express recency, but the result set is capped at 50 rows, so
+        sorting the full already-fetched response is identical in correctness
+        to sorting it in the key. (The failure mode server-side sort exists to
+        prevent is a ``limit`` truncating before the sort runs; there is no
+        limit here.) Same reasoning as the Vault/Show Prep client-side sorts.
+        """
+        rows = self._query_all(
+            KeyConditionExpression=Key("PK").eq(f"USER#{sub}")
+            & Key("SK").begins_with("CONV#")
+        )
+        return sorted(rows, key=lambda r: r.get("updated_at", ""), reverse=True)
+
+    def get_conversation(self, sub: str, conv_id: str) -> dict | None:
+        """One conversation, or ``None`` if ``sub`` does not own it.
+
+        Returning None (rather than raising) for a foreign id is what lets the
+        router answer 404 instead of 403 -- a 403 would confirm the id exists,
+        turning the endpoint into an existence oracle for guessed ULIDs.
+        """
+        for row in self.list_conversations(sub):
+            if row.get("conv_id") == conv_id:
+                return row
+        return None
+
+    def put_conversation(self, record: dict, *, expected_last_seq: int | None = None) -> None:
+        """Insert or replace a conversation index row, stamping its TTL.
+
+        ``expected_last_seq`` makes this the SERIALIZATION POINT for a thread.
+        Two requests appending to the same conversation both read the same
+        ``last_seq`` (the gap between that read and this write spans the whole
+        Bedrock call, several seconds), so without a guard the second would
+        overwrite the first's messages at the same sort key. With it, exactly
+        one wins and the loser raises ``ConditionalCheckFailedException``,
+        which the router turns into a 409.
+
+        The guard differs between create and append, and using the append form
+        for both is the obvious mistake — it fails 100% of the time on a new
+        thread, because there is no existing ``last_seq`` to compare against:
+
+        * create (``expected_last_seq=0`` on an unwritten row) → the row simply
+          must not already exist;
+        * append → the stored ``last_seq`` must still be what we read.
+
+        Note this is a conditional PUT rather than a ``transact_write_items``
+        across the row and both messages. Mutual exclusion is what actually
+        matters here, and this provides it; the residual failure (row updated,
+        a message write then fails) leaves a GAP in seq numbers, which is
+        harmless — ordering is preserved and ``message_count`` is already
+        documented as advisory — rather than the lost message a missing guard
+        would cause.
+        """
+        updated_at = record["updated_at"]
+        moment = (
+            datetime.fromisoformat(updated_at)
+            if isinstance(updated_at, str)
+            else updated_at
+        )
+        kwargs: dict = {"Item": {
+            "PK": f"USER#{record['sub']}",
+            "SK": f"CONV#{record['created_at']}#{record['conv_id']}",
+            "entity": "conversation",
+            # surface_of() rather than record["surface"]: a row built before
+            # RFC 0018 (or by a caller that never learned about surfaces) is a
+            # customer thread, and must get the customer clock rather than a
+            # KeyError.
+            "ttl": _conversation_ttl(moment, surface_of(record)),
+            **_serialize(record),
+        }}
+        if expected_last_seq is not None:
+            if expected_last_seq == 0:
+                kwargs["ConditionExpression"] = (
+                    Attr("PK").not_exists() | Attr("last_seq").eq(0)
+                )
+            else:
+                kwargs["ConditionExpression"] = Attr("last_seq").eq(expected_last_seq)
+        self._table.put_item(**kwargs)
+
+    def get_conversation_messages(self, conv_id: str, limit: int | None = None) -> list[dict]:
+        """A thread's messages, oldest first.
+
+        ``limit`` returns the most recent N (still oldest-first), because a
+        transcript is read from the end -- an unbounded response can pass the
+        Lambda Function URL's 6 MB buffered-response cap on a long thread.
+        """
+        if limit is None:
+            return self._query_all(
+                KeyConditionExpression=Key("PK").eq(f"CONV#{conv_id}")
+                & Key("SK").begins_with("MSG#")
+            )
+        resp = self._table.query(
+            KeyConditionExpression=Key("PK").eq(f"CONV#{conv_id}")
+            & Key("SK").begins_with("MSG#"),
+            ScanIndexForward=False,
+            Limit=limit,
+        )
+        return list(reversed(resp.get("Items", [])))
+
+    def put_conversation_message(
+        self, conv_id: str, sub: str, record: dict, *, surface: str
+    ) -> None:
+        """Append one message row, stamping its own clock for its own surface.
+
+        ``surface`` is REQUIRED, not defaulted, and that is deliberate. It is
+        passed in rather than looked up because the caller already holds the
+        thread's index row; making it mandatory is what stops a future caller
+        silently stamping an admin thread's messages with the six-month
+        customer clock, which would leave a two-year thread with an empty
+        transcript. A defaulted parameter here would reproduce the exact
+        silent-failure shape RFC 0018 item 1 exists to remove -- so the check
+        is mechanical (an incomplete call fails at import/typecheck) rather
+        than remembered.
+        """
+        created_at = record["created_at"]
+        moment = (
+            datetime.fromisoformat(created_at)
+            if isinstance(created_at, str)
+            else created_at
+        )
+        self._table.put_item(Item={
+            "PK": f"CONV#{conv_id}",
+            "SK": f"MSG#{int(record['seq']):06d}",
+            "entity": "conversation_message",
+            "conv_id": conv_id,
+            # Stored AND asserted on read (see services/conversations). A field
+            # kept "for defense in depth" that nothing reads is decoration.
+            "sub": sub,
+            "ttl": _conversation_ttl(moment, surface),
+            **_serialize(record),
+        })
+
+    def delete_conversation(self, sub: str, conv_id: str) -> bool:
+        """Hard-delete a conversation and its messages. False if not owned.
+
+        THE INDEX ROW GOES FIRST, and that ordering is load-bearing. A long
+        thread can hold hundreds of message rows; BatchWriteItem caps at 25 per
+        call and the Lambda times out at 30s. Deleting the index row first
+        means a sweep cut off half-way leaves the thread already gone from
+        every route -- ownership resolves through PK=USER#<sub>, so orphaned
+        message rows are unreachable by construction and reap themselves on
+        their own TTL. Delete the messages first and a timeout leaves a live,
+        listable thread with a hole punched in its transcript.
+        """
+        row = self.get_conversation(sub, conv_id)
+        if row is None:
+            return False
+        self._table.delete_item(Key={"PK": row["PK"], "SK": row["SK"]})
+        self.delete_conversation_messages(conv_id)
+        return True
+
+    def delete_all_conversations(self, sub: str, surface: str) -> list[str]:
+        """Delete every index row for ``sub`` FIRST, returning the ids to sweep.
+
+        The thread count is capped at 50, but the ROW count is not — 50 threads
+        of several hundred messages each is far more than a 30s Lambda can
+        BatchWriteItem through. Clearing all index rows in one bounded pass
+        means the caller's history list is empty the moment this returns, which
+        is the whole observable contract; the message sweep that follows is
+        best-effort, and anything it misses is unreachable and TTL-reaped.
+
+        SCOPED TO ONE SURFACE, and ``surface`` is required rather than
+        defaulting to "everything" — an unscoped bulk delete is precisely the
+        bug this change removes from ``prune_to_cap``, and a convenience
+        default would leave it one forgotten argument away from returning.
+        """
+        rows = [r for r in self.list_conversations(sub) if in_surface(r, surface)]
+        with self._table.batch_writer() as batch:
+            for row in rows:
+                batch.delete_item(Key={"PK": row["PK"], "SK": row["SK"]})
+        return [row["conv_id"] for row in rows]
+
+    def delete_conversation_messages(self, conv_id: str) -> None:
+        """Sweep every message row for a thread whose index row is already gone."""
+        with self._table.batch_writer() as batch:
+            for row in self.get_conversation_messages(conv_id):
+                batch.delete_item(Key={"PK": row["PK"], "SK": row["SK"]})

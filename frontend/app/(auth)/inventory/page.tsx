@@ -1,6 +1,6 @@
 import type { Metadata } from 'next'
 import Container from '@/components/ui/Container'
-import InventoryWorkspace from '@/components/inventory/InventoryWorkspace'
+import SplitWorkspace from '@/components/inventory/SplitWorkspace'
 import InventoryStats from '@/components/inventory/InventoryStats'
 
 export const metadata: Metadata = { title: 'Inventory Search' }
@@ -27,7 +27,7 @@ export default function InventoryPage() {
         </header>
 
         <div className="mt-8">
-          <InventoryWorkspace />
+          <SplitWorkspace />
         </div>
       </Container>
     </div>

@@ -282,7 +282,7 @@ health check wants.
   event-translation model is a second thing to verify against this app's
   specific subprocess/threading design.
 - **API Gateway HTTP API instead of a Function URL.** Considered directly
-  (see `claude-progress.txt`'s OWNER DECISIONS) and rejected: no response
+  (see `claude-progress.md`'s OWNER DECISIONS) and rejected: no response
   streaming (forecloses ever streaming `/chat`), a hard 30-second integration
   timeout HTTP API cannot raise (Function URLs are bound only by the
   function's own configurable timeout, up to 15 minutes), and none of HTTP
@@ -300,7 +300,7 @@ health check wants.
   PKCE.** Bigger rewrite (drops NextAuth's server-side session model,
   requires a secret-less "Public client" Cognito app client, re-plumbs every
   page that currently trusts a server session), bigger savings. Deferred by
-  owner decision — see `claude-progress.txt` — revisit only if request
+  owner decision — see `claude-progress.md` — revisit only if request
   volume grows enough to justify it.
 - **Amplify Hosting for the frontend.** Already rejected once
   (`docs/aws-setup.md`, Phase 6) for being a git-based remote build service

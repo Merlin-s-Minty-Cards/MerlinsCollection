@@ -1,17 +1,18 @@
 'use client'
 
-import { useState } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { useSession } from 'next-auth/react'
 import { Send } from 'lucide-react'
 import { ApiError } from '@/lib/api'
 import {
   sendChat,
-  type ChatMessage,
+  displayedCardToPresentedCard,
   type DisplayedCard,
   type DisplayPanelState,
 } from '@/lib/inventory'
-import { CardPresentation } from './CardPresentation'
-import { DisplayPanel } from './DisplayPanel'
+import { getConversation } from '@/lib/conversations'
+import { CARD_GRID_CLASS, CardPresentation } from './CardPresentation'
+import type { ResultsView } from './ResultsPane'
 import MarkdownMessage from './MarkdownMessage'
 
 type Bubble = {
@@ -21,62 +22,143 @@ type Bubble = {
 }
 
 const GENERIC_ERROR = 'Something went wrong. Try asking again.'
-const MAX_HISTORY_TURNS = 20
-const MAX_TURN_CHARS = 4000
+const MISSING_THREAD_ERROR =
+  'That conversation is no longer available. Starting a new one.'
 const EMPTY_PANEL: DisplayPanelState = { cards: [], truncated: false }
+const EMPTY_DISPLAY_MESSAGE = 'No cards in the display yet.'
+const TRUNCATED_NOTICE = 'Limited to 50 cards. Some results are not shown.'
 
-/** Build completed, bounded user/assistant exchanges for Bedrock replay. */
-function buildHistory(messages: Bubble[]): ChatMessage[] {
-  const turns: ChatMessage[] = []
-  for (let i = 0; i < messages.length - 1; i++) {
-    const question = messages[i]
-    const answer = messages[i + 1]
-    if (
-      question.role === 'user' &&
-      answer.role === 'assistant' &&
-      question.content !== '' &&
-      answer.content !== ''
-    ) {
-      turns.push(
-        { role: 'user', content: question.content.slice(0, MAX_TURN_CHARS) },
-        { role: 'assistant', content: answer.content.slice(0, MAX_TURN_CHARS) },
-      )
-      i++
-    }
+/** Build the shared right-pane view from the chat's own display-panel state. */
+function toDisplayView(panel: DisplayPanelState): ResultsView {
+  return {
+    headerLabel: `Display (${panel.cards.length}${panel.truncated ? '+' : ''})`,
+    cards: panel.cards.map(displayedCardToPresentedCard),
+    status: 'success',
+    emptyMessage: EMPTY_DISPLAY_MESSAGE,
+    truncatedNotice: panel.truncated ? TRUNCATED_NOTICE : undefined,
   }
-  return turns.slice(-MAX_HISTORY_TURNS)
 }
 
-function artifactTitle(card: DisplayedCard): string {
-  return card.display_name || card.card?.name || 'Unknown card'
+export interface ChatPanelProps {
+  /**
+   * RFC 0019: ChatPanel no longer renders its own display panel — it shares
+   * one ResultsPane with filter mode. This fires whenever the set of
+   * currently-displayed cards changes, carrying a normalized view for that
+   * shared pane.
+   */
+  onDisplayChange?: (view: ResultsView) => void
+  /**
+   * RFC 0017: fires whenever the thread this panel is in changes — a new
+   * thread's server-assigned id, a resumed one, or null after reset(). Lets
+   * the header highlight the open thread and notice when it is deleted.
+   */
+  onConversationChange?: (conversationId: string | null) => void
 }
 
-function artifactCondition(card: DisplayedCard): string {
-  if (card.condition) return card.condition
-  if (card.kind === 'graded') {
-    if (card.grade_label) return card.grade_label
-    const slabGrade = [card.company, card.grade].filter(Boolean).join(' ')
-    if (slabGrade) return slabGrade
-  }
-  // kind is narrowed to 'raw' | 'graded' (RFC-0016 Council r2): a 'sealed'
-  // branch here was dead code, since a DisplayedCard can never carry that
-  // kind (see DisplayedCard.kind's docstring in models/chat.py).
-  return 'N/A'
+export interface ChatPanelHandle {
+  /** Clears the transcript, input, and display state — a fresh conversation. */
+  reset: () => void
+  /**
+   * Clears only the "pinned" display cards (what round-trips as
+   * `panel_item_ids` on the next turn), leaving the transcript untouched.
+   * Used by the shared ResultsPane's "Clear display" control in chat mode.
+   */
+  clearDisplay: () => void
+  /**
+   * Opens a stored thread: replaces the transcript, the display panel and the
+   * live thread id with that conversation's. Never rejects — a thread deleted
+   * in another tab or aged out by the TTL is a routine 404, surfaced in the
+   * transcript rather than thrown at the caller.
+   */
+  loadConversation: (conversationId: string) => Promise<void>
 }
 
-export default function ChatPanel() {
+const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(function ChatPanel(
+  { onDisplayChange, onConversationChange },
+  ref,
+) {
   const { data: session } = useSession()
   const [input, setInput] = useState('')
   const [messages, setMessages] = useState<Bubble[]>([])
   const [displayPanel, setDisplayPanel] = useState<DisplayPanelState>(EMPTY_PANEL)
   const [sending, setSending] = useState(false)
+  // RFC 0017: the thread this panel is currently in. null means the next
+  // message opens a new one, which the backend creates implicitly.
+  const [conversationId, setConversationId] = useState<string | null>(null)
+  // Monotonic id (same pattern as FilterPanel's requestId): bumped by both a
+  // new send AND reset(), so a reply that resolves after either can never
+  // write into a conversation it no longer belongs to. Without this, calling
+  // the new reset() while a request is in flight let a stale reply reappear
+  // in an otherwise-fresh, supposedly-empty conversation once it resolved.
+  const requestId = useRef(0)
+
+  // Push the current display state to the shared right-pane ResultsPane
+  // whenever it changes — this is the ONLY place it reaches the DOM now;
+  // ChatPanel itself never renders a card grid for it.
+  useEffect(() => {
+    onDisplayChange?.(toDisplayView(displayPanel))
+    // onDisplayChange is intentionally omitted — see FilterPanel's identical
+    // reasoning for onResultsChange.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayPanel])
+
+  useEffect(() => {
+    onConversationChange?.(conversationId)
+    // onConversationChange is intentionally omitted — same reasoning as
+    // onDisplayChange above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversationId])
+
+  useImperativeHandle(ref, () => ({
+    reset: () => {
+      requestId.current++
+      setMessages([])
+      setInput('')
+      setDisplayPanel(EMPTY_PANEL)
+      setConversationId(null)
+    },
+    clearDisplay: () => {
+      setDisplayPanel(EMPTY_PANEL)
+    },
+    loadConversation: async (id: string) => {
+      const requestNumber = ++requestId.current
+      try {
+        const detail = await getConversation(id, { token: session?.accessToken })
+        if (requestNumber !== requestId.current) return
+        // Replaced together, past the guard. Setting the thread id apart from
+        // the transcript would leave the panel showing one thread while the
+        // next message appends to another.
+        setMessages(
+          detail.messages.map((message) => ({
+            role: message.role,
+            content: message.content,
+            artifacts: message.artifacts ?? [],
+          })),
+        )
+        setDisplayPanel(detail.panel ?? EMPTY_PANEL)
+        setConversationId(detail.conversation_id)
+        setInput('')
+      } catch (err) {
+        if (requestNumber !== requestId.current) return
+        // Routine, not exceptional: deleted in another tab, or TTL-expired.
+        // The current thread is left exactly as it was.
+        const detail =
+          err instanceof ApiError && err.status === 404
+            ? MISSING_THREAD_ERROR
+            : err instanceof ApiError && err.detail
+              ? err.detail
+              : GENERIC_ERROR
+        setMessages((prev) => [...prev, { role: 'error', content: detail }])
+      }
+    },
+  }))
 
   async function onSubmit(event: React.FormEvent) {
     event.preventDefault()
     const text = input.trim()
     if (!text || sending) return
 
-    const history = buildHistory(messages)
+    const id = ++requestId.current
     // Only stable item IDs round-trip. Every visible field is discarded and
     // re-hydrated by the backend on this request.
     const panelItemIds = displayPanel.cards.map((card) => card.item_id)
@@ -85,30 +167,50 @@ export default function ChatPanel() {
     setInput('')
     setSending(true)
     try {
-      const res = await sendChat(text, history, panelItemIds, {
-        token: session?.accessToken,
-      })
+      const res = await sendChat(
+        text,
+        { conversationId, panelItemIds },
+        { token: session?.accessToken },
+      )
+      if (id !== requestId.current) return
       setMessages((prev) => [
         ...prev,
         { role: 'assistant', content: res.reply, artifacts: res.artifacts ?? [] },
       ])
       setDisplayPanel(res.panel ?? EMPTY_PANEL)
+      if (res.conversation_id) setConversationId(res.conversation_id)
     } catch (err) {
-      const detail = err instanceof ApiError && err.detail ? err.detail : GENERIC_ERROR
+      if (id !== requestId.current) return
+      // A 404 means this thread is gone — either deleted elsewhere, or never
+      // actually persisted: the backend returns a well-formed conversation_id
+      // even when the write that would have created the thread failed, because
+      // it refuses to discard a paid-for Bedrock reply. Holding that id would
+      // 404 every subsequent message forever, so it is dropped here and the
+      // next message opens a fresh thread.
+      const missingThread = err instanceof ApiError && err.status === 404
+      if (missingThread) setConversationId(null)
+      const detail = missingThread
+        ? MISSING_THREAD_ERROR
+        : err instanceof ApiError && err.detail
+          ? err.detail
+          : GENERIC_ERROR
       setMessages((prev) => [...prev, { role: 'error', content: detail }])
     } finally {
+      // Always clears `sending`, even for a stale request — reset() doesn't
+      // touch it, so without this a reset while a request is in flight would
+      // leave the fresh conversation's input disabled until the browser tab
+      // is reloaded.
       setSending(false)
     }
   }
 
   return (
-    <div className="relative">
-      <div className="flex h-[560px] flex-col rounded-2xl vault-panel">
-        <div
-          className="vault-scroll flex-1 space-y-4 overflow-y-auto p-4 sm:p-5"
-          aria-live="polite"
-          aria-atomic="false"
-        >
+    <div className="flex h-full flex-col rounded-2xl vault-panel">
+      <div
+        className="vault-scroll flex-1 space-y-4 overflow-y-auto p-4 sm:p-5"
+        aria-live="polite"
+        aria-atomic="false"
+      >
           {messages.length === 0 && (
             <div className="flex h-full flex-col items-center justify-center text-center">
               <p className="text-pine-100">Ask Merlin about the collection</p>
@@ -153,17 +255,10 @@ export default function ChatPanel() {
           </button>
         </form>
       </div>
-
-      {displayPanel.cards.length > 0 && (
-        <DisplayPanel
-          cards={displayPanel.cards}
-          truncated={displayPanel.truncated}
-          onClose={() => setDisplayPanel({ cards: [], truncated: false })}
-        />
-      )}
-    </div>
   )
-}
+})
+
+export default ChatPanel
 
 function ChatBubble({ bubble }: { bubble: Bubble }) {
   if (bubble.role === 'user') {
@@ -188,21 +283,23 @@ function ChatBubble({ bubble }: { bubble: Bubble }) {
         <MarkdownMessage content={bubble.content} />
       </div>
       {bubble.artifacts && bubble.artifacts.length > 0 && (
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          {bubble.artifacts.map((card) => (
+        // Shared CARD_GRID_CLASS so an inline chat card is the same size as
+        // one in the shared results pane — a single card used to span most
+        // of the chat pane's width (owner report, 2026-08-25). Mapped through
+        // displayedCardToPresentedCard (RFC 0019), the same shared helper the
+        // right-pane display view uses — no more parallel title/condition
+        // logic for the same DisplayedCard shape.
+        <div className={`max-w-[85%] ${CARD_GRID_CLASS}`}>
+          {bubble.artifacts.map(displayedCardToPresentedCard).map((card) => (
             <CardPresentation
-              key={card.item_id}
-              title={artifactTitle(card)}
-              imageUrl={card.card?.image_small || undefined}
-              setName={card.card?.set_name ?? 'Unknown set'}
-              number={card.card?.number}
-              conditionLabel={artifactCondition(card)}
-              // listed_price is the RESOLVED, condition-adjusted price
-              // (mirrors routers/inventory.py::_display_price); it must win
-              // over current_market_value, a separate, potentially stale
-              // pass-through (RFC-0016 Council r2 self-review).
-              price={card.listed_price ?? card.current_market_value ?? 'Price N/A'}
-              isJapanese={card.language === 'JP'}
+              key={card.key}
+              title={card.title}
+              imageUrl={card.imageUrl}
+              setName={card.setName}
+              number={card.number}
+              conditionLabel={card.conditionLabel}
+              price={card.price}
+              isJapanese={card.isJapanese}
             />
           ))}
         </div>

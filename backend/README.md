@@ -104,7 +104,12 @@ The status codes are deliberate and distinguish *whose* problem it is:
 | `GET /inventory/search` | Bearer | Filter inventory by name/set/rarity/condition/price |
 | `GET /inventory/summary` | Bearer | Dashboard header stats (`cards_in_vault`, `est_value`, `sets_tracked`) |
 | `GET /inventory/facets` | Bearer | Distinct sets/rarities/conditions/languages for filter dropdowns |
-| `POST /chat/` | Bearer | Natural-language inventory chat via Bedrock |
+| `POST /chat/` | Bearer | Natural-language inventory chat via Bedrock; takes `conversation_id`, returns it + `title` |
+| `GET /chat/conversations` | Bearer | The caller's own threads, ≤50, `updated_at` descending |
+| `GET /chat/conversations/{id}` | Bearer | One transcript (≤200 messages) + live-rehydrated panel |
+| `PATCH /chat/conversations/{id}` | Bearer | Rename a thread (does not touch `updated_at`) |
+| `DELETE /chat/conversations/{id}` | Bearer | Hard delete one thread (204) |
+| `DELETE /chat/conversations` | Bearer | Delete every thread the caller owns (204) |
 | `GET /public/shows` | **None** | All shows split into `upcoming`/`past` by the business's Pacific "today" |
 | `GET /public/featured-cards` | **None** | Up to 5 homepage cards (`name` + `image_url` only) |
 | `GET /admin/*` | Admin | Retool admin panel (inventory CRUD, sales, buys, trades, show prep, market) |

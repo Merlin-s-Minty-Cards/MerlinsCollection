@@ -92,13 +92,21 @@ UI components never call `fetch` directly. They go through `lib/`, which keeps t
 backend contract in one typed place:
 
 - **`api.ts`** — `apiFetch<T>()`, the single typed wrapper around `fetch` for the
-  FastAPI backend (prefixes `NEXT_PUBLIC_API_URL`, throws on non-2xx).
+  FastAPI backend (prefixes `NEXT_PUBLIC_API_URL`, throws on non-2xx). A **204
+  No Content** resolves to `undefined` instead of throwing — gated on that
+  status exactly, so a malformed empty 200 still fails loudly.
 - **`inventory.ts`** — types + helpers for the inventory tool, modeled on the
   [pokemontcg.io v2](https://docs.pokemontcg.io/) card schema. Includes
   `searchInventory` (filter mode → `GET /inventory/search`), `getInventorySummary`
   (authenticated dashboard header stats → `GET /inventory/summary`), `sendChat`
-  (chat mode → `POST /chat`), and pure helpers (`pickMarketPrice`, `formatPrice`,
+  (chat mode → `POST /chat/`), and pure helpers (`pickMarketPrice`, `formatPrice`,
   `buildSearchQuery`).
+- **`conversations.ts`** — typed client for the five conversation routes
+  (RFC 0017): `listConversations`, `getConversation`, `renameConversation`,
+  `deleteConversation`, `clearConversations`. The transcript is server-owned,
+  so `sendChat` carries a `conversation_id` rather than a `history` array —
+  nothing here pushes transcript content back up, and nothing should grow a
+  way to. A thread the caller does not own answers **404, never 403**.
 - **`public.ts`** — typed client for the backend's unauthenticated `/public/*`
   endpoints: `getPublicShows` (`GET /public/shows`, upcoming/past) and
   `getFeaturedCards` (`GET /public/featured-cards`, homepage cards). Both

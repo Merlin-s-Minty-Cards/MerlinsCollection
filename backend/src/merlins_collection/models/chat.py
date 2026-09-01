@@ -1,5 +1,6 @@
 """Request/response models for the ``/chat`` (AI chat mode) endpoint."""
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
@@ -14,29 +15,37 @@ class ChatTurn(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    """A user chat message plus optional prior turns and panel item IDs.
+    """A user chat message, its conversation, and the client's current panel.
 
-    Only item IDs may round-trip from the client. Display data is always rebuilt
-    from the inventory repository during the Bedrock tool loop.
+    RFC 0017: the transcript is now SERVER-owned. ``conversation_id`` selects
+    the thread; omitting it starts a new one implicitly (owner decision — "New
+    chat" stays a zero-latency client-side reset, and a thread opened but never
+    used never exists to occupy one of the 50 slots).
+
+    Only item IDs may round-trip from the client. Display data is always
+    rebuilt from the inventory repository during the Bedrock tool loop.
     """
 
     message: str = Field(min_length=1, max_length=4000)
-    history: list[ChatTurn] = Field(default_factory=list, max_length=20)
+    conversation_id: str | None = Field(default=None, max_length=64)
     panel_item_ids: list[str] = Field(default_factory=list, max_length=50)
+    # DEPRECATED and IGNORED (RFC 0017). Kept for exactly one release so a
+    # CloudFront-cached old client bundle gets a working chat instead of a 422
+    # -- the client bundle is baked at build time and cannot be updated in
+    # lockstep with this API. Nothing reads it: the server loads the real
+    # transcript from storage, which is also what stops a client forging
+    # assistant turns to put words in the model's mouth. Remove the field once
+    # the deployed bundle is known to have rolled over.
+    history: list[ChatTurn] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
     def _validate_request_context(self) -> "ChatRequest":
-        """Validate Bedrock history ordering and bound round-tripped item IDs."""
-        for i, turn in enumerate(self.history):
-            expected = "user" if i % 2 == 0 else "assistant"
-            if turn.role != expected:
-                raise ValueError(
-                    "history must alternate user/assistant turns, starting with user"
-                )
-        if len(self.history) % 2 != 0:
-            raise ValueError(
-                "history must end with an assistant turn (completed exchanges only)"
-            )
+        """Bound round-tripped item IDs.
+
+        The user/assistant alternation checks that used to live here are gone
+        with client-sent history: the server now guarantees a well-formed
+        replay window by construction (services/conversations.replay_turns).
+        """
         for item_id in self.panel_item_ids:
             if len(item_id) > 100:
                 raise ValueError("panel_item_ids contains an item ID over 100 characters")
@@ -128,3 +137,103 @@ class ChatResponse(BaseModel):
     reply: str
     artifacts: list[DisplayedCard] = Field(default_factory=list)
     panel: DisplayPanel = Field(default_factory=DisplayPanel)
+    # RFC 0017. Always present, including for a thread this request just
+    # created implicitly -- it is how the client learns which thread it is in
+    # without a second round trip.
+    conversation_id: str = ""
+    title: str = ""
+
+
+# ---- RFC 0017: conversation history ----
+
+#: Upper bound on a title, whether derived or user-supplied. Matches
+#: display_name_override's precedent for an admin-typed string.
+MAX_TITLE_LENGTH = 200
+
+#: The two chat surfaces (RFC 0018). A thread belongs to exactly one.
+#:
+#: These live here, in a leaf module, so both ``services/conversations.py`` and
+#: ``services/dynamodb.py`` can import them without a cycle — the TTL branch is
+#: in the repository while the scoping predicate is in the service, and neither
+#: should be spelling a bare "admin" string of its own.
+CUSTOMER_SURFACE = "customer"
+ADMIN_SURFACE = "admin"
+
+
+def surface_of(row: dict) -> str:
+    """The surface a stored conversation row belongs to.
+
+    **The default is a FACT, not a guess.** Nothing is backfilled: every row
+    written before RFC 0018 is a customer thread, because ``/admin/chat/`` did
+    not exist to write any other kind. Same precedent as ``Transaction.batch_id``
+    — optional, defaulted, no migration, one code path with no legacy branch.
+    """
+    return str(row.get("surface") or CUSTOMER_SURFACE)
+
+
+def in_surface(row: dict, surface: str) -> bool:
+    """THE scoping predicate. Every reader that cares about a surface calls this.
+
+    RFC 0018's own risk table flags "`surface` filter forgotten in one reader"
+    and names the list and the count. It missed the third and worst one:
+    ``prune_to_cap`` DELETES rows, so an unscoped prune silently evicts the
+    two-year admin threads Open Question 3 promises to keep. There is one
+    definition, it lives here, and list/count/prune/clear-all/get all call it —
+    the same shape as ``services/triage.in_triage_scope``, and for the same
+    reason: two spellings of a scope is how a queue and its badge start
+    disagreeing.
+    """
+    return surface_of(row) == surface
+
+
+class ConversationSummary(BaseModel):
+    """One row of the history list. Carries no message content."""
+
+    conversation_id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    # ADVISORY ONLY. DynamoDB TTL deletion is best-effort (typically within 48h
+    # of expiry), so after a message row is reaped this can read higher than
+    # the number of rows that still exist. Nothing computes from it.
+    message_count: int = 0
+
+
+class ConversationMessage(BaseModel):
+    """One stored turn, with its inline cards hydrated LIVE at fetch time.
+
+    ``artifacts`` is never deserialized from storage -- only the item IDs are
+    stored, and they are re-hydrated on read. Storing the card records instead
+    would re-serve a months-old price in a tile that looks identical to a
+    current one, which is the exact failure RFC 0016's "IDs only" rule exists
+    to prevent.
+    """
+
+    seq: int
+    role: Literal["user", "assistant"]
+    content: str
+    artifacts: list[DisplayedCard] = Field(default_factory=list)
+    created_at: datetime
+
+
+class ConversationDetail(BaseModel):
+    """A resumed thread: transcript plus its live-hydrated panel."""
+
+    conversation_id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    messages: list[ConversationMessage] = Field(default_factory=list)
+    # True when older turns exist but were not returned -- the transcript is
+    # capped so one response cannot exceed the Lambda Function URL's 6 MB
+    # buffered-response limit.
+    truncated: bool = False
+    panel: DisplayPanel = Field(default_factory=DisplayPanel)
+
+
+class ConversationList(BaseModel):
+    conversations: list[ConversationSummary] = Field(default_factory=list)
+
+
+class ConversationRenameRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=MAX_TITLE_LENGTH)

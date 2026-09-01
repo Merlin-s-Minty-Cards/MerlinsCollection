@@ -739,7 +739,7 @@ class TestAdminMarketConfidence:
 # RFC 0009 T7 — the graded refresh-skip bug
 # ===========================================================================
 #
-# Open since Round 2 (claude-progress.txt, KNOWN BUGS): "Admin refresh-prices
+# Open since Round 2, recorded at the time as: "Admin refresh-prices
 # button silently skips graded slabs (raw-only scope); nightly sync does refresh
 # them. Scope mismatch, not a wrong number."
 #

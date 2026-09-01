@@ -17,7 +17,7 @@ A fifth reported symptom (Trade page Catalog/Inventory and Raw/Graded toggle but
 
 ## Motivation
 
-Owner-reported, 2026-08-14: no card shows price history despite being in the system a while; no consignor filter/column on Inventory; every show's analytics read zero even though the Daily tab works; column sorting is inconsistent across admin tables. Each was root-caused (see `claude-progress.txt` FEATURE GOAL section for the full diagnosis) to a real, distinct gap rather than one shared bug.
+Owner-reported, 2026-08-14: no card shows price history despite being in the system a while; no consignor filter/column on Inventory; every show's analytics read zero even though the Daily tab works; column sorting is inconsistent across admin tables. Each was root-caused (see `claude-progress.md` FEATURE GOAL section for the full diagnosis) to a real, distinct gap rather than one shared bug.
 
 ## Detailed Design
 

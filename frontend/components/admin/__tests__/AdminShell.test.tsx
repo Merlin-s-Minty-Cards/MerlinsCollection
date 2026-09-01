@@ -13,6 +13,10 @@ vi.mock('next/navigation', () => ({
 
 vi.mock('next-auth/react', () => ({
   signOut: vi.fn(),
+  // AdminShell mounts AdminChat (RFC 0018), which reads the Cognito access
+  // token to call /admin/chat. Not a change to what this file tests — the
+  // shell simply has a new child with a real session dependency.
+  useSession: () => ({ data: { accessToken: 'test-token' }, status: 'authenticated' }),
 }))
 
 const getMock = vi.fn()

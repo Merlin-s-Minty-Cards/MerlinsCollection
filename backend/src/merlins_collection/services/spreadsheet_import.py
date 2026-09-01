@@ -1351,7 +1351,7 @@ def run_singles_only_import(csv_dir, repo, *, force_replace: bool = False) -> di
 
     * reads exactly one CSV — the other 17 tabs are never opened, so the two
       documented dormant bugs in ``import_sealed``/``import_consignments``
-      (see claude-progress.txt "DEFERRED — OTHER TABS") stay dormant;
+      stay dormant;
     * checks for pre-existing data with the guard scoped to
       ``SINGLES_ONLY_ENTITIES``, so shows/debts/payouts cannot refuse it;
     * writes under a fresh generation, exactly like a full run;
@@ -1386,7 +1386,7 @@ def run_singles_only_import(csv_dir, repo, *, force_replace: bool = False) -> di
     every inventory_item/transaction not of this generation" has nothing to
     delete but this path's own prior attempts.
     It is NOT future-proof. Once Sealed/Bulk/Consignments are turned back on — a
-    FUTURE phase (claude-progress.txt "DEFERRED — OTHER TABS"), NOT now, and
+    FUTURE phase, NOT now, and
     nothing here should be built for it in advance — a Singles-only re-run would
     delete THEIR inventory rows too, because it cannot see the difference. Before
     that happens the scope has to get finer than entity type: filter the sweep by

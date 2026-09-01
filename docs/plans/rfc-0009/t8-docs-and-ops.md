@@ -51,7 +51,7 @@ The "Third-Party APIs (Planned)" section contains three errors, all recorded in
 |---|---|
 | The PSA cert API supplies **population** data | It does not. `TotalPopulation` and `PopulationHigher` are **always `null`** on the public API. Population is website-only |
 | **PriceCharting** is the graded price source | Owner declined a paid subscription on 2026-08-07. The source is **PokemonPriceTracker's free tier** (100 credits/day, PSA 8/9/10 from eBay sold listings) |
-| "see claude-progress.txt Phase 4, PAUSED" | That file was replaced by the admin-enhancements rounds and has no Phase 4. Point at `docs/rfcs/0009-...` instead |
+| "see claude-progress.md Phase 4, PAUSED" | That file was replaced by the admin-enhancements rounds and has no Phase 4. Point at `docs/rfcs/0009-...` instead |
 
 Rewrite the section to describe what was **built**, not what was planned — the
 feature exists now. It should state:

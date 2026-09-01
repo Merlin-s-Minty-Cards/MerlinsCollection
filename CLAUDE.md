@@ -9,7 +9,7 @@ Never combine phases. Wait for user confirmation after confirming tests fail.
 Development stays in the main thread — no subagent-driven orchestration. Custom skills live in `.claude/skills/`; the two remaining custom agents (`.claude/agents/test-qa.md`, `.claude/agents/web-browser.md`) exist only because their output is long-running or heavy and belongs off the main thread, not because they get orchestrated.
 
 For **non-trivial feature work** (new functionality, multi-step changes, anything touching more than a couple of files), default to this flow without waiting to be asked:
-1. `initialize-roadmap` skill — audit the workspace, create/update `claude-progress.txt`, unless one already exists and is current for the active feature.
+1. `initialize-roadmap` skill — audit the workspace, create/update `claude-progress.md`, unless one already exists and is current for the active feature.
 2. `design-doc` skill for architecture/schema/contract design on substantial features.
 3. `tdd` skill for implementation — it nests `adversarial-review` as an inline pre- and post-change critique step (logic, security, chaos, bloat), no subagent spawn.
 4. `sync-docs` then `pr-description` skills to close out.
@@ -20,6 +20,128 @@ Skip this default for small fixes, one-off questions, or anything the user frame
 **When the user explicitly invokes `subagent-driven-development` as that override, design stays with the driving model and only mechanical implementation delegates down.** RFC-writing, the implementation plan, and any task-brief authoring are done by the model already running the conversation — never handed to a subagent, because a fresh subagent re-derives context that model already has. Only the per-task implementer dispatches (the code-writer loop the skill drives once briefs exist) go to subagents, and each of those dispatches **must pass an explicit `model` override** — omitting it silently inherits the calling session's own model, which defeats the skill's own "Model Selection" section rather than merely skipping an optimization. Diagnosed 2026-08-14 on RFC 0012: the first implementer dispatches ran on Opus by default via the `code-writer` agent's own frontmatter, for tasks whose briefs already contained the exact code to write — pure transcription-plus-testing, the skill's own stated cheapest-tier case. Knowing the skill's rule was not enough; the fix was to make the check mechanical rather than remembered — the driving model treats "no explicit `model` on this dispatch" as an incomplete call, the same way a missing required argument would be.
 
 **Closing the loop is a separate, always-on concern, not part of the feature flow above.** `lesson-capture` fires whenever the user reports that something Claude built or decided fell short, or Claude itself notices it took a long or circuitous path a clearer rule would have avoided — it writes the generalized lesson (never a narrow one-off fix) to CLAUDE.md or a skill, gated on the lesson actually generalizing. `skill-curator` is the periodic, hand-run counterpart that reviews `.claude/skills/` for drift — near-duplicates to merge, bloated skills to split, over-narrow entries that slipped past the gate. Any skill file either one touches goes through `writing-great-skills`, never `superpowers:writing-skills`.
+
+## ESCALATE ON MISSING INFORMATION, NEVER ON UNCERTAINTY — THE OWNER SETS DIRECTION, NOT IMPLEMENTATION
+
+Owner rule, stated 2026-08-27: *"My goal is to lay out a design idea, you ask
+questions to help me nail down the details, then from then on, you do
+everything without needing my input, with the exception of some very critical
+cases."*
+
+**The test for interrupting the owner is NOT "am I uncertain?" It is "does the
+owner hold information I cannot obtain?"** Those come apart constantly, and
+mistaking the first for the second is what produces a stream of questions the
+owner experiences as being made to do the work they delegated.
+
+Diagnosed on RFC 0018's kickoff, where two questions went up that should never
+have left the session:
+
+- *"Should the carried-forward visual verification run before RFC-0018's code
+  or alongside it?"* — a **reversible ordering preference** with no
+  information asymmetry at all. Pick one, say which and why, revisit if it
+  turns out wrong.
+- *"RFC-0018 says every money figure routes through `services/ledger.py`'s
+  `is_countable`, but `mcp-server-admin/` is a Node process — mirror the
+  predicate in TypeScript, or call back into the backend?"* — **answerable
+  from the repo**, and from files already read in that same session:
+  `ledger.py`, `mcp-server/src/condition-pricing.ts`, and
+  `backend/tests/test_cross_boundary.py`, which is the existing precedent for
+  exactly this Python↔TypeScript problem. The owner was handed a research
+  task, not a decision.
+
+Both had a determinable answer. Neither needed a human. `AskUserQuestion`'s
+own description already says to reserve it for choices the codebase cannot
+settle — **knowing that rule was not enough**, the same way knowing the
+`model`-override rule was not enough above. So the check is mechanical:
+**before escalating, name the specific fact the owner has that you do not.**
+If you cannot name one, you are escalating on uncertainty and the question
+does not go up.
+
+**What DOES go up:** a change to what the feature *is* or who it is for; a
+decision that spends money or is hard to reverse (a production write, a
+deploy, a paid API, deleting owner data); a genuine conflict between two
+things the owner has previously asked for; and anything the owner has
+explicitly reserved. Note the asymmetry — *reversible* is the operative word.
+An ordering choice is reversible; `POST /chat/` billing Bedrock and writing
+rows to the live table is not, which is why **that** one was correctly held
+back in the same session.
+
+**When you want a second opinion, spawn an adversarial agent — do not use the
+owner as one.** This is a deliberate, narrow exception to "development stays
+in the main thread" above: it covers a *decision review*, never orchestrating
+implementation. `adversarial-review` still runs inline inside `tdd` as its
+pre- and post-change passes; this is the additional case where a design call
+is genuinely close and an independent read is worth more than another lap of
+self-critique. A subagent costs a few minutes; a question costs the owner a
+context switch and their confidence that the work is being carried.
+
+**Write the decision down where the next session will find it** — the
+`claude-progress.md` roadmap item, the RFC, or a comment at the code it
+governs — with the reasoning and the rejected alternative. A decision made
+autonomously and left unrecorded is indistinguishable from one nobody made,
+and it is what turns the owner's next question into an interrogation.
+
+## `claude-progress.md` IS GITIGNORED AND ROLLING — NOTHING TRACKED MAY CITE IT
+
+The roadmap file is scratch. `.gitignore` excludes it, so a fresh clone has
+none of it, and every `initialize-roadmap` run **overwrites** the previous
+baseline — the current file opens by saying it "supersedes the previous
+baseline in this file". Last month's Section/Phase numbering is not archived
+anywhere; it is gone.
+
+So a citation to it from tracked source, tests or docs is a pointer nobody but
+that week's author can resolve. Found 2026-08-27 while renaming the file from
+`.txt`: **15 such citations across `backend/`** — `Section 3, Phase 12`,
+`CONCURRENCY warning`, `KNOWN BUGS`, `DEFERRED — OTHER TABS`, `Phase 19`,
+`LOG 2026-07-28`, `D4`. Every anchor had been overwritten several RFCs
+earlier; **zero** of them still existed in the file. All 15 were removed, and
+removing them cost nothing, because the substance each one carried — the
+measurement, the rule, the reasoning — was already written inline in the
+comment beside it. The citation was pure decoration over prose that already
+stood on its own.
+
+**Put the durable "why" in the comment itself**, and cite only targets that
+survive: an RFC in `docs/rfcs/`, a plan in `docs/plans/`, a CLAUDE.md section,
+or a dated measurement. If a fact is worth citing from source, it is worth
+writing down somewhere tracked.
+
+Same lesson, still visible: `RFC 0003 §7` is cited ~10 times across `backend/`
+but `docs/rfcs/0001`–`0008` were deleted in `06d86f1`. Those are recoverable
+from git history rather than gone, so they are an annoyance rather than a dead
+end — but they were produced the same way.
+
+## THIS WORKING TREE HABITUALLY HOLDS HOURS OF UNCOMMITTED WORK — INVESTIGATION IS READ-ONLY
+
+`claude-progress.md`'s Workspace Snapshot has said "**Working tree: dirty, and
+it matters**" across multiple features: two or three distinct bodies of
+in-flight work, some staged and some not, routinely coexist here for days.
+That is normal for this project and will be true again next session.
+
+So a working-tree-mutating git command is **destructive here even when its
+name sounds gentle**. `git stash` is the trap — it reads as "set this aside for
+a second", it carries none of the `--hard`/`--force` signals that invite
+caution, and it reverts every uncommitted change in the tree in one step. Run
+2026-08-27 as an idle reflex while reading lint output, with nothing in the
+task calling for it, it swallowed an entire in-flight RFC-0017 backend
+implementation plus an RFC-0016 remediation tail. Recovery needed a full
+manual rebuild from `stash@{0}` and `stash@{0}^2`, and was only possible
+because `--keep-index` happened to preserve an index snapshot.
+
+**While investigating, use read-only commands only** — `git status`,
+`git diff`, `git log`, `git show`, `git stash list`, `git cat-file`. Anything
+that writes the index or the working tree (`stash`, `reset`, `checkout --`,
+`restore`, `clean`) alters the user's unsaved work and deserves the same
+deliberation as editing their files by hand: only when the task actually calls
+for it, and never as a step in figuring something out.
+
+**If a recovery is ever needed:** `git stash pop --index` is what restores the
+staged/unstaged split rather than flattening it. When it refuses — as it did
+here, because `.gitignore`'s blob in HEAD is CRLF while `.gitattributes`
+mandates LF, leaving that one file permanently "modified" and blocking the
+merge check — `git checkout <stash> -- .` followed by `git reset <stash>^2 -- .`
+rebuilds the identical end state without going through the merge at all.
+Verify with `git diff <stash>` and `git diff --cached <stash>^2`; both empty
+means the restore is exact.
 
 ## Context usage — stay under ~40% of the window, and say so before you don't
 
@@ -46,9 +168,45 @@ that point without having flagged it at least once. Re-flag at ~60% and again
 as usage nears wherever this session's auto-compact would fire on its own, so
 the warnings escalate with how urgent it actually is.
 
-**This is advisory, not a gate.** The user decides whether to compact, start
-fresh, or keep going — never refuse to continue work solely because the
-estimate crossed 40%.
+**Flagging is not enough on its own — at high usage, actively DRIVE TO A
+STOPPING POINT and hand off.** Owner correction, 2026-08-27: *"you should
+still stop the conversation when the context is too high… Get to a stopping
+point so I can compact the conversation."* A one-line warning that is followed
+by another hour of work leaves the owner choosing between interrupting
+mid-change and letting the window run out. So past roughly 45-50%, finish the
+increment in flight, then stop:
+
+1. **Land the work at a green boundary** — suites passing, nothing half-edited.
+2. **Tear down anything the session started** — dev servers, temporary harness
+   routes, background jobs — and confirm `git status --porcelain` holds only
+   intentional changes. A compact must not strand a running process or a
+   scratch file nobody will remember.
+3. **Write state into `claude-progress.md`**, because that file is the handoff
+   and the conversation is about to be summarized away.
+4. **Offer a paste-ready resume prompt** — but which kind depends on where the
+   stopping point falls, and the two are not interchangeable:
+
+   - **Mid-task** (the increment in flight isn't done, or the very next step
+     still needs everything just discussed — the failure mode, the design
+     tradeoffs, the code just read): offer `/compact` with a resume prompt
+     that continues the SAME task. The old context still has work left to do;
+     compacting keeps a compressed version of it around for that work.
+   - **Between tasks** (this task just landed at a green boundary and the
+     next one hasn't started yet — the exact moment this section's own
+     numbered list describes): the old task's context has nothing further to
+     contribute to the next task. Owner correction, 2026-08-28: compacting
+     here just to carry forward context the next task will never touch is
+     wasted motion — write a **handoff** instead (a dated entry in
+     `claude-progress.md` if one is already driving this work, otherwise a
+     scratch handoff file) capturing exactly what a fresh session needs to
+     pick up the next task cold, and offer a short prompt that points at that
+     file and names the next task — not a `/compact` prompt. A fresh session
+     with no prior context plus a good handoff costs less than compacting a
+     full task's worth of exploration the next task will never use again.
+
+**Still not a hard gate**: if the owner says keep going, keep going. The rule
+is that the *stopping point* is prepared and offered, not that work halts
+unilaterally — and never mid-edit, which is worse than either alternative.
 
 `totalTokensReminder` is an undocumented/internal Claude Code setting (not
 part of the public settings schema's stable surface) — if a future Claude
@@ -115,6 +273,7 @@ would break every bookmark to fix a URL nobody types.
 | | `/admin/cosigners` | Cosigners | Cosigner CRUD + payout link tool |
 | | `/admin/locations` | Locations | Admin-managed location list — see "Locations" below |
 | — | `/admin/card/[id]` | (card detail) | Single-item detail, price chart, timeline — not in sidebar, reached via links |
+| — | *(no route)* | **Analyst** | Read-only analyst chat, a slide-over in the sticky header of **every** tab — see "THE ADMIN ANALYST CHAT" below |
 
 Three rules the grouping carries, all of which have a test in
 `AdminShell.test.tsx`:
@@ -1070,6 +1229,69 @@ values already present on inventory, then editable by admins. Endpoints
 Frontend reads it via `useLocations()`; never hardcode a location list in new
 code.
 
+## AN OVERLAY MOUNTED INSIDE A `backdrop-blur` ANCESTOR IS NOT FIXED TO THE VIEWPORT — PORTAL IT
+
+Measured in a real browser 2026-08-27 (RFC-0018 item 9b), on a defect that had
+passed every component test. `AdminChat`'s slide-over is
+`fixed right-0 top-0 z-40`, and it was rendered inside `AdminShell`'s
+`sticky top-0 z-30 … backdrop-blur-md` header. **A non-`none`
+`backdrop-filter` (or `filter`, `transform`, `perspective`, `will-change`,
+`contain: paint`) does two things at once to every `position: fixed`
+descendant**, and both bit:
+
+1. **The blurred element becomes their containing block.** `fixed top-0`
+   anchors to *it*, not the viewport. Measured at `y = 67` the moment anything
+   sat above `<main>`, so a `h-screen` panel ran 67px past the fold and took
+   its message input with it.
+2. **It opens a stacking context.** The panel's own `z-40` is resolved
+   *inside* `z-30`, so it can never out-rank a sibling of the header.
+   `AdminShell`'s mobile bottom nav is `z-50`, so at **390x844 and 430x932**
+   `document.elementFromPoint` at the centre of the composer returned the
+   nav's `<a>`. The analyst chat opened, rendered and read correctly on a
+   phone, and **tapping the input navigated to another tab** — it could not be
+   typed into at all.
+
+**The fix is `createPortal(…, document.body)`, not a bigger z-index.** Raising
+the number inside a trapped stacking context does nothing; the portal takes
+the node out of the subtree so `fixed` means the viewport again and the
+z-index is comparable with the nav's. Gate it on a mount-only flag —
+`createPortal` needs a real `document`, and a render that disagrees with the
+server's markup is a hydration error on every admin page.
+
+**Four live `backdrop-blur` ancestors are waiting to do this again**, so check
+before mounting any new overlay: `AdminShell.tsx:243` (sidebar), `:350`
+(mobile nav), `:377` (sticky header), and `Navbar.tsx:41`. The two modals
+(`CardDetailModal`, `SaleDetailModal`) are safe as they stand — their blur is
+on their own `fixed inset-0` backdrop, which is already viewport-anchored.
+
+**No jsdom test can catch either half**, which is why this shipped green:
+jsdom computes no layout and no stacking. `AdminChat.test.tsx` pins the
+structural half (the dialog is not a descendant of the blurred wrapper) and
+that is the most a unit test can do — **reachability of a control is a browser
+measurement**, and `document.elementFromPoint` at an element's own centre is
+the check that distinguishes "rendered" from "usable". `getBoundingClientRect`
+does not: it reported the composer comfortably inside the viewport the whole
+time it was unclickable.
+
+Same family as the hover rule above — a control that exists but cannot be
+operated is not a control.
+
+**Superseded 2026-08-28 — the panel is no longer `fixed` at all.** Owner
+report: it overlapped the tab instead of shrinking it ("reduce the width...
+with no overlap"). `fixed` was never load-bearing for anything the panel
+actually needed — decision 2 only required the tab underneath to stay
+*mounted*, which ordinary flow content does just as well — so the fix removes
+`position: fixed` (and therefore the trap above) entirely rather than
+re-solving it: the panel now portals into a slot `AdminShell` renders as a
+flex sibling of `<main>`, taking real layout space so `<main>` genuinely
+shrinks. Width is `min(<configured>, 100vw)` so a phone still gets full
+coverage instead of clipping, and `pb-20 md:pb-0` (the same classes `<main>`
+already carries) clears the mobile bottom nav by reserving space above its
+band rather than by winning a stacking fight normal-flow content structurally
+cannot win. **The measurement and the general rule above are still true and
+still the thing to check before mounting any NEW `fixed` overlay** — this
+paragraph records only that `AdminChat` itself stopped being one of them.
+
 # Ops
 
 **The catalog is NOT empty.** An earlier version of this file claimed the live
@@ -1106,6 +1328,149 @@ reason. Tests missed it for months because they all send prices as **strings**;
 when testing a money path, send a JSON **number**, which is what the frontend
 actually sends.
 
+## A PLAIN JS STRING OPERATION ON A CDK TOKEN IS A SILENT NO-OP — USE `Fn.*`
+
+Diagnosed 2026-08-26, after it had taken the **entire production site** down —
+every customer page and every admin tab at once — for an unknown period behind
+two `UPDATE_COMPLETE` stacks.
+
+`infra/bin/infra.ts` fed the frontend its backend origin as
+`backend.functionUrl.url.replace(/\/$/, '')`, with a long comment correctly
+explaining that a Lambda Function URL always carries a trailing slash and that
+`frontend/lib/api.ts` concatenates `${BASE_URL}${path}` where every caller's
+`path` starts with its own slash. The diagnosis was right. **The fix never
+executed.**
+
+**At synth time `functionUrl.url` is not a URL. It is an unresolved CDK token**
+— a placeholder string of the form `${Token[TOKEN.n]}` that CDK swaps for a
+CloudFormation intrinsic when it writes the template. It does not end in a
+slash, so the regex matched nothing, `.replace()` returned the token unchanged,
+and CDK emitted a bare passthrough:
+
+```json
+"NEXT_PUBLIC_API_URL": {"Fn::ImportValue": "MerlinsBackendStack:...FunctionUrl"}
+```
+
+The slash only exists after CloudFormation resolves that import at **deploy**
+time, which is long after any JavaScript could have run. Every request then
+went to `//inventory/search`, which FastAPI treats as a different, nonexistent
+route and 404s **before it even authenticates** — so the symptom is a 404, not
+a 401, on endpoints that plainly exist. Measured live: `/health` → 200,
+`//health` → 404.
+
+**The rule: a token can only be transformed by CDK's own `Fn.*` intrinsics**,
+which defer the work into the template so it happens after the value resolves.
+`.replace()`, `.split()`, `.slice()`, `.endsWith()`, `.toLowerCase()` and
+template literals carrying logic all fail this way — and they fail *silently
+and plausibly*, which is what makes this worse than a crash. There is no error,
+the types are all `string`, and the code reads as obviously correct in review.
+`infra/lib/backend-origin.ts` is the fixed shape to copy.
+
+**`cdk.Token.isUnresolved(value)` is how you check** before trusting a
+construct property as a real string. Anything CDK computes from a deployed
+resource — `.url`, `.functionArn`, `.bucketName`, `.tableName`,
+`.distributionDomainName`, every `Fn.importValue` — is a token. Literals you
+wrote yourself are not.
+
+**And verification here has to be the synthesized template, never the source.**
+`cdk synth -o <dir>` then read the emitted JSON for the property in question: a
+transformation that worked shows up as `Fn::Join`/`Fn::Select` structure, and
+one that no-opped shows up as the bare `Fn::ImportValue` above. A unit test on
+the TypeScript cannot catch this on its own, because at test time the token is
+just as unresolved as it is at synth. `infra/test/backend-origin.test.ts` pins
+the emitted structure via `stack.resolve()` for exactly that reason.
+
+**`bash scripts/smoke-deployment.sh` is the standing post-deploy check** and
+exists because of this incident: it asserts the *deployed* Lambda's
+`NEXT_PUBLIC_API_URL` has no trailing slash, probes real backend routes, and
+confirms the frontend's secrets survived. **A green `cdk deploy` proves
+nothing about whether the site works — run it every time.**
+
+## THE FRONTEND BUILD HANG IS AN UNBOUNDED FETCH, NOT A WINDOWS SOCKET QUIRK
+
+Diagnosed 2026-08-26, **correcting a diagnosis this repo had recorded as
+fact** (`infra/lib/frontend-stack.ts`'s `skipOpenNextBuild` docstring, and the
+`staticPageGenerationTimeout: 180` comment in `frontend/next.config.ts`). The
+old note read: *"on this Windows dev machine, `next build`'s static-generation
+fetches to a live HTTPS backend hang indefinitely … when invoked through
+cdk-nextjs-standalone's nested child-process chain … the exact same build
+invoked DIRECTLY succeeds every time … suspect a proxy/DNS/socket
+difference."* Every observation in it is real. The conclusion drawn from them
+is wrong, and it sent the fix in the wrong direction for nine days.
+
+**The comparison was not controlled.** `cdk-nextjs-standalone`'s
+`NextjsBuild.getBuildEnvVars()` replaces every **unresolved** `NEXT_PUBLIC_*`
+token with a literal `{{ KEY }}` placeholder, substituting the real value into
+the built files at *deploy* time. So a CDK-driven build runs with
+`NEXT_PUBLIC_API_URL="{{ NEXT_PUBLIC_API_URL }}"`, while a hand-run
+`npm run build:opennext` from a plain shell has the variable **unset** and
+falls back to `http://localhost:8000`. "Direct vs nested" also changed the
+backend URL — which is the variable that actually mattered.
+
+Measured on Linux, both invocations direct:
+
+| `NEXT_PUBLIC_API_URL` during build | Result |
+|---|---|
+| unset → `http://localhost:8000` | succeeds, 24/24 static pages |
+| `{{ NEXT_PUBLIC_API_URL }}` | **hangs**, 3× the watchdog, build fails |
+
+**The mechanism:** bare `fetch("{{ NEXT_PUBLIC_API_URL }}/public/shows")`
+rejects in **23 ms** with `TypeError: Failed to parse URL`. But
+`frontend/lib/public.ts` fetches with `next: { revalidate: 300 }`, and inside
+**Next's ISR fetch wrapper that rejection becomes a hang.** Static generation
+then burns the entire `staticPageGenerationTimeout`, three times, and fails on
+whichever public page reached it first — which is exactly why the old note
+observed "a different page each time" and read it as flakiness. It is not
+flakiness; it is a race between equally-doomed pages.
+
+> **A page-level `try/catch` fallback does not cover a hang.**
+> `FeaturedFinds.tsx` has said `// On ANY error, fall through to the static
+> set` since it was written, and it never once rescued this build, because a
+> promise that never settles raises nothing. Any "fall back on failure" path
+> guarding I/O needs the I/O to be *bounded* before the fallback means
+> anything.
+
+**The fix is `isUsableBaseUrl` in `frontend/lib/api-base.ts`:** `apiFetch`
+rejects *before constructing a request* when the base URL is not an absolute
+http(s) origin. Callers' existing fallbacks then do the job they were written
+for. Do not "fix" this by raising `staticPageGenerationTimeout` again — that
+buffers the symptom and costs 9 minutes per failed build.
+
+**The general rule, and the reason this section is long:** when two runs
+differ, the recorded cause must be a variable you actually held everything
+else constant against. "Direct succeeds, nested fails" was reproduced twice
+each way and was still wrong, because both arms silently changed a second
+variable. Reproducibility is not control.
+
+## A PAGE'S CACHE LIFETIME MUST BE DECLARED, NEVER INFERRED FROM A FETCH
+
+Same day, found while verifying the fix above actually worked end to end.
+
+`frontend/app/(public)/page.tsx` had **no `export const revalidate`**. Its
+freshness came entirely from `getFeaturedCards`' own
+`next: { revalidate: 300 }`. When that fetch stops running at build time — as
+it now correctly does whenever the base URL is a build-time placeholder — Next
+observes no revalidating fetch, concludes the page is **fully static**, and
+emits `cache-control: s-maxage=31536000`. CloudFront then pins the build-time
+*fallback* content at the edge **for a year**, and ISR at the origin never
+dislodges it.
+
+Measured live after a deploy: `/shows` (`export const revalidate = 300`) and
+`/articles` (`= 60`) both self-healed within ~2 minutes; `/` was still serving
+placeholder card art 12 minutes later, with `x-nextjs-cache: HIT` and
+`age: 1046`.
+
+| Page | Page-level `revalidate` | `Cache-Control` served |
+|---|---|---|
+| `/shows`, `/articles` | declared | `s-maxage=2, stale-while-revalidate=2592000` |
+| `/` (before the fix) | **absent** | `s-maxage=31536000` |
+
+**Every page that renders remote data declares its own `revalidate`.** A page
+whose cache policy is a side effect of whether a fetch inside it happened to
+succeed will, on the one deploy where that fetch fails, cache the failure
+permanently. `/about` and `/dictionary` correctly have none — they fetch
+nothing, so a year-long static cache is the right answer for them.
+
 ## A PARTIAL ENV EXPORT ON `cdk deploy` SILENTLY DELETES SECRETS FROM THE LIVE LAMBDA
 
 Diagnosed 2026-08-18 on `MerlinsFrontendStack` (RFC 0014's CloudFront+Lambda
@@ -1132,9 +1497,132 @@ Before running `cdk deploy` on `MerlinsFrontendStack` for *any* reason —
 including a change that has nothing to do with auth — export every secret
 this stack uses, not just the one being changed: `AUTH_SECRET`,
 `AWS_COGNITO_CLIENT_SECRET`, and (if relevant to `MerlinsBackendStack`)
-`POKEMONPRICETRACKER_API_KEY` / `ADMIN_API_KEY`. The real values already live
-in `frontend/.env.local`. Same failure mode applies to any future secret
-added to either stack's environment map.
+`POKEMONPRICETRACKER_API_KEY` / `ADMIN_API_KEY`. Same failure mode applies to
+any future secret added to either stack's environment map.
+
+**`bash scripts/deploy-frontend.sh` closes this mechanically rather than by
+memory, and it is the way to deploy this stack.** It reads each secret's
+current live value straight off the deployed Lambda and re-exports it (through
+command substitution — the values are never printed), so a deploy can only
+preserve what is already there; an explicit export in your own shell still
+wins, so rotating a secret works normally. It refuses to run at all if
+`AUTH_SECRET` or `AWS_COGNITO_CLIENT_SECRET` would end up empty, and it runs
+the smoke check afterwards. Note that this repo's clones do **not** all have a
+`frontend/.env.local` — the WSL clone has none, which is precisely why
+recovering the values from the live Lambda beats depending on a file that may
+not exist.
+
+**A second, independent route to the same wipe, found 2026-08-26:
+`cdk deploy MerlinsFrontendStack` also deploys its DEPENDENCY stacks.**
+`MerlinsFrontendStack` imports the backend's Function URL, so CDK pulls
+`MerlinsBackendStack` into the deploy — and a `cdk diff` for a
+*frontend-only* change duly reported that it would remove
+`POKEMONPRICETRACKER_API_KEY` from the backend Lambda **and** republish the
+backend container image from whatever is in the working tree, uncommitted
+changes included. **Always pass `--exclusively`** when deploying one stack;
+`deploy-frontend.sh` does. And always `cdk diff` before a deploy: reading
+that diff is what caught this, not reasoning about it.
+
+## A MANUAL DOCKER REBUILD OF THE BACKEND IMAGE MUST PASS `--target lambda` — THE DEFAULT STAGE LOOKS FINE AND ISN'T
+
+Diagnosed 2026-08-26. `backend/Dockerfile` has two stages built from the same
+`base`: `lambda` (adds the AWS Lambda Web Adapter binary at
+`/opt/extensions/lambda-adapter` plus `AWS_LWA_PORT`/`AWS_LWA_INVOKE_MODE`) and
+`runtime` (the ECS production stage, no adapter) — `runtime` is the **last**
+stage in the file, so a bare `docker build` with no `--target` silently builds
+`runtime` instead. `infra/lib/backend-stack.ts`'s own `fromImageAsset` call
+gets this right (`target: 'lambda'`), and its comment already flags "the
+Dockerfile `lambda` stage bug hit earlier" as a **prior, distinct incident** —
+this is a recurring failure class, not a one-off typo.
+
+**Why this is the trap it is:** the wrong-stage image runs perfectly well
+under a plain `docker run` — uvicorn logs `Application startup complete` same
+as always, because nothing about the app itself is broken. Only the platform
+integration is missing. Under **real** Lambda, the runtime API has nothing to
+talk to without the adapter extension, so every single invocation hangs until
+the function's configured timeout and returns a `502` — cold start *and* warm.
+That symptom (clean startup logs, then a hard timeout on every request) reads
+exactly like a slow-cold-start or resource problem, not a wrong-image problem,
+which is what makes it slow to diagnose under production pressure rather than
+what makes it happen in the first place.
+
+**This bites specifically when hand-recovering from the "Docker manifest not
+supported by Lambda" media-type error** (modern `docker build` attaches
+provenance/SBOM attestations Lambda rejects — fix: delete the bad ECR tag,
+rebuild with `--provenance=false --sbom=false`, push, retry `cdk deploy`). That
+recipe is a bare `docker build` command with no stage named — copy it
+literally and the rebuild lands on `runtime`, silently overwriting the correct
+image under the exact tag CDK still believes holds the `lambda`-target build.
+**Every manual rebuild of this image is `docker build --target lambda
+--provenance=false --sbom=false -f backend/Dockerfile -t <repo>:<tag> .`, full
+stop** — never the bare command. Verify before pushing, every time:
+`docker run --rm --entrypoint /bin/sh <tag> -c "ls /opt/extensions/"` must
+show `lambda-adapter`; empty output means the wrong stage got built.
+
+If this has already shipped: `cdk deploy` alone will **not** fix it —
+CloudFormation tracks the image *URI string*, not its content, so a corrected
+push under the same tag reports `no changes` and the live function keeps
+running the bad code. Mitigate first with `aws lambda update-function-code
+--image-uri <repo>:<last-known-good-tag>` (found via `aws ecr describe-images
+--query "sort_by(imageDetails,& imagePushedAt)"`), rebuild the broken tag
+correctly, push, then `update-function-code` a second time to point back at
+that now-fixed tag — the second manual call is required precisely because the
+first `cdk deploy` after the fix will see no template diff and do nothing.
+
+## A RUNTIME FILE READ RESOLVED FROM THE REPO ROOT IS UNTESTED BY CONSTRUCTION
+
+Diagnosed 2026-08-27 on RFC-0018's admin analyst chat, before it shipped.
+`services/bedrock._admin_tool_schemas()` read `shared/admin-tool-contract.json`
+**at request time**, finding it by walking up from `bedrock.py.__file__` to the
+repository root. Correct in this clone. Broken in production, on the first
+request, with nothing local able to see it.
+
+Two facts about the deployed artifact, both measured rather than reasoned about:
+
+- **`backend/Dockerfile` never `COPY`s `shared/`** — `grep -c "COPY shared"`
+  returns **0**. It copies `backend/pyproject.toml`, `backend/src`,
+  `backend/scripts` and the built `mcp-server/dist`, and nothing else from the
+  repo root.
+- **The image installs the package NON-editable** (`RUN pip install
+  ./backend`), so `__file__` lives under `site-packages/` and the walk lands
+  outside any checkout entirely.
+
+| layout | the walk resolves to |
+|---|---|
+| this dev clone (editable install) | `<repo>/shared/admin-tool-contract.json` ✅ |
+| image, if `backend/src` were on `sys.path` | `/app/shared/…` ❌ never copied |
+| **image, actual** | **`/usr/local/lib/shared/…`** ❌ |
+
+So the first `POST /admin/chat/` would have raised `FileNotFoundError` before
+Bedrock was ever called. **The whole test suite passed**, and always would
+have: every test runs in the one layout where the path is correct, so no test
+could distinguish "resolves the file" from "happens to be standing next to it".
+That is what makes this class different from an ordinary bug — it is not
+under-tested, it is *untestable in place*.
+
+**The rule: a package reads its own data through `importlib.resources`, and the
+file lives inside the package.** Then it ships with the wheel automatically and
+resolves identically under an editable install, a wheel, a container image or a
+zipimport — no `COPY` line for anyone to remember, and no path relationship for
+a packaging change to break. `Path(__file__).parents[N]` is fine for reaching
+*within* the package and is a bug the moment it climbs out of it.
+
+**`shared/` is for values crossing the Python/TypeScript boundary — nothing
+else.** `shared/tool-contract.json` belongs there because `mcp-server/`
+(TypeScript) reads it. The admin contract never had a non-Python reader: RFC
+0018 assumed a TypeScript admin server, roadmap item 4 chose Python instead, and
+the file was left in the directory whose only justification that decision had
+just removed. Same family as the stale-gate-comment lesson above — **when a
+decision removes the reason something is where it is, the thing does not move
+itself**, and here the leftover was not merely untidy, it was the bug.
+
+**Verification has to be the built artifact, never the source** — the same rule
+this file already records for `cdk synth`. `pip wheel --no-deps -w /tmp ./backend`
+then `unzip -l` the result and look for the file; better, unpack it somewhere
+with **no repo checkout in scope**, put that on `sys.path`, and import. That is
+a two-minute check and it is the only one that distinguishes the three rows of
+the table above. `backend/tests/test_admin_contract_ships.py` pins the invariant
+so the file cannot drift back out of the package.
 
 **Catalog seed + sync (one-time owner action, not scheduled).** Needed only for
 a fresh/empty table, which the live one is not. With AWS creds, from `backend/`:
@@ -1337,14 +1825,223 @@ more than a few characters.**
 Located at `/inventory` — authenticated customers only.
 Two distinct modes (user picks one at a time):
 - **Filter mode**: dropdowns (set, condition, rarity), price range, name search → `GET /inventory/search`
-- **Chat mode**: plain text to Claude via Bedrock + MCP tools → `POST /chat`
+- **Chat mode**: plain text to Claude via Bedrock + MCP tools → `POST /chat/`
+
+**The transcript is SERVER-owned (RFC 0017).** The client sends a
+`conversation_id`, never a `history` array — the backend replays the thread
+from DynamoDB, which is also what stops a client forging assistant turns.
+`ChatRequest.history` is still *accepted and ignored* for one release; nothing
+reads it. Threads are keyed on the caller's Cognito `sub`, capped at 50 with
+least-recently-used pruning, and expire on the existing `ttl` attribute after
+six months.
+
+| Route | Purpose |
+|---|---|
+| `POST /chat/` | Send a message; creates a thread implicitly, returns `conversation_id` + `title` |
+| `GET /chat/conversations` | The caller's own threads, ≤50, `updated_at` descending |
+| `GET /chat/conversations/{id}` | One transcript (≤200 messages) + its live-rehydrated panel |
+| `PATCH /chat/conversations/{id}` | Rename — deliberately does NOT touch `updated_at` |
+| `DELETE /chat/conversations/{id}` | Hard delete: index row first, then the message sweep |
+| `DELETE /chat/conversations` | Clear all |
+
+**A thread the caller does not own answers 404, never 403** — a 403 would
+confirm the id exists. (The *route* `POST /admin/chat/` answers 403 to a
+non-admin; that is a different question, asked before any id is looked at.)
+
+**These routes are customer-private, and the tripwire that guards that was
+NARROWED, not deleted, when RFC 0018 mounted `/admin/chat/conversations`.**
+`test_no_admin_route_exposes_a_conversation` used to assert that no admin route
+path contained the string "conversation" — which the admin analyst chat
+legitimately now does. Replacing a string check with nothing would have been
+exactly the weakening the test exists to prevent, so it asserts the property
+the string stood in for instead: **an admin route must never return a
+`surface="customer"` thread**, checked against real stored rows. Stricter than
+before, and no longer defeated by renaming a path.
+
+**A returned `conversation_id` is not proof the thread was written.**
+`routers/chat.py` sets it unconditionally, *after* the deliberately-broad
+`except` that swallows a persistence failure rather than discard a paid-for
+Bedrock reply. So a client holding that id must treat a later 404 as "this
+thread is gone" and start a new one — `ChatPanel` does exactly that. Holding it
+instead wedges the chat on a permanent 404 that only a page reload clears.
+
+## THE ADMIN ANALYST CHAT IS A SECOND SURFACE, ISOLATED BY PROCESS (RFC 0018)
+
+`/admin` carries a read-only analyst slide-over — `AdminChat.tsx`, mounted in
+`AdminShell`'s sticky header so it is reachable from **every** admin tab, with
+the tab underneath staying mounted while it is open (that is why it is not a
+route). It answers questions over the business's own numbers: profit and
+margin, aging stock, consignor position, pricing outliers.
+
+| Route | Purpose |
+|---|---|
+| `POST /admin/chat/` | Ask the analyst; same request/response shape as `POST /chat/` |
+| `GET/PATCH/DELETE /admin/chat/conversations[/{id}]` | The same five conversation routes, scoped to the admin surface |
+
+**The isolation is STRUCTURAL, not an `isAdmin` flag** (owner decision 6). Four
+things differ from the customer chat and none of them is a runtime boolean: a
+different **subprocess** (`python -m merlins_collection.mcp_admin`, spawned by
+`get_admin_mcp_executor()`), a different **tool contract**, a different
+**system prompt** (read-only analyst), and `ADMIN_VISIBILITY` hydration. A
+customer conversation cannot name an admin tool because the process serving it
+never loaded one. If a refactor starts collapsing these into one server with a
+flag because it is less code, that is the alternative the RFC explicitly
+rejected.
+
+**That isolation is about the money/security boundary — server process, tool
+contract, system prompt — not about UI components, which should be SHARED.**
+`AdminChat.tsx` originally hand-rolled its own conversation-history dropdown
+instead of generalizing the customer surface's `HistoryMenu`
+(`frontend/components/inventory/HistoryMenu.tsx`, RFC 0017), and shipped
+missing three things `HistoryMenu` already had: click-outside-to-close,
+rename/delete, and a last-edited date (owner report 2026-08-28). `HistoryMenu`
+now takes an optional `client?: ConversationsClient` prop (default
+`customerConversations`; the admin panel passes `adminConversations`) so both
+surfaces read the identical, better-tested flyout. **"Structural isolation"
+naming the four things that must differ is not license to rebuild everything
+else too** — a component with no privileged data of its own (it only ever
+renders what its `client` prop fetches) drifting into two maintained copies is
+pure cost with no isolation benefit to show for it.
+
+**The admin MCP server is PYTHON, not TypeScript** — `mcp` is already a backend
+dependency, so it needs no npm workspace, no Dockerfile stage and no CI job,
+and far more importantly its tools import `services/ledger.py` and
+`services/condition_pricing.py` **directly**. A TypeScript mirror could pin a
+*value* with a parity test; it could not pin a *call graph*, and
+`services/ledger.py`'s docstring enumerates its readers exhaustively precisely
+because the failure mode is a reader that forgets to call it.
+
+**A contract-parity test that diffs only KEY SETS cannot catch a VALUE
+collapsing to a meaningless stub.**
+`test_each_tool_takes_exactly_the_arguments_the_contract_declares` has always
+correctly asserted that `admin-tool-contract.json`'s `properties`/`required`
+names match what the server implements — but `services/bedrock._admin_tool_schemas()`
+built every one of those properties as a bare `{}` when handing them to
+Bedrock, because the contract carried no per-property `type`/`description` at
+all. The test was green the whole time; it was never able to see the
+difference between a real schema and an empty one, because it was never
+told to look at property VALUES, only property NAMES. The model, in
+practice, was told a parameter named `start` exists and nothing else — which
+is why "what's our most profitable show, all time?" kept getting answered
+with a demand for exact dates (owner report 2026-08-28; fixed by giving every
+admin tool property a real `type`/`description`, some an `enum`, and passing
+them through instead of discarding them). This is the SAME failure shape as
+`mcp-server/src/condition-pricing.ts` claiming cross-language pinning that no
+test ever checked — a docstring or a test's own scope can both create false
+confidence, and "a test exists and passes" is not the same claim as "the test
+checks the thing that matters." Before trusting a parity test, check what it
+actually diffs.
+
+**`surface` scopes every conversation read, and `services/conversations.owned_rows()`
+is the one place that does it.** `list_summaries`, `get_owned`, `prune_to_cap`
+and `clear_all` all route through it — `prune_to_cap` especially, because it
+DELETES: an unscoped 50-thread LRU cap would drop a quarterly margin analysis
+as soon as that sub's combined thread count passed 50. Admin threads keep a
+**two-year** TTL against the customer surface's six months, and that branch
+lives in `_conversation_ttl` and nowhere else.
+
+**`rate_limit_admin_chat` raises only the PER-USER tiers (30/min, 500/day) and
+shares the same `global#chat` key.** A separate global counter would look
+tidier and would let the two surfaces together spend twice the ceiling that
+exists to bound the account's Bedrock bill — the ceiling is about dollars, and
+Bedrock does not care which surface spent them.
+
+**One chat request is bounded by three things, and the 30s Lambda timeout is
+the weakest of them.** `_MAX_TOOL_TURNS = 5` / `_MAX_QUERY_TOOL_CALLS_PER_REQUEST
+= 10` (`services/bedrock.py`) are the CUSTOMER-chat module defaults — one
+assistant turn may emit any number of `toolUse` blocks, so without the second
+guard forty of them run forty full inventory walks. Both are also
+`BedrockChatService` CONSTRUCTOR parameters (RFC 0020 item 6, same seam
+`tools`/`system_prompt` already use), so raising them for the admin analyst
+does not silently widen the customer surface too: `get_admin_bedrock_service`
+(`dependencies.py`) passes `max_tool_turns=6, max_query_tool_calls_per_request=14`
+instead of the module defaults. The third guard, `McpToolExecutor`'s per-call
+timeout, is shared by both surfaces — derived from
+`LAMBDA_REQUEST_BUDGET_SECONDS` and pinned to the CDK stack's actual value by a
+cross-boundary test.
+
+Measured 2026-08-27 (customer/original four admin tools) via
+`backend/scripts/measure_admin_chat_latency.py` against the live table: no tool
+on either server exceeds **1.0s**, and the worst five-call sequence the OLD
+5/10 ceiling permits is **3.6s** (round-trip-bound from a home connection —
+`list_inventory` is ten *sequential* shard queries at ~82ms each here versus
+~5ms in-region). Re-measured 2026-08-30 after RFC 0020's four raw-listing
+tools (`list_shows`/`list_transactions`/`list_inventory`/`list_consignors`)
+joined the admin surface: a 14-call sequence mixing all eight admin tools
+measured **~15.6-16.9s** across two runs (52-57% of the 30s budget, same
+home-connection caveat — production is faster, not slower). `list_shows` is
+the single slowest admin tool (**~2.4s** median, an N+1 `get_show_analytics`
+call per show) — still well under the per-call timeout, but the reason the
+14-call total isn't as cheap as a flat "~1.0s per tool" estimate would
+suggest.
 
 # MCP Tools
+
+**Two servers, two contracts, two processes.** The customer server is
+TypeScript (`mcp-server/`, pinned to `shared/tool-contract.json`); the admin
+server is Python (`backend/src/merlins_collection/mcp_admin/`, pinned to
+`merlins_collection/admin-tool-contract.json` — inside the package, because
+nothing outside the backend reads it and a repo-relative read does not survive
+the image). They share **no tool name**, and there is a test asserting it.
+
+**Customer** (`mcp-server/`, reached from `/inventory` chat mode):
 - `get_inventory_summary` — total count, value, top cards
 - `search_inventory` — filter by name, set, condition, value range
 - `get_card_price_history` — historical price data for a card
 - `calculate_inventory_value` — full valuation with breakdown by set/condition
 - `flag_underpriced_cards` — cards listed below market price threshold
+
+**Admin** (`mcp_admin/`, reached from the `/admin` analyst slide-over; every
+tool is `readOnlyHint: true` and nothing here writes):
+- `get_profit_summary` — gross, cost, net, margin for a date range, optionally
+  one show. Bounds inclusive both ends; `margin_pct` is `None` on zero sales,
+  never `0.0`
+- `find_aging_stock` — held stock only, oldest first (a sold card is not
+  "sitting on a shelf")
+- `get_consignor_position` — what is held on each consignor's behalf.
+  **`split_percent` is OUR cut, so the consignor's share is its complement**;
+  archived consignors are included, because archiving is not settlement
+- `find_pricing_outliers` — `over` / `under` / `unpriced`. An unknown direction
+  raises rather than returning `[]`, and `unpriced` is its own direction rather
+  than an infinite deviation
+
+**`stale` / `max_age_days` are deliberately NOT built**, though RFC 0018's tool
+table lists them: no inventory model carries a per-item price timestamp.
+`value_note` mentions an age in *prose*, and parsing a number back out of a
+sentence to drive a money answer is a guess wearing a filter's clothes.
+
+**Four more admin tools joined in RFC 0020 — raw, filterable "librarian"
+listings, not aggregates.** The four above stay unchanged (each encodes a
+money/business rule cheap to keep correct in code and risky to re-derive from
+a system prompt); these hand back rows and let the model do its own research,
+scanning/summing/grouping/filtering over them itself where CLAUDE.md's
+math-trust boundary allows (see `_ADMIN_SYSTEM_PROMPT` below):
+- `list_shows` — every show, joined with its analytics snapshot when one
+  exists, newest first. `has_analytics: false` (not `$0`) for a show never
+  archived or manually analyzed
+- `list_transactions` — raw ledger rows in a date range. Every row carries
+  `is_countable`/`is_trade_cash_leg` so a raw sum, if ever unavoidable, can
+  still exclude voids and trade cash legs correctly; capped at 100 rows with
+  `total_matched`/`truncated` always present
+- `list_inventory` — raw admin-visible inventory rows (cost basis,
+  consignment terms, review flags), reusing the SAME
+  `services.inventory_filters`/`services.inventory_sort` registries
+  `GET /admin/inventory/search` validates against. A non-null `consignment`
+  field means exclude that row before summing `cost_basis` as the business's
+  own capital — stated in the tool description itself
+- `list_consignors` — every consignor's identity and default
+  `payout_percent` (THEIR share as a percent — the OPPOSITE convention from
+  an item's `ConsignmentTerms.split_percent`, OUR cut as a 0-1 fraction).
+  Not for computing a payout; call `get_consignor_position` for that
+
+**`_ADMIN_SYSTEM_PROMPT` is "librarian" framing, not a lookup-table
+instruction** (RFC 0020 item 7): broad read access, encouraged to
+cross-reference and iterate rather than declare a question unanswerable; a
+stated preference for the four narrow aggregate tools when one directly
+answers, the four raw `list_*` tools for a breakdown/comparison/filter no
+narrow tool offers; and the math-trust boundary itself as an instruction —
+never sum `amount` across `list_transactions` rows for a profit/revenue
+figure, call `get_profit_summary` instead.
 
 # AWS Services
 | Service         | Purpose                                              |
@@ -1362,7 +2059,7 @@ Two distinct modes (user picks one at a time):
 
 Authority: [`docs/rfcs/0009-slab-intake-and-graded-pricing.md`](docs/rfcs/0009-slab-intake-and-graded-pricing.md),
 with per-task status in [`docs/plans/rfc-0009/progress.md`](docs/plans/rfc-0009/progress.md).
-An earlier version of this section pointed at "claude-progress.txt Phase 4" — that
+An earlier version of this section pointed at "claude-progress.md Phase 4" — that
 file has no Phase 4 and never will; the admin-enhancement rounds replaced it.
 
 **Slab intake is MANUAL-FIRST, and that is the shipped design, not a stopgap.**

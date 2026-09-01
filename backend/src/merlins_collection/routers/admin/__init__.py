@@ -10,6 +10,7 @@ from merlins_collection.dependencies import require_admin
 
 from .analytics import router as analytics_router
 from .catalog import router as catalog_router
+from .chat import router as chat_router
 from .cosigners import router as cosigners_router
 from .inventory import router as inventory_router
 from .locations import router as locations_router
@@ -32,6 +33,7 @@ admin_router = APIRouter(
 
 admin_router.include_router(inventory_router)
 admin_router.include_router(catalog_router)
+admin_router.include_router(chat_router)
 admin_router.include_router(locations_router)
 admin_router.include_router(market_router)
 admin_router.include_router(watchlist_router)

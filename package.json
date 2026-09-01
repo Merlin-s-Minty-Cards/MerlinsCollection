@@ -1,7 +1,11 @@
 {
   "name": "merlins-collection",
   "private": true,
-  "workspaces": ["frontend", "mcp-server", "infra"],
+  "workspaces": [
+    "frontend",
+    "mcp-server",
+    "infra"
+  ],
   "scripts": {
     "test": "npm run test --workspaces --if-present && npm run test:backend",
     "test:frontend": "npm run test --workspace=frontend",
@@ -9,5 +13,6 @@
     "_comment:test:backend": "Delegates to scripts/run-backend-tests.js, which resolves the venv interpreter in Node (works under both cmd.exe on Windows and sh on Linux/WSL/macOS, unlike a hardcoded shell path). A bare `python` on PATH can resolve to an unrelated environment with no pytest installed, so the interpreter is never left implicit. These root scripts are dev convenience only -- CI runs each workspace directly (see .github/workflows/ci.yml), never this one. See CLAUDE.md > Test Commands.",
     "test:backend": "node scripts/run-backend-tests.js",
     "docker:test": "docker compose -f docker-compose.test.yml run --rm --build backend-tests && docker compose -f docker-compose.test.yml run --rm --build frontend-tests && docker compose -f docker-compose.test.yml run --rm --build mcp-tests"
-  }
+  },
+  "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
 }

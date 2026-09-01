@@ -3,11 +3,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { useSession } from 'next-auth/react'
 import { Search } from 'lucide-react'
-import CardGrid from './CardGrid'
+import type { ResultsView } from './ResultsPane'
 import SetCombobox from '@/components/shared/SetCombobox'
 import {
   searchInventory,
   getInventoryFacets,
+  toPresentedCard,
   type InventorySearchResult,
   type InventoryFilters,
   type InventoryFacets,
@@ -41,7 +42,26 @@ const fieldClass = 'vault-field w-full rounded-lg px-3 py-2.5 text-sm'
 const labelClass =
   'mb-1.5 block font-mono text-[11px] uppercase tracking-[0.12em] text-pine-300'
 
-export default function FilterPanel() {
+export interface FilterPanelProps {
+  /**
+   * RFC 0019: FilterPanel no longer renders its own results grid — filter and
+   * chat mode share one ResultsPane in the split workspace's right column.
+   * This fires whenever the search status or result changes, carrying a
+   * normalized view for that shared pane.
+   */
+  onResultsChange?: (view: ResultsView) => void
+}
+
+const IDLE_MESSAGE = 'Set your filters and run a search to browse the collection.'
+const NO_RESULTS_MESSAGE = 'No cards found. Try widening your filters.'
+const ERROR_MESSAGE = 'Something went wrong. Check your connection and try again.'
+
+function hiddenNoPriceNotice(count: number | undefined): string | undefined {
+  if (!count) return undefined
+  return `${count} card${count === 1 ? '' : 's'} hidden (no price on file)`
+}
+
+export default function FilterPanel({ onResultsChange }: FilterPanelProps = {}) {
   const { data: session } = useSession()
   const [filters, setFilters] = useState<InventoryFilters>({})
   const [status, setStatus] = useState<Status>('idle')
@@ -57,6 +77,37 @@ export default function FilterPanel() {
       .then(setFacets)
       .catch(() => {}) // Facets load failure is non-fatal; dropdowns stay empty.
   }, [session?.accessToken])
+
+  // Push a normalized view to the shared ResultsPane whenever the search
+  // status or result changes — this is the ONLY place FilterPanel's results
+  // reach the DOM now; the panel itself never renders a card grid.
+  useEffect(() => {
+    if (status === 'idle') {
+      onResultsChange?.({ headerLabel: '', cards: [], status: 'idle', emptyMessage: IDLE_MESSAGE })
+      return
+    }
+    if (status === 'loading') {
+      onResultsChange?.({ headerLabel: '', cards: [], status: 'loading', emptyMessage: '' })
+      return
+    }
+    if (status === 'error') {
+      onResultsChange?.({ headerLabel: '', cards: [], status: 'error', emptyMessage: ERROR_MESSAGE })
+      return
+    }
+    // success
+    const total = result?.total ?? 0
+    onResultsChange?.({
+      headerLabel: `${total} result${total === 1 ? '' : 's'}`,
+      cards: (result?.items ?? []).map(toPresentedCard),
+      status: 'success',
+      emptyMessage: NO_RESULTS_MESSAGE,
+      truncatedNotice: hiddenNoPriceNotice(result?.hidden_no_price),
+    })
+    // onResultsChange is intentionally omitted: it's expected to be a stable
+    // callback (or the caller's own useCallback), and including it would
+    // refire this effect on every parent render even when nothing changed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, result])
 
   function update<K extends keyof InventoryFilters>(key: K, value: string) {
     setFilters((prev) => ({ ...prev, [key]: value }))
@@ -86,8 +137,15 @@ export default function FilterPanel() {
         className="rounded-2xl vault-panel p-4 sm:p-5"
         aria-label="Filter the inventory"
       >
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          <div className="sm:col-span-2 lg:col-span-3">
+        {/* auto-fit, NOT sm:/lg: breakpoints. Tailwind's breakpoints are
+            VIEWPORT-scoped, and RFC-0019 moved this panel into a 320-720px
+            resizable pane — so on a 1440px window `lg:grid-cols-3` gave three
+            ~120px columns inside a 420px pane and every select clipped its own
+            text ("Any condit", "All languag", "Newest firs", measured live
+            2026-08-27). auto-fit tracks the pane, which is the thing that
+            actually varies here. */}
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(9.5rem,1fr))] gap-4">
+          <div className="col-span-full">
             <label htmlFor="flt-name" className={labelClass}>
               Card name
             </label>
@@ -231,74 +289,6 @@ export default function FilterPanel() {
           </div>
         </div>
       </form>
-
-      <div aria-live="polite">
-        <Results status={status} result={result} />
-      </div>
     </div>
-  )
-}
-
-// ---- Results display ----
-
-function Results({
-  status,
-  result,
-}: {
-  status: Status
-  result: InventorySearchResult | null
-}) {
-  if (status === 'idle') {
-    return (
-      <p className="py-10 text-center text-sm text-pine-300">
-        Set your filters and run a search to browse the collection.
-      </p>
-    )
-  }
-  if (status === 'loading') {
-    return (
-      <p className="py-10 text-center font-mono text-sm text-mint">Searching the vault…</p>
-    )
-  }
-  if (status === 'error') {
-    return (
-      <p className="py-10 text-center text-sm text-red-300">
-        Something went wrong. Check your connection and try again.
-      </p>
-    )
-  }
-  if (!result || result.items.length === 0) {
-    return (
-      <div className="space-y-2 py-10 text-center">
-        <p className="text-sm text-pine-300">No cards found. Try widening your filters.</p>
-        <HiddenNoPriceNotice count={result?.hidden_no_price} />
-      </div>
-    )
-  }
-  return (
-    <div className="space-y-4">
-      <div className="space-y-1">
-        <p className="font-mono text-xs uppercase tracking-[0.12em] text-pine-300">
-          {result.total} result{result.total === 1 ? '' : 's'}
-        </p>
-        <HiddenNoPriceNotice count={result.hidden_no_price} />
-      </div>
-      <CardGrid items={result.items} />
-    </div>
-  )
-}
-
-/**
- * Tells the customer that the price range dropped cards we hold but have no
- * price for, rather than letting them vanish from the grid unexplained (the
- * owner's "the price filter wipes the inventory" bug report). Renders nothing
- * when the backend hid none — or when an older backend omits the field.
- */
-function HiddenNoPriceNotice({ count }: { count?: number }) {
-  if (!count) return null
-  return (
-    <p className="font-mono text-xs uppercase tracking-[0.12em] text-pine-300">
-      {count} card{count === 1 ? '' : 's'} hidden (no price on file)
-    </p>
   )
 }

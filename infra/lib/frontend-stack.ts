@@ -1,5 +1,6 @@
 import * as path from 'path'
 import * as cdk from 'aws-cdk-lib'
+import * as acm from 'aws-cdk-lib/aws-certificatemanager'
 import { Construct } from 'constructs'
 import { Nextjs } from 'cdk-nextjs-standalone'
 import { buildFrontendEnvironment } from './frontend-environment'
@@ -34,25 +35,35 @@ export interface FrontendStackProps extends cdk.StackProps {
   readonly sanityProjectId?: string
   readonly sanityDataset?: string
   /**
-   * KNOWN, UNRESOLVED, CONFIRMED-REAL ISSUE (2026-08-17), not a hypothetical:
-   * on this Windows dev machine, `next build`'s static-generation fetches to
-   * a live HTTPS backend hang indefinitely (Next's own 60s-per-page watchdog
-   * fires 3x, then aborts) when the build is invoked through
-   * cdk-nextjs-standalone's nested child-process chain (CDK CLI -> ts-node
-   * -> execSync -> npm -> next build). The exact same build, same machine,
-   * same backend, invoked DIRECTLY (`npm run build:opennext --workspace=
-   * frontend`) succeeds every time — reproduced twice each way. Root cause
-   * not yet identified (suspect a proxy/DNS/socket difference somewhere in
-   * that specific nested-child-process tree on Windows); this is NOT a
-   * cdk-nextjs-standalone bug report, just an observed fact about running it
-   * from this kind of machine. Defaults to false (the correct long-term
-   * behavior — always build fresh) so nobody has to know about this to get
-   * a real deploy; set `skipOpenNextBuild: true` ONLY as a deliberate,
-   * temporary escape hatch when you've already run
-   * `npm run build:opennext --workspace=frontend` yourself directly and want
-   * `cdk synth`/`deploy` to reuse that known-good `.open-next` output rather
-   * than re-triggering a build that will hang. Do not let this quietly
-   * become the permanent way this gets deployed.
+   * RESOLVED 2026-08-26 — root cause found, and it was NOT what this docstring
+   * used to claim. The old text recorded a "Windows nested-child-process
+   * proxy/DNS/socket" theory based on "direct build succeeds, CDK-driven build
+   * hangs, reproduced twice each way". Both observations were real; the
+   * conclusion was wrong, because the comparison was uncontrolled.
+   *
+   * `NextjsBuild.getBuildEnvVars()` swaps every UNRESOLVED `NEXT_PUBLIC_*`
+   * token for a literal `{{ KEY }}` placeholder. So a CDK-driven build runs
+   * with `NEXT_PUBLIC_API_URL="{{ NEXT_PUBLIC_API_URL }}"`, while a hand-run
+   * build from a plain shell has it UNSET and falls back to localhost. The
+   * arms differed by the backend URL, not by the process tree. Reproduced on
+   * Linux, both arms direct: placeholder => hangs, localhost => 24/24 pages.
+   *
+   * Mechanism: bare `fetch` rejects that URL in ~23ms, but `lib/public.ts`
+   * fetches with `next: { revalidate: 300 }` and Next's ISR fetch wrapper
+   * turns the rejection into a HANG, burning staticPageGenerationTimeout on
+   * whichever public page got there first (hence "a different page each
+   * time"). Fixed properly in `frontend/lib/api-base.ts`: `apiFetch` now
+   * rejects before constructing a request when the base URL is not a real
+   * http(s) origin, so callers' existing fallbacks actually fire.
+   *
+   * **`skipOpenNextBuild` should no longer be needed.** It stays as an escape
+   * hatch, and if you do use it, note the footgun the old instructions
+   * omitted: run the manual build with
+   * `NEXT_PUBLIC_API_URL='{{ NEXT_PUBLIC_API_URL }}'` (plus the Sanity vars)
+   * or the bundle bakes `http://localhost:8000` into production, since there
+   * will be no placeholder left for the deploy-time substitution to replace.
+   * `scripts/deploy-frontend.sh` + `scripts/smoke-deployment.sh` are the safe
+   * path. See CLAUDE.md, "THE FRONTEND BUILD HANG IS AN UNBOUNDED FETCH".
    */
   readonly skipOpenNextBuild?: boolean
 }
@@ -133,6 +144,43 @@ export class FrontendStack extends cdk.Stack {
                 ephemeralStorageSize: cdk.Size.gibibytes(2),
               },
             },
+          },
+        },
+        // `merlinsmintycards.com` / `www` were attached to this
+        // distribution by hand, outside CDK, some time before this stack
+        // existed in its current form — nothing in this file ever declared
+        // `Aliases` or a `ViewerCertificate`. CloudFormation manages the
+        // FULL property set of AWS::CloudFront::Distribution on every
+        // update, so a template that's silent on those two properties
+        // resets them to empty/default on every deploy — confirmed the hard
+        // way 2026-08-25: a routine `cdk deploy MerlinsFrontendStack`
+        // silently stripped both, and the domain served CloudFront's
+        // default `*.cloudfront.net` cert (a hostname mismatch, not a
+        // renewal failure) until manually restored via
+        // `aws cloudfront update-distribution`.
+        //
+        // NOT using `Nextjs`'s own top-level `domainProps` here: that path
+        // requires a Route53 hosted zone in this account (`HostedZone.
+        // fromLookup`, plus it writes A/AAAA alias records itself) and this
+        // IAM user has no route53:ListHostedZones grant — confirmed via a
+        // live AccessDenied, not assumed. `overrides.nextjsDistribution.
+        // distributionProps` is the documented escape hatch for exactly
+        // this case ("DNS setups where you cannot use a Route53 hosted zone
+        // in the same account") — it only sets the two CloudFront-side
+        // properties and never touches DNS, which already correctly points
+        // at this distribution from wherever it's actually managed.
+        //
+        // Reuses the existing ISSUED cert rather than provisioning a new
+        // one: `*.merlinsmintycards.com` with `merlinsmintycards.com` as an
+        // additional SAN, so both the apex and `www` are covered.
+        nextjsDistribution: {
+          distributionProps: {
+            domainNames: ['merlinsmintycards.com', 'www.merlinsmintycards.com'],
+            certificate: acm.Certificate.fromCertificateArn(
+              this,
+              'CustomDomainCertificate',
+              'arn:aws:acm:us-east-1:560151615792:certificate/ec514ed8-8b19-496e-a1ad-82c6f3d2d765',
+            ),
           },
         },
       },

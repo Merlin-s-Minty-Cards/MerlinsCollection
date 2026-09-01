@@ -143,11 +143,6 @@ export interface InventorySummary {
   sets_tracked: number
 }
 
-export interface ChatMessage {
-  role: 'user' | 'assistant'
-  content: string
-}
-
 export interface DisplayCardSummary {
   // Council r2 self-review M5: set_id, rarity, image_large and market_price
   // were on the wire with no reader on either display surface (DisplayPanel,
@@ -205,6 +200,19 @@ export interface ChatResponse {
   reply: string
   artifacts?: DisplayedCard[]
   panel?: DisplayPanelState
+  /**
+   * The thread this exchange landed in — echoed back so a new thread's
+   * implicitly-created id reaches the client.
+   *
+   * CAUTION: the backend sets this unconditionally, including when the write
+   * that would have persisted the thread failed (it swallows that failure
+   * rather than discard a paid-for Bedrock reply). So an id here is
+   * well-formed but not proof the thread exists. Treat a later 404 as "this
+   * thread is gone" and start a new one.
+   */
+  conversation_id?: string
+  /** Server-derived thread title, from the first user message. */
+  title?: string
 }
 
 export interface RequestOptions {
@@ -259,30 +267,33 @@ export async function getInventoryFacets(
   return apiFetch<InventoryFacets>('/inventory/facets', { token: opts.token })
 }
 
-/** Send a chat message and optional item-ID-only panel state to the backend. */
-export function sendChat(
-  message: string,
-  history: ChatMessage[],
-  opts?: RequestOptions,
-): Promise<ChatResponse>
-export function sendChat(
-  message: string,
-  history: ChatMessage[],
-  panelItemIds: string[],
-  opts?: RequestOptions,
-): Promise<ChatResponse>
+/** What the caller carries between turns of one thread. */
+export interface SendChatContext {
+  /**
+   * The thread this message belongs to. Omitted (or null) starts a new one —
+   * the backend creates it implicitly and returns its id on the response.
+   */
+  conversationId?: string | null
+  /** Stable item IDs of the currently-displayed cards; every other field is
+   * discarded and re-hydrated by the backend. */
+  panelItemIds?: string[]
+}
+
+/**
+ * Send a chat message.
+ *
+ * RFC 0017: no `history` array goes up any more. The transcript is server-
+ * owned and replayed from storage, which is what stops a client forging
+ * assistant turns — so the client's whole job is carrying the thread id.
+ */
 export async function sendChat(
   message: string,
-  history: ChatMessage[],
-  panelItemIdsOrOptions: string[] | RequestOptions = {},
-  maybeOptions: RequestOptions = {},
+  context: SendChatContext = {},
+  opts: RequestOptions = {},
 ): Promise<ChatResponse> {
-  const hasPanelState = Array.isArray(panelItemIdsOrOptions)
-  const panelItemIds = hasPanelState ? panelItemIdsOrOptions : undefined
-  const opts = hasPanelState ? maybeOptions : panelItemIdsOrOptions
-  const body = hasPanelState
-    ? { message, history, panel_item_ids: panelItemIds }
-    : { message, history }
+  const body: Record<string, unknown> = { message }
+  if (context.conversationId) body.conversation_id = context.conversationId
+  if (context.panelItemIds) body.panel_item_ids = context.panelItemIds
 
   // Trailing slash matters: the backend route is /chat/ and a bare /chat
   // would cost a 307 round-trip.
@@ -348,4 +359,74 @@ export function itemKey(item: InventoryItem): string {
 /** True for a Japanese print. A missing language defaults to English. */
 export function isJapanese(item: InventoryItem): boolean {
   return item.language === 'JP'
+}
+
+// ---- RFC 0019: Inventory Split Workspace ----
+// Filter mode (InventoryItem[]) and chat mode (DisplayedCard[]) each have
+// their own wire shape, but both render through the exact same
+// CardPresentation component. PresentedCard is the one normalized shape a
+// shared results grid (ResultsPane) can consume regardless of which mode
+// produced it.
+
+export interface PresentedCard {
+  key: string
+  title: string
+  imageUrl?: string
+  setName: string
+  number?: string
+  conditionLabel: string
+  price: string
+  isJapanese: boolean
+}
+
+/** Map a search-result item into the shared card-presentation shape. */
+export function toPresentedCard(item: InventoryItem): PresentedCard {
+  // Mirrors CardTile.tsx's existing precedence: a raw item's live catalog
+  // market_price outranks the sheet-derived listed_price; graded/sealed
+  // items have no catalog market_price to consult at all.
+  const marketPrice = item.kind === 'raw' ? item.card?.market_price : null
+  return {
+    key: itemKey(item),
+    title: itemTitle(item),
+    imageUrl: item.card?.image_small ?? undefined,
+    setName: item.card?.set_name ?? 'Unknown set',
+    number: item.card?.number,
+    conditionLabel: conditionLabel(item),
+    price: marketPrice ?? item.listed_price ?? 'Price N/A',
+    isJapanese: isJapanese(item),
+  }
+}
+
+/**
+ * Condition/grade label for a chat-displayed card. Consolidates what used to
+ * be copy-pasted as `cardCondition` (DisplayPanel.tsx) and
+ * `artifactCondition` (ChatPanel.tsx) — both retired by RFC 0019 in favor of
+ * this single implementation.
+ */
+function displayedCardCondition(card: DisplayedCard): string {
+  if (card.condition) return card.condition
+  if (card.kind === 'graded') {
+    if (card.grade_label) return card.grade_label
+    const slabGrade = [card.company, card.grade].filter(Boolean).join(' ')
+    if (slabGrade) return slabGrade
+  }
+  return 'N/A'
+}
+
+/** Map a chat-displayed card into the shared card-presentation shape. */
+export function displayedCardToPresentedCard(card: DisplayedCard): PresentedCard {
+  return {
+    key: card.item_id,
+    title: card.display_name || card.card?.name || 'Unknown card',
+    imageUrl: card.card?.image_small || undefined,
+    setName: card.card?.set_name ?? 'Unknown set',
+    number: card.card?.number,
+    conditionLabel: displayedCardCondition(card),
+    // listed_price is the RESOLVED, condition-adjusted price (mirrors
+    // routers/inventory.py::_display_price) and must win over
+    // current_market_value, a separate, potentially stale pass-through
+    // (RFC-0016 Council r2 self-review) — preserved unchanged here.
+    price: card.listed_price ?? card.current_market_value ?? 'Price N/A',
+    isJapanese: card.language === 'JP',
+  }
 }

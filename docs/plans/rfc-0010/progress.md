@@ -2,7 +2,7 @@
 
 **Read this first.** It is the state of the world for anyone picking up a task.
 
-**This file is the tracked progress file — not `claude-progress.txt`.** That one is
+**This file is the tracked progress file — not `claude-progress.md`.** That one is
 gitignored (`.gitignore:60`), so it is local-only and your edits to it will never appear in
 `git status` or reach anyone else. Record all RFC 0010 status **in this file**.
 

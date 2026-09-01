@@ -143,15 +143,35 @@ def test_executor_unresponsive_server_fails_fast_without_hanging():
     assert time.monotonic() - started < 8
 
 
-def test_executor_subprocess_inherits_parent_environment(executor, monkeypatch):
+def test_aws_credentials_reach_the_subprocess(executor, monkeypatch):
     """AWS credentials/region env vars must reach the MCP server subprocess.
 
     (The mcp SDK's default is a *restricted* environment that would strip
     AWS_ACCESS_KEY_ID etc., silently breaking DynamoDB access in the tools.)
+
+    REWRITTEN 2026-08-27: this used to probe an arbitrary variable
+    (`MERLINS_MCP_ENV_PROBE`), which stopped reaching the child once the
+    environment became an allowlist rather than the whole of `os.environ`. The
+    variable was incidental; the CONCERN — the credential chain surviving — is
+    what the test was for, so it now probes a real AWS variable. See the
+    companion test below, which pins the half this one cannot see.
     """
-    monkeypatch.setenv("MERLINS_MCP_ENV_PROBE", "reached-the-subprocess")
-    out = executor("env_probe", {"name": "MERLINS_MCP_ENV_PROBE"})
+    monkeypatch.setenv("AWS_SESSION_TOKEN", "reached-the-subprocess")
+    out = executor("env_probe", {"name": "AWS_SESSION_TOKEN"})
     assert out == "reached-the-subprocess"
+
+
+def test_a_secret_does_not_reach_the_subprocess(executor, monkeypatch):
+    """The other half of the contract, and the reason the allowlist exists.
+
+    Under Lambda the parent's environment carries ADMIN_API_KEY and the task
+    role's credentials for a role that can PutItem/DeleteItem/TransactWriteItems.
+    Handing all of that to a tool server means RFC 0018 decision 6's separate
+    process buys tool-surface isolation and no privilege isolation at all.
+    """
+    monkeypatch.setenv("ADMIN_API_KEY", "must-not-leak")
+    out = executor("env_probe", {"name": "ADMIN_API_KEY"})
+    assert "must-not-leak" not in out
 
 
 def test_executor_close_is_idempotent_and_allows_restart(executor):

@@ -21,9 +21,12 @@ import {
   itemTitle,
   itemKey,
   conditionLabel,
+  toPresentedCard,
+  displayedCardToPresentedCard,
   type InventoryItem,
   type InventorySearchResult,
   type InventorySummary,
+  type DisplayedCard,
 } from '@/lib/inventory'
 
 const mockedApiFetch = vi.mocked(apiFetch)
@@ -205,31 +208,42 @@ describe('getInventorySummary', () => {
 })
 
 describe('sendChat', () => {
-  it('POSTs {message, history} to /chat/ (trailing slash — no 307 round-trip)', async () => {
+  /**
+   * RFC 0017: no `history` array goes up any more. The transcript is
+   * server-owned and replayed from storage — which is what stops a client
+   * forging assistant turns — so the client's whole job between turns is
+   * carrying the thread id.
+   */
+  it('POSTs {message} to /chat/ (trailing slash — no 307 round-trip)', async () => {
     mockedApiFetch.mockResolvedValue({ reply: 'hi' })
-    await sendChat('How much is Charizard?', [
-      { role: 'user', content: 'hello' },
-      { role: 'assistant', content: 'hi there' },
-    ])
+    await sendChat('How much is Charizard?')
     expect(mockedApiFetch).toHaveBeenCalledWith(
       '/chat/',
       expect.objectContaining({
         method: 'POST',
         headers: expect.objectContaining({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({
-          message: 'How much is Charizard?',
-          history: [
-            { role: 'user', content: 'hello' },
-            { role: 'assistant', content: 'hi there' },
-          ],
-        }),
+        body: JSON.stringify({ message: 'How much is Charizard?' }),
       }),
     )
   })
 
+  it('omits conversation_id entirely when opening a new thread', async () => {
+    mockedApiFetch.mockResolvedValue({ reply: 'hi' })
+    await sendChat('first message', { conversationId: null })
+    const body = JSON.parse(String(mockedApiFetch.mock.calls[0][1]?.body))
+    expect(body).not.toHaveProperty('conversation_id')
+  })
+
+  it('sends conversation_id when continuing a thread', async () => {
+    mockedApiFetch.mockResolvedValue({ reply: 'hi' })
+    await sendChat('follow up', { conversationId: '01JD' })
+    const body = JSON.parse(String(mockedApiFetch.mock.calls[0][1]?.body))
+    expect(body).toEqual({ message: 'follow up', conversation_id: '01JD' })
+  })
+
   it('forwards a bearer token to apiFetch when given', async () => {
     mockedApiFetch.mockResolvedValue({ reply: 'hi' })
-    await sendChat('hello', [], { token: 'jwt-123' })
+    await sendChat('hello', {}, { token: 'jwt-123' })
     expect(mockedApiFetch).toHaveBeenCalledWith(
       '/chat/',
       expect.objectContaining({ token: 'jwt-123' }),
@@ -246,8 +260,7 @@ describe('sendChat', () => {
 
     await sendChat(
       'What is still open?',
-      [],
-      ['item-1', 'item-2'],
+      { conversationId: '01JD', panelItemIds: ['item-1', 'item-2'] },
       { token: 'jwt-123' },
     )
 
@@ -256,7 +269,7 @@ describe('sendChat', () => {
       expect.objectContaining({
         body: JSON.stringify({
           message: 'What is still open?',
-          history: [],
+          conversation_id: '01JD',
           panel_item_ids: ['item-1', 'item-2'],
         }),
         token: 'jwt-123',
@@ -435,5 +448,169 @@ describe('itemKey', () => {
       itemKey(makeSealedItem({ item_id: 'itm-4' })),
     ]
     expect(new Set(keys).size).toBe(keys.length)
+  })
+})
+
+// ---- RFC 0019: Inventory Split Workspace — shared PresentedCard mapping ----
+// Both the filter results grid and the chat display grid render through one
+// normalized shape so they can share a single ResultsPane component.
+
+describe('toPresentedCard', () => {
+  it('maps a raw item into a presented card, keyed by item_id', () => {
+    const presented = toPresentedCard(makeRawItem())
+    expect(presented).toEqual({
+      key: '01JRAWCHARIZARDNM0000000001',
+      title: 'Charizard',
+      imageUrl: 'https://img/charizard.png',
+      setName: 'Base',
+      number: '4',
+      conditionLabel: 'NM',
+      price: '250.00',
+      isJapanese: false,
+    })
+  })
+
+  it('prefers the live catalog market_price over listed_price for a raw item', () => {
+    const presented = toPresentedCard(
+      makeRawItem({ card: { ...makeRawItem().card, market_price: '400.00' } }),
+    )
+    expect(presented.price).toBe('400.00')
+  })
+
+  it('falls back to listed_price, then "Price N/A", when no market_price exists', () => {
+    expect(toPresentedCard(makeRawItem()).price).toBe('250.00')
+    expect(toPresentedCard(makeRawItem({ listed_price: null })).price).toBe('Price N/A')
+  })
+
+  it('never reads market_price for a graded or sealed item', () => {
+    // market_price lives on the raw catalog join only; a graded slab's price
+    // comes from listed_price (the per-grade figure), never the catalog's
+    // near-mint market_price.
+    expect(toPresentedCard(makeGradedItem()).price).toBe('900.00')
+  })
+
+  it('is company + grade for a graded item', () => {
+    expect(toPresentedCard(makeGradedItem()).conditionLabel).toBe('PSA 9.5')
+  })
+
+  it('has no image/number and an "Unknown set" fallback for a sealed product', () => {
+    const presented = toPresentedCard(makeSealedItem())
+    expect(presented.title).toBe('Scarlet & Violet Booster Box')
+    expect(presented.setName).toBe('Unknown set')
+    expect(presented.imageUrl).toBeUndefined()
+    expect(presented.number).toBeUndefined()
+    expect(presented.conditionLabel).toBe('Booster Box')
+  })
+
+  it('flags a Japanese print', () => {
+    expect(toPresentedCard(makeRawItem({ language: 'JP' })).isJapanese).toBe(true)
+    expect(toPresentedCard(makeRawItem()).isJapanese).toBe(false)
+  })
+})
+
+function makeDisplayedCard(overrides: Partial<DisplayedCard> = {}): DisplayedCard {
+  return {
+    item_id: 'item-1',
+    kind: 'raw',
+    card: {
+      card_id: 'base1-4',
+      name: 'Charizard',
+      set_name: 'Base',
+      number: '4',
+      image_small: 'https://img/charizard.png',
+    },
+    display_name: null,
+    listed_price: '275.00',
+    current_market_value: '450.00',
+    condition: 'LP',
+    company: null,
+    grade: null,
+    grade_label: null,
+    cert_number: null,
+    language: 'EN',
+    ...overrides,
+  }
+}
+
+describe('displayedCardToPresentedCard', () => {
+  it('maps a raw displayed card, keyed by item_id', () => {
+    expect(displayedCardToPresentedCard(makeDisplayedCard())).toEqual({
+      key: 'item-1',
+      title: 'Charizard',
+      imageUrl: 'https://img/charizard.png',
+      setName: 'Base',
+      number: '4',
+      conditionLabel: 'LP',
+      price: '275.00',
+      isJapanese: false,
+    })
+  })
+
+  it('prefers listed_price (the resolved, condition-adjusted figure) over current_market_value', () => {
+    expect(displayedCardToPresentedCard(makeDisplayedCard()).price).toBe('275.00')
+  })
+
+  it('falls back to current_market_value when listed_price is null', () => {
+    expect(
+      displayedCardToPresentedCard(makeDisplayedCard({ listed_price: null })).price,
+    ).toBe('450.00')
+  })
+
+  it('falls back to "Price N/A" when neither price is present', () => {
+    expect(
+      displayedCardToPresentedCard(
+        makeDisplayedCard({ listed_price: null, current_market_value: null }),
+      ).price,
+    ).toBe('Price N/A')
+  })
+
+  it('uses display_name over the catalog name when both are present', () => {
+    expect(
+      displayedCardToPresentedCard(makeDisplayedCard({ display_name: 'Chespin' })).title,
+    ).toBe('Chespin')
+  })
+
+  it('falls back to "Unknown card" when neither display_name nor a catalog card exists', () => {
+    expect(
+      displayedCardToPresentedCard(makeDisplayedCard({ card: null, display_name: null })).title,
+    ).toBe('Unknown card')
+  })
+
+  it('shows the JP badge for an uncatalogued Japanese item (language independent of card)', () => {
+    expect(
+      displayedCardToPresentedCard(makeDisplayedCard({ card: null, language: 'JP' })).isJapanese,
+    ).toBe(true)
+  })
+
+  it('prefers a graded label, falling back to "company grade", falling back to "N/A"', () => {
+    expect(
+      displayedCardToPresentedCard(
+        makeDisplayedCard({ kind: 'graded', condition: null, grade_label: 'Gem Mint 10' }),
+      ).conditionLabel,
+    ).toBe('Gem Mint 10')
+
+    expect(
+      displayedCardToPresentedCard(
+        makeDisplayedCard({
+          kind: 'graded',
+          condition: null,
+          grade_label: null,
+          company: 'PSA',
+          grade: '9.5',
+        }),
+      ).conditionLabel,
+    ).toBe('PSA 9.5')
+
+    expect(
+      displayedCardToPresentedCard(
+        makeDisplayedCard({
+          kind: 'graded',
+          condition: null,
+          grade_label: null,
+          company: null,
+          grade: null,
+        }),
+      ).conditionLabel,
+    ).toBe('N/A')
   })
 })

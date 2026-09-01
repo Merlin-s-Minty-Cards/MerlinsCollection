@@ -8,9 +8,11 @@ price as a Near Mint one.
 The multiplier table was researched via secondary sources (convergent ranges
 from multiple collector-market references + one real shipped buylist formula)
 and OWNER-APPROVED 2026-07-30. Confidence is MEDIUM, not high — these are
-triangulated launch defaults, not measured constants. See
-claude-progress.txt Phase 19 and Section 6 LOG "CONDITION-PRICING RESEARCH
-COMPLETE — MULTIPLIERS APPROVED" for the full evidence base.
+triangulated launch defaults, not measured constants. The research write-up
+behind them lived in the pre-RFC scratch roadmap and is no longer tracked; the
+surviving record is CLAUDE.md's condition-pricing section and
+``docs/plans/rfc-0008/follow-ups.md`` (the 2026-08-06 decision to apply these
+customer-side, measured live at -18.5% across 73 of 228 items).
 
 The age/era dimension was investigated and DROPPED (not supported by evidence,
 not deferred). Do not add it without explicit owner direction.

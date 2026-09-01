@@ -954,8 +954,7 @@ def test_run_daily_sync_runs_the_depth_pass_before_the_denormalize_step(dynamo_r
 # ---------------------------------------------------------------------------
 # PHASE 12 — inventory price correctness (RED phase, absorbs Phase 10)
 #
-# claude-progress.txt Section 3, Phase 12. `refresh_inventory_market_values`
-# (this module, :74-103) does a bare exact-match `card.prices.get(item.finish)`
+# `refresh_inventory_market_values` (this module, :74-103) does a bare exact-match `card.prices.get(item.finish)`
 # instead of walking the SAME `_MARKET_FINISH_FALLBACK` chain the read path
 # (`models.inventory._market_price`) already uses. Measured live: 174/213
 # null `current_market_value`s trace to exactly this mismatch.

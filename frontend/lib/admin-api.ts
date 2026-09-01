@@ -3,7 +3,11 @@
 import { useSession } from 'next-auth/react'
 import { useCallback, useMemo, useRef } from 'react'
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
+import { API_BASE_URL } from './api-base'
+
+// Normalized in api-base.ts so `${BASE_URL}${path}` can never emit a double
+// slash — see that module for the production 404 this prevents.
+const BASE_URL = API_BASE_URL
 
 /** Error thrown by admin API calls with status and optional detail from backend. */
 export class AdminApiError extends Error {

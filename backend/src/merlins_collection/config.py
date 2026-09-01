@@ -55,6 +55,21 @@ class Settings(BaseSettings):
     # late-written point still expires on the same schedule as one written on
     # time would have.
     price_history_retention_days: int = 730
+    # How long a chat conversation is kept before DynamoDB's native TTL reaps
+    # it (RFC 0017, decision 7 — six months). The owner's chosen reading is
+    # "six months from LAST USE": the conversation row's ttl is pushed forward
+    # on every append, while each message row keeps its own clock from its own
+    # created_at. Since updated_at is by definition >= the newest message's
+    # created_at, the conversation row always outlives its own messages — so
+    # ownership can never be orphaned by expiry.
+    conversation_retention_days: int = 183
+    # Admin analyst threads are kept for TWO YEARS, not six months (RFC 0018,
+    # Open Question 3 — a deliberate owner call). A quarter's margin analysis is
+    # worth comparing against next year's, which a six-month clock destroys.
+    # The branch between the two lives in exactly one function,
+    # `services/dynamodb._conversation_ttl`; two writers computing a TTL
+    # independently is how half a thread expires early.
+    admin_conversation_retention_days: int = 730
     # Comma-separated browser origins allowed to call the API (CORS).
     cors_origins: str = "http://localhost:3000"
     # Dev-only: inject a fake user instead of verifying Cognito JWTs.
@@ -103,6 +118,15 @@ class Settings(BaseSettings):
     # value — set this to HALF the tolerable daily Bedrock spend. Default 1000/day
     # → true worst-case ceiling of 2000 Bedrock calls per rolling 24h.
     rate_limit_chat_global_daily: str = "1000/day"
+    # The ADMIN analyst chat (RFC 0018 decision 4): "same limiter, higher admin
+    # ceiling". Per-user tiers are raised because an admin working through a
+    # month's numbers legitimately asks more questions than a customer browsing
+    # cards — but the GLOBAL tier is deliberately NOT duplicated. Both surfaces
+    # spend from `global#chat`, because the thing that ceiling protects is the
+    # account's Bedrock bill, and two independent global counters would let
+    # admin + customer together exceed the budget it exists to cap.
+    rate_limit_admin_chat: str = "30/minute"
+    rate_limit_admin_chat_daily: str = "500/day"
     # Filter-mode search and the auth endpoints are cheap DynamoDB/JWT calls, so
     # they get looser limits — still enough to blunt a scraper or a stuck client.
     rate_limit_search: str = "60/minute"

@@ -33,10 +33,86 @@ from mcp.client.stdio import stdio_client
 
 logger = logging.getLogger(__name__)
 
+#: Environment variables an MCP subprocess is allowed to inherit from this
+#: process. An ALLOWLIST, not a filter-list, so a secret added to the backend
+#: later is excluded by default rather than by remembering to exclude it.
+#:
+#: Why this is not `{**os.environ}` (which it was until 2026-08-27): under
+#: Lambda that dict carries `ADMIN_API_KEY` and the task role's session
+#: credentials for a role holding PutItem/DeleteItem/TransactWriteItems/Scan.
+#: The customer MCP server was therefore holding a full-write admin credential,
+#: which makes RFC 0018 decision 6's process boundary tool-SURFACE isolation
+#: only — it confers no privilege isolation at all. Both servers need exactly
+#: the AWS credential chain and enough of a shell to start; nothing else.
+_ENV_ALLOWLIST = frozenset({
+    # AWS credential chain + region resolution.
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_ROLE_ARN",
+    "AWS_ROLE_SESSION_NAME",
+    "AWS_EC2_METADATA_DISABLED",
+    "AWS_STS_REGIONAL_ENDPOINTS",
+    # Enough environment to start an interpreter or a node binary at all.
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "TMPDIR",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "NODE_PATH",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+})
+
 # How long a healthy runner gets to exit via the stop event before being cancelled.
 _GRACEFUL_EXIT_TIMEOUT = 2.0
 # How long to wait for the runner task to release the subprocess on teardown.
 _TEARDOWN_TIMEOUT = 10.0
+
+
+#: The backend Lambda's own timeout, mirrored from
+#: ``infra/lib/backend-stack.ts``. Every guard below is sized against it, and
+#: ``test_request_time_budget.py`` reads the CDK source to keep the two equal —
+#: raising one without the other leaves these looking correct and being wrong.
+LAMBDA_REQUEST_BUDGET_SECONDS = 30.0
+
+#: Ceiling on ONE tool call. Its job is to turn a single wedged tool into an
+#: error string the model can narrate around, which requires that it fire with
+#: enough of the request left for a final Bedrock turn to run. It was 30.0 —
+#: the entire budget — so that error path had never once been reachable in
+#: production: the Lambda died at the same instant the guard gave up.
+#:
+#: Measured 2026-08-27 (``scripts/measure_admin_chat_latency.py``, against the
+#: live table over a home connection to us-east-1, which is pessimistic — the
+#: DynamoDB legs are ten sequential round trips that cost ~5ms each in-region
+#: and ~85ms here): **no tool on either server exceeds 1.0s.** The slowest is
+#: ``get_profit_summary`` over a full year at 0.97s. Ten seconds is therefore
+#: ~10x the worst real case, not a tight bound.
+#:
+#: **This bounds one anomaly, not N.** Nothing here caps the sum across a
+#: request; ``bedrock._MAX_QUERY_TOOL_CALLS_PER_REQUEST`` bounds the count and
+#: the Lambda timeout remains the backstop for the aggregate. Said plainly
+#: because a guard whose reach is overstated is how the next person stops
+#: looking.
+DEFAULT_CALL_TIMEOUT_SECONDS = LAMBDA_REQUEST_BUDGET_SECONDS / 3
+
+#: Ceiling on spawn + MCP handshake. Deliberately NOT lowered alongside the
+#: call timeout: the measurement above puts a warm local spawn at 1.7s, but a
+#: Lambda cold start runs a fresh Python interpreter importing boto3, mcp and
+#: merlins_collection off a cold container filesystem, and that is a quantity
+#: no measurement taken on this machine can stand in for. Tightening a bound
+#: against a number you cannot measure is the guess this whole item exists to
+#: remove.
+DEFAULT_INIT_TIMEOUT_SECONDS = 15.0
 
 
 class McpToolExecutor:
@@ -51,8 +127,8 @@ class McpToolExecutor:
         self,
         command: list[str],
         *,
-        call_timeout: float = 30.0,
-        init_timeout: float = 15.0,
+        call_timeout: float = DEFAULT_CALL_TIMEOUT_SECONDS,
+        init_timeout: float = DEFAULT_INIT_TIMEOUT_SECONDS,
         env: dict[str, str] | None = None,
     ) -> None:
         self._command = list(command)
@@ -106,17 +182,30 @@ class McpToolExecutor:
 
     # ---- session lifecycle ----
 
+    def _child_env(self) -> dict[str, str]:
+        """The environment handed to the subprocess: allowlist + explicit config.
+
+        Built at spawn time rather than at construction so a respawn sees
+        current values (rotated credentials, a refreshed session token) instead
+        of a stale snapshot. Overrides always win and always arrive, because
+        pydantic-settings reads `.env` without exporting to `os.environ` — the
+        table name and region genuinely are not in the parent's environment.
+        """
+        inherited = {
+            key: value
+            for key, value in os.environ.items()
+            if key in _ENV_ALLOWLIST
+        }
+        return {**inherited, **self._env_overrides}
+
     def _ensure_session(self) -> _SessionState:
         state = self._state
         if state is not None:
             return state
         with self._lock:
             if self._state is None:
-                # Environment is captured at spawn time so a respawn sees
-                # current values, not a stale construction-time snapshot.
-                env = {**os.environ, **self._env_overrides}
                 self._state = _SessionState.start(
-                    self._command, env, self._init_timeout
+                    self._command, self._child_env(), self._init_timeout
                 )
             return self._state
 

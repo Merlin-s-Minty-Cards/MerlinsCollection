@@ -1,6 +1,6 @@
 ---
 name: sync-docs
-description: Bring READMEs, API endpoint docs, inline code commentary, and CLAUDE.md tables back in line with code that just changed. Use after implementation work lands, or when documentation looks stale relative to the source.
+description: Bring READMEs, API endpoint docs, inline code commentary, and CLAUDE.md tables back in line with code that just changed. Use after implementation work lands, when documentation looks stale relative to the source, or when renaming or moving something that other files point at.
 ---
 
 # Sync Docs
@@ -13,6 +13,7 @@ After source files change, scan the modifications and update every corresponding
 - Documentation is **derived from the code as it is now**, so read the actual implementation before describing it — commit messages and intentions record what someone meant, not what shipped.
 - Match each document's existing voice, structure, and formatting, and confine edits to the sections the code change touches.
 - Comment what the code cannot say itself — constraints, invariants, non-obvious "why". Rewrite or drop any comment an edit made stale.
+- **Rewriting a reference asserts that it still resolves.** Before updating a pointer — a renamed file, a moved doc, a cited RFC or section anchor — open the target and confirm it exists and still says what is claimed. A mechanical find-and-replace across every mention refreshes dead pointers into apparently-maintained ones, spending the staleness that was the reader's only clue that the trail had gone cold. Where a target no longer resolves, keep the substance inline in the comment and drop the pointer.
 - Document secret and credential **names and purposes** only; values stay out.
 
 ## Step-by-Step Execution

@@ -3,6 +3,14 @@ node_modules
 **/node_modules
 .next
 **/.next
+# OpenNext's build output (frontend/.open-next) — not excluded until
+# 2026-08-25. CDK hashes the ENTIRE docker build context (repo root) to
+# fingerprint the backend Lambda image asset, so building the frontend
+# standalone (SKIP_OPENNEXT_BUILD=true path) changed that hash and forced an
+# unrelated backend image rebuild+republish on every frontend-only deploy,
+# even though backend/Dockerfile never reads anything under frontend/.
+.open-next
+**/.open-next
 dist
 **/dist
 *.tsbuildinfo
