@@ -304,12 +304,6 @@ class TestTradeConfirm:
         create = client.post("/admin/trades", json={}, headers=_auth(token))
         trade_id = create.json()["trade_id"]
 
-        # 3.0: cash requires manual basis mode
-        client.patch(f"/admin/trades/{trade_id}", json={
-            "basis_mode": "manual",
-            "manual_basis": "20.00",
-        }, headers=_auth(token))
-
         # Add outgoing (our cards)
         client.post(f"/admin/trades/{trade_id}/outgoing", json={
             "item_id": "our-1", "agreed_value": "50.00",
@@ -346,7 +340,7 @@ class TestTradeConfirm:
         all_items = repo.list_inventory()
         new_items = [i for i in all_items if i.status == ItemStatus.AVAILABLE]
         assert len(new_items) == 1
-        # 3.0: manual basis mode — operator set total basis to 20.00
+        # Automatic: out basis (20 + 15 = 35) - cash they pay (15) = 20.00.
         assert new_items[0].cost_basis == Decimal("20.00")
 
     def test_confirm_returns_item_ids_for_incoming_legs_in_order(self, admin_client):
@@ -355,9 +349,6 @@ class TestTradeConfirm:
 
         create = client.post("/admin/trades", json={}, headers=_auth(token))
         trade_id = create.json()["trade_id"]
-        client.patch(f"/admin/trades/{trade_id}", json={
-            "basis_mode": "manual", "manual_basis": "20.00",
-        }, headers=_auth(token))
         client.post(f"/admin/trades/{trade_id}/outgoing", json={
             "item_id": "our-1", "agreed_value": "50.00",
         }, headers=_auth(token))
@@ -588,7 +579,7 @@ class TestTradeBalanceMultiCash:
         assert data["is_balanced"] is True
 
     def test_balance_with_margin_split(self, admin_client):
-        """Balance reports legacy error when margin_split.enabled is True (3.0)."""
+        """A stored margin_split is inert — balance still reports the automatic pool."""
         client, repo, token = admin_client
         repo.put_inventory_item(_raw(item_id="our-1", cost_basis="20.00",
                                      current_market_value="50.00"))
@@ -611,30 +602,21 @@ class TestTradeBalanceMultiCash:
         assert resp.status_code == 200
         data = resp.json()
         assert "margin_split_applied" not in data
-        assert data["basis_mode_error"] == (
-            "This trade uses the retired percent-based margin split; "
-            "choose a basis mode"
-        )
+        assert "basis_mode_error" not in data
+        assert data["projected_basis_pool"] == "20.00"
 
 
 class TestTradeConfirmMultiCash:
     """POST /admin/trades/{id}/confirm with cash_components."""
 
     def test_confirm_creates_transactions_for_each_cash_component(self, admin_client):
-        """Confirm creates separate transactions per cash component.
-        3.0: cash requires manual basis mode.
-        """
+        """Confirm creates separate transactions per cash component."""
         client, repo, token = admin_client
         repo.put_inventory_item(_raw(item_id="our-1", cost_basis="20.00",
                                      current_market_value="50.00"))
 
         create = client.post("/admin/trades", json={}, headers=_auth(token))
         trade_id = create.json()["trade_id"]
-
-        client.patch(f"/admin/trades/{trade_id}", json={
-            "basis_mode": "manual",
-            "manual_basis": "20.00",
-        }, headers=_auth(token))
 
         client.post(f"/admin/trades/{trade_id}/outgoing", json={
             "item_id": "our-1", "agreed_value": "50.00",
@@ -721,9 +703,9 @@ class TestTradeCostBasisAllocation:
         assert len(new_items) == 1
         assert new_items[0].cost_basis == Decimal("15.00")
 
-    def test_cash_adjusts_basis_pool(self, admin_client):
-        # was: we pay $5 -> pool 15 + 5 = 20.00
-        # 3.0: transfer (default) + cash -> 422 rejection
+    def test_cash_we_pay_adds_to_basis_pool(self, admin_client):
+        # Automatic, always: pool = out basis (15) + cash we pay (5) = 20.00.
+        # No mode to pick, no 422 — cash is just part of what it cost us.
         client, repo, token = admin_client
         repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
                                      current_market_value="20.00"))
@@ -735,12 +717,13 @@ class TestTradeCostBasisAllocation:
                               "payment_method": "cash"}],
         )
         resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
-        assert resp.status_code == 422
-        assert resp.json()["detail"] == "Cash components require Manual basis mode"
+        assert resp.status_code == 200, resp.text
+
+        new_items = _new_available_items(repo, {"our-1"})
+        assert new_items[0].cost_basis == Decimal("20.00")
 
     def test_cash_they_pay_reduces_basis_pool(self, admin_client):
-        # was: they pay $5 -> pool 15 - 5 = 10.00
-        # 3.0: transfer (default) + cash -> 422 rejection
+        # Automatic, always: pool = out basis (15) - cash they pay (5) = 10.00.
         client, repo, token = admin_client
         repo.put_inventory_item(_raw(item_id="our-2", cost_basis="15.00",
                                      current_market_value="20.00"))
@@ -752,29 +735,19 @@ class TestTradeCostBasisAllocation:
                               "payment_method": "cash"}],
         )
         resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
-        assert resp.status_code == 422
-        assert resp.json()["detail"] == "Cash components require Manual basis mode"
+        assert resp.status_code == 200, resp.text
 
-    def test_margin_split_raises_basis(self, admin_client):
-        # was: margin split 50% recognizes part of profit
-        # 3.0: legacy margin_split.enabled=True without basis_mode -> 422
-        client, repo, token = admin_client
-        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
-                                     current_market_value="20.00"))
-        trade_id = _build_trade(client, token,
-                                out_legs=[("our-1", "20.00")],
-                                in_legs=[("Their Card", "25.00")],
-                                margin_split={"enabled": True, "percent": "50"})
-        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
-        assert resp.status_code == 422
-        assert resp.json()["detail"] == (
-            "This trade uses the retired percent-based margin split; "
-            "choose a basis mode"
-        )
+        new_items = _new_available_items(repo, {"our-2"})
+        assert new_items[0].cost_basis == Decimal("10.00")
 
-    def test_margin_split_full_percent_makes_basis_equal_agreed_value(self, admin_client):
-        # was: 100% split -> basis == agreed value
-        # 3.0: legacy margin_split.enabled=True without basis_mode -> 422
+    def test_legacy_margin_split_field_has_no_effect_on_confirm(self, admin_client):
+        """`margin_split` is a retired, inert field — still storable via PATCH
+
+        (unrelated other tests cover that), but it no longer changes the
+        basis pool or blocks confirmation the way the deleted basis-mode
+        system used to. The pool is always the automatic out-basis-plus-cash
+        figure, regardless of what margin_split says.
+        """
         client, repo, token = admin_client
         repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
                                      current_market_value="20.00"))
@@ -783,28 +756,12 @@ class TestTradeCostBasisAllocation:
                                 in_legs=[("Their Card", "25.00")],
                                 margin_split={"enabled": True, "percent": "100"})
         resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
-        assert resp.status_code == 422
-        assert resp.json()["detail"] == (
-            "This trade uses the retired percent-based margin split; "
-            "choose a basis mode"
-        )
+        assert resp.status_code == 200, resp.text
 
-    def test_margin_split_ignored_when_trade_is_a_loss(self, admin_client):
-        # was: loss -> margin split ignored -> pool = out basis
-        # 3.0: legacy margin_split.enabled=True without basis_mode -> 422
-        client, repo, token = admin_client
-        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
-                                     current_market_value="20.00"))
-        trade_id = _build_trade(client, token,
-                                out_legs=[("our-1", "20.00")],
-                                in_legs=[("Their Card", "10.00")],
-                                margin_split={"enabled": True, "percent": "50"})
-        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
-        assert resp.status_code == 422
-        assert resp.json()["detail"] == (
-            "This trade uses the retired percent-based margin split; "
-            "choose a basis mode"
-        )
+        new_items = _new_available_items(repo, {"our-1"})
+        # Automatic formula (out basis, no cash) == 15.00 — NOT the agreed
+        # value (25.00) a 100%-split would once have produced.
+        assert new_items[0].cost_basis == Decimal("15.00")
 
     def test_multi_incoming_pro_rata_with_rounding(self, admin_client):
         # pool 10.00 across agreed 10 & 20 -> 3.33 and 6.67, summing exactly
@@ -831,8 +788,8 @@ class TestTradeCostBasisAllocation:
 
         Rounding each leg half-up independently overspends a 0.04 pool across
         agreed [1,1,1,1,1,1,2] and the remainder-on-last-leg fix-up lands on
-        -0.02, which would persist as a negative book cost.
-        3.0: cash requires manual mode; operator enters 0.04 as the basis.
+        -0.02, which would persist as a negative book cost. Pool reaches 0.04
+        automatically: out basis 100.04 - cash they pay 100.00 = 0.04.
         """
         client, repo, token = admin_client
         repo.put_inventory_item(_raw(item_id="our-1", cost_basis="100.04",
@@ -844,8 +801,6 @@ class TestTradeCostBasisAllocation:
             in_legs=in_legs,
             cash_components=[{"direction": "they_pay", "amount": "100.00",
                               "payment_method": "cash"}],
-            basis_mode="manual",
-            manual_basis="0.04",
         )
         resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
         assert resp.status_code == 200, resp.text
@@ -858,7 +813,7 @@ class TestTradeCostBasisAllocation:
         assert sum(bases) == Decimal("0.04")
 
     def test_basis_pool_floors_at_zero(self, admin_client):
-        # 3.0: cash requires manual mode; operator enters 0.00 as the basis
+        # Automatic pool goes negative (5.00 - 50.00 = -45.00) and floors at 0.
         client, repo, token = admin_client
         repo.put_inventory_item(_raw(item_id="our-1", cost_basis="5.00",
                                      current_market_value="20.00"))
@@ -868,8 +823,6 @@ class TestTradeCostBasisAllocation:
             in_legs=[("Their Card", "25.00")],
             cash_components=[{"direction": "they_pay", "amount": "50.00",
                               "payment_method": "cash"}],
-            basis_mode="manual",
-            manual_basis="0.00",
         )
         resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
         assert resp.status_code == 200, resp.text
@@ -1082,36 +1035,20 @@ class TestTradeIncomingLocation:
 
 
 # ===========================================================================
-# 3.0: Trade basis MODES (transfer / split / manual)
+# Trade cost basis is fully automatic — no mode, no manual entry (retires the
+# earlier transfer/split/manual system)
 # ===========================================================================
 
-class TestTradeBasisModes:
-    """3.0: Three named basis modes replace percent-based margin split."""
+class TestTradeBasisIsAutomatic:
+    """The basis pool is always out-basis + cash we pay - cash they pay.
 
-    def test_patch_accepts_basis_mode(self, admin_client):
-        client, repo, token = admin_client
-        trade_id = client.post("/admin/trades", json={},
-                               headers=_auth(token)).json()["trade_id"]
-        resp = client.patch(f"/admin/trades/{trade_id}", json={
-            "basis_mode": "split",
-        }, headers=_auth(token))
-        assert resp.status_code == 200
-        assert resp.json()["basis_mode"] == "split"
+    There is no mode to choose and no manual override. Sending the retired
+    `basis_mode` / `manual_basis` fields is a harmless no-op (they're simply
+    not read), never a 422 — there is nothing left to validate.
+    """
 
-    def test_patch_accepts_manual_basis(self, admin_client):
-        client, repo, token = admin_client
-        trade_id = client.post("/admin/trades", json={},
-                               headers=_auth(token)).json()["trade_id"]
-        resp = client.patch(f"/admin/trades/{trade_id}", json={
-            "basis_mode": "manual",
-            "manual_basis": "42.50",
-        }, headers=_auth(token))
-        assert resp.status_code == 200
-        assert resp.json()["basis_mode"] == "manual"
-        assert resp.json()["manual_basis"] == "42.50"
-
-    def test_transfer_mode_basis_equals_outgoing_cost(self, admin_client):
-        """Transfer: incoming basis = total outgoing cost basis (owner's example)."""
+    def test_basis_equals_outgoing_cost_with_no_cash(self, admin_client):
+        """No cash: pool = outgoing cost basis, exactly as before."""
         client, repo, token = admin_client
         repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
                                      current_market_value="20.00"))
@@ -1123,10 +1060,25 @@ class TestTradeBasisModes:
         new_items = _new_available_items(repo, {"our-1"})
         assert new_items[0].cost_basis == Decimal("15.00")
 
-    def test_split_mode_basis_equals_midpoint(self, admin_client):
-        """Split: basis = (out_basis + in_agreed) / 2.
+    def test_cash_no_longer_blocks_confirm(self, admin_client):
+        """A cash-inclusive trade confirms with no mode selected — no 422."""
+        client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
+                                     current_market_value="20.00"))
+        trade_id = _build_trade(client, token,
+                                out_legs=[("our-1", "20.00")],
+                                in_legs=[("Their Card", "25.00")],
+                                cash_components=[{"direction": "we_pay", "amount": "5.00",
+                                                  "payment_method": "cash"}])
+        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
+        assert resp.status_code == 200, resp.text
 
-        Owner's worked example: out cost $15, in agreed $25 -> (15+25)/2 = $20.
+    def test_stale_basis_mode_and_manual_basis_fields_are_ignored(self, admin_client):
+        """A caller still sending the retired fields gets the automatic result.
+
+        Guards against a stale frontend bundle (mid-deploy) sending
+        `basis_mode`/`manual_basis` on a cash trade — it must not 422 or
+        change the outcome from the automatic formula.
         """
         client, repo, token = admin_client
         repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
@@ -1134,123 +1086,35 @@ class TestTradeBasisModes:
         trade_id = _build_trade(client, token,
                                 out_legs=[("our-1", "20.00")],
                                 in_legs=[("Their Card", "25.00")],
-                                basis_mode="split")
+                                cash_components=[{"direction": "we_pay", "amount": "5.00",
+                                                  "payment_method": "cash"}],
+                                basis_mode="manual",
+                                manual_basis="999.00")
         resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
-        assert resp.status_code == 200
+        assert resp.status_code == 200, resp.text
         new_items = _new_available_items(repo, {"our-1"})
+        # 15.00 + 5.00 (we_pay) = 20.00 — NOT the stale manual_basis of 999.00.
         assert new_items[0].cost_basis == Decimal("20.00")
 
-    def test_manual_mode_uses_supplied_basis(self, admin_client):
-        """Manual: incoming basis = operator-supplied value."""
+    def test_confirmed_session_no_longer_stores_a_basis_mode(self, admin_client):
+        """There is no mode to persist any more."""
         client, repo, token = admin_client
         repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
                                      current_market_value="20.00"))
         trade_id = _build_trade(client, token,
                                 out_legs=[("our-1", "20.00")],
-                                in_legs=[("Their Card", "25.00")],
-                                basis_mode="manual",
-                                manual_basis="18.00")
-        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
-        assert resp.status_code == 200
-        new_items = _new_available_items(repo, {"our-1"})
-        assert new_items[0].cost_basis == Decimal("18.00")
-
-    def test_transfer_mode_rejects_cash(self, admin_client):
-        """Transfer + cash -> 422 (explicit basis_mode)."""
-        client, repo, token = admin_client
-        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
-                                     current_market_value="20.00"))
-        trade_id = _build_trade(client, token,
-                                out_legs=[("our-1", "20.00")],
-                                in_legs=[("Their Card", "25.00")],
-                                cash_components=[{"direction": "we_pay", "amount": "5.00",
-                                                  "payment_method": "cash"}],
-                                basis_mode="transfer")
-        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
-        assert resp.status_code == 422
-        assert resp.json()["detail"] == "Cash components require Manual basis mode"
-
-    def test_split_mode_rejects_cash(self, admin_client):
-        """Split + cash -> 422."""
-        client, repo, token = admin_client
-        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
-                                     current_market_value="20.00"))
-        trade_id = _build_trade(client, token,
-                                out_legs=[("our-1", "20.00")],
-                                in_legs=[("Their Card", "25.00")],
-                                cash_components=[{"direction": "they_pay", "amount": "5.00",
-                                                  "payment_method": "cash"}],
-                                basis_mode="split")
-        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
-        assert resp.status_code == 422
-        assert resp.json()["detail"] == "Cash components require Manual basis mode"
-
-    def test_manual_mode_allows_cash(self, admin_client):
-        """Manual + cash -> OK."""
-        client, repo, token = admin_client
-        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
-                                     current_market_value="20.00"))
-        trade_id = _build_trade(client, token,
-                                out_legs=[("our-1", "20.00")],
-                                in_legs=[("Their Card", "25.00")],
-                                cash_components=[{"direction": "we_pay", "amount": "5.00",
-                                                  "payment_method": "cash"}],
-                                basis_mode="manual",
-                                manual_basis="20.00")
-        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
-        assert resp.status_code == 200
-
-    def test_manual_mode_rejects_null_basis(self, admin_client):
-        """Manual without manual_basis -> 422."""
-        client, repo, token = admin_client
-        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
-                                     current_market_value="20.00"))
-        trade_id = _build_trade(client, token,
-                                out_legs=[("our-1", "20.00")],
-                                in_legs=[("Their Card", "25.00")],
-                                basis_mode="manual")
-        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
-        assert resp.status_code == 422
-        assert resp.json()["detail"] == (
-            "Manual basis mode requires a total basis amount"
-        )
-
-    def test_legacy_margin_split_enabled_rejects_confirm(self, admin_client):
-        """Legacy margin_split.enabled=True without explicit basis_mode -> 422."""
-        client, repo, token = admin_client
-        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
-                                     current_market_value="20.00"))
-        trade_id = _build_trade(client, token,
-                                out_legs=[("our-1", "20.00")],
-                                in_legs=[("Their Card", "25.00")],
-                                margin_split={"enabled": True, "percent": "50"})
-        resp = client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
-        assert resp.status_code == 422
-        assert resp.json()["detail"] == (
-            "This trade uses the retired percent-based margin split; "
-            "choose a basis mode"
-        )
-
-    def test_confirmed_session_stores_basis_mode(self, admin_client):
-        """Confirmed session persists the basis_mode used."""
-        client, repo, token = admin_client
-        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
-                                     current_market_value="20.00"))
-        trade_id = _build_trade(client, token,
-                                out_legs=[("our-1", "20.00")],
-                                in_legs=[("Their Card", "25.00")],
-                                basis_mode="split")
+                                in_legs=[("Their Card", "25.00")])
         client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
         session = client.get(f"/admin/trades/{trade_id}",
                              headers=_auth(token)).json()
-        assert session["basis_mode"] == "split"
+        assert "basis_mode" not in session
 
 
 class TestTradeCardOnlyInvariant:
     """Invariant: for card-only trades, total outgoing sale amounts == total incoming bases."""
 
-    def test_invariant_transfer_single_leg(self, admin_client):
-        """1-out/1-in transfer: sale amount = out basis = incoming basis."""
+    def test_invariant_single_leg(self, admin_client):
+        """1-out/1-in, no cash: sale amount = out basis = incoming basis."""
         client, repo, token = admin_client
         repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
                                      current_market_value="20.00"))
@@ -1273,50 +1137,8 @@ class TestTradeCardOnlyInvariant:
         # Invariant: sale amount == incoming basis
         assert sale_amount == incoming_basis == Decimal("15.00")
 
-    def test_invariant_split_mode(self, admin_client):
-        """Split mode: sale amounts and incoming bases both sum to midpoint."""
-        client, repo, token = admin_client
-        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
-                                     current_market_value="20.00"))
-        trade_id = _build_trade(client, token,
-                                out_legs=[("our-1", "20.00")],
-                                in_legs=[("Their Card", "25.00")],
-                                basis_mode="split")
-        client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
-
-        out_events = repo.get_timeline_events("our-1")
-        trade_outs = [e for e in out_events if e.get("type") == "trade_out"]
-        sale_amount = Decimal(trade_outs[0]["amount"])
-
-        new_items = _new_available_items(repo, {"our-1"})
-        incoming_basis = new_items[0].cost_basis
-
-        # (15 + 25) / 2 = 20
-        assert sale_amount == incoming_basis == Decimal("20.00")
-
-    def test_invariant_manual_card_only(self, admin_client):
-        """Manual mode (card-only): sale = incoming basis = manual_basis."""
-        client, repo, token = admin_client
-        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="15.00",
-                                     current_market_value="20.00"))
-        trade_id = _build_trade(client, token,
-                                out_legs=[("our-1", "20.00")],
-                                in_legs=[("Their Card", "25.00")],
-                                basis_mode="manual",
-                                manual_basis="18.00")
-        client.post(f"/admin/trades/{trade_id}/confirm", headers=_auth(token))
-
-        out_events = repo.get_timeline_events("our-1")
-        trade_outs = [e for e in out_events if e.get("type") == "trade_out"]
-        sale_amount = Decimal(trade_outs[0]["amount"])
-
-        new_items = _new_available_items(repo, {"our-1"})
-        incoming_basis = new_items[0].cost_basis
-
-        assert sale_amount == incoming_basis == Decimal("18.00")
-
     def test_invariant_multi_leg(self, admin_client):
-        """Multi-leg transfer: total sale amounts == total incoming bases."""
+        """Multi-leg, no cash: total sale amounts == total incoming bases."""
         client, repo, token = admin_client
         repo.put_inventory_item(_raw(item_id="our-1", cost_basis="10.00",
                                      current_market_value="20.00"))
@@ -1345,11 +1167,16 @@ class TestTradeCardOnlyInvariant:
         assert total_sale == total_basis == Decimal("15.00")
 
 
-class TestTradeBalanceBasisMode:
-    """GET /admin/trades/{id}/balance -- basis mode fields (3.0)."""
+class TestTradeBalanceIsAutomatic:
+    """GET /admin/trades/{id}/balance -- the automatic basis-pool preview.
 
-    def test_balance_returns_basis_mode_fields(self, admin_client):
-        """Balance response includes new basis mode fields, drops margin_split_applied."""
+    Mirrors confirm's own automatic computation exactly, so the number an
+    operator sees before confirming is the number that actually gets stored.
+    No basis_mode / basis_mode_error fields exist any more — there is
+    nothing left to choose or to get wrong.
+    """
+
+    def test_balance_projects_the_automatic_pool(self, admin_client):
         client, repo, token = admin_client
         repo.put_inventory_item(_raw(item_id="our-1", cost_basis="20.00",
                                      current_market_value="50.00"))
@@ -1367,83 +1194,28 @@ class TestTradeBalanceBasisMode:
         assert resp.status_code == 200
         data = resp.json()
 
-        assert data["basis_mode"] == "transfer"
         assert data["has_cash"] is False
         assert data["projected_basis_pool"] == "20.00"
-        assert data["basis_mode_error"] is None
+        assert "basis_mode" not in data
+        assert "basis_mode_error" not in data
         assert "margin_split_applied" not in data
 
-    def test_balance_projected_pool_split(self, admin_client):
-        """Split mode: projected_basis_pool = (out_basis + in_agreed) / 2."""
+    def test_balance_projected_pool_includes_cash(self, admin_client):
+        """Cash we pay folds into the projected pool, same as at confirm."""
         client, repo, token = admin_client
         repo.put_inventory_item(_raw(item_id="our-1", cost_basis="20.00",
                                      current_market_value="50.00"))
         trade_id = client.post("/admin/trades", json={},
                                headers=_auth(token)).json()["trade_id"]
-        client.patch(f"/admin/trades/{trade_id}", json={
-            "basis_mode": "split",
-        }, headers=_auth(token))
         client.post(f"/admin/trades/{trade_id}/outgoing", json={
             "item_id": "our-1", "agreed_value": "50.00",
         }, headers=_auth(token))
         client.post(f"/admin/trades/{trade_id}/incoming", json={
             "name": "Their card", "agreed_value": "40.00",
         }, headers=_auth(token))
-
-        resp = client.get(f"/admin/trades/{trade_id}/balance",
-                          headers=_auth(token))
-        data = resp.json()
-        # (20 + 40) / 2 = 30
-        assert data["projected_basis_pool"] == "30.00"
-
-    def test_balance_projected_pool_manual_with_value(self, admin_client):
-        """Manual mode with value: projected_basis_pool = the value."""
-        client, repo, token = admin_client
-        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="20.00",
-                                     current_market_value="50.00"))
-        trade_id = client.post("/admin/trades", json={},
-                               headers=_auth(token)).json()["trade_id"]
-        client.patch(f"/admin/trades/{trade_id}", json={
-            "basis_mode": "manual",
-            "manual_basis": "35.00",
-        }, headers=_auth(token))
-        client.post(f"/admin/trades/{trade_id}/outgoing", json={
-            "item_id": "our-1", "agreed_value": "50.00",
-        }, headers=_auth(token))
-        client.post(f"/admin/trades/{trade_id}/incoming", json={
-            "name": "Their card", "agreed_value": "40.00",
-        }, headers=_auth(token))
-
-        resp = client.get(f"/admin/trades/{trade_id}/balance",
-                          headers=_auth(token))
-        data = resp.json()
-        assert data["projected_basis_pool"] == "35.00"
-
-    def test_balance_projected_pool_manual_without_value(self, admin_client):
-        """Manual mode without value: projected_basis_pool = null, error set."""
-        client, repo, token = admin_client
-        trade_id = client.post("/admin/trades", json={},
-                               headers=_auth(token)).json()["trade_id"]
-        client.patch(f"/admin/trades/{trade_id}", json={
-            "basis_mode": "manual",
-        }, headers=_auth(token))
-
-        resp = client.get(f"/admin/trades/{trade_id}/balance",
-                          headers=_auth(token))
-        data = resp.json()
-        assert data["projected_basis_pool"] is None
-        assert data["basis_mode_error"] == (
-            "Manual basis mode requires a total basis amount"
-        )
-
-    def test_balance_has_cash_true(self, admin_client):
-        """has_cash is true when cash components exist."""
-        client, repo, token = admin_client
-        trade_id = client.post("/admin/trades", json={},
-                               headers=_auth(token)).json()["trade_id"]
         client.put(f"/admin/trades/{trade_id}/cash", json={
             "cash_components": [
-                {"direction": "they_pay", "amount": "10.00",
+                {"direction": "they_pay", "amount": "5.00",
                  "payment_method": "cash"},
             ]
         }, headers=_auth(token))
@@ -1452,26 +1224,42 @@ class TestTradeBalanceBasisMode:
                           headers=_auth(token))
         data = resp.json()
         assert data["has_cash"] is True
-        assert data["basis_mode_error"] == (
-            "Cash components require Manual basis mode"
-        )
+        # 20 (out basis) - 5 (cash they pay) = 15 — no error, no manual step.
+        assert data["projected_basis_pool"] == "15.00"
 
-    def test_balance_legacy_margin_split_error(self, admin_client):
-        """Legacy margin_split.enabled=True reports error on balance."""
+    def test_balance_ignores_legacy_margin_split(self, admin_client):
+        """margin_split is stored (unrelated PATCH tests cover that) but inert here."""
         client, repo, token = admin_client
+        repo.put_inventory_item(_raw(item_id="our-1", cost_basis="20.00",
+                                     current_market_value="50.00"))
         trade_id = client.post("/admin/trades", json={},
                                headers=_auth(token)).json()["trade_id"]
         client.patch(f"/admin/trades/{trade_id}", json={
             "margin_split": {"enabled": True, "percent": "15"},
         }, headers=_auth(token))
+        client.post(f"/admin/trades/{trade_id}/outgoing", json={
+            "item_id": "our-1", "agreed_value": "50.00",
+        }, headers=_auth(token))
 
         resp = client.get(f"/admin/trades/{trade_id}/balance",
                           headers=_auth(token))
+        assert resp.status_code == 200
         data = resp.json()
-        assert data["basis_mode_error"] == (
-            "This trade uses the retired percent-based margin split; "
-            "choose a basis mode"
-        )
+        assert "basis_mode_error" not in data
+        assert data["projected_basis_pool"] == "20.00"
+
+    def test_patch_ignores_retired_basis_mode_and_manual_basis_fields(self, admin_client):
+        """PATCHing the retired fields is a silent no-op, not a 422 or a store."""
+        client, repo, token = admin_client
+        trade_id = client.post("/admin/trades", json={},
+                               headers=_auth(token)).json()["trade_id"]
+        resp = client.patch(f"/admin/trades/{trade_id}", json={
+            "basis_mode": "manual",
+            "manual_basis": "42.50",
+        }, headers=_auth(token))
+        assert resp.status_code == 200
+        assert "basis_mode" not in resp.json()
+        assert "manual_basis" not in resp.json()
 
 
 # ===========================================================================
@@ -1488,9 +1276,6 @@ class TestTradeBatchId:
                                      current_market_value="50.00"))
 
         trade_id = client.post("/admin/trades", json={}, headers=_auth(token)).json()["trade_id"]
-        client.patch(f"/admin/trades/{trade_id}", json={
-            "basis_mode": "manual", "manual_basis": "20.00",
-        }, headers=_auth(token))
         client.post(f"/admin/trades/{trade_id}/outgoing", json={
             "item_id": "our-1", "agreed_value": "50.00",
         }, headers=_auth(token))
@@ -1655,9 +1440,6 @@ class TestGradedIncoming:
         repo.put_inventory_item(_raw(item_id="our-1"))
 
         trade_id = _start_trade(client, token)
-        client.patch(f"/admin/trades/{trade_id}", json={
-            "basis_mode": "manual", "manual_basis": "20.00",
-        }, headers=_auth(token))
         client.post(f"/admin/trades/{trade_id}/outgoing", json={
             "item_id": "our-1", "agreed_value": "50.00",
         }, headers=_auth(token))

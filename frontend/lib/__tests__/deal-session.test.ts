@@ -20,11 +20,11 @@ describe('sessionApiFor', () => {
 
   it('routes each mode to its own API', () => {
     expect(sessionApiFor('buy', api).supports).toEqual(
-      { incoming: true, outgoing: false, costBasisMode: false })
+      { incoming: true, outgoing: false })
     expect(sessionApiFor('sell', api).supports).toEqual(
-      { incoming: false, outgoing: true, costBasisMode: false })
+      { incoming: false, outgoing: true })
     expect(sessionApiFor('trade', api).supports).toEqual(
-      { incoming: true, outgoing: true, costBasisMode: true })
+      { incoming: true, outgoing: true })
   })
 
   it('creates a buy session against the purchases API', async () => {

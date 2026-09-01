@@ -208,11 +208,12 @@ describe('the unified deal page', () => {
     expect(screen.queryByText(/profit/i)).not.toBeInTheDocument()
   })
 
-  it('shows cost-basis mode only in trade', async () => {
-    mockSearchParams({ mode: 'buy' })
+  it('never shows a cost-basis mode picker, in trade or any other mode', async () => {
+    mockSearchParams({ mode: 'trade' })
     render(<DealPage />)
     await screen.findByRole('heading', { name: /coming in/i })
     expect(screen.queryByLabelText(/basis/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/cost basis mode/i)).not.toBeInTheDocument()
   })
 
   it('defaults the date to the LOCAL today', async () => {

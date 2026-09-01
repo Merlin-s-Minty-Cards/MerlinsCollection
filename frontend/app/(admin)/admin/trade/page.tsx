@@ -8,7 +8,6 @@ import { todayLocal } from '@/lib/dates'
 import { useCardImages } from '@/lib/use-card-images'
 import { adminItemName } from '@/lib/admin-item-name'
 import { parseMoney } from '@/lib/money'
-import type { BasisMode } from '@/lib/trade-basis'
 import ConfirmDialog from '@/components/admin/shared/ConfirmDialog'
 import type { PickerCard } from '@/components/admin/shared/CardPickerRow'
 import DealSearchPanel, {
@@ -83,8 +82,6 @@ export default function DealPage() {
   const [date, setDate] = useState(todayLocal())
   const [counterparty, setCounterparty] = useState('')
   const [paymentMethod, setPaymentMethod] = useState('cash')
-  const [basisMode, setBasisMode] = useState<BasisMode>('transfer')
-  const [manualBasis, setManualBasis] = useState('')
 
   // `undefined` = closed. `null` = manual entry. A `PickerCard` = a catalog pick.
   const [formCard, setFormCard] = useState<PickerCard | null | undefined>(undefined)
@@ -129,8 +126,6 @@ export default function DealPage() {
     setIncoming([])
     setOutgoing([])
     setCashComponents([])
-    setBasisMode('transfer')
-    setManualBasis('')
     setCounterparty('')
     setPaymentMethod('cash')
     setFormCard(undefined)
@@ -270,10 +265,13 @@ export default function DealPage() {
 
   let profit: number | null = null
   if (mode === 'sell') profit = outgoingTotal - outgoingCostBasisTotal
-  if (mode === 'trade') {
-    const costBasis = basisMode === 'manual' ? (parseMoney(manualBasis) ?? 0) : outgoingCostBasisTotal
-    profit = incomingTotal + cashNet - costBasis
-  }
+  // Trade's true stored cost basis is computed server-side and automatically
+  // nets cash into the pool too (see `_compute_basis_pool`,
+  // routers/admin/trades.py) — but this preview figure doesn't need to
+  // duplicate that: it already equals total trade profit on its own terms
+  // (value received minus cost given up), independent of how the basis pool
+  // gets allocated across incoming legs.
+  if (mode === 'trade') profit = incomingTotal + cashNet - outgoingCostBasisTotal
 
   const handleConfirm = async () => {
     if (!sessionId) return
@@ -286,12 +284,7 @@ export default function DealPage() {
         // own); Buy/Sell book under exactly one, chosen in `DealSummary`'s
         // payment-method select — never derived from the cash-component list,
         // which is a different concept (final-review Critical 2).
-        payment_method: session.supports.costBasisMode ? undefined : paymentMethod,
-        basis_mode: session.supports.costBasisMode ? basisMode : undefined,
-        manual_basis:
-          session.supports.costBasisMode && basisMode === 'manual'
-            ? String(parseMoney(manualBasis) ?? 0)
-            : undefined,
+        payment_method: mode === 'trade' ? undefined : paymentMethod,
       })
       setConfirmed(true)
       setShowConfirm(false)
@@ -475,17 +468,12 @@ export default function DealPage() {
         )}
         <DealSummary
           mode={mode}
-          supportsCostBasisMode={session.supports.costBasisMode}
           showProfit={mode !== 'buy'}
           customerView={customerView}
           cashComponents={cashComponents}
           onCashComponentsChange={handleCashComponentsChange}
           balance={balance}
           profit={profit}
-          basisMode={basisMode}
-          onBasisModeChange={setBasisMode}
-          manualBasis={manualBasis}
-          onManualBasisChange={setManualBasis}
           date={date}
           onDateChange={setDate}
           counterparty={counterparty}

@@ -13,17 +13,12 @@ import DealSummary, { type DealSummaryProps } from '../DealSummary'
 function props(over: Partial<DealSummaryProps> = {}): DealSummaryProps {
   return {
     mode: 'trade',
-    supportsCostBasisMode: true,
     showProfit: true,
     customerView: false,
     cashComponents: [{ direction: 'they_pay', amount: 0, payment_method: 'cash' }],
     onCashComponentsChange: vi.fn(),
     balance: 0,
     profit: 0,
-    basisMode: 'transfer',
-    onBasisModeChange: vi.fn(),
-    manualBasis: '',
-    onManualBasisChange: vi.fn(),
     date: '2026-08-14',
     onDateChange: vi.fn(),
     counterparty: '',
@@ -69,5 +64,31 @@ describe('DealSummary cash amount input', () => {
     expect(onCashComponentsChange).toHaveBeenLastCalledWith([
       expect.objectContaining({ amount: 1300 }),
     ])
+  })
+})
+
+describe('DealSummary cost basis mode', () => {
+  it('never renders a cost basis mode picker, in any mode', () => {
+    render(<DealSummary {...props({ mode: 'trade' })} />)
+    expect(screen.queryByText(/cost basis mode/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^transfer$/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^split$/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^manual$/i })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(/total cost basis/i)).not.toBeInTheDocument()
+  })
+})
+
+describe('DealSummary payment method visibility', () => {
+  // Exact label, not a regex: a staged cash component also carries its own
+  // "Payment method N" select (the rail that ONE cash leg settles on), which
+  // is a different control from the single deal-wide select this describes.
+  it('shows the payment method select for buy and sell', () => {
+    render(<DealSummary {...props({ mode: 'buy', onPaymentMethodChange: vi.fn() })} />)
+    expect(screen.getByLabelText('Payment method')).toBeInTheDocument()
+  })
+
+  it('hides the payment method select for trade — it uses cash components instead', () => {
+    render(<DealSummary {...props({ mode: 'trade', onPaymentMethodChange: vi.fn() })} />)
+    expect(screen.queryByLabelText('Payment method')).not.toBeInTheDocument()
   })
 })
