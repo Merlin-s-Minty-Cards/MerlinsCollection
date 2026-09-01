@@ -3,6 +3,7 @@ import * as cdk from 'aws-cdk-lib'
 import { BackendStack } from '../lib/backend-stack'
 import { FrontendStack } from '../lib/frontend-stack'
 import { backendOriginFromFunctionUrl } from '../lib/backend-origin'
+import { CognitoBrandingStack } from '../lib/cognito-branding-stack'
 
 /**
  * RFC 0014 — parallel-deploy phase. Backend (Task 4) is deployed and
@@ -111,4 +112,13 @@ new FrontendStack(app, 'MerlinsFrontendStack', {
   // easy-to-grep env var rather than a silent default, so reusing it
   // requires a conscious choice each time, not muscle memory.
   skipOpenNextBuild: process.env.SKIP_OPENNEXT_BUILD === 'true',
+})
+
+// Deliberately independent of both stacks above — see
+// CognitoBrandingStack's own header comment for why. Deploy on its own:
+// `cdk deploy MerlinsCognitoBrandingStack`.
+new CognitoBrandingStack(app, 'MerlinsCognitoBrandingStack', {
+  env: { account, region },
+  cognitoUserPoolId: 'us-east-1_Ab945I9ir',
+  cognitoClientId: '3vmg0a9lffhc85a2lrskh27b3f',
 })
