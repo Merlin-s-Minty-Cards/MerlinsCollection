@@ -89,9 +89,15 @@ describe('Dashboard money', () => {
 
     // Addressed by card: cost basis and unrealized profit are both $200.00 in
     // this fixture, so plain text matching would not prove which is which.
-    expect(await screen.findByTestId('stat-market')).toHaveTextContent('$400.00')
-    expect(await screen.findByTestId('stat-cost')).toHaveTextContent('$200.00')
-    expect(await screen.findByTestId('stat-on-hand')).toHaveTextContent('2')
+    // Each assertion gets its own waitFor — findByTestId only proves the
+    // element exists (it renders a dash placeholder during loading too), not
+    // that loadStats()'s Promise.all has settled and re-rendered yet.
+    const market = await screen.findByTestId('stat-market')
+    await waitFor(() => expect(market).toHaveTextContent('$400.00'))
+    const cost = await screen.findByTestId('stat-cost')
+    await waitFor(() => expect(cost).toHaveTextContent('$200.00'))
+    const onHand = await screen.findByTestId('stat-on-hand')
+    await waitFor(() => expect(onHand).toHaveTextContent('2'))
   })
 
   it('shows unrealized profit with its margin', async () => {
@@ -184,8 +190,17 @@ describe('Dashboard resilience', () => {
 
     render(<AdminDashboardPage />)
 
-    expect(await screen.findByTestId('stat-market')).toHaveTextContent('$400.00')
-    expect(await screen.findByTestId('stat-coverage')).toHaveTextContent('80%')
+    // findByTestId only guarantees the element exists — it renders in both
+    // the loading and loaded states (`value={loading || !h ? dash : ...}`),
+    // so it resolves the instant the dash placeholder is on screen. The
+    // content assertion needs its own wait so it isn't a race against
+    // loadStats()'s Promise.all settling — same pattern the coverage test
+    // above already uses for its data-tone check.
+    const market = await screen.findByTestId('stat-market')
+    await waitFor(() => expect(market).toHaveTextContent('$400.00'))
+
+    const coverage = await screen.findByTestId('stat-coverage')
+    await waitFor(() => expect(coverage).toHaveTextContent('80%'))
   })
 })
 
