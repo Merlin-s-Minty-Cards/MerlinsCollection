@@ -104,8 +104,8 @@ describe('Dashboard money', () => {
     render(<AdminDashboardPage />)
 
     const profit = await screen.findByTestId('stat-unrealized')
-    expect(profit).toHaveTextContent('$200.00')
-    expect(profit).toHaveTextContent('100.0%')
+    await waitFor(() => expect(profit).toHaveTextContent('$200.00'))
+    await waitFor(() => expect(profit).toHaveTextContent('100.0%'))
   })
 })
 
@@ -114,7 +114,10 @@ describe('Dashboard needs-action queues', () => {
     render(<AdminDashboardPage />)
 
     const triage = await screen.findByTestId('action-triage')
-    expect(triage).toHaveTextContent('4')
+    // The count prop is `loading ? null : stats?.triageCount`, so this card
+    // renders with a dash before loadStats() resolves — same race as the
+    // stat cards above.
+    await waitFor(() => expect(triage).toHaveTextContent('4'))
     expect(triage.closest('a')).toHaveAttribute('href', '/admin/triage')
   })
 
@@ -122,7 +125,7 @@ describe('Dashboard needs-action queues', () => {
     render(<AdminDashboardPage />)
 
     const queue = await screen.findByTestId('action-prep-queue')
-    expect(queue).toHaveTextContent('1')
+    await waitFor(() => expect(queue).toHaveTextContent('1'))
     expect(queue.closest('a')).toHaveAttribute('href', '/admin/outgoing')
   })
 
@@ -145,8 +148,8 @@ describe('Dashboard activity', () => {
     render(<AdminDashboardPage />)
 
     const today = await screen.findByTestId('stat-today')
-    expect(today).toHaveTextContent('$420.00')
-    expect(today).toHaveTextContent('3')
+    await waitFor(() => expect(today).toHaveTextContent('$420.00'))
+    await waitFor(() => expect(today).toHaveTextContent('3'))
   })
 })
 
@@ -155,7 +158,7 @@ describe('Dashboard market health', () => {
     render(<AdminDashboardPage />)
 
     const coverage = await screen.findByTestId('stat-coverage')
-    expect(coverage).toHaveTextContent('80%')
+    await waitFor(() => expect(coverage).toHaveTextContent('80%'))
   })
 
   it('flags thin coverage rather than reporting it as neutral', async () => {
@@ -266,8 +269,13 @@ describe('New from TCGdex', () => {
     render(<AdminDashboardPage />)
 
     const card = await screen.findByTestId('action-pairable')
-    expect(within(card).getByText('3')).toBeInTheDocument()
-    expect(within(card).getByText(/47 new catalog cards in 30 days/)).toBeInTheDocument()
+    // Both the count and the hint text are `loading ? <placeholder> : ...` —
+    // the card itself renders immediately, its content settles after
+    // loadStats() resolves.
+    await waitFor(() => expect(within(card).getByText('3')).toBeInTheDocument())
+    await waitFor(() =>
+      expect(within(card).getByText(/47 new catalog cards in 30 days/)).toBeInTheDocument(),
+    )
   })
 
   it('links to the unmatched queue', async () => {
@@ -323,7 +331,7 @@ describe('New from TCGdex', () => {
     render(<AdminDashboardPage />)
 
     const card = await screen.findByTestId('action-pairable')
-    expect(within(card).getByText('0')).toBeInTheDocument()
+    await waitFor(() => expect(within(card).getByText('0')).toBeInTheDocument())
     expect(within(card).queryByText(/check back/i)).not.toBeInTheDocument()
   })
 })
