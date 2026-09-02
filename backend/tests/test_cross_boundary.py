@@ -12,14 +12,22 @@ sync-point needs re-verification.
 """
 
 import re
+from decimal import Decimal
 from pathlib import Path
 
 from merlins_collection.models.inventory import _MARKET_FINISH_FALLBACK
-from merlins_collection.routers.inventory import _CUSTOMER_VISIBLE_LOCATIONS
+from merlins_collection.services.condition_pricing import (
+    _TIER_MULTIPLIERS,
+    _TIER_ORDER,
+)
+from merlins_collection.services.customer_visibility import (
+    CUSTOMER_VISIBLE_LOCATIONS as _CUSTOMER_VISIBLE_LOCATIONS,
+)
 from merlins_collection.services.dynamodb import INVENTORY_SHARD_COUNT
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MCP_REPO = REPO_ROOT / "mcp-server" / "src" / "dynamodb-repository.ts"
+MCP_CONDITION_PRICING = REPO_ROOT / "mcp-server" / "src" / "condition-pricing.ts"
 
 
 def _read_mcp_source() -> str:
@@ -55,8 +63,9 @@ def test_customer_visible_locations_match():
 def test_finish_fallback_order_matches():
     """The finish-aware fallback chain in TypeScript must match _MARKET_FINISH_FALLBACK in Python.
 
-    The CONCURRENCY warning in claude-progress.txt explicitly states these two
-    must agree or the website and chatbot quote different prices.
+    These two must agree or the website and chatbot quote different prices for
+    the same card. ``_MARKET_FINISH_FALLBACK`` in ``models/inventory.py`` is the
+    canonical order and carries the full rule.
     """
     source = _read_mcp_source()
     # Extract the fallbackOrder array from the marketPrice method.
@@ -95,4 +104,67 @@ def test_image_host_allowlists_match():
     fe_hosts = set(re.findall(r"'([^']+)'", match.group(1)))
     assert fe_hosts == _ALLOWED_IMAGE_HOSTS, (
         f"Image-host allowlist mismatch:\n  Backend: {_ALLOWED_IMAGE_HOSTS}\n  Frontend: {fe_hosts}"
+    )
+
+
+# ---- condition multipliers: the seam that CLAIMED to be pinned and was not ----
+#
+# `mcp-server/src/condition-pricing.ts` has said since it was written that the
+# multipliers "are pinned on both sides by tests so a silent divergence fails
+# loudly rather than mispricing stock". That was FALSE. Until 2026-08-27 this
+# file pinned four things — shard count, customer-visible locations, the finish
+# fallback order, and the image-host allowlist — and the multiplier table was
+# not among them. Each side had only its OWN test with independently hardcoded
+# expectations (`test_condition_pricing.py`, `dynamodb-repository.test.ts`), so
+# re-tuning the Python table and its own test went green with TypeScript stale.
+#
+# This is the money path CLAUDE.md measured at -18.5% of customer-visible value
+# (a DMG card was being shown at ~6.7x what the business valued it at), and the
+# two halves of /inventory — filter mode and chat mode — read from these two
+# separate tables. A divergence prices the same card two different ways
+# depending on which half the customer is looking at, which is exactly what the
+# docstring promised could not happen.
+
+
+def _read_mcp_condition_pricing() -> str:
+    return MCP_CONDITION_PRICING.read_text(encoding="utf-8")
+
+
+def _parse_ts_multipliers(source: str) -> dict[str, str]:
+    """Extract the TIER_MULTIPLIERS object literal as {tier: literal-text}."""
+    block = re.search(
+        r"const\s+TIER_MULTIPLIERS\s*:[^=]*=\s*\{(.*?)\}", source, re.S
+    )
+    assert block is not None, "Could not find TIER_MULTIPLIERS in condition-pricing.ts"
+    return dict(re.findall(r"(\w+)\s*:\s*([\d.]+)", block.group(1)))
+
+
+def test_condition_multipliers_match():
+    """Every tier multiplier must be identical in Python and TypeScript."""
+    ts = _parse_ts_multipliers(_read_mcp_condition_pricing())
+    py = {tier.value: value for tier, value in _TIER_MULTIPLIERS.items()}
+
+    assert set(ts) == set(py), (
+        f"Tier sets differ: TypeScript={sorted(ts)}, Python={sorted(py)}"
+    )
+    for tier, py_value in py.items():
+        assert Decimal(ts[tier]) == py_value, (
+            f"Multiplier mismatch for {tier}: Python={py_value}, TypeScript={ts[tier]}"
+        )
+
+
+def test_condition_tier_order_matches():
+    """The best-to-worst order drives every `+`/`-` midpoint, so it must match too.
+
+    A reordered list does not change any single multiplier but silently changes
+    which neighbouring tier `LP+` averages with — a divergence that the
+    multiplier test above cannot see.
+    """
+    source = _read_mcp_condition_pricing()
+    match = re.search(r"const\s+TIER_ORDER\s*=\s*\[(.*?)\]", source, re.S)
+    assert match is not None, "Could not find TIER_ORDER in condition-pricing.ts"
+    ts_order = re.findall(r'"(\w+)"', match.group(1))
+    py_order = [tier.value for tier in _TIER_ORDER]
+    assert ts_order == py_order, (
+        f"Tier order mismatch: Python={py_order}, TypeScript={ts_order}"
     )

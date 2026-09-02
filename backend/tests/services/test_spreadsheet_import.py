@@ -1542,7 +1542,7 @@ def test_import_consignments_materializes_display_name(dynamo_repo):
 
 
 # =============================================================================
-# PHASE 3 (RFC 0003 §3 / claude-progress.txt Section 3, Phase 3.1-3.3): store
+# PHASE 3 (RFC 0003 §3, phases 3.1-3.3): store
 # EVERYTHING, show only unsold; multilingual matching; needs_review round trip.
 # Everything above this banner pins the PRE-Phase-3 shape (English-only single
 # hit matching); everything below is new coverage for the Phase 3 rewrite.
@@ -1751,7 +1751,7 @@ def test_import_slabs_links_a_set_only_japanese_row_to_its_japanese_catalog_card
 # while 3.1/3.2 rewrite the matcher underneath it. Kept to English-only data on
 # purpose: build_review.py / apply_review_decisions.py's OWN multilingual
 # banding (NA/CONTRADICTION for any non-EN item) is explicitly Phase 6 scope
-# (claude-progress.txt §3, Phase 6.1) and must not be pre-empted here.
+# (Phase 6.1) and must not be pre-empted here.
 
 def test_an_unmatched_singles_row_surfaces_in_build_review_and_is_relinked(
         dynamo_repo):

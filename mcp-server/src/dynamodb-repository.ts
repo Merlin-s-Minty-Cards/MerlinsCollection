@@ -173,6 +173,7 @@ export class DynamoDbInventoryRepository implements InventoryRepository {
       const sealedMarket = asNumber(row.current_market_value ?? 0);
       return {
         id: String(row.item_id),
+        itemId: String(row.item_id),
         name: String(row.product_name),
         set: "Sealed",
         condition: SEALED_TYPE_LABELS[String(row.product_type)] ?? "Sealed",
@@ -206,6 +207,12 @@ export class DynamoDbInventoryRepository implements InventoryRepository {
         : "";
     return {
       id: fallback,
+      // [RFC 0016 checklist item 1] Distinct from `id` above, which stays
+      // card_id ?? item_id for backward compat. itemId is always the row's
+      // own per-unit item_id, never the shared catalog card_id — one card_id
+      // can map to several physical units, so display tools must point-read
+      // by this value, not by `id`.
+      itemId: String(row.item_id),
       name: override || (meta ? String(meta.name) : nameFallback),
       set: meta ? String(meta.set_id) : cardId ? cardId.split("-")[0]! : "Unknown",
       condition:

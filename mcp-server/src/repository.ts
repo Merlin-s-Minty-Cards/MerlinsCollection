@@ -8,6 +8,13 @@
 
 export type Card = {
   id: string;
+  /**
+   * The per-unit inventory item ID, distinct from `id` (which may be a
+   * catalog card_id shared by several physical units). Display tools
+   * (`display_card`, `set_display`) point-read by this value — see RFC 0016
+   * §6 / Council r1 checklist item 1 (docs/plans/rfc-0016/council-r1-verdict.md).
+   */
+  itemId: string;
   name: string;
   set: string;
   condition: string;

@@ -413,7 +413,7 @@ InventoryItemAdapter: TypeAdapter[InventoryItem] = TypeAdapter(InventoryItem)
 # market price. Most singles are "normal"; holo-only cards price under a holo key.
 #
 # *** THIS TUPLE IS THE CANONICAL FALLBACK ORDER FOR THE WHOLE PRODUCT, in every
-# language it is implemented in (claude-progress.txt, CONCURRENCY warning). The
+# language it is implemented in. The
 # MCP server re-implements the same walk in TypeScript; if the two orders ever
 # disagree, the website and the Bedrock chat quote different prices for the same
 # card. Change it here and there together, or not at all. ***
@@ -458,9 +458,9 @@ def _market_price(card, finish: str | None) -> Decimal | None:
     (``services.catalog_sync.refresh_inventory_market_values``), and the
     dashboard summary (``routers.inventory.inventory_summary``). They each used
     to resolve prices for themselves, and the write path's bare exact match left
-    174 of 213 live items unpriced while the read path priced them fine
-    (claude-progress.txt Phase 12/Phase 10). Do not re-implement this walk in a
-    caller: a second copy is how that divergence happened.
+    174 of 213 live items unpriced while the read path priced them fine. Do not
+    re-implement this walk in a caller: a second copy is how that divergence
+    happened.
 
     ``card.prices`` is keyed by finish (``normal``/``holofoil``/…); the item's own
     finish is tried first, then a sensible fallback order, then any finish that

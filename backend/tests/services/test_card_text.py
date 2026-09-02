@@ -297,7 +297,7 @@ def test_set_hint_from_url_handles_base_set_and_returns_empty_for_non_product():
 
 
 # =============================================================================
-# PHASE 3.1 (claude-progress.txt Section 3 / Q4): language beyond the name
+# PHASE 3.1 — language beyond the name
 # marker — the TCG Link's `Language=` query param, and a SET-based JP fallback
 # for rows that carry no marker anywhere (two real 7-25 Slabs rows: Bubble Mew
 # EX / Shiny Treasure EX, Seismitoad / SV11B).

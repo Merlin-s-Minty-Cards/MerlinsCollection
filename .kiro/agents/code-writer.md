@@ -30,7 +30,7 @@ Behavior-changing code goes through a Council round; docs-only, config bumps, te
 
 1. Ingest the verdict the orchestrator passes you.
 2. Fix every blocking item.
-3. Run tests to confirm green.
+3. Confirm green by reading the owner-produced `test-results.txt`. Do not run a suite.
 4. Write the new submission to `council/r(N+1)/submission.md`.
 5. Report to the orchestrator: files changed, new submission path (including the new revision number), lanes touched. Then stop.
 
@@ -42,9 +42,12 @@ The orchestrator reports PASS. Report completion (files changed, test results, o
 
 1. Read the active plan's `progress.md` — identify the current item. If no plan folder exists under `.kiro/plans/`, report that and await orchestrator direction.
 2. Read relevant source files before editing.
-3. Confirm failing tests exist (RED). Write them if not.
+3. Confirm failing tests exist (RED). Write them if not. Confirm by reading the RED
+   artifact the owner produced (`test-results.txt`) — never by running a suite yourself.
 4. Implement minimal change (GREEN).
-5. Run tests per `#[[file:.kiro/steering/terminal.md]]`.
+5. **Never start a suite** — see `#[[file:.kiro/steering/terminal.md]]` > Running Tests.
+   State what you expect to pass, hand the command to the owner, and stop. Linters are fast
+   and may be run directly.
 6. Refactor, keeping tests green.
 7. Enter Council Loop (write submission, report, stop). If re-spawned with a verdict, patch and resubmit.
 8. Report. Do NOT commit.

@@ -3,8 +3,7 @@
 This is the ONE destructive script in the tree. It removes the dead
 pokemontcg.io-era catalog, every price derived from it, and the holdings the old
 spreadsheet import wrote — and it leaves the business master data alone
-(shows, consignors, config, auth, rate-limit counters). Scope is D4 in
-``claude-progress.txt``.
+(shows, consignors, config, auth, rate-limit counters).
 
 **Load, then swap.** The order is the whole design. The fresh catalog is written
 first, stamped with a new catalog generation; only once it has fully landed does

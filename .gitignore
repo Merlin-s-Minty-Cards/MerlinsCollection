@@ -64,7 +64,7 @@ Thumbs.db
 docs/learning/
 
 # Agent workflow progress/roadmap scaffolding (not project docs)
-claude-progress.txt
+claude-progress.md
 
 # Claude AI agent runtime artifacts (reviews, temp state)
 .claude/council/

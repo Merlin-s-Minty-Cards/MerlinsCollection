@@ -2,6 +2,7 @@
 import * as cdk from 'aws-cdk-lib'
 import { BackendStack } from '../lib/backend-stack'
 import { FrontendStack } from '../lib/frontend-stack'
+import { backendOriginFromFunctionUrl } from '../lib/backend-origin'
 import { CognitoBrandingStack } from '../lib/cognito-branding-stack'
 
 /**
@@ -64,16 +65,30 @@ const backend = new BackendStack(app, 'MerlinsBackendStack', {
 
 new FrontendStack(app, 'MerlinsFrontendStack', {
   env: { account, region },
-  // Points at the already-deployed backend Lambda's real Function URL —
-  // `functionUrl.url` already includes the https:// scheme (confirmed
-  // against the live BackendFunctionUrl output, which reads the same
-  // property) but ALSO a trailing slash. frontend/lib/api.ts's `apiFetch`
-  // concatenates `${BASE_URL}${path}` with no separator handling and every
-  // caller's `path` starts with its own leading slash, so a trailing slash
-  // here would produce a double slash the backend's router 404s on. Strip
-  // it — this is exactly the kind of copy-paste-shaped bug the RFC's own
-  // FORWARDED_ALLOW_IPS correction already warned about repeating.
-  backendApiUrl: backend.functionUrl.url.replace(/\/$/, ''),
+  // Points at the already-deployed backend Lambda's real Function URL.
+  // AWS always renders a Function URL with a TRAILING SLASH, and both
+  // frontend/lib/api.ts and frontend/lib/admin-api.ts concatenate
+  // `${BASE_URL}${path}` where every caller's `path` carries its own leading
+  // slash — so an untrimmed value here requests `//inventory/search`, a
+  // genuinely different route that FastAPI 404s before it even authenticates.
+  //
+  // THIS LINE USED TO READ `backend.functionUrl.url.replace(/\/$/, '')`, and
+  // that silently did nothing for months — it took the whole production site
+  // down (every customer page AND every admin tab) until 2026-08-26. At synth
+  // time `functionUrl.url` is not a URL at all, it is an unresolved CDK token
+  // (`${Token[TOKEN.n]}`) that does not end in a slash, so the regex matched
+  // nothing and CDK emitted a bare `Fn::ImportValue` passthrough. The slash
+  // only appears when CloudFormation resolves the import at DEPLOY time,
+  // which is long after any JavaScript string method could have run.
+  //
+  // The rule this encodes: a CDK token can only be transformed by CDK's own
+  // `Fn.*` intrinsics, which defer the work into the template itself. Plain
+  // JS string operations on a token are no-ops that LOOK correct in review.
+  //
+  // `Fn.split('/', 'https://host/')` yields `['https:', '', 'host', '']`, so
+  // index 2 is the bare host — dropping the trailing empty segment along with
+  // it — and rejoining under an explicit scheme rebuilds a slash-free origin.
+  backendApiUrl: backendOriginFromFunctionUrl(backend.functionUrl.url),
   cognitoClientId: '3vmg0a9lffhc85a2lrskh27b3f',
   cognitoIssuer: `https://cognito-idp.${region}.amazonaws.com/us-east-1_Ab945I9ir`,
   // Cognito Hosted UI domain — NOT the issuer host, see auth.config.ts's own

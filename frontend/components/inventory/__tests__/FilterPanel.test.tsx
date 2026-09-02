@@ -107,19 +107,30 @@ describe('FilterPanel', () => {
     expect(condOptions).toContain('LP')
   })
 
-  it('searches with backend param names and renders matching items', async () => {
+  it('searches with backend param names and pushes matching items to the shared results pane', async () => {
     mockedApiFetch.mockImplementation((path: string) => {
       if (String(path).includes('/inventory/facets')) return Promise.resolve(MOCK_FACETS)
       return Promise.resolve(response([charizard]))
     })
-    render(<FilterPanel />)
+    // RFC 0019: FilterPanel no longer renders its own results grid — it
+    // pushes a normalized view up to the shared right-pane ResultsPane via
+    // onResultsChange instead.
+    const onResultsChange = vi.fn()
+    render(<FilterPanel onResultsChange={onResultsChange} />)
 
     await userEvent.type(screen.getByLabelText(/name/i), 'Charizard')
     await userEvent.click(screen.getByRole('button', { name: /search/i }))
 
     const query = lastSearchQuery()
     expect(query.get('name')).toBe('Charizard')
-    expect(await screen.findByText('Charizard')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(onResultsChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          status: 'success',
+          cards: [expect.objectContaining({ title: 'Charizard' })],
+        }),
+      )
+    })
   })
 
   it('sends the set_id from the combobox selection', async () => {
@@ -217,14 +228,19 @@ describe('FilterPanel', () => {
     expect(lastSearchQuery().get('name')).toBe('Charizard')
   })
 
-  it('shows the total from the backend', async () => {
+  it('reports the total from the backend as the shared pane\'s header label', async () => {
     mockedApiFetch.mockImplementation((path: string) => {
       if (String(path).includes('/inventory/facets')) return Promise.resolve(MOCK_FACETS)
       return Promise.resolve({ items: [charizard], total: 1, hidden_no_price: 0 })
     })
-    render(<FilterPanel />)
+    const onResultsChange = vi.fn()
+    render(<FilterPanel onResultsChange={onResultsChange} />)
     await userEvent.click(screen.getByRole('button', { name: /search/i }))
-    expect(await screen.findByText(/1 result\b/i)).toBeInTheDocument()
+    await waitFor(() => {
+      expect(onResultsChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({ headerLabel: '1 result' }),
+      )
+    })
   })
 
   it('surfaces the count of cards the price bound hid for having no price', async () => {
@@ -232,9 +248,14 @@ describe('FilterPanel', () => {
       if (String(path).includes('/inventory/facets')) return Promise.resolve(MOCK_FACETS)
       return Promise.resolve(response([charizard], 3))
     })
-    render(<FilterPanel />)
+    const onResultsChange = vi.fn()
+    render(<FilterPanel onResultsChange={onResultsChange} />)
     await userEvent.click(screen.getByRole('button', { name: /search/i }))
-    expect(await screen.findByText(/3 cards hidden \(no price on file\)/i)).toBeInTheDocument()
+    await waitFor(() => {
+      expect(onResultsChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({ truncatedNotice: '3 cards hidden (no price on file)' }),
+      )
+    })
   })
 
   it('surfaces the hidden count even when the price bound hid everything', async () => {
@@ -242,24 +263,67 @@ describe('FilterPanel', () => {
       if (String(path).includes('/inventory/facets')) return Promise.resolve(MOCK_FACETS)
       return Promise.resolve(response([], 12))
     })
-    render(<FilterPanel />)
+    const onResultsChange = vi.fn()
+    render(<FilterPanel onResultsChange={onResultsChange} />)
     await userEvent.click(screen.getByRole('button', { name: /search/i }))
-    expect(await screen.findByText(/12 cards hidden \(no price on file\)/i)).toBeInTheDocument()
+    await waitFor(() => {
+      expect(onResultsChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({ truncatedNotice: '12 cards hidden (no price on file)' }),
+      )
+    })
   })
 
-  it('shows an empty state when nothing matches', async () => {
-    render(<FilterPanel />)
+  it('reports an empty-state message with no cards when nothing matches', async () => {
+    const onResultsChange = vi.fn()
+    render(<FilterPanel onResultsChange={onResultsChange} />)
     await userEvent.click(screen.getByRole('button', { name: /search/i }))
-    expect(await screen.findByText(/no cards/i)).toBeInTheDocument()
+    await waitFor(() => {
+      expect(onResultsChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          status: 'success',
+          cards: [],
+          emptyMessage: expect.stringMatching(/no cards/i),
+        }),
+      )
+    })
   })
 
-  it('shows an error state when the search request fails', async () => {
+  it('reports an error status when the search request fails', async () => {
     mockedApiFetch.mockImplementation((path: string) => {
       if (String(path).includes('/inventory/facets')) return Promise.resolve(MOCK_FACETS)
       return Promise.reject(new Error('boom'))
     })
+    const onResultsChange = vi.fn()
+    render(<FilterPanel onResultsChange={onResultsChange} />)
+    await userEvent.click(screen.getByRole('button', { name: /search/i }))
+    await waitFor(() => {
+      expect(onResultsChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({ status: 'error' }),
+      )
+    })
+  })
+
+  it('reports the idle prompt before any search has run', () => {
+    const onResultsChange = vi.fn()
+    render(<FilterPanel onResultsChange={onResultsChange} />)
+    expect(onResultsChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        status: 'idle',
+        cards: [],
+        emptyMessage: expect.stringMatching(/set your filters/i),
+      }),
+    )
+  })
+
+  it('does not render its own card grid or results text — that belongs to the shared ResultsPane', async () => {
+    mockedApiFetch.mockImplementation((path: string) => {
+      if (String(path).includes('/inventory/facets')) return Promise.resolve(MOCK_FACETS)
+      return Promise.resolve(response([charizard]))
+    })
     render(<FilterPanel />)
     await userEvent.click(screen.getByRole('button', { name: /search/i }))
-    expect(await screen.findByText(/something went wrong/i)).toBeInTheDocument()
+    await waitFor(() => expect(searchCalls().length).toBeGreaterThan(0))
+    expect(screen.queryByText('Charizard')).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'Charizard' })).toBeNull()
   })
 })

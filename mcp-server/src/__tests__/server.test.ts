@@ -1,7 +1,8 @@
 /**
- * The MCP server layer: buildServer(repo) must expose the five inventory tools
- * with names and input schemas matching shared/tool-contract.json — the same
- * file the backend pins its Bedrock tool schemas against.
+ * The MCP server layer: buildServer(repo) must expose the five inventory query
+ * tools with names and input schemas matching the query subset of
+ * shared/tool-contract.json. The six display tools in that contract are
+ * intentionally backend-only and must never be registered here.
  *
  * Tests talk to the server through a real MCP client over an in-memory
  * transport: real protocol, no subprocess.
@@ -18,7 +19,25 @@ import { card } from "./fixtures/card.js";
 
 const contract = JSON.parse(
   readFileSync(new URL("../../../shared/tool-contract.json", import.meta.url), "utf-8"),
-) as { tools: Array<{ name: string; properties: string[]; required: string[] }> };
+) as {
+  tools: Array<{ name: string; properties: string[]; required: string[] }>;
+  resultShapes?: {
+    search_inventory?: {
+      requiredFields?: string[];
+    };
+  };
+};
+
+const queryToolNames = new Set([
+  "search_inventory",
+  "get_inventory_summary",
+  "get_card_price_history",
+  "calculate_inventory_value",
+  "flag_underpriced_cards",
+]);
+
+const queryContract = contract.tools.filter((tool) => queryToolNames.has(tool.name));
+const displayContract = contract.tools.filter((tool) => !queryToolNames.has(tool.name));
 
 async function connect(repo: InventoryRepository): Promise<Client> {
   const server = buildServer(repo);
@@ -51,14 +70,27 @@ async function callTool(
 }
 
 describe("tool registration", () => {
-  it("exposes exactly the tools from shared/tool-contract.json with matching schemas", async () => {
+  it("registers only the five query tools while display tools remain backend-only", async () => {
     const client = await connect(new InMemoryInventoryRepository());
     const { tools } = await client.listTools();
 
     const byName = new Map(tools.map((t) => [t.name, t]));
-    expect([...byName.keys()].sort()).toEqual(contract.tools.map((t) => t.name).sort());
+    expect([...byName.keys()].sort()).toEqual(queryContract.map((t) => t.name).sort());
+    expect(queryContract).toHaveLength(5);
+    
+    // Decision 23: display tools collapsed to display_card + set_display (2 tools)
+    // The contract now has 7 total: 5 query + 2 display
+    expect(contract.tools).toHaveLength(7);
+    expect(displayContract.map((tool) => tool.name).sort()).toEqual([
+      "display_card",
+      "set_display",
+    ]);
+    
+    for (const displayTool of displayContract) {
+      expect(byName.has(displayTool.name), `${displayTool.name} must not be registered`).toBe(false);
+    }
 
-    for (const expected of contract.tools) {
+    for (const expected of queryContract) {
       const schema = byName.get(expected.name)!.inputSchema as {
         properties?: Record<string, unknown>;
         required?: string[];
@@ -70,6 +102,19 @@ describe("tool registration", () => {
         [...expected.required].sort(),
       );
     }
+  });
+
+  it("search_inventory result shape carries per-unit item_id per the contract", () => {
+    // Council r1 item 1 FATAL: one card_id maps to multiple physical units,
+    // so search_inventory must emit item_id per entry for display_card to hydrate
+    // the exact unit. This assertion pins the MCP producer to the shared contract.
+    expect(contract.resultShapes).toBeDefined();
+    expect(contract.resultShapes?.search_inventory).toBeDefined();
+    
+    const requiredFields = contract.resultShapes?.search_inventory?.requiredFields ?? [];
+    expect(requiredFields).toContain("id"); // card_id
+    expect(requiredFields).toContain("item_id"); // per-unit identifier
+    expect(requiredFields).toContain("name");
   });
 });
 

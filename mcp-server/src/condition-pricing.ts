@@ -11,10 +11,24 @@
  *
  * **This table is duplicated, not shared, and that is a known seam.** The
  * multipliers were researched and OWNER-APPROVED 2026-07-30 and have not moved
- * since; they are pinned on both sides by tests so a silent divergence fails
- * loudly rather than mispricing stock. If a tier is ever re-tuned, both files
- * change together — see docs/plans/rfc-0008/follow-ups.md on the wider
- * "vocabulary declared in three places" problem.
+ * since.
+ *
+ * They are pinned across the seam by
+ * `backend/tests/test_cross_boundary.py::test_condition_multipliers_match` and
+ * `::test_condition_tier_order_matches`, which parse THIS file and compare it
+ * to `services/condition_pricing.py`. Both are mutation-tested. If a tier is
+ * ever re-tuned, both files change together or the backend suite goes red.
+ *
+ * **Until 2026-08-27 this paragraph claimed that pinning existed when it did
+ * not** — `test_cross_boundary.py` covered the shard count, customer-visible
+ * locations, the finish fallback order and the image-host allowlist, and not
+ * these multipliers. Each side had only its own test with independently
+ * hardcoded numbers, so re-tuning Python and its own test would have gone
+ * green with this file stale, pricing the same card two ways depending on
+ * which half of /inventory the customer was looking at. A comment asserting a
+ * safety property is not the property; if you rely on one, go read the test it
+ * names. See docs/plans/rfc-0008/follow-ups.md on the wider "vocabulary
+ * declared in three places" problem.
  */
 
 /** Anchor: NM = 1.00 — the catalog market figure IS a NM price. */

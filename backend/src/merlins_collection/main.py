@@ -34,11 +34,17 @@ async def _lifespan(app: FastAPI):
             "never run production with this flag."
         )
     yield
-    # Kill the MCP server subprocess (if one was started) — child processes
-    # don't die with the parent on Windows.
-    from merlins_collection.dependencies import shutdown_mcp_executor
+    # Kill the MCP server subprocesses (if any were started) — child processes
+    # don't die with the parent on Windows. BOTH executors are shut down here:
+    # the customer one and the admin analyst one (RFC 0018). Each is lazy, so
+    # this is a no-op for whichever was never spawned.
+    from merlins_collection.dependencies import (
+        shutdown_admin_mcp_executor,
+        shutdown_mcp_executor,
+    )
 
     shutdown_mcp_executor()
+    shutdown_admin_mcp_executor()
 
 
 app = FastAPI(title="Merlin's Collection API", version="0.1.0", lifespan=_lifespan)

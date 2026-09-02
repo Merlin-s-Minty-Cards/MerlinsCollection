@@ -13,7 +13,7 @@ Use this for behavioral changes where a failing test can describe the desired ou
 
 ### 1. Understand
 
-Read the request, task, issue tracker item, plan, spec, and relevant code as available — including `claude-progress.txt`'s active roadmap item, if one is driving this work.
+Read the request, task, issue tracker item, plan, spec, and relevant code as available — including `claude-progress.md`'s active roadmap item, if one is driving this work.
 
 Identify:
 - The desired behavior
@@ -61,7 +61,7 @@ Consider the adversarial-review findings and refine the implementation. Simplify
 - Extract helpers if the intent becomes clearer
 - Close with the full suite once, per the `testing` skill
 
-**Report:** the failing test name, why it failed, the passing result, the final verification command output — and, if a roadmap item drove this, its updated checkbox/log entry in `claude-progress.txt`.
+**Report:** the failing test name, why it failed, the passing result, the final verification command output — and, if a roadmap item drove this, its updated checkbox/log entry in `claude-progress.md`.
 
 ## Rules
 

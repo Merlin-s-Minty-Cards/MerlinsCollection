@@ -12,7 +12,7 @@ the values are the provider's.
 
 **2. Fix a known open bug.** The Market page's refresh-prices button is raw-only
 while the nightly sync does refresh graded items — a scope mismatch recorded in
-`claude-progress.txt:157` and still open. Same area, fix it here.
+`claude-progress.md:157` and still open. Same area, fix it here.
 
 ## Files
 
@@ -135,7 +135,7 @@ git commit -m "feat(slabs): nightly graded pricing with quota-aware rotation; fi
 ```
 
 Update [`progress.md`](progress.md), and strike the graded-refresh row in
-`claude-progress.txt`'s known-issues section — it has been open since Round 2 and
+`claude-progress.md`'s known-issues section — it has been open since Round 2 and
 should not be listed as open once this lands.
 
 ## Definition of done — all four, every time

@@ -1,0 +1,44 @@
+# Line-ending policy.
+#
+# WHY THIS EXISTS: this repo is edited from both Windows tools and WSL. Without a
+# policy, a Windows-side editor rewrites whole files to CRLF, producing phantom
+# diffs where every line shows as changed but the content is byte-identical
+# (observed: all 13 .kiro/agents/*.md files, plus .kiro/skills/*/SKILL.md and
+# scripts/run-tests.sh). Beyond the noise, CRLF actively breaks two things here:
+#   1. Agent/skill frontmatter — parsers that match a bare `---` fence line see
+#      `---\r` and can reject the whole block, which silently strips an agent's
+#      declared `tools:` grant.
+#   2. Shell scripts — `#!/usr/bin/env bash\r` fails to exec on Linux.
+#
+# `text=auto eol=lf` normalizes to LF in the index and checks out LF in the
+# working tree on every platform. Scoped to the file types we actually author
+# rather than `*` so no binary or vendored asset gets renormalized by surprise.
+
+*.md    text eol=lf
+*.sh    text eol=lf
+*.py    text eol=lf
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.js    text eol=lf
+*.jsx   text eol=lf
+*.json  text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.css   text eol=lf
+*.toml  text eol=lf
+*.cfg   text eol=lf
+*.txt   text eol=lf
+.gitattributes text eol=lf
+.gitignore     text eol=lf
+Dockerfile     text eol=lf
+
+# Binary assets — never touch.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.webp  binary
+*.ico   binary
+*.woff  binary
+*.woff2 binary
+*.pdf   binary

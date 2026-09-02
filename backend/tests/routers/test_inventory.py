@@ -997,8 +997,8 @@ def test_search_result_display_name_override_is_none_when_unset(inv_client, mint
 # ---------------------------------------------------------------------------
 # PHASE 12 — inventory price correctness (RED phase)
 #
-# claude-progress.txt Section 3, Phase 12 (absorbs Phase 10). Three symptoms,
-# one root cause plus two more bugs in the same neighborhood:
+# Phase 12 absorbs Phase 10. Three symptoms, one root cause plus two more bugs
+# in the same neighborhood:
 #   D1 (Finding 1): the write-path denormalizer (`refresh_inventory_market_
 #       values`, services/catalog_sync.py) does a bare exact-match finish
 #       lookup instead of the read path's `_MARKET_FINISH_FALLBACK` chain.

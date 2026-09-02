@@ -75,8 +75,7 @@ MIN_EXPECTED_RATIO = 0.9
 
 # THIS IS NOT A WEAKENED RAIL — it is the same rail calibrated to what each
 # language's upstream actually contains. Measured live against TCGdex on
-# 2026-07-28 (see claude-progress.txt LOG 2026-07-28 "LIVE WIPE ATTEMPT",
-# FOLLOW-UP):
+# 2026-07-28, during the live wipe attempt:
 #
 #   EN  23,444 of 23,746 advertised (98.7%) — only 25 of 218 sets missing, all
 #       niche promo products. A normal long tail; 0.9 is a real check here and

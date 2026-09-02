@@ -1,0 +1,164 @@
+{
+  "comment": "Single source of truth for the ADMIN analyst tools (RFC 0018). Mirrors shared/tool-contract.json's role for the customer surface. These tools are served by a SEPARATE process (merlins_collection.mcp_admin) and are never advertised to the customer chat — a tool the model was never told about cannot be called, and behind that the customer executor is wired to a server that does not implement them. Every tool here is read-only; nothing in this contract writes. Tools are added here as they are built, so this file and the server are always exactly equal (see backend/tests/test_admin_tool_contract.py) rather than this listing a roadmap of things that do not work yet. Every property carries a real `description` — `services/bedrock._admin_tool_schemas()` passes it straight through to the model, so a bare `{}` here is a bare `{}` in Bedrock's toolSpec too (owner report 2026-08-28: an undescribed `start`/`end` is why the analyst chat could not resolve \"all time\" on its own).",
+  "tools": [
+    {
+      "name": "get_profit_summary",
+      "description": "Gross sales, purchases, net and margin for a date range, optionally scoped to one show. start and end are both OPTIONAL: omit both for a wide default window covering several recent years through today (NOT guaranteed to be literally every transaction ever recorded — the response's period.start/period.end report the exact dates actually used, so read those back rather than assuming); omit just one to leave that side unbounded. Never ask the operator for exact dates when they say \"all time\", \"everything\" or \"since the beginning\" — just omit start and end. Dates are ISO (YYYY-MM-DD) and both bounds are inclusive.",
+      "properties": {
+        "start": {
+          "type": "string",
+          "description": "ISO date YYYY-MM-DD, inclusive lower bound. OMIT for \"all time\" — never invent or ask for an exact date to mean \"the beginning\"."
+        },
+        "end": {
+          "type": "string",
+          "description": "ISO date YYYY-MM-DD, inclusive upper bound. Defaults to today when omitted."
+        },
+        "show_id": {
+          "type": "string",
+          "description": "Optional. Restrict the summary to one show's transactions only."
+        }
+      },
+      "required": []
+    },
+    {
+      "name": "find_aging_stock",
+      "description": "Held inventory that has been sitting unsold the longest, oldest first. Sold, lost and returned-to-consignor items are excluded — they are not sitting on a shelf. Optionally filter by location or by minimum value.",
+      "properties": {
+        "min_days": {
+          "type": "integer",
+          "description": "Minimum number of days an item must have been held to qualify. Defaults to 90."
+        },
+        "location": {
+          "type": "string",
+          "description": "Optional. Restrict to items stored at one location."
+        },
+        "min_value": {
+          "type": "number",
+          "description": "Optional. Only include items worth at least this much."
+        }
+      },
+      "required": []
+    },
+    {
+      "name": "get_consignor_position",
+      "description": "Value of stock held on each consignor's behalf, with our cut and their projected share. Archived consignors are included — archiving is not settlement. Omit consignor_id for all of them.",
+      "properties": {
+        "consignor_id": {
+          "type": "string",
+          "description": "Optional. Restrict to one consignor's position. Omit to see every consignor."
+        }
+      },
+      "required": []
+    },
+    {
+      "name": "find_pricing_outliers",
+      "description": "Held stock whose asking price disagrees with the market figure. direction is 'over' (asking above market), 'under' (below), or 'unpriced' (no asking price). threshold_pct is a magnitude — direction alone decides the sign.",
+      "properties": {
+        "direction": {
+          "type": "string",
+          "enum": ["over", "under", "unpriced"],
+          "description": "'over' = priced above market, 'under' = priced below market, 'unpriced' = no asking price at all (ignores threshold_pct)."
+        },
+        "threshold_pct": {
+          "type": "number",
+          "description": "Magnitude of the deviation threshold, as a percent (e.g. 20 means 20%). Defaults to 20. Ignored when direction is 'unpriced'."
+        }
+      },
+      "required": ["direction"]
+    },
+    {
+      "name": "list_shows",
+      "description": "Every show with its date/venue and, when available, its analytics snapshot (gross sales, purchases, net, item counts), newest first. A show that has never been archived or manually analyzed has has_analytics=false and null money fields — that is not the same as a show with zero sales; say so rather than treating it as unprofitable. If limit truncates the result, you are seeing the most RECENT shows, not a representative sample of all of them.",
+      "properties": {
+        "start": {
+          "type": "string",
+          "description": "ISO date YYYY-MM-DD, inclusive. Omit for all shows regardless of date."
+        },
+        "end": {
+          "type": "string",
+          "description": "ISO date YYYY-MM-DD, inclusive. Omit for all shows regardless of date."
+        },
+        "include_archived": {
+          "type": "boolean",
+          "description": "Defaults to true — most real shows are archived, and archiving is not settlement (CLAUDE.md). Set false to see only currently-active shows."
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Maximum rows returned. Defaults to 200."
+        }
+      },
+      "required": []
+    },
+    {
+      "name": "list_transactions",
+      "description": "Raw ledger rows in a date range. NEVER sum `amount` across these rows to state a profit/revenue/gross figure — call get_profit_summary instead (trade cash legs double-count and voided rows must be excluded; both are flagged per-row here so you can filter, but the aggregate tools already do it correctly). Use this to browse, filter, or answer questions the aggregate tools do not cover.",
+      "properties": {
+        "start": {
+          "type": "string",
+          "description": "ISO date YYYY-MM-DD, inclusive. Omit for the wide default window (see get_profit_summary's start for the same behavior)."
+        },
+        "end": {
+          "type": "string",
+          "description": "ISO date YYYY-MM-DD, inclusive. Defaults to today."
+        },
+        "show_id": {
+          "type": "string",
+          "description": "Optional. Restrict to one show's transactions."
+        },
+        "type": {
+          "type": "string",
+          "enum": ["sale", "purchase"],
+          "description": "Optional. Restrict to one transaction type."
+        },
+        "include_voided": {
+          "type": "boolean",
+          "description": "Defaults to false. When true, voided rows are included, each still carrying voided_at and is_countable=false — never treat one as a real transaction."
+        },
+        "sort": {
+          "type": "string",
+          "description": "Optional, e.g. 'amount_desc'. Same fields as GET /admin/transactions's sort."
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Maximum rows returned, capped at 100. total_matched/truncated in the response tell you if you need to narrow the range instead of raising this."
+        }
+      },
+      "required": []
+    },
+    {
+      "name": "list_inventory",
+      "description": "Raw inventory rows with admin-only fields (cost basis, consignment terms, review flags) the customer-facing inventory tools never expose. Prices here are RAW figures, not customer-facing condition-adjusted prices. A row's consignment field is non-null when the item is held for someone else — exclude those rows before summing cost_basis as the business's own capital, the same way get_consignor_position already does for consignment value. Narrow with filters — the table is the largest in the system and results are capped.",
+      "properties": {
+        "filters": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Each string is 'field:op:value', identical to the admin inventory page's ?filter= parameter (e.g. 'status:eq:available', 'cost_basis:gte:100'). See FILTERABLE_FIELDS for the full field list; op is one of contains/eq/gte/lte/isnull/notnull."
+        },
+        "sort": {
+          "type": "string",
+          "description": "Optional, e.g. 'cost_basis_desc'. Same fields as the admin inventory page's sort."
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Maximum rows returned, capped at 100."
+        }
+      },
+      "required": []
+    },
+    {
+      "name": "list_consignors",
+      "description": "Every consignor's identity and default payout_percent (THEIR share as a percent, e.g. 50 = 50% — the OPPOSITE convention from an item's ConsignmentTerms.split_percent, which is OUR cut as a 0-1 fraction). Do not use this to compute anyone's payout — call get_consignor_position for a correct, item-level projected split. Use this for identity/contact/archived-status questions.",
+      "properties": {
+        "include_archived": {
+          "type": "boolean",
+          "description": "Defaults to true — archiving is not settlement (CLAUDE.md), so an archived consignor may still be owed money."
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Maximum rows returned. Defaults to 200."
+        }
+      },
+      "required": []
+    }
+  ]
+}

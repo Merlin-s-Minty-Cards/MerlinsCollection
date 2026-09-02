@@ -22,6 +22,14 @@ export type SearchFilters = {
 /** A single card as returned to search callers (the frontend's `currentValue` shape). */
 export type CardResult = {
   id: string;
+  /**
+   * Per-unit inventory item ID (RFC 0016 checklist item 1). Snake_case,
+   * unlike the rest of this shape's camelCase fields, to match what the
+   * display tools (`display_card`/`set_display`) accept as input — the
+   * model round-trips this exact field name from the search result straight
+   * into a display-tool call.
+   */
+  item_id: string;
   name: string;
   set: string;
   condition: string;
@@ -105,6 +113,7 @@ export async function searchInventory(
 
   return matches.map((card) => ({
     id: card.id,
+    item_id: card.itemId,
     name: card.name,
     set: card.set,
     condition: card.condition,

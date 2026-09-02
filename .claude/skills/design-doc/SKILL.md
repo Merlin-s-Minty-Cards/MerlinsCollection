@@ -18,7 +18,7 @@ Compile a feature's technical constraints, data schemas, API contracts, and serv
 
 ## Step-by-Step Execution
 
-1. **Collect the inputs.** Gather the feature requirements from the user, plus anything relevant in `claude-progress.txt`, prior RFCs, and the affected source directories. List the hard constraints (auth requirements, existing API shapes, DynamoDB schema flexibility, CMS content models). Check this list against the mechanism-choice constraint above — resolve any open ones now, before drafting.
+1. **Collect the inputs.** Gather the feature requirements from the user, plus anything relevant in `claude-progress.md`, prior RFCs, and the affected source directories. List the hard constraints (auth requirements, existing API shapes, DynamoDB schema flexibility, CMS content models). Check this list against the mechanism-choice constraint above — resolve any open ones now, before drafting.
 2. **Survey the current state.** Read the code at the integration points the feature will touch. Note existing patterns the design should follow rather than reinvent.
 3. **Draft the RFC** with this structure:
    - `# RFC NNNN: <Title>` — status (`Draft`), author, date.

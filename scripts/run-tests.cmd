@@ -5,7 +5,11 @@ REM Output: test-results.txt in repo root
 
 setlocal enabledelayedexpansion
 
-set "ROOT=c:\Users\ethar\.cursor\projects\MerlinsCollection-Secondary"
+REM Resolve ROOT relative to this script's own location (parent of scripts/),
+REM not a hardcoded clone path -- a hardcoded path silently pointed at a stale
+REM clone (MerlinsCollection-Secondary) whenever this script was copied or the
+REM repo moved. %~dp0 is this .cmd file's own directory, trailing backslash included.
+set "ROOT=%~dp0.."
 set "OUT=%ROOT%\test-results.txt"
 set "SUITE=%~1"
 if "%SUITE%"=="" set "SUITE=all"

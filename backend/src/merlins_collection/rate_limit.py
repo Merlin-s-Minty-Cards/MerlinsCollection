@@ -58,7 +58,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import Depends, HTTPException, Request, status
 
 from merlins_collection.config import settings
-from merlins_collection.dependencies import get_current_user
+from merlins_collection.dependencies import get_current_user, require_admin
 from merlins_collection.models.auth import AuthenticatedUser
 
 logger = logging.getLogger(__name__)
@@ -133,6 +133,8 @@ _LIMIT_SETTINGS = (
     "rate_limit_chat",
     "rate_limit_chat_daily",
     "rate_limit_chat_global_daily",
+    "rate_limit_admin_chat",
+    "rate_limit_admin_chat_daily",
     "rate_limit_search",
     "rate_limit_auth",
     "rate_limit_public",
@@ -362,6 +364,36 @@ def rate_limit_chat(
         ("global#chat", *parse_limit(settings.rate_limit_chat_global_daily)),
     ]
     _apply(limiter, tiers, fail_closed=True, label="chat")
+    return user
+
+
+def rate_limit_admin_chat(
+    request: Request,
+    user: AuthenticatedUser = Depends(require_admin),
+    limiter: DynamoRateLimiter = Depends(get_rate_limiter),
+) -> AuthenticatedUser:
+    """Cost-critical dependency for ``/admin/chat/``. Fails CLOSED, like its sibling.
+
+    Depends on ``require_admin`` rather than ``get_current_user``, so a
+    non-admin gets a 403 from the dependency itself and never reaches Bedrock.
+
+    **The third tier is the SAME ``global#chat`` key the customer chat uses**,
+    and that is the whole of decision 4's "one admin cannot drain the day's
+    Bedrock spend". Only the per-user tiers are raised. A separate
+    ``global#admin_chat`` counter would look tidier and would let the two
+    surfaces together spend twice the ceiling that exists to bound the
+    account's bill — the ceiling is about dollars, and Bedrock does not care
+    which surface spent them.
+    """
+    if not settings.rate_limit_enabled:
+        return user
+    key = caller_key(request, user)
+    tiers = [
+        (f"{key}#admin_chat", *parse_limit(settings.rate_limit_admin_chat)),
+        (f"{key}#admin_chat", *parse_limit(settings.rate_limit_admin_chat_daily)),
+        ("global#chat", *parse_limit(settings.rate_limit_chat_global_daily)),
+    ]
+    _apply(limiter, tiers, fail_closed=True, label="admin_chat")
     return user
 
 

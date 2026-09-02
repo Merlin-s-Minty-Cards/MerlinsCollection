@@ -551,7 +551,7 @@ the most recent stopped task in the cluster shows `startedBy:
 unattended, successful price-sync run — the exact gap RFC 0013 item 5 set out
 to close.
 
-**A prior version of RFC 0013's own tracking file (`claude-progress.txt`)
+**A prior version of RFC 0013's own tracking file (`claude-progress.md`)
 still listed this item as not-yet-deployed** after the schedules had already
 gone live two days earlier — the file was never updated with a "DONE" line
 the way this section now is, so a later session re-diagnosed a solved problem

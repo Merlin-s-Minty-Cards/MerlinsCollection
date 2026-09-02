@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { usePathname } from 'next/navigation'
 import Link from 'next/link'
 import {
@@ -27,6 +27,7 @@ import {
 } from 'lucide-react'
 import { signOut } from 'next-auth/react'
 import { useAdminApi } from '@/lib/admin-api'
+import AdminChat from './AdminChat'
 
 /**
  * The admin tabs, grouped by WHEN you use them (RFC 0010 T13). Sixteen at the
@@ -140,6 +141,10 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
   const [openGroups, setOpenGroups] = useState<OpenMap>({})
   const pathname = usePathname()
   const api = useAdminApi()
+  // A real flex sibling of <main>, in the SAME row as <aside> — this is what
+  // lets AdminChat's panel take real layout space and shrink <main> instead
+  // of overlaying it (owner report 2026-08-28). AdminChat portals into it.
+  const chatSlotRef = useRef<HTMLDivElement>(null)
 
   // Read on mount, not in the initial state: `useState(readSavedGroups)` runs
   // during SSR too, where there is no localStorage, and the hydrated markup
@@ -369,8 +374,22 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
 
       {/* Main content */}
       <main className="flex-1 min-w-0 pb-20 md:pb-0 overflow-y-auto vault-scroll">
+        {/* The analyst chat's toggle (RFC 0018 decision 2). It lives here, above
+            the page, rather than in the sidebar: the panel is available on
+            EVERY tab, and the tab underneath stays mounted while it is open —
+            the questions worth asking are about the rows you are looking at. */}
+        <div className="sticky top-0 z-30 flex justify-end border-b border-pine-700/40 bg-pine-950/80 px-4 py-2 backdrop-blur-md">
+          <AdminChat slotRef={chatSlotRef} />
+        </div>
         {children}
       </main>
+
+      {/* Empty when the panel is closed — an empty flex item with no
+          explicit width takes none, so <main> is untouched until AdminChat
+          portals its (width-capped) panel in here. shrink-0 keeps it at
+          exactly that width rather than being squeezed by flexbox's default
+          proportional-shrink alongside <main>'s own min-w-0. */}
+      <div ref={chatSlotRef} className="shrink-0" />
     </div>
   )
 }

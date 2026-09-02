@@ -52,8 +52,14 @@ export default function InventoryStats() {
         ]
       : [PLACEHOLDER, PLACEHOLDER, PLACEHOLDER]
 
+  // auto-fit rather than a fixed grid-cols-3: at 390px the three fixed columns
+  // were ~105px each while "$10,517.69" at text-lg needs ~110px, so the value
+  // overflowed its card and collided with the one beside it (measured in a live
+  // browser pass, 2026-08-27). auto-fit reflows instead of overflowing, and
+  // needs no breakpoint because it responds to the real container, not the
+  // viewport.
   return (
-    <dl className="mt-7 grid max-w-md grid-cols-3 gap-4">
+    <dl className="mt-7 grid max-w-md grid-cols-[repeat(auto-fit,minmax(7.5rem,1fr))] gap-4">
       {LABELS.map((label, i) => (
         <div key={label} className="rounded-xl border border-pine-700 bg-pine-950/60 px-3 py-3">
           <dt className="font-mono text-[10px] uppercase tracking-[0.1em] text-pine-300">

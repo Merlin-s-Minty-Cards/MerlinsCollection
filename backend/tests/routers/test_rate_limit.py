@@ -65,7 +65,14 @@ def rl_client(cognito_config, jwks, dynamo_repo, rl_limiter):
     app.dependency_overrides[get_rate_limiter] = lambda: rl_limiter
 
     bedrock = MagicMock()
-    bedrock.chat.return_value = "hi"
+    # A dict matching the REAL BedrockChatService.chat() contract, not a bare
+    # string (RFC 0016 Council r2 self-review: routers/chat.py's
+    # `isinstance(result, str)` compatibility branch was dead code -- no real
+    # chat() implementation has returned a string since this plan's GREEN
+    # landed -- kept alive only by stubs like this one; the router's branch
+    # was removed and this double fixed to match reality, mirroring
+    # test_chat.py's `_stub_bedrock`).
+    bedrock.chat.return_value = {"reply": "hi", "artifacts": [], "panel": {"cards": [], "truncated": False}}
     app.dependency_overrides[get_bedrock_service] = lambda: bedrock
 
     client = TestClient(app, raise_server_exceptions=False)

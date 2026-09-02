@@ -24,10 +24,10 @@ describe("searchInventory", () => {
     const result = await searchInventory(seed(), {});
 
     expect(result).toEqual([
-      { id: "1", name: "Charizard", set: "Base Set", condition: "Near Mint", quantity: 1, currentValue: 500, marketPrice: 500, language: "EN" },
-      { id: "2", name: "Blastoise", set: "Base Set", condition: "Lightly Played", quantity: 1, currentValue: 300, marketPrice: 300, language: "EN" },
-      { id: "3", name: "Pikachu", set: "Jungle", condition: "Near Mint", quantity: 3, currentValue: 20, marketPrice: 20, language: "EN" },
-      { id: "4", name: "Charizard", set: "Jungle", condition: "Near Mint", quantity: 1, currentValue: 150, marketPrice: 150, language: "EN" },
+      { id: "1", item_id: "item-1", name: "Charizard", set: "Base Set", condition: "Near Mint", quantity: 1, currentValue: 500, marketPrice: 500, language: "EN" },
+      { id: "2", item_id: "item-2", name: "Blastoise", set: "Base Set", condition: "Lightly Played", quantity: 1, currentValue: 300, marketPrice: 300, language: "EN" },
+      { id: "3", item_id: "item-3", name: "Pikachu", set: "Jungle", condition: "Near Mint", quantity: 3, currentValue: 20, marketPrice: 20, language: "EN" },
+      { id: "4", item_id: "item-4", name: "Charizard", set: "Jungle", condition: "Near Mint", quantity: 1, currentValue: 150, marketPrice: 150, language: "EN" },
     ]);
   });
 

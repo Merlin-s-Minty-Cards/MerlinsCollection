@@ -26,3 +26,62 @@ def test_bedrock_tools_match_shared_contract():
         schema = specs[name]["inputSchema"]["json"]
         assert sorted(schema.get("properties", {})) == sorted(tool["properties"]), name
         assert sorted(schema.get("required", [])) == sorted(tool["required"]), name
+
+
+def test_shared_contract_has_seven_tools_after_decision_23():
+    """Contract sync: decision 23 collapsed display tools to 7 total.
+    
+    Five query tools (MCP-registered) + two display tools (backend-only):
+    display_card and set_display. The five incremental panel-mutation tools
+    (open/close/add/remove/reorder) are removed.
+    """
+    tools = _contract_tools()
+    names = [tool["name"] for tool in tools]
+
+    assert len(names) == 7, (
+        f"Contract must have 7 tools (5 query + 2 display), got {len(names)}. "
+        f"Decision 23 collapsed display tools. See council/r1/verdict.md."
+    )
+    assert names[:5] == [
+        "search_inventory",
+        "get_inventory_summary",
+        "get_card_price_history",
+        "calculate_inventory_value",
+        "flag_underpriced_cards",
+    ], "First 5 tools must be the query tools (unchanged)"
+    
+    assert names[5:] == [
+        "display_card",
+        "set_display",
+    ], (
+        f"Last 2 tools must be display_card and set_display, got {names[5:]}. "
+        f"open/close/add/remove/reorder are removed per decision 23."
+    )
+
+
+def test_search_inventory_result_shape_carries_per_unit_item_id():
+    """Council r1 item 1 FATAL: search_inventory result must carry item_id per entry.
+    
+    One card_id can map to multiple physical units. The MCP producer must emit
+    item_id so display_card can hydrate the exact unit, not "one of them."
+    
+    This assertion pins the result shape in the shared contract so both sides
+    (mcp-server producer, backend consumer) can assert against the same spec.
+    """
+    contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+    
+    assert "resultShapes" in contract, "Contract must have resultShapes section"
+    assert "search_inventory" in contract["resultShapes"], (
+        "search_inventory result shape must be declared"
+    )
+    
+    shape = contract["resultShapes"]["search_inventory"]
+    required = shape.get("requiredFields", [])
+    
+    assert "id" in required, "search_inventory result must carry id (card_id)"
+    assert "item_id" in required, (
+        "search_inventory result must carry item_id (per-unit identifier). "
+        "See council/r1/verdict.md item 1 FATAL."
+    )
+    assert "name" in required, "search_inventory result must carry name"
+

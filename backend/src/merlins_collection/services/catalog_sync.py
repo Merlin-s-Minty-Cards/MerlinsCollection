@@ -400,8 +400,8 @@ def refresh_inventory_market_values(repo) -> int:
     ``card.prices.get(item.finish)``. That exact match is what this function used
     to do, and it silently left 174 of 213 live items unpriced: a ``"normal"``-
     finish item against a card TCGdex prices only under ``holofoil`` matched
-    nothing here while the read path priced it correctly (claude-progress.txt
-    Phase 12, absorbing Phase 10). Sharing the helper is the fix AND the guard
+    nothing here while the read path priced it correctly. Sharing the helper is
+    the fix AND the guard
     against the two paths drifting apart again.
     """
     updated = 0
