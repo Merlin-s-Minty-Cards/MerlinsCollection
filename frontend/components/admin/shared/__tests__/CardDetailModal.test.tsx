@@ -464,6 +464,89 @@ describe('CardDetailModal — Send to Triage', () => {
 })
 
 // ===========================================================================
+// RFC 0022 T7 — Send to Vault
+// ===========================================================================
+//
+// A deliberate copy of the Send to Triage shape above, not a new pattern:
+// same reach (the five pages that mount this modal), same "reads differently
+// once already in that state" rule, same undo affordance. The one real
+// difference: sending TO the vault has no note to type, so it writes
+// directly with no inline form — see the RFC's exact scope, "sets status to
+// on_hold, and nothing else."
+describe('CardDetailModal — Send to Vault', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    putMock.mockReset()
+    getMock.mockResolvedValue(null)
+    postMock.mockResolvedValue({})
+    putMock.mockResolvedValue({})
+  })
+
+  it('offers a Send to Vault action for an item that is not already on_hold', async () => {
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+    expect(await screen.findByRole('button', { name: /send to vault/i })).toBeInTheDocument()
+  })
+
+  it('writes status: on_hold directly, with no intermediate form', async () => {
+    putMock.mockResolvedValue({ ...item, status: 'on_hold' })
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /send to vault/i }))
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith('/inventory/item-1', { status: 'on_hold' }),
+    )
+  })
+
+  it('reads "In Vault" for an item already on_hold, and never silently re-writes it', async () => {
+    render(<CardDetailModal item={{ ...item, status: 'on_hold' }} onClose={vi.fn()} />)
+
+    expect(await screen.findByRole('button', { name: /in vault/i })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /send to vault/i })).not.toBeInTheDocument()
+  })
+
+  it('the server response, not a local flag, decides what the button reads', async () => {
+    // Same rule the existing comment on writeTriage states explicitly: the
+    // button must reflect the REFETCHED item, never an optimistic flag that
+    // could disagree with it. Here the PUT response omits `status` entirely
+    // (a malformed/partial server reply), so the button must NOT have
+    // already flipped to "In Vault" on the strength of the click alone.
+    putMock.mockResolvedValueOnce({ item_id: 'item-1' })
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /send to vault/i }))
+    await waitFor(() => expect(putMock).toHaveBeenCalled())
+
+    expect(screen.getByRole('button', { name: /send to vault/i })).toBeInTheDocument()
+  })
+
+  it('offers to return an already-vaulted item to available', async () => {
+    render(<CardDetailModal item={{ ...item, status: 'on_hold' }} onClose={vi.fn()} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /in vault/i }))
+    fireEvent.click(screen.getByRole('button', { name: /return to available/i }))
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith('/inventory/item-1', { status: 'available' }),
+    )
+  })
+
+  it('offers an Undo that restores the previous status', async () => {
+    const available = { ...item, status: 'available' }
+    putMock.mockResolvedValue({ ...available, status: 'on_hold' })
+    render(<CardDetailModal item={available} onClose={vi.fn()} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /send to vault/i }))
+    fireEvent.click(await screen.findByRole('button', { name: /undo/i }))
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenLastCalledWith('/inventory/item-1', { status: 'available' }),
+    )
+  })
+})
+
+// ===========================================================================
 // RFC 0010 T5 — an edit shows up immediately, and the parent is handed the row
 // ===========================================================================
 //

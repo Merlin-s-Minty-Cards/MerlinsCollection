@@ -83,6 +83,10 @@ export default function AdminInventoryPage() {
   const [refreshing, setRefreshing] = useState(false)
   const [refreshResult, setRefreshResult] = useState<string | null>(null)
 
+  // RFC 0022 — a rejected inline edit surfaces here; the cell itself renders
+  // no error text (InlineEditCell's own contract).
+  const [editError, setEditError] = useState<string | null>(null)
+
   // Dynamic locations dropdown
   const { options: locationOptions } = useLocations()
 
@@ -236,13 +240,25 @@ export default function AdminInventoryPage() {
     }
   }
 
+  // RFC 0022 — the generic click-to-edit commit path every registry `edit`
+  // spec calls: partial PUT, then refetch so any server-side recompute
+  // (denormalized market value, review transitions) is reflected.
+  const saveField = useCallback(
+    async (item: InventoryItem, field: string, value: unknown) => {
+      await api.put(`/inventory/${item.item_id}`, { [field]: value })
+      fetchItems()
+    },
+    [api, fetchItems],
+  )
+
   const columns = toDataTableColumns(visible, {
     editingId, editField, editValue, setEditValue,
     startEdit, saveEdit, cancelEdit,
-    locationOptions, getImageUrl,
+    locationOptions, showOptions, getImageUrl,
     onRefresh: fetchItems,
     onDelete: setDeleteTarget,
     consignorName: (id) => cosignorOptions.find((o) => o.value === id)?.label,
+    saveField,
   })
 
   // --- Filters ------------------------------------------------------------
@@ -462,6 +478,21 @@ export default function AdminInventoryPage() {
         </div>
       )}
 
+      {/* Inline-edit error toast */}
+      {editError && (
+        <div className="flex items-center gap-2 text-xs text-red-400 bg-red-500/5 border border-red-500/20 rounded-lg px-3 py-2 mb-4">
+          {editError}
+          <button
+            type="button"
+            onClick={() => setEditError(null)}
+            className="ml-auto text-pine-500 hover:text-pine-300"
+            aria-label="Dismiss"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       {/* Table */}
       <DataTable
         columns={columns}
@@ -473,6 +504,7 @@ export default function AdminInventoryPage() {
         onRowClick={(item) => setDetailItem(item)}
         loading={loading}
         emptyMessage="No inventory items match your filters"
+        onEditError={(err) => setEditError(err instanceof AdminApiError ? (err.detail ?? 'Update failed') : 'Update failed')}
       />
 
       {/* Delete confirmation */}

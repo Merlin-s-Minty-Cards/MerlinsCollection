@@ -523,3 +523,50 @@ describe('AdminPrepQueuePage hand-valued rows', () => {
     expect(within(rowFor(/Pikachu/)).queryByText(/hand-valued/i)).not.toBeInTheDocument()
   })
 })
+
+// RFC 0022 T4a — condition and cost_basis joined this page's click-to-edit set.
+describe('AdminPrepQueuePage — inline condition and cost_basis edit (RFC 0022)', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    putMock.mockReset()
+    putMock.mockResolvedValue({})
+    getMock.mockImplementation((path: string) => {
+      if (path === '/inventory/search') {
+        return Promise.resolve({
+          items: [{
+            item_id: 'item-1', display_name: 'Pikachu', status: 'available',
+            location: 'binder', condition: 'NM', cost_basis: '4.00',
+          }],
+        })
+      }
+      if (path === '/locations') return Promise.resolve([{ value: 'binder', label: 'Binder' }])
+      return Promise.resolve({})
+    })
+  })
+
+  it('edits condition through a select that commits on change', async () => {
+    render(<AdminPrepQueuePage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.click(screen.getByText('NM'))
+    const select = screen.getByRole('combobox', { name: /cond/i })
+    await act(async () => {
+      fireEvent.change(select, { target: { value: 'LP' } })
+    })
+    expect(putMock).toHaveBeenCalledWith('/inventory/item-1', { condition: 'LP' })
+  })
+
+  it('edits cost_basis as money, parsed before it reaches the API', async () => {
+    render(<AdminPrepQueuePage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Cost' }))
+    const input = screen.getByRole('textbox', { name: /cost/i })
+    fireEvent.change(input, { target: { value: '5.50' } })
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Enter' })
+    })
+    // parseMoney normalizes '5.50' -> '5.5', matching lib/money.ts's own precedent.
+    expect(putMock).toHaveBeenCalledWith('/inventory/item-1', { cost_basis: '5.5' })
+  })
+})

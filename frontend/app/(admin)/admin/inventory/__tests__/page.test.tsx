@@ -192,7 +192,7 @@ describe('AdminInventoryPage inline location edit no-op guard', () => {
     render(<AdminInventoryPage />)
     await act(async () => { await Promise.resolve() })
 
-    fireEvent.click(screen.getByTitle('Click to edit'))
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Location' }))
     const select = screen.getByRole('combobox', { name: /edit location/i })
     fireEvent.blur(select)
 
@@ -404,10 +404,10 @@ describe('AdminInventoryPage — configurable columns', () => {
     render(<AdminInventoryPage />)
     await act(async () => { await Promise.resolve() })
 
-    fireEvent.click(screen.getByTitle('Click to edit'))
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Location' }))
     const select = screen.getByRole('combobox', { name: /edit location/i })
+    // `select` commits on change now (RFC 0022), not on blur.
     fireEvent.change(select, { target: { value: 'binder' } })
-    fireEvent.blur(select)
 
     await waitFor(() =>
       expect(putMock).toHaveBeenCalledWith('/inventory/item-1', { location: 'binder' }),

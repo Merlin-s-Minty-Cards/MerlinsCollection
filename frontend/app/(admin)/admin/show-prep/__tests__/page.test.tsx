@@ -102,6 +102,32 @@ describe('AdminShowPrepPage inline sticker editing', () => {
     expect(putMock).not.toHaveBeenCalled()
   })
 
+  it('edits location inline via a select (RFC 0022 T4a)', async () => {
+    render(<AdminShowPrepPage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit Location' }))
+    const select = screen.getByRole('combobox', { name: 'Edit Location' })
+    await act(async () => {
+      fireEvent.change(select, { target: { value: 'binder-a' } })
+    })
+    // Same value as stored -> dirty-check skips the round trip.
+    expect(putMock).not.toHaveBeenCalledWith('/inventory/item-1', expect.objectContaining({ location: expect.anything() }))
+  })
+
+  it('edits cost_basis inline as money (RFC 0022 T4a)', async () => {
+    render(<AdminShowPrepPage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit Price Paid' }))
+    const input = screen.getByRole('textbox', { name: 'Edit Price Paid' })
+    fireEvent.change(input, { target: { value: '12.50' } })
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Enter' })
+    })
+    expect(putMock).toHaveBeenCalledWith('/inventory/item-1', { cost_basis: '12.5' })
+  })
+
   it('surfaces a failure message and keeps the editor open when the PUT rejects', async () => {
     putMock.mockRejectedValueOnce(new Error('boom'))
     render(<AdminShowPrepPage />)

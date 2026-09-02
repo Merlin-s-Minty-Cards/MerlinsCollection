@@ -164,6 +164,17 @@ export default function AdminVaultPage() {
           {item.condition ? formatCondition(item.condition, item.condition_modifier) : '—'}
         </span>
       ),
+      // Same reasoning as /admin/outgoing: no condition_modifier merge risk
+      // here since VaultItem DOES carry it, so the combined string round-trips.
+      edit: {
+        type: 'select',
+        options: ['NM', 'LP+', 'LP', 'LP-', 'MP', 'HP', 'DMG'].map((v) => ({ value: v, label: v })),
+        value: (item) => (item.condition ? formatCondition(item.condition, item.condition_modifier) : ''),
+        save: async (item, next) => {
+          await api.put(`/inventory/${item.item_id}`, { condition: next || null })
+          fetchVault()
+        },
+      },
     },
     {
       key: 'cost_basis',
@@ -171,6 +182,15 @@ export default function AdminVaultPage() {
       sortable: true,
       className: 'text-right',
       render: (item) => <PriceDisplay value={item.cost_basis} className="text-xs text-pine-300 font-mono" />,
+      edit: {
+        type: 'money',
+        value: (item) => item.cost_basis ?? '',
+        save: async (item, next) => {
+          await api.put(`/inventory/${item.item_id}`, { cost_basis: next || null })
+          fetchVault()
+        },
+        undoLabel: 'Cost basis',
+      },
     },
     {
       key: 'current_market_value',
@@ -178,6 +198,7 @@ export default function AdminVaultPage() {
       sortable: true,
       className: 'text-right',
       render: (item) => <PriceDisplay value={item.current_market_value} className="text-xs text-mint font-mono" />,
+      // Denormalized nightly by refresh_inventory_market_values.
     },
     {
       key: 'sticker_price',
@@ -190,6 +211,15 @@ export default function AdminVaultPage() {
         ) : (
           <span className="text-pine-600">—</span>
         ),
+      edit: {
+        type: 'money',
+        value: (item) => item.sticker_price ?? '',
+        save: async (item, next) => {
+          await api.put(`/inventory/${item.item_id}`, { sticker_price: next || null })
+          fetchVault()
+        },
+        undoLabel: 'Sticker price',
+      },
     },
     {
       key: 'dollar_net',

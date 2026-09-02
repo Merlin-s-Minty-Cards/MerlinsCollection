@@ -281,6 +281,16 @@ export default function AdminShowPrepPage() {
       key: 'location',
       label: 'Location',
       render: (item) => <span className="text-xs text-pine-300 capitalize">{item.location || '—'}</span>,
+      edit: {
+        type: 'select',
+        options: locationOptions,
+        value: (item) => item.location ?? '',
+        save: async (item, next) => {
+          await api.put(`/inventory/${item.item_id}`, { location: next || null })
+          fetchMispriced()
+        },
+        undoLabel: 'Location',
+      },
     },
     {
       key: 'cost_basis',
@@ -288,6 +298,15 @@ export default function AdminShowPrepPage() {
       sortable: true,
       className: 'text-right',
       render: (item) => <PriceDisplay value={item.cost_basis} className="text-xs text-pine-300" />,
+      edit: {
+        type: 'money',
+        value: (item) => (item.cost_basis != null ? String(item.cost_basis) : ''),
+        save: async (item, next) => {
+          await api.put(`/inventory/${item.item_id}`, { cost_basis: next || null })
+          fetchMispriced()
+        },
+        undoLabel: 'Cost basis',
+      },
     },
     {
       key: 'current_market_value',

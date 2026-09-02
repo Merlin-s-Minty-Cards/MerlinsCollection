@@ -361,3 +361,50 @@ describe('a filter follows its column', () => {
     expect(isFilterVisible(notes, new Set(['status']), true)).toBe(true)
   })
 })
+
+// ===========================================================================
+// RFC 0022 T5 — a column cannot ship silently uneditable
+// ===========================================================================
+//
+// CLAUDE.md's own lesson (the admin-tool-contract parity test that diffed key
+// sets while every value was an empty `{}` stub): a totality test that only
+// checks PRESENCE would pass even if `notEditable` were `''` on every column.
+// So the reason string itself is asserted, not just that the key exists.
+
+describe('every INVENTORY_COLUMNS entry has an edit spec or a real reason', () => {
+  it('carries either `edit` or a `notEditable` reason of at least 10 characters', () => {
+    for (const col of INVENTORY_COLUMNS) {
+      const hasEdit = typeof col.edit === 'function'
+      const hasReason = typeof col.notEditable === 'string' && col.notEditable.trim().length >= 10
+      expect(
+        hasEdit || hasReason,
+        `column ${col.key} has neither edit nor a real notEditable reason`,
+      ).toBe(true)
+      // Never both — a column that is click-to-edit needs no excuse, and a
+      // stated excuse alongside a real editor is a stale comment nobody removed.
+      expect(hasEdit && hasReason, `column ${col.key} has BOTH edit and notEditable`).toBe(false)
+    }
+  })
+
+  it('never ships an edit spec whose type is missing from InlineEditCell\'s own union', () => {
+    // Loose but cheap: catches a typo'd type string (`'slect'`) that would
+    // otherwise render nothing and fail silently in the browser only.
+    const KNOWN_TYPES = new Set([
+      'text', 'textarea', 'money', 'number', 'date',
+      'select', 'multiselect', 'checkbox', 'url',
+    ])
+    // A minimal stand-in context — only what `edit()` factories actually read.
+    const ctx = {
+      editingId: null, editField: null, editValue: '', setEditValue: () => {},
+      startEdit: () => {}, saveEdit: () => {}, cancelEdit: () => {},
+      locationOptions: [], showOptions: [], getImageUrl: () => null,
+      onRefresh: () => {}, onDelete: () => {}, consignorName: () => undefined,
+      saveField: async () => {},
+    }
+    for (const col of INVENTORY_COLUMNS) {
+      if (!col.edit) continue
+      const spec = col.edit(ctx as never)
+      expect(KNOWN_TYPES.has(spec.type), `column ${col.key} has unknown edit.type ${spec.type}`).toBe(true)
+    }
+  })
+})

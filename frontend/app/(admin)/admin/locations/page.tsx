@@ -96,12 +96,31 @@ export default function AdminLocationsPage() {
       label: 'Label',
       sortable: true,
       render: (loc) => <span className="text-pine-100 text-sm font-medium">{loc.label}</span>,
+      edit: {
+        type: 'text',
+        value: (loc) => loc.label,
+        save: async (loc, next) => {
+          await api.patch(`/locations/${loc.value}`, { label: next })
+          fetchLocations()
+        },
+      },
     },
     {
       key: 'value',
       label: 'Value',
       sortable: true,
-      render: (loc) => <span className="text-xs text-pine-400 font-mono">{loc.value}</span>,
+      // RFC 0022 T6 — permanently NOT editable: it's the join key stored on
+      // every inventory item pointing at this location, and there is no
+      // rename-and-migrate path. CLAUDE.md's rule: a disabled control states
+      // why, right beside it — hence the title rather than a silent omission.
+      render: (loc) => (
+        <span
+          className="text-xs text-pine-400 font-mono"
+          title="Not editable — this is the join key stored on every item at this location."
+        >
+          {loc.value}
+        </span>
+      ),
     },
     {
       key: '_actions',

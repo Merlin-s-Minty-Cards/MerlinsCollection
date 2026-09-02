@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { X, Pencil, Check, XCircle, Flag, Undo2 } from 'lucide-react'
+import { X, Pencil, Check, XCircle, Flag, Undo2, Lock } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { clearTriageBody, sendToTriageBody } from '@/lib/triage'
 import { CONDITION_OPTIONS, parseCondition, formatCondition } from '@/lib/constants'
@@ -179,6 +179,13 @@ export default function CardDetailModal({
   const [triagePanel, setTriagePanel] = useState(false)
   const [triageNote, setTriageNote] = useState('')
   const [triageUndo, setTriageUndo] = useState(false)
+  // Send to Vault (RFC 0022 T7). `vaultPanel` is the confirm step shown ONLY
+  // when already in the vault ("In Vault" -> offer to return to available);
+  // sending TO the vault has no note to type, so that click writes directly,
+  // matching the RFC's "one button, nothing else" scope. `vaultUndo` holds
+  // the PREVIOUS status to restore, or `null` when no undo toast is showing.
+  const [vaultPanel, setVaultPanel] = useState(false)
+  const [vaultUndo, setVaultUndo] = useState<string | null>(null)
   // Consignment assign/unassign (RFC 0012 C3). `consignorPanel` is the
   // inline assign form, matching `triagePanel`'s disclosure pattern.
   const [consignorPanel, setConsignorPanel] = useState(false)
@@ -321,6 +328,31 @@ export default function CardDetailModal({
     [api, item, onUpdated],
   )
 
+  // Send to Vault (RFC 0022 T7): PUT { status } through the same partial-
+  // update endpoint every other write here uses — no new endpoint. The
+  // SERVER's `status` is the single answer once the response lands (mirrors
+  // `writeTriage`'s own comment above): `shown`/`inVault` below are derived
+  // from `current`, never a local optimistic flag that could disagree.
+  const writeVault = useCallback(
+    async (nextStatus: string, previousStatus: string | null) => {
+      if (!item) return
+      setSaving(true)
+      setError(null)
+      try {
+        const updated = asItem(await api.put(`/inventory/${item.item_id}`, { status: nextStatus }))
+        if (updated) setCurrent(updated)
+        setVaultPanel(false)
+        setVaultUndo(previousStatus)
+        onUpdated?.(updated ?? undefined)
+      } catch (err) {
+        setError(err instanceof AdminApiError ? (err.detail ?? 'Update failed') : 'Update failed')
+      } finally {
+        setSaving(false)
+      }
+    },
+    [api, item, onUpdated],
+  )
+
   // Consignment assign/unassign (RFC 0012 C3). Declared here, alongside the
   // other write handlers and above the early `return null` below, so the
   // Rules of Hooks are not broken — the derived `consignment` read-only
@@ -408,6 +440,9 @@ export default function CardDetailModal({
   // DERIVED, never separate state: two sources for "is this card flagged" is how
   // the header comes to disagree with the item it is describing.
   const flagged = Boolean(shown.needs_review)
+  // Same derivation rule as `flagged`: the SERVER's status is the answer,
+  // never a local flag the header could disagree with.
+  const inVault = shown.status === 'on_hold'
 
   // Only the fields this kind actually has, per the backend union.
   const visibleFields = EDITABLE_FIELDS.filter(
@@ -476,6 +511,34 @@ export default function CardDetailModal({
                            hover:border-amber-400/40 transition-colors disabled:opacity-50"
               >
                 <Flag size={12} /> Send to Triage
+              </button>
+            )}
+            {/* Send to Vault (RFC 0022 T7) — same reach as Send to Triage,
+                the five pages that mount this modal. "In Vault" offers to
+                return the item to available rather than silently re-writing
+                on_hold, mirroring the Triage button's own no-op-reads-broken
+                reasoning. */}
+            {inVault ? (
+              <button
+                type="button"
+                onClick={() => setVaultPanel((open) => !open)}
+                disabled={saving}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium
+                           text-sky-300 bg-sky-400/10 border border-sky-400/30
+                           hover:bg-sky-400/20 transition-colors disabled:opacity-50"
+              >
+                <Lock size={12} /> In Vault
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => writeVault('on_hold', String(shown.status ?? ''))}
+                disabled={saving}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium
+                           text-pine-300 border border-pine-700/60 hover:text-sky-300
+                           hover:border-sky-400/40 transition-colors disabled:opacity-50"
+              >
+                <Lock size={12} /> Send to Vault
               </button>
             )}
             <button
@@ -548,6 +611,45 @@ export default function CardDetailModal({
                 </div>
               </>
             )}
+          </div>
+        )}
+
+        {/* Vault panel — the confirm step for returning an on_hold item to
+            available. Sending TO the vault has no note to type, so it writes
+            directly from the header button above with no panel at all. */}
+        {vaultPanel && inVault && (
+          <div className="border-b border-pine-700/40 bg-pine-900/60 px-5 py-3 flex items-center justify-between gap-3">
+            <p className="text-[11px] text-pine-400">In Vault (on hold).</p>
+            <button
+              type="button"
+              onClick={() => writeVault('available', null)}
+              disabled={saving}
+              className="px-2.5 py-1 rounded-md text-[11px] font-medium text-mint
+                         border border-mint/30 hover:bg-mint/10 disabled:opacity-50"
+            >
+              Return to available
+            </button>
+          </div>
+        )}
+
+        {/* Undo — same affordance as the Triage row action: a mis-click on
+            Send to Vault pulls a card out of customer-visible stock, and this
+            is the cheap way back without a confirm dialog in the way. */}
+        {vaultUndo !== null && (
+          <div
+            role="status"
+            className="flex items-center justify-between gap-3 border-b border-sky-400/20
+                       bg-sky-400/10 px-5 py-2 text-[11px] text-pine-100"
+          >
+            <span>Sent to Vault.</span>
+            <button
+              type="button"
+              onClick={() => writeVault(vaultUndo, null)}
+              disabled={saving}
+              className="flex items-center gap-1 text-mint hover:text-mint/80 disabled:opacity-50"
+            >
+              <Undo2 size={12} /> Undo
+            </button>
           </div>
         )}
 

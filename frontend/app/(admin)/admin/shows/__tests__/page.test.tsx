@@ -158,3 +158,26 @@ describe('AdminShowsPage', () => {
     await waitFor(() => expect(postMock).toHaveBeenCalledWith('/shows/show-2/unarchive'))
   })
 })
+
+// RFC 0022 T4b — name/date/venue/city/sales_goal joined the click-to-edit set.
+describe('AdminShowsPage — inline edit (RFC 0022)', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    putMock.mockReset()
+    putMock.mockResolvedValue({})
+    getMock.mockImplementation(() => Promise.resolve([activeShow]))
+  })
+
+  it('edits the show name inline as text', async () => {
+    render(<AdminShowsPage />)
+    await screen.findByText('Portland Card Show')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Show' }))
+    const input = screen.getByRole('textbox', { name: 'Edit Show' })
+    fireEvent.change(input, { target: { value: 'Portland Winter Show' } })
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Enter' })
+    })
+    expect(putMock).toHaveBeenCalledWith('/shows/show-1', { name: 'Portland Winter Show' })
+  })
+})

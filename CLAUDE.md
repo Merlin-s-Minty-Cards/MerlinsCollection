@@ -551,6 +551,77 @@ at all — the "every tab" goal is not met yet; see
 the import-materialized fallback, which is a silent no-op on a catalog-matched
 item (follow-ups.md, T10 row 3).
 
+**"Send to Vault" (RFC 0022 T7) lives beside Send to Triage in the same
+modal, on the same reach** — the five pages above, no new wiring per page.
+It PUTs `{status: 'on_hold'}` through the existing
+`PUT /admin/inventory/{item_id}` (no new endpoint) and reads **"In Vault"**
+once the server confirms `status === 'on_hold'`, offering to return the item
+to `available`. Sending TO the vault has no note to type, so — unlike Send
+to Triage — it writes directly on click with no inline form. Same undo
+affordance (a 5-second-equivalent toast restoring the previous status), and
+the button's state is derived from the refetched item, never an optimistic
+local flag — the exact rule `writeTriage`'s own comment already states.
+
+## UNIVERSAL ADMIN INLINE EDITING (RFC 0022)
+
+Every value in every admin table is click-to-edit where it makes sense, via
+one shared mechanism: `InlineEditCell` (`components/admin/shared/`, 9 input
+types — `text|textarea|money|number|date|select|multiselect|checkbox|url`)
+rendered by `DataTable` when a `Column<T>` carries an `edit: EditSpec<T>`.
+The read-only presentation is byte-identical to before; the affordance is a
+hover background + pencil on hover/focus, and the cell stays
+keyboard-focusable (Enter opens the editor) because hover may never be the
+only route to a control.
+
+**`multiselect` is array-typed on purpose, not a delimiter-joined string** —
+`InlineEditCell` takes separate `multiselectValue: string[]` /
+`onSaveMultiselect: (v: string[]) => …` props for it, and `EditSpec<T>`
+mirrors that split (`multiselectValue`/`saveMultiselect`, alongside the
+scalar `value`/`save` every other type uses). Built ahead of any real
+consumer in this RFC specifically so RFC 0023's `finish_attributes` column
+has a mechanism to use rather than bolting on a second one.
+
+**Undo, not confirmation** (owner decision): `EditSpec.undoLabel`, when set,
+shows a 5-second "`‹label›` → `‹new value›` · Undo" toast after a successful
+commit; Undo re-issues `save` with the value captured *before* the edit. Set
+only on `status`, `cost_basis`, `sticker_price`, `listed_price`, `location`
+(consignor reassignment has no inline column yet — see the exclusion note
+below). Everything else commits silently. The toast lives inside
+`DataTable` itself, not a separate component — it needs the row/column/
+previous-value context only the table has.
+
+**A `Column<T>` with `edit` conflicts with `onRowClick` on the SAME
+cell** — `InlineEditCell`'s click handler calls `stopPropagation()`, so an
+editable cell silently eats a row-level click. Found live on
+`/admin/cosigners` (rows are click-to-select; making `name` editable broke
+selecting a consignor entirely — reverted) and on the Analytics Shows tab
+(kept `date` editable, dropped `name`, which is that tab's click-to-detail
+target). **Before adding `edit` to a column on a page with `onRowClick`,
+check whether that column is the actual click target for row navigation** —
+DataTable-level tests cannot catch this because they don't exercise both
+features on one cell at once.
+
+**`INVENTORY_COLUMNS` (`lib/admin-inventory-columns.tsx`) is the reference
+registry and the only one with a totality test today**
+(`lib/__tests__/admin-inventory-columns.test.ts`): every column carries
+either `edit` or a `notEditable` reason string ≥10 characters, never both —
+the length check is the point, mirroring the `admin-tool-contract.json`
+lesson elsewhere in this file where a parity test diffed key sets while
+every value was an empty stub. **Only `card_id` and consignment/
+`consignor_name` are excluded by owner decision** ("everything except
+card_id and consignment"); every other exclusion (`current_market_value`,
+identity/audit fields, derived columns) has its own stated reason.
+`/admin/shows`, `/admin/cosigners`, `SlabList` gained real inline editing
+too but **not yet a formal registry + totality test of their own** — a
+known, deliberate gap (not an oversight), left as a follow-up.
+
+**`SlabList` gotcha, same one `slabs_sort.py` already documents:** `grade`
+and `cost_basis` are `str(Decimal)` on the wire. The component has no
+`api`/side-effect capability of its own — it takes an optional
+`onEditField(row, field, value)` prop, and the PARENT PAGE
+(`/admin/slabs`) is what parses the string back to a JSON number before the
+PUT, never re-sending the display string and never a bare Python float.
+
 **The one rule that must not be broken:** assigning an English display name
 writes `display_name_override` and **never** `card_id`. Re-pointing a card is a
 separate, confirmed action with a before/after diff and warnings for trade
@@ -1240,10 +1311,15 @@ constants.ts`).
 once from the legacy `InventoryLocation` enum unioned with distinct location
 values already present on inventory, then editable by admins. Endpoints
 (`backend/src/merlins_collection/routers/admin/locations.py`):
-`GET /admin/locations`, `POST /admin/locations`, `DELETE /admin/locations/
+`GET /admin/locations`, `POST /admin/locations`, `PATCH /admin/locations/
+{value}` (RFC 0022 T6 — `label` only, any other key including `value` itself
+is a 422 via `extra="forbid"`, never a silent no-op), `DELETE /admin/locations/
 {value}` (blocked with 409 if the location is still in use by any item).
-Frontend reads it via `useLocations()`; never hardcode a location list in new
-code.
+**`value` is permanently not editable at any price** — it's the join key
+stored on every inventory item pointing at that location, and there is no
+rename-and-migrate path; the frontend cell carries a `title` explaining why,
+per the "a disabled control states why" rule. Frontend reads it via
+`useLocations()`; never hardcode a location list in new code.
 
 ## AN OVERLAY MOUNTED INSIDE A `backdrop-blur` ANCESTOR IS NOT FIXED TO THE VIEWPORT — PORTAL IT
 
@@ -1656,8 +1732,8 @@ variables — the general shape to copy whenever a new piece of infra has a
 meaningfully different blast radius than what already exists, rather than
 folding it into a stack that also carries this secret-wipe risk.
 
-**Catalog seed + sync (one-time owner action, not scheduled).** Needed only for
-a fresh/empty table, which the live one is not. With AWS creds, from `backend/`:
+**Catalog seed (one-time owner action).** Needed only for a fresh/empty
+table, which the live one is not. With AWS creds, from `backend/`:
 
 ```bash
 cd backend
@@ -1667,9 +1743,15 @@ cd backend
 ```
 
 then press **Sync Prices** on `/admin/market`, or run `scripts/daily_sync.py`
-the same way. This is not part of the scheduled daily sync — the daily sync
-refreshes prices for cards already in the catalog, it does not seed the
-catalog itself.
+the same way. This is not the scheduled sync — seeding is a one-time bootstrap
+that populates catalog IDENTITY rows; it does not run on a schedule and does
+not price anything.
+
+**The daily/monthly price and catalog sync IS scheduled (RFC 0021), via
+`MerlinsSyncStack`** — see "MerlinsSyncStack — the restored daily/monthly
+sync" below. Before RFC 0021 this section read "not scheduled" because it
+genuinely wasn't: RFC 0014's migration off ECS deleted the schedule that used
+to invoke `scripts/scheduled_sync.py`, and nothing replaced it until now.
 
 **Every script here needs the venv interpreter spelled out.** A bare `python`
 resolves to an unrelated environment that cannot import `merlins_collection`,
@@ -1735,6 +1817,64 @@ instead of only when a set is entirely absent. That early-out is why a promo
 catalogued into a set we already hold was invisible. The extra walk is the
 accepted cost; **restoring the early-out will look like an optimization and
 is the bug.**
+
+**TCG Pocket (digital-only) sets are excluded at INGEST, not just at query
+time (RFC 0021) — a DIFFERENT filter from the `sync_new_sets` early-out
+above, and the two must not be confused.** TCGdex carries Pokémon TCG Pocket
+under series `tcgp`; both `sync_new_sets` and `seed_catalog.seed_language`
+now resolve that series' set ids (`services.catalog_sync.excluded_set_ids`,
+one `GET /{lang}/series/tcgp` call per language, cached per run) and skip
+them before ever walking their cards. A TCG Pocket card is not physical
+inventory — no TCGplayer/Cardmarket pricing, no card to buy/sell/grade — and
+it used to pollute every catalog autocomplete an operator uses at a buy
+table. `scripts/purge_catalog_junk.py` is the one-time cleanup for rows
+ingested before this exclusion existed; the exclusion above is what stops it
+recurring.
+
+## MerlinsSyncStack — the restored daily/monthly sync (RFC 0021)
+
+A FIFTH, deliberately independent stack (`infra/lib/sync-stack.ts`), on the
+same "shares no resource, can't drag another stack into a deploy" reasoning
+as `MerlinsCognitoBrandingStack`. EventBridge Scheduler → ECS Fargate
+`RunTask`, invoking the existing, already-tested
+`python -m scripts.scheduled_sync --job <prices|catalog>` dispatcher — the
+job was never broken, it just had no caller after RFC 0014 deleted the ECS
+constructs that used to invoke it.
+
+| Schedule | Cron (UTC) | Job | Why |
+|---|---|---|---|
+| `merlins-sync-prices` | `0 9 * * ? *` (09:00 = 01:00/02:00 Pacific) | `--job prices` → `run_daily_sync` | Overnight in the business's own timezone; carries the ~24-minute weekly catalog cycle as its long tail |
+| `merlins-sync-catalog` | `0 15 2 * ? *` (15:00 on the 2nd) | `--job catalog` → `sync_new_sets` | New sets release monthly at most. **Deliberately a different day/hour from `prices`** — two concurrent catalog writers is not a state either job was designed for; six hours of separation is cheaper than building a lock for a job that runs twice a month |
+
+Task role grants `Query`/`GetItem`/`PutItem`/`UpdateItem`/`BatchWriteItem`/
+`Scan` on `merlins-cards` — mirrors
+`deploy/backend-task-role-permissions.json`'s `BusinessTable` statement;
+**any new action the sync needs goes in both places or they drift.** The
+image asset builds `backend/Dockerfile`'s **`runtime`** target, not
+`lambda` — this is an ECS task with no Lambda Runtime API to talk to, the
+exact opposite of `MerlinsBackendStack`'s own image, and
+`infra/test/sync-stack.test.ts` pins the target against the synthesized
+**asset manifest** (the `--target` build arg is not a CloudFormation
+template property, so the template alone can't prove it — same "verify the
+built artifact" discipline as the Lambda-stage trap this repo already
+documents, applied in reverse). No `Fn::ImportValue` anywhere: the table
+name is a plain string prop from `infra/bin/infra.ts`, same as every other
+stack, specifically so a sync-only change can never pull `MerlinsBackendStack`
+into its deploy.
+
+`assignPublicIp: true` in public subnets, no NAT gateway — the job needs to
+reach `api.tcgdex.net` and `pokemonpricetracker.com`, and a NAT gateway costs
+~$32/month to avoid a public IP on a task that runs twice a month.
+
+**Deploy only via `bash scripts/deploy-sync.sh`** (mirrors
+`deploy-frontend.sh`'s secret-recovery pattern, scoped to this stack's one
+secret, `POKEMONPRICETRACKER_API_KEY`) — a hand-run `cdk deploy
+MerlinsSyncStack` from a shell missing that export writes an EMPTY key,
+silently degrading the nightly job's graded pricing while every other step
+still reports success. Always `--exclusively`. `bash scripts/verify-sync.sh`
+is the standing post-deploy check (schedule state, most recent task run, the
+last structured JSON summary line in CloudWatch Logs, and a one-shot manual
+invocation command so the first run doesn't have to wait for the schedule).
 
 # Test Commands
 

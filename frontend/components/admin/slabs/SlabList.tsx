@@ -47,6 +47,7 @@ export default function SlabList({
   sortKey,
   sortDir,
   onSort,
+  onEditField,
 }: {
   rows: SlabRow[]
   // RFC 0013 T4d — same optional DataTable contract as every other admin
@@ -55,6 +56,14 @@ export default function SlabList({
   sortKey?: string | null
   sortDir?: 'asc' | 'desc'
   onSort?: (key: string) => void
+  /**
+   * RFC 0022 T4b — present ⇒ grade/cost_basis/status become click-to-edit.
+   * Optional so this component's own tests can still render a read-only
+   * list. `value` is already the STRING the field displays (`grade`,
+   * `cost_basis` are `str(Decimal)` on the wire) — the caller parses it
+   * back to a number before the PUT, never sending the string through.
+   */
+  onEditField?: (row: SlabRow, field: string, value: string) => Promise<void>
 }) {
   // A freshly-mapped array every render, which is what the hook expects — it
   // attempts each id exactly once and will not re-queue a failure, so passing a
@@ -102,6 +111,11 @@ export default function SlabList({
       label: 'Grade',
       sortable: true,
       render: (row) => <span className="font-mono text-pine-200">{row.grade}</span>,
+      edit: onEditField && {
+        type: 'text',
+        value: (row) => row.grade,
+        save: (row, next) => onEditField(row, 'grade', next),
+      },
     },
     {
       // Sorts by the DERIVED `priced` flag (RFC 0013), not the raw money
@@ -143,12 +157,32 @@ export default function SlabList({
       label: 'Cost',
       sortable: true,
       render: (row) => <span className="font-mono text-pine-200">${row.cost_basis}</span>,
+      edit: onEditField && {
+        type: 'money',
+        value: (row) => row.cost_basis,
+        save: (row, next) => onEditField(row, 'cost_basis', next),
+        undoLabel: 'Cost basis',
+      },
     },
     {
       key: 'status',
       label: 'Status',
       sortable: true,
       render: (row) => <span className="text-pine-300">{row.status}</span>,
+      edit: onEditField && {
+        type: 'select',
+        options: [
+          { value: 'available', label: 'available' },
+          { value: 'on_hold', label: 'on_hold' },
+          { value: 'sold', label: 'sold' },
+          { value: 'lost', label: 'lost' },
+          { value: 'out_for_grading', label: 'out_for_grading' },
+          { value: 'returned_to_consignor', label: 'returned_to_consignor' },
+        ],
+        value: (row) => row.status,
+        save: (row, next) => onEditField(row, 'status', next),
+        undoLabel: 'Status',
+      },
     },
   ]
 

@@ -486,3 +486,31 @@ describe('Show Analytics stale snapshots (RFC 0010 T11)', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/out of date/i)
   })
 })
+
+describe('Show Analytics Shows tab — inline date edit (RFC 0022 T4b)', () => {
+  beforeEach(() => {
+    getMock.mockImplementation((path: string) => {
+      if (path === '/analytics/dates') return Promise.resolve({ dates: [] })
+      if (path === '/shows') return Promise.resolve({ shows: [SHOW] })
+      if (path === '/analytics/by-date') return Promise.resolve({ analytics: [] })
+      return Promise.resolve({})
+    })
+  })
+
+  it('edits the show date inline; name stays read-only since it is the row-click target', async () => {
+    await renderPage()
+    fireEvent.click(screen.getByRole('button', { name: 'Shows' }))
+    await screen.findByText('Portland Card Show')
+
+    // Name has no editor — clicking it still opens the detail (tested above).
+    expect(screen.queryByRole('button', { name: 'Edit Show' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Date' }))
+    const input = screen.getByLabelText('Edit Date') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '2026-08-11' } })
+
+    await waitFor(() =>
+      expect(mockApi.put).toHaveBeenCalledWith('/shows/show-1', { date: '2026-08-11' }),
+    )
+  })
+})

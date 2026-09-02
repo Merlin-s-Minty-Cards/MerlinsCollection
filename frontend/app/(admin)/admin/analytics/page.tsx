@@ -353,6 +353,17 @@ export default function AdminAnalyticsPage() {
       sortable: true,
       className: 'w-28',
       render: (row) => <span className="text-xs font-mono text-pine-300">{formatISODate(row.date)}</span>,
+      // Only name/date here per the RFC's scope for this tab — Sold/Bought/
+      // Net/Items below are a ShowAnalytics JOIN, not shows_sort.py fields,
+      // and stay display-only.
+      edit: {
+        type: 'date',
+        value: (row) => row.date,
+        save: async (row, next) => {
+          await api.put(`/shows/${row.show_id}`, { date: next })
+          fetchShows()
+        },
+      },
     },
     {
       key: 'name',
@@ -372,6 +383,13 @@ export default function AdminAnalyticsPage() {
           )}
         </div>
       ),
+      // RFC 0022 T4b: NOT made click-to-edit, unlike /admin/shows' own name
+      // column. This row's name text IS the row-click target (onRowClick
+      // opens the show detail below), and InlineEditCell's cell click
+      // handler calls stopPropagation() — making it editable here would
+      // silently break that navigation, same conflict found on
+      // /admin/cosigners. `date` (a less obvious click target) keeps its
+      // edit; renaming a show still works from /admin/shows.
     },
     {
       key: '_sold',

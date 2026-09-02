@@ -266,3 +266,364 @@ describe('InlineEditCell type="money"', () => {
     expect(onSave).toHaveBeenCalledWith('0')
   })
 })
+
+// RFC 0022 T1 — five new scalar types plus multiselect, generalizing the
+// component from three types to nine.
+describe('InlineEditCell type="text"', () => {
+  it('commits the typed value on Enter, and again on blur', async () => {
+    const onSave = vi.fn()
+    render(
+      <InlineEditCell value="Rylan" type="text" displayValue={<span>Rylan</span>} onSave={onSave} />
+    )
+    fireEvent.click(screen.getByText('Rylan'))
+    const input = screen.getByRole('textbox') as HTMLInputElement
+    expect(input.type).toBe('text')
+    fireEvent.change(input, { target: { value: 'Rylan Voss' } })
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Enter' })
+    })
+    expect(onSave).toHaveBeenCalledWith('Rylan Voss')
+  })
+
+  it('cancels on Escape without also firing a blur-save (double-fire regression)', () => {
+    const onSave = vi.fn()
+    render(
+      <InlineEditCell value="Rylan" type="text" displayValue={<span>Rylan</span>} onSave={onSave} />
+    )
+    fireEvent.click(screen.getByText('Rylan'))
+    const input = screen.getByRole('textbox') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'Something Else' } })
+    fireEvent.keyDown(input, { key: 'Escape' })
+    expect(screen.getByText('Rylan')).toBeInTheDocument()
+    expect(onSave).not.toHaveBeenCalled()
+  })
+
+  it('carries the vault-field class', () => {
+    render(
+      <InlineEditCell value="Rylan" type="text" displayValue={<span>Rylan</span>} onSave={vi.fn()} />
+    )
+    fireEvent.click(screen.getByText('Rylan'))
+    expect(screen.getByRole('textbox').className).toContain('vault-field')
+  })
+
+  it('carries the aria-label through onto the input itself, not just the wrapper', () => {
+    render(
+      <InlineEditCell
+        value="Rylan"
+        type="text"
+        displayValue={<span>Rylan</span>}
+        onSave={vi.fn()}
+        aria-label="Edit Name"
+      />
+    )
+    fireEvent.click(screen.getByText('Rylan'))
+    expect(screen.getByRole('textbox', { name: 'Edit Name' })).toBeInTheDocument()
+  })
+})
+
+describe('InlineEditCell type="textarea"', () => {
+  it('carries the aria-label through onto the textarea itself', () => {
+    render(
+      <InlineEditCell
+        value="old note"
+        type="textarea"
+        displayValue={<span>old note</span>}
+        onSave={vi.fn()}
+        aria-label="Edit Notes"
+      />
+    )
+    fireEvent.click(screen.getByText('old note'))
+    expect(screen.getByRole('textbox', { name: 'Edit Notes' })).toBeInTheDocument()
+  })
+
+  it('renders a textarea and commits on Ctrl+Enter', async () => {
+    const onSave = vi.fn()
+    render(
+      <InlineEditCell value="old note" type="textarea" displayValue={<span>old note</span>} onSave={onSave} />
+    )
+    fireEvent.click(screen.getByText('old note'))
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    expect(textarea.tagName).toBe('TEXTAREA')
+    fireEvent.change(textarea, { target: { value: 'new note' } })
+    await act(async () => {
+      fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true })
+    })
+    expect(onSave).toHaveBeenCalledWith('new note')
+  })
+
+  it('does NOT commit on a bare Enter (needs a newline, not a submit)', () => {
+    const onSave = vi.fn()
+    render(
+      <InlineEditCell value="old note" type="textarea" displayValue={<span>old note</span>} onSave={onSave} />
+    )
+    fireEvent.click(screen.getByText('old note'))
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: 'new note' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    expect(onSave).not.toHaveBeenCalled()
+  })
+
+  it('commits on blur', async () => {
+    const onSave = vi.fn()
+    render(
+      <InlineEditCell value="old note" type="textarea" displayValue={<span>old note</span>} onSave={onSave} />
+    )
+    fireEvent.click(screen.getByText('old note'))
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: 'new note' } })
+    await act(async () => {
+      fireEvent.blur(textarea)
+    })
+    expect(onSave).toHaveBeenCalledWith('new note')
+  })
+
+  it('cancels on Escape without a blur double-fire', () => {
+    const onSave = vi.fn()
+    render(
+      <InlineEditCell value="old note" type="textarea" displayValue={<span>old note</span>} onSave={onSave} />
+    )
+    fireEvent.click(screen.getByText('old note'))
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: 'discard me' } })
+    fireEvent.keyDown(textarea, { key: 'Escape' })
+    expect(screen.getByText('old note')).toBeInTheDocument()
+    expect(onSave).not.toHaveBeenCalled()
+  })
+})
+
+describe('InlineEditCell type="date"', () => {
+  it('renders a native date input carrying the ISO value verbatim, no Date construction', () => {
+    render(
+      <InlineEditCell value="2026-03-08" type="date" displayValue={<span>Mar 8, 2026</span>} onSave={vi.fn()} />
+    )
+    fireEvent.click(screen.getByText('Mar 8, 2026'))
+    const input = screen.getByDisplayValue('2026-03-08') as HTMLInputElement
+    expect(input.type).toBe('date')
+  })
+
+  it('commits on change', async () => {
+    const onSave = vi.fn()
+    render(
+      <InlineEditCell value="2026-03-08" type="date" displayValue={<span>Mar 8, 2026</span>} onSave={onSave} />
+    )
+    fireEvent.click(screen.getByText('Mar 8, 2026'))
+    const input = screen.getByDisplayValue('2026-03-08')
+    await act(async () => {
+      fireEvent.change(input, { target: { value: '2026-03-09' } })
+    })
+    expect(onSave).toHaveBeenCalledWith('2026-03-09')
+  })
+
+  it('cancels on Escape without a blur double-fire', () => {
+    const onSave = vi.fn()
+    render(
+      <InlineEditCell value="2026-03-08" type="date" displayValue={<span>Mar 8, 2026</span>} onSave={onSave} />
+    )
+    fireEvent.click(screen.getByText('Mar 8, 2026'))
+    const input = screen.getByDisplayValue('2026-03-08')
+    fireEvent.keyDown(input, { key: 'Escape' })
+    expect(screen.getByText('Mar 8, 2026')).toBeInTheDocument()
+    expect(onSave).not.toHaveBeenCalled()
+  })
+})
+
+const CONDITION_OPTIONS = [
+  { value: 'NM', label: 'NM' },
+  { value: 'LP', label: 'LP' },
+  { value: 'MP', label: 'MP' },
+]
+
+describe('InlineEditCell type="select"', () => {
+  it('commits immediately on change -- no Enter, no blur required', async () => {
+    const onSave = vi.fn()
+    render(
+      <InlineEditCell
+        value="NM"
+        type="select"
+        options={CONDITION_OPTIONS}
+        displayValue={<span>NM</span>}
+        onSave={onSave}
+      />
+    )
+    fireEvent.click(screen.getByText('NM'))
+    const select = screen.getByRole('combobox')
+    await act(async () => {
+      fireEvent.change(select, { target: { value: 'LP' } })
+    })
+    expect(onSave).toHaveBeenCalledWith('LP')
+  })
+
+  it('cancels on Escape before a choice is made, without a blur double-fire', () => {
+    const onSave = vi.fn()
+    render(
+      <InlineEditCell
+        value="NM"
+        type="select"
+        options={CONDITION_OPTIONS}
+        displayValue={<span>NM</span>}
+        onSave={onSave}
+      />
+    )
+    fireEvent.click(screen.getByText('NM'))
+    const select = screen.getByRole('combobox')
+    fireEvent.keyDown(select, { key: 'Escape' })
+    expect(screen.getByText('NM')).toBeInTheDocument()
+    expect(onSave).not.toHaveBeenCalled()
+  })
+
+  it('renders a DISABLED select showing the current value when options have not loaded yet, never an empty dropdown', () => {
+    render(
+      <InlineEditCell value="NM" type="select" options={[]} displayValue={<span>NM</span>} onSave={vi.fn()} />
+    )
+    fireEvent.click(screen.getByText('NM'))
+    const select = screen.getByRole('combobox') as HTMLSelectElement
+    expect(select.disabled).toBe(true)
+  })
+
+  it('carries the vault-field class', () => {
+    render(
+      <InlineEditCell
+        value="NM"
+        type="select"
+        options={CONDITION_OPTIONS}
+        displayValue={<span>NM</span>}
+        onSave={vi.fn()}
+      />
+    )
+    fireEvent.click(screen.getByText('NM'))
+    expect(screen.getByRole('combobox').className).toContain('vault-field')
+  })
+
+  it('carries the aria-label through onto the select itself, not just the wrapper', () => {
+    render(
+      <InlineEditCell
+        value="NM"
+        type="select"
+        options={CONDITION_OPTIONS}
+        displayValue={<span>NM</span>}
+        onSave={vi.fn()}
+        aria-label="Edit Condition"
+      />
+    )
+    fireEvent.click(screen.getByText('NM'))
+    expect(screen.getByRole('combobox', { name: 'Edit Condition' })).toBeInTheDocument()
+  })
+})
+
+describe('InlineEditCell type="checkbox"', () => {
+  it('renders as a checkbox in place -- no click-to-edit swap at all', () => {
+    render(
+      <InlineEditCell value="false" type="checkbox" displayValue={<span>ignored</span>} onSave={vi.fn()} />
+    )
+    // The checkbox is immediately present, with no separate display state to click into.
+    expect(screen.getByRole('checkbox')).toBeInTheDocument()
+  })
+
+  it('toggles and saves immediately on click, with no separate commit step', async () => {
+    const onSave = vi.fn()
+    render(
+      <InlineEditCell value="false" type="checkbox" displayValue={<span>ignored</span>} onSave={onSave} />
+    )
+    const checkbox = screen.getByRole('checkbox') as HTMLInputElement
+    expect(checkbox.checked).toBe(false)
+    await act(async () => {
+      fireEvent.click(checkbox)
+    })
+    expect(onSave).toHaveBeenCalledWith('true')
+  })
+
+  it('reflects a true stored value as checked', () => {
+    render(
+      <InlineEditCell value="true" type="checkbox" displayValue={<span>ignored</span>} onSave={vi.fn()} />
+    )
+    expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(true)
+  })
+})
+
+describe('InlineEditCell type="multiselect"', () => {
+  const FINISH_OPTIONS = [
+    { value: 'holofoil', label: 'Holofoil' },
+    { value: 'reverseHolofoil', label: 'Reverse Holo' },
+    { value: 'normal', label: 'Normal' },
+  ]
+
+  it('opens a chip/checkbox list of options on click', () => {
+    render(
+      <InlineEditCell
+        value=""
+        type="multiselect"
+        options={FINISH_OPTIONS}
+        multiselectValue={['holofoil']}
+        onSave={vi.fn()}
+        onSaveMultiselect={vi.fn()}
+        displayValue={<span>Holofoil</span>}
+      />
+    )
+    fireEvent.click(screen.getByText('Holofoil'))
+    expect(screen.getByRole('checkbox', { name: 'Holofoil' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Normal' })).not.toBeChecked()
+  })
+
+  it('calls onSaveMultiselect with the updated ARRAY on each toggle, immediately', async () => {
+    const onSaveMultiselect = vi.fn()
+    render(
+      <InlineEditCell
+        value=""
+        type="multiselect"
+        options={FINISH_OPTIONS}
+        multiselectValue={['holofoil']}
+        onSave={vi.fn()}
+        onSaveMultiselect={onSaveMultiselect}
+        displayValue={<span>Holofoil</span>}
+      />
+    )
+    fireEvent.click(screen.getByText('Holofoil'))
+    await act(async () => {
+      fireEvent.click(screen.getByRole('checkbox', { name: 'Normal' }))
+    })
+    expect(onSaveMultiselect).toHaveBeenCalledWith(['holofoil', 'normal'])
+  })
+
+  it('removes a value from the array when its chip is toggled off', async () => {
+    const onSaveMultiselect = vi.fn()
+    render(
+      <InlineEditCell
+        value=""
+        type="multiselect"
+        options={FINISH_OPTIONS}
+        multiselectValue={['holofoil', 'normal']}
+        onSave={vi.fn()}
+        onSaveMultiselect={onSaveMultiselect}
+        displayValue={<span>2 finishes</span>}
+      />
+    )
+    fireEvent.click(screen.getByText('2 finishes'))
+    await act(async () => {
+      fireEvent.click(screen.getByRole('checkbox', { name: 'Normal' }))
+    })
+    expect(onSaveMultiselect).toHaveBeenCalledWith(['holofoil'])
+  })
+
+  it('with allowCustom, appends a free-text value not in options', async () => {
+    const onSaveMultiselect = vi.fn()
+    render(
+      <InlineEditCell
+        value=""
+        type="multiselect"
+        options={FINISH_OPTIONS}
+        multiselectValue={['holofoil']}
+        allowCustom
+        onSave={vi.fn()}
+        onSaveMultiselect={onSaveMultiselect}
+        displayValue={<span>Holofoil</span>}
+      />
+    )
+    fireEvent.click(screen.getByText('Holofoil'))
+    const customInput = screen.getByPlaceholderText(/add/i)
+    fireEvent.change(customInput, { target: { value: 'firstEditionHolofoil' } })
+    await act(async () => {
+      fireEvent.keyDown(customInput, { key: 'Enter' })
+    })
+    expect(onSaveMultiselect).toHaveBeenCalledWith(['holofoil', 'firstEditionHolofoil'])
+  })
+})
