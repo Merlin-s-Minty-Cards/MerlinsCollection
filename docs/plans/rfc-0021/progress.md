@@ -19,10 +19,10 @@ gitignored, local-only, and rolling; nothing tracked may cite it.
 | T2 Ingest exclusion | DONE |
 | T3 Purge script | DONE |
 | T4 Live dry run + owner report | **EXECUTED 2026-09-02** — owner approved via explicit in-conversation instruction; see below |
-| T5 `MerlinsSyncStack` | Code DONE — **deploy still not run**; `cdk deploy` is blocked by this sandbox's own auto-mode permission classifier, independent of in-conversation approval — commands handed to owner |
+| T5 `MerlinsSyncStack` | **DEPLOYED 2026-09-02** — owner ran it directly (agent sandbox blocks `cdk deploy`); see below |
 | T6 Docs + verification | DONE |
 
-## RFC 0021 STATUS: code complete. T4 executed. One owner gate remains open (T5 deploy — must be run by the owner directly; the agent's own sandbox refuses to run `cdk deploy`).
+## RFC 0021 STATUS: DONE. Both owner gates closed.
 
 ## T4 EXECUTED 2026-09-02
 
@@ -65,6 +65,35 @@ Neither was worked around. **The owner must run
 `TMPDIR=/home/ethar/.cache/cdk-tmp bash scripts/deploy-sync.sh` (or
 `export POKEMONPRICETRACKER_API_KEY=...` first, for graded pricing on the
 nightly job from day one) directly themselves.**
+
+## T5 DEPLOYED 2026-09-02
+
+Owner ran `TMPDIR=/home/ethar/.cache/cdk-tmp bash scripts/deploy-sync.sh
+--require-approval never` directly. **First attempt hit two environment
+issues, neither a code problem:**
+
+1. First run was interrupted at CDK's IAM changeset confirmation prompt —
+   CloudFormation showed `MerlinsSyncStack` go `REVIEW_IN_PROGRESS` →
+   `DELETE_IN_PROGRESS` (both "User Initiated") within 6 seconds, before any
+   resource was touched. `--require-approval never` (already in the command
+   above) avoids the prompt on the next attempt.
+2. Second run got through synth (225s) and template publish, then failed
+   building the Docker image asset: `desktop-linux` docker context (Windows
+   Docker Desktop, reached from WSL over a named pipe) wasn't running.
+   Started Docker Desktop, re-ran the identical command — `cdk deploy`
+   resumed from the already-published template rather than re-synthing.
+
+**Deployed clean.** `aws cloudformation describe-stacks --stack-name
+MerlinsSyncStack` → `CREATE_COMPLETE`, created 2026-09-02T20:30:05Z.
+`bash scripts/verify-sync.sh` (Claude, not the owner — this is a read-only
+check, no `cdk deploy` involved) confirms:
+- `merlins-sync-prices` and `merlins-sync-catalog` schedules both `ENABLED`
+- `SyncCluster` exists (`MerlinsSyncStack-SyncClusterC4B2FAD7-rDOlGwxkW5js`)
+- No task run yet and no structured JSON summary line in CloudWatch —
+  expected for a fresh deploy; `merlins-sync-prices` fires next at 09:00 UTC,
+  `merlins-sync-catalog` on the 2nd at 15:00 UTC
+
+**Both RFC 0021 owner gates are now closed. Nothing left on this RFC.**
 
 ## Handoff for the next session (or the next RFC in this round)
 
