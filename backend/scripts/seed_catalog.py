@@ -46,11 +46,13 @@ import time
 from datetime import datetime, timezone
 
 from merlins_collection.config import settings
-from merlins_collection.models.inventory import Language
+from merlins_collection.models.inventory import SEEDED_LANGUAGES, Language
+from merlins_collection.services.catalog_sync import excluded_set_ids
 from merlins_collection.services.dynamodb import InventoryRepository
 from merlins_collection.services.tcgdex import (
     LANGUAGE_API_CODE,
     TcgdexClient,
+    build_card_id,
     to_catalog_card_brief,
 )
 
@@ -112,26 +114,34 @@ class SeedAborted(RuntimeError):
     """A rail fired: the run is wrong in a way that must not exit 0."""
 
 
-def _set_metadata(client, language):
-    """Return ``(set_names, expected_cards)``; degrade rather than abort.
+def _set_metadata(client, language, *, excluded=frozenset()):
+    """Return ``(set_names, expected_cards, sets_skipped_digital)``; degrade
+    rather than abort.
 
     Matching keys on name + number + language and treats the set only as a
     corroborating signal, so an unavailable set list costs display quality and
     the magnitude cross-check, but not the seed itself.
+
+    ``excluded`` (raw TCGdex set ids, from ``excluded_set_ids``) is dropped
+    from the ``expected_cards`` sum -- digital-only cards are never seeded, so
+    counting them toward the magnitude-check total would make a correct,
+    fully-seeded run look short by exactly the TCG Pocket card count.
     """
     try:
         sets = client.list_sets(language)
     except Exception as exc:  # noqa: BLE001 - breadth must not hinge on set names
         print(f"  set list unavailable ({exc}); seeding without set names")
-        return {}, None
+        return {}, None, 0
 
     set_names = {s["id"]: s.get("name", "") for s in sets}
+    sets_skipped_digital = sum(1 for s in sets if s.get("id") in excluded)
     counts = [
         (s.get("cardCount") or {}).get("total")
         for s in sets
-        if isinstance((s.get("cardCount") or {}).get("total"), int)
+        if s.get("id") not in excluded
+        and isinstance((s.get("cardCount") or {}).get("total"), int)
     ]
-    return set_names, (sum(counts) if counts else None)
+    return set_names, (sum(counts) if counts else None), sets_skipped_digital
 
 
 def seed_language(repo, client, language: Language, *, batch_size: int = BATCH_SIZE,
@@ -164,7 +174,11 @@ def seed_language(repo, client, language: Language, *, batch_size: int = BATCH_S
     if min_expected_ratio is None:
         min_expected_ratio = MIN_EXPECTED_RATIO_BY_LANGUAGE.get(language,
                                                                 MIN_EXPECTED_RATIO)
-    set_names, expected = _set_metadata(client, language)
+    excluded = excluded_set_ids(client, language)
+    excluded_composite = {build_card_id(language, raw_id) for raw_id in excluded}
+    set_names, expected, sets_skipped_digital = _set_metadata(
+        client, language, excluded=excluded
+    )
 
     synced_at = datetime.now(timezone.utc)
     cards: list = []
@@ -212,8 +226,8 @@ def seed_language(repo, client, language: Language, *, batch_size: int = BATCH_S
     try:
         for raw in client.iter_brief_cards(language):
             try:
-                cards.append(to_catalog_card_brief(raw, language, set_names=set_names,
-                                                   synced_at=synced_at))
+                card = to_catalog_card_brief(raw, language, set_names=set_names,
+                                             synced_at=synced_at)
             except Exception as exc:  # noqa: BLE001 - one bad row must not abort
                 failures += 1
                 # Logged with the id and exception type rather than swallowed
@@ -221,6 +235,11 @@ def seed_language(repo, client, language: Language, *, batch_size: int = BATCH_S
                 # must not look the same.
                 print(f"  skipped {raw.get('id')!r}: {type(exc).__name__}: {exc}")
                 continue
+            if card.set_id in excluded_composite:
+                # Digital-only (TCG Pocket); already reported via
+                # `sets_skipped_digital` above -- not counted as `seeded`.
+                continue
+            cards.append(card)
             seeded += 1
             if len(cards) >= batch_size:
                 flush()
@@ -236,6 +255,7 @@ def seed_language(repo, client, language: Language, *, batch_size: int = BATCH_S
         "language": language.value, "cards_seeded": seeded,
         "cards_written": written, "cards_preserved": preserved,
         "failures": failures, "cards_expected": expected,
+        "sets_skipped_digital": sets_skipped_digital,
     }
 
     attempted = seeded + failures
@@ -273,7 +293,8 @@ def seed_language(repo, client, language: Language, *, batch_size: int = BATCH_S
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--language", action="append", choices=sorted(LANGUAGE_API_CODE.values()),
-                        help="API language code to seed (repeatable); default: all")
+                        help="API language code to seed (repeatable); default: "
+                             "every language already seeded (SEEDED_LANGUAGES)")
     parser.add_argument("--execute", action="store_true",
                         help="actually write; without it this is a dry run")
     parser.add_argument("--confirm-table",
@@ -284,8 +305,16 @@ def main(argv=None) -> int:
                              "cross-checked against the set list (the run "
                              "aborts without this)")
     args = parser.parse_args(argv)
-    languages = ([lang for lang in Language if LANGUAGE_API_CODE[lang] in args.language]
-                 if args.language else list(Language))
+    # LANGUAGE_API_CODE, never bare `Language`, when filtering by a requested
+    # code -- `Language` now includes `OTHER`, which carries no API code and
+    # would KeyError on the lookup below before its membership is even
+    # checked. The no-flag default stays `SEEDED_LANGUAGES` (today: EN, JP)
+    # rather than every language TCGdex speaks -- RFC 0023 section 1.3 is
+    # explicit that seeding a new language is a deliberate, named
+    # `--language <code>` run, never something a bare `--execute` picks up
+    # because the vocabulary grew.
+    languages = ([lang for lang in LANGUAGE_API_CODE if LANGUAGE_API_CODE[lang] in args.language]
+                 if args.language else list(SEEDED_LANGUAGES))
 
     table, region = settings.dynamodb_table_name, settings.aws_region
     mode = "WRITING to" if args.execute else "DRY RUN against"

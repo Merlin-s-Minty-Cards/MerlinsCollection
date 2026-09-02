@@ -1086,6 +1086,39 @@ class InventoryRepository:
                 return
             kwargs["ExclusiveStartKey"] = last
 
+    def delete_catalog_card_partition(self, card_id: str) -> int:
+        """Delete the whole ``CARD#<card_id>`` partition; return rows removed.
+
+        For ``scripts/purge_catalog_junk.py`` (RFC 0021) — a different caller
+        and a different key than ``purge_card_data`` above, which scopes on
+        catalog GENERATION for the reseed swap. This deletes a NAMED card
+        outright, keyed only by id, and takes its ``PRICE#RAW#…`` /
+        ``GRADEDPRICE#…`` children with it: deleting just the ``META`` row
+        would orphan price history nothing could ever read again.
+        """
+        items = self._query_all(KeyConditionExpression=Key("PK").eq(f"CARD#{card_id}"))
+        if not items:
+            return 0
+        with self._table.batch_writer() as batch:
+            for item in items:
+                batch.delete_item(Key={"PK": item["PK"], "SK": item["SK"]})
+        return len(items)
+
+    def delete_catalog_sets(self, set_ids) -> int:
+        """Remove registry rows for sets with no surviving catalog cards.
+
+        For ``scripts/purge_catalog_junk.py`` (RFC 0021). The caller must only
+        pass a set id once every one of its cards has actually been deleted —
+        deregistering a set with survivors would make it invisible to the Set
+        filter while it still matches search.
+        """
+        deleted = 0
+        with self._table.batch_writer() as batch:
+            for set_id in set_ids:
+                batch.delete_item(Key={"PK": self._CATALOG_SETS_PK, "SK": f"SET#{set_id}"})
+                deleted += 1
+        return deleted
+
     def list_cards_by_set(self, set_id):
         """Return every catalog card in a set via the GSI1 ``SET#`` partition."""
         items = self._query_all(

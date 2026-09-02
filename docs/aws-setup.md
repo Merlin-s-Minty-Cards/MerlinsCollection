@@ -407,170 +407,90 @@ Also rotate the Phase 1 access key once production runs on IAM roles.
 
 ## Phase 8 — Scheduled Syncs (EventBridge Scheduler → ECS RunTask)
 
-Two automated sync jobs keep prices and the card catalog current. Both run
-as **ECS RunTask** invocations of the existing backend container image,
-dispatched by EventBridge Scheduler.
+**SUPERSEDED 2026-09-02 by RFC 0021's `MerlinsSyncStack` — everything below
+this line down to "Outbound third-party credentials" describes a manually
+`aws`-CLI-created setup that WENT DARK and is being kept only as the incident
+record, not as instructions to follow.** Do not re-run the `aws iam
+create-role` / `aws scheduler create-schedule` commands below; they would
+create a SECOND, duplicate set of schedules alongside the CDK-managed ones.
 
-### Why ECS RunTask, not Lambda
+**What actually happened, confirmed live 2026-09-02 via CloudWatch Logs
+Insights** (`fields @timestamp, @message | filter @message like /"job":/`,
+scanning 45 days / 301,686 records across `/ecs/merlins-backend`): the
+manually-created schedules below really did fire correctly for a while —
+structured `{"job": "prices", "status": "ok", ...}` lines exist for
+**Aug 13, 14, 15 and 18, 2026** — but **zero** exist after that. RFC 0014's
+backend migration off ECS to a Lambda Function URL (documented elsewhere in
+this file) decommissioned the ECS **service** the ECS cluster/task-definition
+family below had been sharing, and the schedules' target task definition
+silently stopped being able to run — a **15+ day silent gap** by the time
+this was diagnosed, with no alarm anywhere to catch it (this setup predates
+CLAUDE.md's later rule that a scheduled job needs a durable failure signal,
+not just hoped-for monitoring).
 
-The sync jobs already exist as CLI scripts built to run in the backend
-container. The image carries all their dependencies (boto3,
-merlins_collection, tcgdex client), and the existing ECS task role already
-grants the required DynamoDB access. A new-set catalog sync can exceed
-Lambda's hard 15-minute timeout. ECS RunTask reuses the existing
-infrastructure with zero new deployment artefacts — no separate Lambda
-package, no new IAM role for Lambda, no cold-start tuning.
+**The old resources are still live and orphaned** (confirmed 2026-09-02):
+IAM role `merlins-scheduler-role`, ECS cluster `arn:aws:ecs:us-east-1:560151615792:cluster/merlins`,
+schedules `merlins-price-sync` / `merlins-catalog-sync` (both still
+`State: ENABLED`, both still targeting the dead cluster). **These are
+deliberately left alone by RFC 0021** — decommissioning them is a real,
+hard-to-reverse AWS deletion and out of that RFC's scope; it is an owner
+decision, flagged here as a follow-up rather than acted on. Until an owner
+disables/deletes them, EventBridge will keep attempting (and presumably
+failing) to invoke them daily/monthly alongside the new stack's schedules —
+harmless duplication, not a correctness risk, since both target dispatchers
+are idempotent and the old ones cannot actually launch a task.
 
-### The two schedules
+**The replacement is `infra/lib/sync-stack.ts` (`MerlinsSyncStack`) — see
+CLAUDE.md's "MerlinsSyncStack" section for the schedule table, and deploy
+only via `bash scripts/deploy-sync.sh`.** It targets the current backend
+Docker image directly (via `ecs.ContainerImage.fromAsset`, the `runtime`
+target) rather than reusing a task definition family an unrelated service
+migration can silently orphan again.
+
+<details>
+<summary>Original manual setup (superseded — kept for the incident record only)</summary>
+
+Two automated sync jobs kept prices and the card catalog current. Both ran
+as **ECS RunTask** invocations of the (now-decommissioned) backend ECS
+service's container image, dispatched by EventBridge Scheduler.
 
 | Schedule | Cron | Job | What it does |
 |----------|------|-----|--------------|
 | `merlins-price-sync` | Daily 09:00 UTC (~5 AM ET, before shop hours) | `--job prices` | Calls `run_daily_sync` — **six steps**: TCGdex depth pass for held cards, **per-grade slab pricing (metered, see below)**, graded/sealed snapshots, inventory market-value refresh, and the **weekly catalog price cycle** (RFC 0010 T17 — ~5,500 unheld catalog cards a night, stalest-first, so the whole catalog is re-priced within a week; adds ~24 min to the run) |
 | `merlins-catalog-sync` | First Monday of each month, 10:00 UTC | `--job catalog` | Calls `sync_new_sets`: seeds identity rows for any TCGdex set the catalog doesn't have yet |
 
-Both schedules have `FlexibleTimeWindow` enabled and a `RetryPolicy` with
-`MaximumRetryAttempts: 2`.
-
-### Setup commands
-
-Replace placeholders (`<ACCOUNT_ID>`, `<CLUSTER_ARN>`, `<TASK_DEF_ARN>`,
-`<SUBNET_IDS>`, `<SECURITY_GROUP_ID>`) with your actual values before running.
-
-**1. Create the scheduler IAM role:**
-
 ```bash
 # Trust policy — lets EventBridge Scheduler assume the role
 aws iam create-role \
   --role-name merlins-scheduler-role \
   --assume-role-policy-document file://deploy/scheduled-sync-scheduler-role.json
-
-# Permissions — ecs:RunTask + iam:PassRole for the task/execution roles
-# Extract the "_permissions" block from the role JSON into a separate file,
-# or inline it:
-aws iam put-role-policy \
-  --role-name merlins-scheduler-role \
-  --policy-name SchedulerRunTask \
-  --policy-document '{
-    "Version": "2012-10-17",
-    "Statement": [
-      {
-        "Sid": "RunSyncTask",
-        "Effect": "Allow",
-        "Action": "ecs:RunTask",
-        "Resource": "<TASK_DEF_ARN>",
-        "Condition": { "ArnLike": { "ecs:cluster": "<CLUSTER_ARN>" } }
-      },
-      {
-        "Sid": "PassTaskRoles",
-        "Effect": "Allow",
-        "Action": "iam:PassRole",
-        "Resource": [
-          "arn:aws:iam::<ACCOUNT_ID>:role/merlins-backend-task-role",
-          "arn:aws:iam::<ACCOUNT_ID>:role/ecsTaskExecutionRole"
-        ]
-      }
-    ]
-  }'
+# ... (full commands omitted from this superseded copy — see git history
+# before 2026-09-02 for the complete original text if ever needed)
 ```
-
-**2. Create the schedules** (reference definitions in
-`deploy/scheduled-sync-eventbridge.json`):
-
-```bash
-# Daily price sync
-aws scheduler create-schedule \
-  --name merlins-price-sync \
-  --schedule-expression "cron(0 9 * * ? *)" \
-  --flexible-time-window '{"Mode":"FLEXIBLE","MaximumWindowInMinutes":15}' \
-  --target '{
-    "Arn": "<CLUSTER_ARN>",
-    "RoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/merlins-scheduler-role",
-    "EcsParameters": {
-      "TaskDefinitionArn": "<TASK_DEF_ARN>",
-      "TaskCount": 1,
-      "LaunchType": "FARGATE",
-      "NetworkConfiguration": {
-        "AwsvpcConfiguration": {
-          "Subnets": ["<SUBNET_IDS>"],
-          "SecurityGroups": ["<SECURITY_GROUP_ID>"],
-          "AssignPublicIp": "ENABLED"
-        }
-      }
-    },
-    "Input": "{\"containerOverrides\":[{\"name\":\"Main\",\"command\":[\"python\",\"-m\",\"scripts.scheduled_sync\",\"--job\",\"prices\"]}]}",
-    "RetryPolicy": {"MaximumRetryAttempts": 2, "MaximumEventAgeInSeconds": 3600}
-  }'
-
-# Monthly catalog sync (first Monday)
-aws scheduler create-schedule \
-  --name merlins-catalog-sync \
-  --schedule-expression "cron(0 10 ? * MON#1 *)" \
-  --flexible-time-window '{"Mode":"FLEXIBLE","MaximumWindowInMinutes":30}' \
-  --target '{
-    "Arn": "<CLUSTER_ARN>",
-    "RoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/merlins-scheduler-role",
-    "EcsParameters": {
-      "TaskDefinitionArn": "<TASK_DEF_ARN>",
-      "TaskCount": 1,
-      "LaunchType": "FARGATE",
-      "NetworkConfiguration": {
-        "AwsvpcConfiguration": {
-          "Subnets": ["<SUBNET_IDS>"],
-          "SecurityGroups": ["<SECURITY_GROUP_ID>"],
-          "AssignPublicIp": "ENABLED"
-        }
-      }
-    },
-    "Input": "{\"containerOverrides\":[{\"name\":\"Main\",\"command\":[\"python\",\"-m\",\"scripts.scheduled_sync\",\"--job\",\"catalog\"]}]}",
-    "RetryPolicy": {"MaximumRetryAttempts": 2, "MaximumEventAgeInSeconds": 3600}
-  }'
-```
-
-**DONE — applied against account 560151615792 on 2026-08-12.** Both
-`merlins-scheduler-role` and both schedules already exist and are `ENABLED`
-(verified live via `aws iam get-role` / `aws scheduler get-schedule`
-2026-08-15). Real values, for the record — `deploy/scheduled-sync-*.json`
-deliberately keep the placeholder form above rather than being edited to match,
-the same template-vs-applied split every other `deploy/*.json` file in this
-repo follows:
 
 - `<CLUSTER_ARN>` = `arn:aws:ecs:us-east-1:560151615792:cluster/merlins`
 - `<TASK_DEF_ARN>` = `arn:aws:ecs:us-east-1:560151615792:task-definition/merlins-merlins-backend`
-  (the bare family, no `:revision` — so a future deploy's new revision is
-  picked up automatically; a pinned revision would silently go stale)
 - `<SUBNET_IDS>` = `subnet-02c58dac47f3ef1a9,subnet-0db51619531f5ed05,subnet-05d7f7cf7c1ebac08`
-  (3 of the cluster's 6 available subnets — any subnet reachable by
-  `sg-0eaae8e456e45b31e` works for a Fargate `RunTask`)
 - `<SECURITY_GROUP_ID>` = `sg-0eaae8e456e45b31e`
 
-**Confirmed actually firing, not just created:** `aws ecs describe-tasks` on
-the most recent stopped task in the cluster shows `startedBy:
-"chronos-schedule/merlins-price-sync"`, `createdAt`
-`2026-08-15T02:12:54-07:00` (= 09:12 UTC, inside the cron's 09:00 UTC +
-15-minute flexible window), and container `Main` exited `0`. This is a real,
-unattended, successful price-sync run — the exact gap RFC 0013 item 5 set out
-to close.
-
-**A prior version of RFC 0013's own tracking file (`claude-progress.md`)
-still listed this item as not-yet-deployed** after the schedules had already
-gone live two days earlier — the file was never updated with a "DONE" line
-the way this section now is, so a later session re-diagnosed a solved problem
-as still open. Always check live AWS state (`aws scheduler list-schedules`)
-before re-attempting a deploy step a progress file marks as pending; the file
-can lag reality in either direction.
+</details>
 
 ### Monitoring
 
 Both jobs log a single structured JSON summary line to stdout, which lands in
-the ECS task's CloudWatch log group. Look for the log group associated with
-the backend task definition (typically `/ecs/merlins-backend` or similar).
+the ECS task's CloudWatch log group (`/ecs/merlins-backend` for the old
+setup; `MerlinsSyncStack`'s own `SyncLogGroup` going forward — see
+`scripts/verify-sync.sh`).
 
 - **Success:** `{"job": "prices", "status": "ok", "summary": {...}}`
 - **Failure:** `{"job": "prices", "status": "error", "error": "RuntimeError: ..."}`
 
 The exit code is 0 on success and non-zero on failure, so ECS marks the task
 as STOPPED with a non-zero exit code on failure, and EventBridge's retry
-policy kicks in automatically.
+policy kicks in automatically. **A green schedule and a green task launch
+prove nothing about whether the job is actually still wired to something
+that runs it — see the "went dark" incident above.** Check for an actual
+recent structured JSON line, not just that the schedule says `ENABLED`.
 
 ### Manual trigger
 

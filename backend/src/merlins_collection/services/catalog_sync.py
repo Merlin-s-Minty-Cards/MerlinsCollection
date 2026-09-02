@@ -37,7 +37,13 @@ from datetime import date, datetime, timezone
 
 from merlins_collection.config import settings
 from merlins_collection.models.catalog import PricePoint
-from merlins_collection.models.inventory import ItemStatus, Language, _market_price, new_ulid
+from merlins_collection.models.inventory import (
+    SEEDED_LANGUAGES,
+    ItemStatus,
+    Language,
+    _market_price,
+    new_ulid,
+)
 from merlins_collection.services import catalog_cache
 from merlins_collection.services.condition_pricing import apply_condition_adjustment
 from merlins_collection.services.dynamodb import CatalogReseedInProgressError
@@ -57,6 +63,59 @@ logger = logging.getLogger(__name__)
 # enough; the cap exists so a pathological response still writes in bounded
 # chunks rather than building one unbounded list in memory.
 _NEW_SETS_BATCH_SIZE = 500
+
+
+# ---------------------------------------------------------------------------
+# Digital-only game exclusion (RFC 0021) — TCG Pocket is not physical inventory
+# ---------------------------------------------------------------------------
+
+# Digital-only games TCGdex carries alongside the physical TCG. These are not
+# inventory: they have no TCGplayer/Cardmarket pricing and no physical card
+# exists to buy, sell or grade. Excluded at INGEST, so a purge never has to run
+# twice.
+EXCLUDED_SERIES = frozenset({"tcgp"})
+
+# Fallback used only when the series endpoint is unreachable for a language.
+# Verified against api.tcgdex.net/v2/en/series/tcgp on 2026-09-02.
+TCG_POCKET_SET_IDS = frozenset({
+    "P-A", "A1", "A1a", "A2", "A2a", "A2b", "A3", "A3a", "A3b",
+    "A4", "A4a", "B1", "B1a", "B2", "B2a",
+})
+
+
+def excluded_set_ids(client, language: Language) -> frozenset[str]:
+    """TCGdex set ids that must never be ingested, for one language.
+
+    Resolved once per language per run and cached by the caller — this is one
+    HTTP call per known excluded series, not one per set.
+
+    A failure here NEVER fails the sync and NEVER silently lets the sets
+    through: it logs a warning and falls back to ``TCG_POCKET_SET_IDS``. The
+    literal can go stale as new TCG Pocket sets release, which is precisely why
+    the live call is preferred; a stale literal ingests a handful of new junk
+    rows the purge script can remove, whereas propagating the error would take
+    the whole nightly catalog job down over a cosmetic filter.
+
+    A series id in ``EXCLUDED_SERIES`` that ``get_series`` cannot find (a 404,
+    mapped to ``None`` by the client's own contract) has no effect — nothing to
+    exclude, nothing to crash on.
+    """
+    resolved: set[str] = set()
+    for series_id in EXCLUDED_SERIES:
+        try:
+            series = client.get_series(language, series_id)
+        except Exception as exc:  # noqa: BLE001 - a cosmetic filter must not sink the nightly job
+            logger.warning(
+                "catalog sync: series lookup failed for %s/%s (%s: %s); "
+                "falling back to the hardcoded TCG Pocket set list",
+                language, series_id, type(exc).__name__, exc,
+            )
+            resolved.update(TCG_POCKET_SET_IDS)
+            continue
+        if series is None:
+            continue
+        resolved.update(s.get("id") for s in (series.get("sets") or []) if s.get("id"))
+    return frozenset(resolved)
 
 
 def snapshot_graded_prices(repo, today: date) -> dict:
@@ -1000,9 +1059,18 @@ def _sync_new_sets(repo, client, *, dry_run: bool = False) -> dict:
     cards_added = 0
     cards_added_to_existing_sets = 0
     sets_registered = 0
+    sets_skipped_digital = 0
     synced_at = datetime.now(timezone.utc)
 
-    for language in Language:
+    # SEEDED_LANGUAGES, never bare `Language` -- RFC 0023 grew `Language` to 19
+    # members (18 real language codes + OTHER). Walking every member here would
+    # silently seed every language's full card catalog on every "check for new
+    # sets" click/monthly run, via the `iter_brief_cards` + `batch_upsert_
+    # catalog_cards` write below -- exactly the all-18-at-once seed RFC 0023
+    # section 1.3 rejects (~100k rows, a multi-hour walk). Seeding a new
+    # language is a deliberate `scripts/seed_catalog.py --language` run; this
+    # job must only maintain languages that run has already loaded.
+    for language in SEEDED_LANGUAGES:
         try:
             sets = client.list_sets(language)
         except Exception as exc:  # noqa: BLE001 - one language's outage must not sink the run
@@ -1010,6 +1078,8 @@ def _sync_new_sets(repo, client, *, dry_run: bool = False) -> dict:
                            "skipping", language, type(exc).__name__, exc)
             continue
         sets_checked += len(sets)
+        excluded = excluded_set_ids(client, language)
+        excluded_composite = {build_card_id(language, raw_id) for raw_id in excluded}
 
         missing_set_ids: set[str] = set()
         # Registry material, gathered from the membership check this loop was
@@ -1029,6 +1099,12 @@ def _sync_new_sets(repo, client, *, dry_run: bool = False) -> dict:
         for raw_set in sets:
             raw_set_id = raw_set.get("id")
             if not raw_set_id:
+                continue
+            if raw_set_id in excluded:
+                # Skipped BEFORE the emptiness check: a digital-only set's cards
+                # are never walked and it never appears in `new_sets` or the
+                # registry (RFC 0021).
+                sets_skipped_digital += 1
                 continue
             composite_set_id = build_card_id(language, raw_set_id)
             rows = repo.list_cards_by_set(composite_set_id)
@@ -1072,6 +1148,12 @@ def _sync_new_sets(repo, client, *, dry_run: bool = False) -> dict:
                     logger.warning("catalog sync: skipped %r (%s: %s)",
                                    raw.get("id"), type(exc).__name__, exc)
                     continue
+                if card.set_id in excluded_composite:
+                    # `iter_brief_cards` is not filterable by set, so a digital
+                    # card is still yielded here even though its set was never
+                    # walked above — drop it rather than let it fall into the
+                    # "existing set" branch below and get written anyway.
+                    continue
                 # Membership on the CARD, not on its set. A set lookup answers
                 # "have we ever seen this set", which stopped being the question
                 # the moment a held set could gain a card.
@@ -1109,4 +1191,5 @@ def _sync_new_sets(repo, client, *, dry_run: bool = False) -> dict:
             # run finding no new set but three new promos in sets we hold used
             # to report "0 new sets" and nothing else.
             "cards_added_to_existing_sets": cards_added_to_existing_sets,
-            "sets_registered": sets_registered}
+            "sets_registered": sets_registered,
+            "sets_skipped_digital": sets_skipped_digital}

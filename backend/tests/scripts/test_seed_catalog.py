@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from merlins_collection.models.catalog import CatalogCard, FinishPrice
-from merlins_collection.models.inventory import Language
+from merlins_collection.models.inventory import SEEDED_LANGUAGES, Language
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "seed_catalog.py"
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "tcgdex"
@@ -42,11 +42,14 @@ def _briefs(name):
 class FakeClient:
     """Serves the committed brief fixtures through the client's interface."""
 
-    def __init__(self, rows, sets=None, sets_error=None, rows_error=None):
+    def __init__(self, rows, sets=None, sets_error=None, rows_error=None,
+                 series=None, series_error=None):
         self.rows = rows
         self.sets = sets or []
         self.sets_error = sets_error
         self.rows_error = rows_error
+        self.series = series or {}
+        self.series_error = series_error
 
     def list_sets(self, language):
         if self.sets_error:
@@ -57,6 +60,11 @@ class FakeClient:
         yield from self.rows
         if self.rows_error:
             raise self.rows_error
+
+    def get_series(self, language, series_id):
+        if self.series_error:
+            raise self.series_error
+        return self.series.get(series_id)
 
 
 def test_seed_writes_language_qualified_identity_rows_with_no_prices(seed, dynamo_repo):
@@ -166,6 +174,47 @@ def test_a_truncated_seed_is_caught_by_the_set_card_count_cross_check(seed, dyna
         seed.seed_language(dynamo_repo, client, Language.EN, execute=True)
 
 
+# --------------------------------------------------------------------------
+# RFC 0021 T2 — TCG Pocket (digital-only) sets are excluded at ingest
+# --------------------------------------------------------------------------
+
+
+def test_seed_language_skips_a_tcg_pocket_set_and_reports_it(seed, dynamo_repo):
+    rows = [{"id": "A1-1", "localId": "1", "name": "Pikachu (Pocket)"}]
+    client = FakeClient(
+        rows,
+        sets=[{"id": "A1", "name": "Genetic Apex", "cardCount": {"total": 1}}],
+        series={"tcgp": {"id": "tcgp", "name": "Pokémon TCG Pocket",
+                         "sets": [{"id": "A1"}]}},
+    )
+
+    summary = seed.seed_language(dynamo_repo, client, Language.EN, execute=True,
+                                 allow_unverified=True)
+
+    assert summary["cards_seeded"] == 0
+    assert summary["sets_skipped_digital"] == 1
+    assert dynamo_repo.get_catalog_card("en:A1-1") is None
+
+
+def test_seed_language_still_seeds_a_physical_set_alongside_an_excluded_one(seed, dynamo_repo):
+    rows = [{"id": "A1-1", "localId": "1", "name": "Pikachu (Pocket)"},
+            *_briefs("cards_en_brief")]
+    client = FakeClient(
+        rows,
+        sets=[{"id": "A1", "name": "Genetic Apex", "cardCount": {"total": 1}},
+              {"id": "base1", "name": "Base Set"}],
+        series={"tcgp": {"id": "tcgp", "name": "Pokémon TCG Pocket",
+                         "sets": [{"id": "A1"}]}},
+    )
+
+    summary = seed.seed_language(dynamo_repo, client, Language.EN, execute=True,
+                                 allow_unverified=True)
+
+    assert summary["cards_seeded"] == 4  # the 4 physical cards, not the pocket one
+    assert dynamo_repo.get_catalog_card("en:A1-1") is None
+    assert dynamo_repo.get_catalog_card("en:base1-4") is not None
+
+
 def test_a_run_that_cannot_confirm_its_size_refuses_to_report_success(seed, dynamo_repo):
     """LOGIC-1: when ``list_sets`` fails the magnitude rail is not merely leaky,
     it is fully disarmed — ``expected is None`` makes the comparison a no-op. A
@@ -266,8 +315,16 @@ def test_an_explicitly_passed_floor_still_overrides_the_per_language_one(seed, d
 
 def test_every_language_has_a_floor_so_none_falls_back_to_the_flat_default(seed):
     """A language added later must not silently inherit 0.9 by accident: the
-    table is the place where "how complete is this upstream" is decided."""
-    assert set(seed.MIN_EXPECTED_RATIO_BY_LANGUAGE) == set(Language)
+    table is the place where "how complete is this upstream" is decided.
+
+    Scoped to ``SEEDED_LANGUAGES`` (languages the catalog actually holds rows
+    for), not the full ``Language`` enum (RFC 0023: 18 real codes + OTHER).
+    Researching a real completeness floor for a language nobody has seeded
+    yet is exactly the "measure upstream first, then move the number" work
+    this table's own comment describes -- it happens when that language is
+    actually seeded (extending ``SEEDED_LANGUAGES`` and this table together),
+    not speculatively for all 18 up front."""
+    assert set(seed.MIN_EXPECTED_RATIO_BY_LANGUAGE) == set(SEEDED_LANGUAGES)
 
 
 # --------------------------------------------------------------------------

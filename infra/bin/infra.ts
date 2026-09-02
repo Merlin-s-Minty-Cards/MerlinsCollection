@@ -4,6 +4,7 @@ import { BackendStack } from '../lib/backend-stack'
 import { FrontendStack } from '../lib/frontend-stack'
 import { backendOriginFromFunctionUrl } from '../lib/backend-origin'
 import { CognitoBrandingStack } from '../lib/cognito-branding-stack'
+import { SyncStack } from '../lib/sync-stack'
 
 /**
  * RFC 0014 — parallel-deploy phase. Backend (Task 4) is deployed and
@@ -121,4 +122,18 @@ new CognitoBrandingStack(app, 'MerlinsCognitoBrandingStack', {
   env: { account, region },
   cognitoUserPoolId: 'us-east-1_Ab945I9ir',
   cognitoClientId: '3vmg0a9lffhc85a2lrskh27b3f',
+})
+
+// RFC 0021 — a FIFTH, deliberately independent stack (see SyncStack's own
+// header comment). Deploy on its own: `bash scripts/deploy-sync.sh`, or by
+// hand `cdk deploy MerlinsSyncStack --exclusively`. Never deploy this stack
+// without `--exclusively` and without exporting POKEMONPRICETRACKER_API_KEY
+// first — an omitted secret writes an EMPTY key on this stack too, same
+// mechanism as the frontend/backend secret-wipe incidents.
+new SyncStack(app, 'MerlinsSyncStack', {
+  env: { account, region },
+  awsRegion: region,
+  dynamoTableName: 'merlins-cards',
+  pokemonPriceTrackerApiKey: process.env.POKEMONPRICETRACKER_API_KEY,
+  pricingDailyQuota: process.env.PRICING_DAILY_QUOTA,
 })

@@ -702,6 +702,45 @@ def test_list_sets_returns_the_bare_array():
     assert client.list_sets(Language.EN) == body
 
 
+def test_list_series_returns_the_bare_array():
+    body = [{"id": "tcgp", "name": "Pokémon TCG Pocket"}, {"id": "base", "name": "Base"}]
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.raw_path.decode())
+        return httpx.Response(200, json=body)
+
+    client = _client(handler)
+    assert client.list_series(Language.EN) == body
+    assert seen == ["/v2/en/series"]
+
+
+def test_get_series_returns_the_full_object_with_its_sets_array():
+    body = {"id": "tcgp", "name": "Pokémon TCG Pocket",
+            "sets": [{"id": "A1"}, {"id": "A1a"}]}
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.raw_path.decode())
+        return httpx.Response(200, json=body)
+
+    client = _client(handler)
+    assert client.get_series(Language.EN, "tcgp") == body
+    assert seen == ["/v2/en/series/tcgp"]
+
+
+def test_get_series_404_returns_none():
+    client = _client(lambda r: httpx.Response(404, json={}))
+    assert client.get_series(Language.EN, "nope") is None
+
+
+def test_get_series_5xx_raises_tcgdex_error():
+    with pytest.raises(TcgdexError):
+        _client(lambda r: httpx.Response(500, json={}), max_retries=1).get_series(
+            Language.EN, "tcgp"
+        )
+
+
 # --------------------------------------------------------------------------
 # FRAIL-1 / FRAIL-8 — transport failures stay inside the retry contract
 # --------------------------------------------------------------------------
@@ -762,8 +801,19 @@ def test_the_default_client_disables_redirects_explicitly():
         assert client._client.follow_redirects is False
 
 
-def test_language_api_codes_are_the_two_supported_languages():
-    assert LANGUAGE_API_CODE == {Language.EN: "en", Language.JP: "ja"}
+def test_language_api_codes_cover_every_tcgdex_language_except_other():
+    """Verified live against TCGdex 2026-09-02 (its own 404 validation body
+    enumerates exactly these 18 codes; the docs site claims 14 and is stale).
+    ``OTHER`` deliberately has no entry — see the model's own docstring."""
+    assert LANGUAGE_API_CODE == {
+        Language.EN: "en", Language.JP: "ja", Language.FR: "fr", Language.DE: "de",
+        Language.ES: "es", Language.ES_MX: "es-mx", Language.IT: "it",
+        Language.PT: "pt", Language.PT_BR: "pt-br", Language.PT_PT: "pt-pt",
+        Language.NL: "nl", Language.PL: "pl", Language.RU: "ru", Language.KO: "ko",
+        Language.ZH_TW: "zh-tw", Language.ZH_CN: "zh-cn", Language.ID: "id",
+        Language.TH: "th",
+    }
+    assert Language.OTHER not in LANGUAGE_API_CODE
 
 
 # ---------------------------------------------------------------------------
@@ -776,7 +826,10 @@ def test_language_api_codes_are_the_two_supported_languages():
 
 
 def test_language_by_api_code_is_the_exact_inverse_of_language_api_code():
-    assert LANGUAGE_BY_API_CODE == {"en": Language.EN, "ja": Language.JP}
+    assert LANGUAGE_BY_API_CODE == {
+        code: language for language, code in LANGUAGE_API_CODE.items()
+    }
+    assert len(LANGUAGE_BY_API_CODE) == len(LANGUAGE_API_CODE)  # no code collides
 
 
 def test_parse_card_id_round_trips_build_card_id_for_every_supported_language():
@@ -784,6 +837,15 @@ def test_parse_card_id_round_trips_build_card_id_for_every_supported_language():
         assert parse_card_id(build_card_id(language, "swsh4-SV1-2")) == (
             language, "swsh4-SV1-2"
         )
+
+
+def test_parse_card_id_round_trips_a_hyphenated_language_code():
+    """RFC 0023's hyphenated codes (``es-mx``, ``zh-tw``, ``pt-br``, ...)
+    contain no colon, so ``partition(":")``/``split(":", 1)`` must still split
+    correctly on the first (and only) colon rather than the hyphen. Do not
+    trust this from reading the code — it is the whole point of this test."""
+    assert build_card_id(Language.ZH_TW, "sv1-25") == "zh-tw:sv1-25"
+    assert parse_card_id("zh-tw:sv1-25") == (Language.ZH_TW, "sv1-25")
 
 
 def test_parse_card_id_splits_on_the_first_colon_only():
@@ -797,7 +859,7 @@ def test_parse_card_id_splits_on_the_first_colon_only():
     ":",           # a separator with neither code nor id
     "en:",         # a language, no id
     ":base1-4",    # an id, no language code
-    "fr:xy7-54",   # a real language this build does not speak
+    "vi:xy7-54",   # a real language TCGdex itself does not speak (not one of its 18 codes)
     "EN:base1-4",  # the enum's NAME, not the API code: deliberately not accepted
 ])
 def test_parse_card_id_returns_none_for_anything_that_is_not_a_composite_id(card_id):
