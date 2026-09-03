@@ -97,3 +97,74 @@ describe('AdminCardDetailPage dates (RFC 0010 T8)', () => {
     expect(screen.queryByText('Aug 9, 2026')).not.toBeInTheDocument()
   })
 })
+
+// ---------------------------------------------------------------------------
+// RFC 0023 follow-ups #2/#3 — this page used to hardcode an English-only
+// TCGplayer link and render a stored `tcg_url` as an `<a href>` with no
+// validation (a `javascript:` value is a stored-XSS sink that fires on one
+// click).
+// ---------------------------------------------------------------------------
+
+describe('AdminCardDetailPage TCGplayer link', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+  })
+
+  function mockItem(overrides: Record<string, unknown>) {
+    getMock.mockImplementation((path: string) => {
+      if (path === '/inventory/item-1') {
+        return Promise.resolve({
+          item_id: 'item-1',
+          display_name: 'Pikachu',
+          status: 'available',
+          cost_basis: '10.00',
+          ...overrides,
+        })
+      }
+      if (path === '/inventory/item-1/timeline') return Promise.resolve({ events: [] })
+      if (path === '/inventory/item-1/price-chart') {
+        return Promise.resolve({ points: [], buy_marker: null, timeframe: '1yr', item_id: 'item-1' })
+      }
+      return Promise.resolve({})
+    })
+  }
+
+  it('links directly to a stored tcg_url when one is a real http(s) URL', async () => {
+    mockItem({ tcg_url: 'https://www.tcgplayer.com/product/12345', language: 'EN' })
+    render(<AdminCardDetailPage />)
+
+    const link = await screen.findByRole('link', { name: /TCGplayer \(stored\)/i })
+    expect(link).toHaveAttribute('href', 'https://www.tcgplayer.com/product/12345')
+  })
+
+  it('generates a Japan-category search link for a JP item with no stored tcg_url', async () => {
+    mockItem({ language: 'JP' })
+    render(<AdminCardDetailPage />)
+
+    const link = await screen.findByRole('link', { name: /^TCGplayer$/i })
+    expect(link).toHaveAttribute(
+      'href',
+      'https://www.tcgplayer.com/search/pokemon-japan/product?productLineName=pokemon-japan&q=Pikachu&view=grid',
+    )
+  })
+
+  it('shows a no-link message, not a link, for a language TCGplayer has no category for', async () => {
+    mockItem({ language: 'KO' })
+    render(<AdminCardDetailPage />)
+
+    expect(await screen.findByText('No TCGplayer link')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /TCGplayer/i })).not.toBeInTheDocument()
+  })
+
+  it('falls back to a generated search link instead of using an unsafe stored tcg_url as href', async () => {
+    mockItem({ tcg_url: 'javascript:alert(1)', language: 'EN' })
+    render(<AdminCardDetailPage />)
+
+    const link = await screen.findByRole('link', { name: /^TCGplayer$/i })
+    expect(link).toHaveAttribute(
+      'href',
+      'https://www.tcgplayer.com/search/pokemon/product?q=Pikachu&view=grid',
+    )
+    expect(screen.queryByRole('link', { name: /TCGplayer \(stored\)/i })).not.toBeInTheDocument()
+  })
+})

@@ -27,7 +27,9 @@ export interface CardSummary {
   rarity: string | null
   image_small: string | null
   // Live pokemontcg.io market price for a matched card; null when the catalog
-  // has none, in which case the tile falls back to the sheet's listed price.
+  // has none. RFC 0025: no longer read by {@link toPresentedCard} — the
+  // customer tile renders `sticker_price`, not a catalog estimate — but the
+  // field stays on the wire; nothing else in this file's contract removed it.
   market_price: string | null
 }
 
@@ -41,6 +43,13 @@ interface ItemBase {
   /** Decimal serialized as a string, e.g. "250.00" (null when unpriced). */
   listed_price: string | null
   current_market_value: string | null
+  /**
+   * RFC 0025: the price the business actually sells the card at — what
+   * {@link toPresentedCard} renders on the tile. A customer-visible item is
+   * guaranteed to have one (`is_customer_visible` requires it); `null` here
+   * would mean the caller is holding an item it should never have fetched.
+   */
+  sticker_price: string | null
   acquired_at: string
   /**
    * Print language (EN/JP). Optional on the wire for backward-compatibility —
@@ -385,10 +394,6 @@ export interface PresentedCard {
 
 /** Map a search-result item into the shared card-presentation shape. */
 export function toPresentedCard(item: InventoryItem): PresentedCard {
-  // Mirrors CardTile.tsx's existing precedence: a raw item's live catalog
-  // market_price outranks the sheet-derived listed_price; graded/sealed
-  // items have no catalog market_price to consult at all.
-  const marketPrice = item.kind === 'raw' ? item.card?.market_price : null
   return {
     key: itemKey(item),
     title: itemTitle(item),
@@ -396,7 +401,16 @@ export function toPresentedCard(item: InventoryItem): PresentedCard {
     setName: item.card?.set_name ?? 'Unknown set',
     number: item.card?.number,
     conditionLabel: conditionLabel(item),
-    price: marketPrice ?? item.listed_price ?? 'Price N/A',
+    // RFC 0025: the price the business actually sells the card at, not an
+    // estimate. `_display_price` (backend) is the identical authority
+    // already used for the price filter and the price sort — reading
+    // `sticker_price` directly here, rather than re-deriving it from
+    // `card.market_price`/`listed_price`, is what keeps this tile from ever
+    // disagreeing with what a customer just filtered or sorted by (RFC 0025
+    // follow-ups #7; this used to read the pre-RFC-0025 catalog-market
+    // computation, which `is_customer_visible` no longer guarantees a
+    // visible item even has).
+    price: item.sticker_price ?? 'Price N/A',
     isJapanese: isJapanese(item),
   }
 }

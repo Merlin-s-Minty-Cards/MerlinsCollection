@@ -19,6 +19,7 @@ import CosignorPicker from './CosignorPicker'
 import MoneyInput from './MoneyInput'
 import { isHandValued } from '@/lib/valuation'
 import { adminItemName } from '@/lib/admin-item-name'
+import { tcgplayerSearchUrl, TCGPLAYER_UNSUPPORTED_LANGUAGE_MESSAGE, safeTcgHref } from '@/lib/tcgplayer'
 import type { UpdatedItem } from '@/lib/item-update'
 
 interface CardDetailModalProps {
@@ -1217,18 +1218,39 @@ export default function CardDetailModal({
             ) : null}
             {/* `acquired_at` and the grading trio used to be repeated here; they
                 now have real, editable rows in the sections above. */}
-            <a
-              href={
-                shown.tcg_url
-                  ? String(shown.tcg_url)
-                  : `https://www.tcgplayer.com/search/pokemon/product?q=${encodeURIComponent(name)}&view=grid`
+            {(() => {
+              // `tcg_url` is admin-typed free text, never a value this code
+              // generates — a `javascript:` value here is a stored-XSS sink
+              // that fires on one click (RFC 0023 follow-ups #3, guarded the
+              // same way on show-prep and the inventory table). Only a real
+              // http(s) URL may ever back the href; anything else falls back
+              // to a language-aware generated search link exactly as if
+              // nothing were stored (RFC 0023 follow-ups #2 — this modal used
+              // to hardcode the English-only category).
+              const safeStoredUrl = safeTcgHref(shown.tcg_url)
+              const generatedUrl = tcgplayerSearchUrl(
+                typeof shown.language === 'string' ? shown.language : undefined,
+                name,
+              )
+              const linkHref = safeStoredUrl || generatedUrl
+              if (!linkHref) {
+                return (
+                  <span className="text-pine-500" title={TCGPLAYER_UNSUPPORTED_LANGUAGE_MESSAGE}>
+                    No TCGplayer link
+                  </span>
+                )
               }
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-blue-400 hover:text-blue-300"
-            >
-              TCGplayer {shown.tcg_url ? 'Link' : 'Search'} ↗
-            </a>
+              return (
+                <a
+                  href={linkHref}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-blue-400 hover:text-blue-300"
+                >
+                  TCGplayer {safeStoredUrl ? 'Link' : 'Search'} ↗
+                </a>
+              )
+            })()}
           </section>
           </div>
         </div>

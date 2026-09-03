@@ -224,6 +224,44 @@ describe('AdminShowPrepPage inline sticker editing', () => {
     // The manual tcg_url field is still editable — the escape hatch never disappears.
     expect(screen.getByRole('button', { name: /edit stored tcg link for pikachu vmax/i })).toBeInTheDocument()
   })
+
+  // RFC 0023 follow-ups #3 — `tcg_url` is admin-typed free text; it must
+  // never be used as an `<a href>` directly, since a `javascript:` value is
+  // a stored-XSS sink that fires on one click.
+  it('falls back to a generated search link instead of using an unsafe stored tcg_url as href', async () => {
+    getMock.mockImplementation((path: string) => {
+      if (path === '/show-prep/mispriced') {
+        return Promise.resolve({
+          items: [{
+            ...mispricedItem,
+            item_id: 'item-xss',
+            tcg_url: 'javascript:alert(1)',
+            language: 'EN',
+          }],
+          total_flagged: 1,
+        })
+      }
+      if (path === '/show-prep/location-summary') {
+        return Promise.resolve({ locations: { 'binder-a': 1 }, total: 1 })
+      }
+      if (path === '/locations') {
+        return Promise.resolve([{ value: 'binder-a', label: 'Binder A' }])
+      }
+      return Promise.resolve({})
+    })
+
+    render(<AdminShowPrepPage />)
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    const link = await screen.findByTitle('Search TCGplayer for "Pikachu VMAX"')
+    expect(link).toHaveAttribute(
+      'href',
+      'https://www.tcgplayer.com/search/pokemon/product?q=Pikachu%20VMAX&view=grid'
+    )
+    expect(link).not.toHaveAttribute('href', 'javascript:alert(1)')
+  })
 })
 
 // ---------------------------------------------------------------------------

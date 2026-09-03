@@ -23,6 +23,7 @@ import PriceChart from '@/components/admin/shared/PriceChart'
 import StatusBadge from '@/components/admin/shared/StatusBadge'
 import CardImage from '@/components/admin/shared/CardImage'
 import { adminItemName } from '@/lib/admin-item-name'
+import { tcgplayerSearchUrl, TCGPLAYER_UNSUPPORTED_LANGUAGE_MESSAGE, safeTcgHref } from '@/lib/tcgplayer'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -70,11 +71,6 @@ interface TimelineEvent {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function buildTcgPlayerUrl(name: string): string {
-  const query = encodeURIComponent(name)
-  return `https://www.tcgplayer.com/search/pokemon/product?q=${query}&view=grid`
-}
 
 function buildEbayUrl(name: string): string {
   const query = encodeURIComponent(name)
@@ -149,8 +145,16 @@ export default function AdminCardDetailPage() {
   const conditionDisplay = item?.condition
     ? formatCondition(item.condition, item.condition_modifier)
     : null
-  const hasStoredTcgLink =
-    typeof item?.tcg_url === 'string' && item.tcg_url.startsWith('http')
+  // `tcg_url` is admin-typed free text, never a value this code generates —
+  // a `javascript:` value here is a stored-XSS sink that fires on one click
+  // (RFC 0023 follow-ups #3, guarded the same way on show-prep, the
+  // inventory table, and CardDetailModal). Only a real http(s) URL may ever
+  // back the href.
+  const safeStoredTcgUrl = safeTcgHref(item?.tcg_url)
+  // Language-aware, not the hardcoded English category this used to be
+  // (RFC 0023 follow-ups #2) — `null` means TCGplayer has no category for
+  // this item's language and must not silently fall back to the English link.
+  const generatedTcgUrl = item ? tcgplayerSearchUrl(item.language, cardName) : null
 
   // ---------------------------------------------------------------------------
   // Render
@@ -231,9 +235,9 @@ export default function AdminCardDetailPage() {
 
           {/* Links section */}
           <div className="flex items-center gap-3 flex-wrap">
-            {hasStoredTcgLink && (
+            {safeStoredTcgUrl && (
               <a
-                href={item.tcg_url!}
+                href={safeStoredTcgUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium text-emerald-400 bg-emerald-400/10 border border-emerald-400/20 hover:bg-emerald-400/20 transition-colors"
@@ -242,15 +246,26 @@ export default function AdminCardDetailPage() {
                 TCGplayer (stored)
               </a>
             )}
-            <a
-              href={buildTcgPlayerUrl(cardName)}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium text-blue-400 bg-blue-400/10 border border-blue-400/20 hover:bg-blue-400/20 transition-colors"
-            >
-              <ExternalLink size={12} />
-              {hasStoredTcgLink ? 'Search TCGplayer' : 'TCGplayer'}
-            </a>
+            {generatedTcgUrl ? (
+              <a
+                href={generatedTcgUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium text-blue-400 bg-blue-400/10 border border-blue-400/20 hover:bg-blue-400/20 transition-colors"
+              >
+                <ExternalLink size={12} />
+                {safeStoredTcgUrl ? 'Search TCGplayer' : 'TCGplayer'}
+              </a>
+            ) : (
+              !safeStoredTcgUrl && (
+                <span
+                  className="text-[11px] text-pine-500 italic"
+                  title={TCGPLAYER_UNSUPPORTED_LANGUAGE_MESSAGE}
+                >
+                  No TCGplayer link
+                </span>
+              )
+            )}
             <a
               href={buildEbayUrl(cardName)}
               target="_blank"

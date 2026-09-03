@@ -1,3 +1,5 @@
+import { safeHref } from './safe-href'
+
 /**
  * The ONE place a TCGplayer URL is built (RFC 0023 §3).
  *
@@ -47,3 +49,24 @@ export function tcgplayerSearchUrl(
  */
 export const TCGPLAYER_UNSUPPORTED_LANGUAGE_MESSAGE =
   'TCGplayer only has English and Japanese Pokémon categories — paste a link if you have one.'
+
+/**
+ * The safe form of a stored `tcg_url` to use as an `<a href>`, or `null` if
+ * it isn't one.
+ *
+ * `tcg_url` is admin-typed free text, not a value this codebase generates —
+ * `admin-inventory-columns.tsx`'s own comment on this same field already
+ * documents it as a stored-XSS sink: a `javascript:` value in an href fires
+ * on one click. Delegates to {@link safeHref} — the same URL-vetting
+ * discipline already used for Sanity-authored article links, which parses
+ * with the real `URL` constructor rather than a regex and so also catches
+ * whitespace/case tricks a naive `^https?:\/\//` check would miss — instead
+ * of a second, narrower reimplementation of "is this href safe". Narrowed
+ * further to http(s) only: `safeHref` also allows `mailto:`/`tel:`, neither
+ * of which is a TCGplayer link.
+ */
+export function safeTcgHref(url: unknown): string | null {
+  if (typeof url !== 'string') return null
+  const vetted = safeHref(url)
+  return vetted && /^https?:/i.test(vetted) ? vetted : null
+}

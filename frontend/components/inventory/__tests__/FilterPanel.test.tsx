@@ -47,6 +47,7 @@ const charizard: InventoryItem = {
   card_id: 'base1-4',
   listed_price: '250.42',
   current_market_value: '300.00',
+  sticker_price: '250.42',
   acquired_at: '2026-04-01',
   finish: 'holofoil',
   condition: 'NM',

@@ -223,7 +223,47 @@ describe('CardDetailModal TCGplayer link', () => {
   it('falls back to a generated TCGplayer search link when no tcg_url is stored', async () => {
     // Mirrors show-prep/page.tsx's `_tcg_url` column fallback — without this,
     // items that never had tcg_url set show no link at all (round7-handoff §10).
-    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+    // `language: 'EN'` mirrors the backend's real default (`_ItemBase.language
+    // = Language.EN`) — every real item carries it, this fixture just predates
+    // RFC 0023.
+    render(<CardDetailModal item={{ ...item, language: 'EN' }} onClose={vi.fn()} />)
+
+    const link = await screen.findByRole('link', { name: /TCGplayer/i })
+    expect(link).toHaveAttribute(
+      'href',
+      'https://www.tcgplayer.com/search/pokemon/product?q=Pikachu&view=grid',
+    )
+  })
+
+  // RFC 0023 follow-ups #2 — this modal used to hardcode the English-only
+  // TCGplayer category regardless of the item's actual language.
+  it('generates a Japan-category search link for a JP item with no stored tcg_url', async () => {
+    render(<CardDetailModal item={{ ...item, language: 'JP' }} onClose={vi.fn()} />)
+
+    const link = await screen.findByRole('link', { name: /TCGplayer/i })
+    expect(link).toHaveAttribute(
+      'href',
+      'https://www.tcgplayer.com/search/pokemon-japan/product?productLineName=pokemon-japan&q=Pikachu&view=grid',
+    )
+  })
+
+  it('shows a no-link message, not a link, for a language TCGplayer has no category for', async () => {
+    render(<CardDetailModal item={{ ...item, language: 'KO' }} onClose={vi.fn()} />)
+
+    expect(await screen.findByText('No TCGplayer link')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /TCGplayer/i })).not.toBeInTheDocument()
+  })
+
+  // RFC 0023 follow-ups #3 — `tcg_url` is admin-typed free text; it must
+  // never be used as an `<a href>` directly, since a `javascript:` value is
+  // a stored-XSS sink that fires on one click.
+  it('falls back to a generated search link instead of using an unsafe stored tcg_url as href', async () => {
+    render(
+      <CardDetailModal
+        item={{ ...item, language: 'EN', tcg_url: 'javascript:alert(1)' }}
+        onClose={vi.fn()}
+      />
+    )
 
     const link = await screen.findByRole('link', { name: /TCGplayer/i })
     expect(link).toHaveAttribute(

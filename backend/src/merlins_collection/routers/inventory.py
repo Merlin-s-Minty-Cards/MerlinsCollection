@@ -65,11 +65,15 @@ def customer_visible_items(repo: InventoryRepository) -> list[InventoryItem]:
 def _display_price(item: EnrichedInventoryItem) -> Decimal | None:
     """THE price of an item, and the only one any customer-facing code may use.
 
-    This is the single authority for the price **filter** and the price
-    **sort**. It used to also be described as "the figure the tile renders";
-    that changed under RFC 0025 T2 (`GET /inventory/search`'s wire shape is
-    otherwise unchanged — the frontend's own price rendering is a separate
-    concern this RFC does not touch).
+    This is the single authority for the price **filter**, the price **sort**,
+    and — since RFC 0025 follow-ups #7 added ``sticker_price`` to
+    ``_CUSTOMER_ITEM_FIELDS`` — the figure the tile renders too.
+    ``frontend/lib/inventory.ts::toPresentedCard`` reads ``item.sticker_price``
+    directly rather than recomputing this walk, on the same "never
+    re-implement price selection in the frontend" rule CLAUDE.md states for
+    catalog prices — but it is reading the identical field this function
+    returns, so the two cannot diverge the way the pre-RFC-0025 bound/tile
+    split once did (see the Rayquaza incident below).
 
     **RFC 0025: this is ``sticker_price`` — the price the business actually
     sells the card at**, set by hand with the card and its condition in front
@@ -180,6 +184,14 @@ def _parse_condition_query(value: str) -> tuple[Condition, ConditionModifier | N
 # the model later defaults to hidden rather than silently leaking.
 _CUSTOMER_ITEM_FIELDS = {
     "item_id", "kind", "card_id", "listed_price", "current_market_value",
+    # RFC 0025 follow-ups #7: `_display_price` (the filter bound and the sort)
+    # became `sticker_price`, but the wire item itself never gained the field,
+    # so the frontend tile kept reading the OLD `card.market_price ??
+    # listed_price` computation — a customer could filter/sort by one price
+    # and see a different one rendered on the card. `sticker_price` joins the
+    # allowlist so `frontend/lib/inventory.ts::toPresentedCard` can read the
+    # same figure the backend already treats as authoritative.
+    "sticker_price",
     "acquired_at", "finish", "condition", "condition_modifier", "factory_sealed",
     # Descriptive tags — "1st Edition", "Full Art" — that are genuinely not
     # mutually exclusive with `finish` (RFC 0023 §2.2). CUSTOMER-FACING by

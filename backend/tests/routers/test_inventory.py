@@ -933,6 +933,27 @@ def test_B9_search_response_omits_internal_fields(inv_client, mint_token):
     assert item["kind"] == "raw" and item["listed_price"] == "10.00"
 
 
+def test_search_response_carries_sticker_price(inv_client, mint_token):
+    """RFC 0025 follow-ups #7: the wire item must carry ``sticker_price`` —
+
+    ``_display_price`` (the filter bound and the sort) became ``sticker_price``
+    under RFC 0025, but the item itself never gained the field on
+    ``_CUSTOMER_ITEM_FIELDS``, so the frontend tile kept reading the OLD
+    ``card.market_price ?? listed_price`` computation: a customer could
+    filter/sort by one price and see a different one rendered. This is the
+    regression test for adding ``sticker_price`` to the allowlist.
+    """
+    client, repo = inv_client
+    repo.put_inventory_item(_raw("sv1-sticker", price="10.00", sticker_price=Decimal("42.00")))
+    resp = client.get(
+        "/inventory/search",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    assert resp.status_code == 200
+    item = resp.json()["items"][0]
+    assert item["sticker_price"] == "42.00"
+
+
 # ==== RFC 0001: display_name materialized at import, read verbatim (MUST-FIX A/C) ==
 # docs/rfcs/0001-inventory-catalog-relink-and-display-fallback.md, section C.
 # `notes` is internal-only and off the customer wire (cost/price range, a location

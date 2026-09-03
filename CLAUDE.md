@@ -1186,6 +1186,20 @@ had. `hidden_no_price` is consequently **structurally always `0`** — kept in
 the response and the counting code stays live, as a tripwire (a test asserts
 the zero) rather than a deletion for a false economy.
 
+**The tile itself gained the field one round later — RFC 0025 follow-ups #7,
+closed at Round 9 closeout (2026-09-03).** The RFC shipped `_display_price` as
+the filter/sort authority but never added `sticker_price` to
+`_CUSTOMER_ITEM_FIELDS`, so the actual price text a customer read on a card
+tile was still `frontend/lib/inventory.ts::toPresentedCard`'s pre-RFC
+computation (`item.card?.market_price ?? item.listed_price`) — a customer
+could filter or sort by the sticker and see a different number rendered.
+`sticker_price` now joins the allowlist (additive; nothing else moved) and
+`toPresentedCard` reads it directly, so the tile can no longer disagree with
+what it was just filtered/sorted by. The chat-mode path needed no change:
+`services/bedrock.py::_hydrate_item` already set `listed_price =
+item.sticker_price` under the original T2 task, so only the filter-mode
+search tile had drifted.
+
 **Condition adjustment does NOT apply to a sticker price**, and this is the
 subtle, easy-to-get-backwards part: `apply_condition_adjustment` exists
 because a *catalog* figure is a Near Mint price and needs scaling down for a
@@ -1592,16 +1606,32 @@ categories site-wide): `pokemon` (id 3, English) and `pokemon-japan` (id
 Portuguese Pokémon category — TCGplayer added Japanese as a dedicated
 category in October 2024 and has added no others since.
 `frontend/lib/tcgplayer.ts`'s `tcgplayerSearchUrl(language, query)` is now
-the one place a TCGplayer URL is built for its two adoption sites
-(`show-prep/page.tsx`'s TCG Price column, `admin-inventory-columns.tsx`'s
-`tcg_url` column) — the real link for `EN`/`JP`, `null` for everything else
-including `OTHER`. **A `null` must never fall back to the English link** —
-an English-category search for a Korean card returns the wrong card or
-nothing, and both are worse than no link; both adoption sites show a
-one-line reason instead. **Not yet adopted in `CardDetailModal.tsx` or
-`card/[id]/page.tsx`** — both still hardcode the English-only link; logged
-in `docs/plans/rfc-0023/follow-ups.md` rather than fixed, since neither was
-in this RFC's stated file list.
+the one place a TCGplayer URL is built, adopted on four surfaces —
+`show-prep/page.tsx`'s TCG Price column, `admin-inventory-columns.tsx`'s
+`tcg_url` column, and — closed at Round 9 closeout (2026-09-03),
+RFC 0023 follow-ups #2 — `CardDetailModal.tsx`'s Quick Info link and
+`card/[id]/page.tsx`'s TCGplayer buttons, both of which used to hardcode the
+English-only category regardless of the item's actual language. All four
+show the real link for `EN`/`JP`, `null` for everything else including
+`OTHER`. **A `null` must never fall back to the English link** — an
+English-category search for a Korean card returns the wrong card or
+nothing, and both are worse than no link; every adoption site shows a
+one-line reason (`TCGPLAYER_UNSUPPORTED_LANGUAGE_MESSAGE`) instead.
+
+**A stored `tcg_url` is admin-typed free text and must never be used as an
+`<a href>` unvalidated — RFC 0023 follow-ups #3, closed the same day.**
+`show-prep/page.tsx` originally rendered `item.tcg_url` directly as an href
+(a `javascript:` value is a stored-XSS sink that fires on one click, the
+exact shape `admin-inventory-columns.tsx`'s own comment on the identical
+field already warned against); `CardDetailModal.tsx` had the same gap, and
+`card/[id]/page.tsx` had only a weaker `startsWith('http')` check. All three
+now go through `lib/tcgplayer.ts`'s `safeTcgHref`, which delegates to the
+existing `lib/safe-href.ts` (already used to vet Sanity-authored article
+links — parses with the real `URL` constructor rather than a regex, so it
+also catches whitespace/case tricks a naive `^https?:\/\//` check would
+miss) and narrows the result to http(s) only. An unsafe or malformed stored
+value now falls back to the generated search link exactly as if nothing
+were stored, on all three surfaces.
 
 **Incidental backend fix, needed because this RFC is what starts generating
 JP links at volume:** `services/card_text.set_hint_from_url`'s marketplace-
