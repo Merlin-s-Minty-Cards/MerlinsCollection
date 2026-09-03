@@ -7,6 +7,10 @@ import SignedAmount from './SignedAmount'
 import StatusBadge from './StatusBadge'
 import VoidDialog from './VoidDialog'
 import SaleDetailModal from './SaleDetailModal'
+import TransactionEditDialog, {
+  type TransactionEditPatch,
+  type TransactionEditResult,
+} from './TransactionEditDialog'
 
 /**
  * The transaction archive, grouped so one real transaction reads as one line.
@@ -42,6 +46,18 @@ export interface ArchiveTransaction {
   voided_at?: string | null
   voided_by?: string | null
   void_reason?: string | null
+  /** RFC 0024 T3 — the edit form's remaining seed fields. */
+  fee?: string | number | null
+  show_id?: string | null
+  notes?: string | null
+  /** RFC 0024 T3 — present once a typo correction has been applied. */
+  edited_at?: string | null
+  edited_by?: string | null
+  edit_history?: {
+    at: string
+    by: string
+    changes: { field: string; old: string | null; new: string | null }[]
+  }[]
   [key: string]: unknown
 }
 
@@ -167,6 +183,7 @@ export default function TransactionGroups({
   emptyMessage = 'No transactions for this date',
   onVoid,
   onRestore,
+  onEdit,
 }: {
   transactions: ArchiveTransaction[]
   loading?: boolean
@@ -174,6 +191,12 @@ export default function TransactionGroups({
   /** Withdraw a transaction. Rejecting keeps the row as it was. */
   onVoid?: (target: VoidTarget, reason: string) => Promise<unknown>
   onRestore?: (target: VoidTarget) => Promise<unknown>
+  /**
+   * Correct a typo on ONE leg (RFC 0024 T3/T4) — never a whole batch, unlike
+   * void/restore. Resolves with the server's `cost_basis_updated`/
+   * `cost_basis_skipped_reason` verdict so the dialog can surface it.
+   */
+  onEdit?: (txnId: string, patch: TransactionEditPatch) => Promise<TransactionEditResult>
 }) {
   const groups = useMemo(() => groupTransactions(transactions), [transactions])
   // Which group's cards are showing in SaleDetailModal — `null` closes it.
@@ -191,6 +214,16 @@ export default function TransactionGroups({
   const [pending, setPending] = useState<{ target: VoidTarget; label: string } | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // RFC 0024 T3/T4 — a typo correction, distinct from void/restore above.
+  // Keyed on the leg object itself: unlike `modalGroupKey`, there is no
+  // re-derivation concern here because a fresh archive refetch after a
+  // successful save CLOSES the dialog (see `submitEdit`) rather than needing
+  // to keep displaying a live-updating row.
+  const [editingLeg, setEditingLeg] = useState<ArchiveTransaction | null>(null)
+  const [editBusy, setEditBusy] = useState(false)
+  const [editError, setEditError] = useState<string | null>(null)
+  const [costBasisSkippedReason, setCostBasisSkippedReason] = useState<string | null>(null)
 
   // RFC 0013 T4f — a lightweight sort control, deliberately NOT a DataTable
   // header: this is a GROUP-level reorder (by group date or group total),
@@ -249,6 +282,34 @@ export default function TransactionGroups({
       await onRestore(target)
     } catch (err) {
       setError(message(err))
+    }
+  }
+
+  const startEdit = (leg: ArchiveTransaction) => {
+    setEditError(null)
+    setCostBasisSkippedReason(null)
+    setEditingLeg(leg)
+  }
+
+  const submitEdit = async (patch: TransactionEditPatch) => {
+    if (!editingLeg || !onEdit) return
+    setEditBusy(true)
+    setEditError(null)
+    try {
+      const result = await onEdit(editingLeg.txn_id, patch)
+      // Only auto-close when nothing needs the operator's attention — a
+      // skipped cost_basis follow is the COMMON case once RFC 0022 made
+      // cost_basis inline-editable everywhere, and it needs a surface to
+      // land on, not an instant close that nobody reads.
+      if (result.cost_basis_skipped_reason) {
+        setCostBasisSkippedReason(result.cost_basis_skipped_reason)
+      } else {
+        setEditingLeg(null)
+      }
+    } catch (err) {
+      setEditError(message(err))
+    } finally {
+      setEditBusy(false)
     }
   }
 
@@ -447,6 +508,21 @@ export default function TransactionGroups({
           })
         }}
         onRestoreLeg={(leg) => restore({ scope: 'row', id: leg.txn_id, count: 1 })}
+        onEditLeg={onEdit ? startEdit : undefined}
+      />
+
+      <TransactionEditDialog
+        open={editingLeg !== null}
+        txn={editingLeg}
+        loading={editBusy}
+        error={editError}
+        costBasisSkippedReason={costBasisSkippedReason}
+        onSave={submitEdit}
+        onClose={() => {
+          setEditingLeg(null)
+          setEditError(null)
+          setCostBasisSkippedReason(null)
+        }}
       />
 
       <VoidDialog

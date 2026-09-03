@@ -304,4 +304,14 @@ describe('IncomingCardForm', () => {
     expect(onCancel).toHaveBeenCalled()
     expect(onAdd).not.toHaveBeenCalled()
   })
+
+  // RFC 0024 T2 — the ratio updates live as the operator types the value.
+  it('shows the acquisition ratio updating live as the value is typed', async () => {
+    const user = userEvent.setup({ delay: null })
+    render(<IncomingCardForm card={card({ display_price: '100.00' })} onAdd={vi.fn()} onCancel={vi.fn()} />)
+    expect(screen.queryByText(/paid/i)).not.toBeInTheDocument()
+    await user.type(screen.getByLabelText(/value/i), '32')
+    expect(await screen.findByText(/paid\s*\$32\.00/i)).toBeInTheDocument()
+    expect(screen.getByText('313%')).toBeInTheDocument()
+  })
 })

@@ -2278,7 +2278,11 @@ class TestAdminItemsBrief:
 
         assert resp.status_code == 200
         assert resp.json() == {
-            "x": {"name": "Charizard EX (alt art)", "card_id": "sv1-1"},
+            "x": {
+                "name": "Charizard EX (alt art)", "card_id": "sv1-1",
+                "cost_basis": "10.00", "market_value_at_purchase": None,
+                "acquisition_ratio": None, "current_market_value": "50.00",
+            },
         }
 
     def test_falls_back_to_the_catalog_name_when_the_item_has_none(self, admin_client):
@@ -2292,7 +2296,9 @@ class TestAdminItemsBrief:
             headers=_auth_header(admin),
         )
 
-        assert resp.json() == {"x": {"name": "Pikachu", "card_id": "sv1-1"}}
+        body = resp.json()
+        assert body["x"]["name"] == "Pikachu"
+        assert body["x"]["card_id"] == "sv1-1"
 
     def test_a_sealed_item_has_no_card_id_and_does_not_500(self, admin_client):
         """Sealed/bulk kinds have no `card_id` attribute at all — reaching
@@ -2309,7 +2315,11 @@ class TestAdminItemsBrief:
 
         assert resp.status_code == 200
         assert resp.json() == {
-            "box": {"name": "Obsidian Flames ETB", "card_id": None},
+            "box": {
+                "name": "Obsidian Flames ETB", "card_id": None,
+                "cost_basis": "40.00", "market_value_at_purchase": None,
+                "acquisition_ratio": None, "current_market_value": None,
+            },
         }
 
     def test_an_unknown_item_id_is_null_not_omitted(self, admin_client):
@@ -2324,6 +2334,49 @@ class TestAdminItemsBrief:
 
         assert resp.status_code == 200
         assert resp.json() == {"does-not-exist": None}
+
+    def test_returns_cost_basis_market_at_purchase_and_the_computed_ratio(
+            self, admin_client):
+        """RFC 0024 T5 — the four fields this endpoint gained: `cost_basis`,
+        `market_value_at_purchase`, the ratio computed server-side from
+        those two, and `current_market_value` (a separate, present-day
+        figure). All stringified, never a bare JSON float — the same
+        discipline `slabs_sort.py`'s `_slab_row()` already documents."""
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_raw(
+            item_id="x", card_id="sv1-1", cost_basis="32.00",
+            market_value_at_purchase=Decimal("100.00"),
+            current_market_value="120.00",
+        ))
+
+        resp = client.post(
+            "/admin/inventory/items-brief",
+            json={"item_ids": ["x"]},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()["x"]
+        assert body["cost_basis"] == "32.00"
+        assert body["market_value_at_purchase"] == "100.00"
+        assert body["acquisition_ratio"] == "312.50"
+        assert body["current_market_value"] == "120.00"
+
+    def test_acquisition_ratio_is_null_when_cost_basis_is_absent_or_zero(
+            self, admin_client):
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_raw(
+            item_id="free", card_id="sv1-1", cost_basis="0.00",
+            market_value_at_purchase=Decimal("100.00"),
+        ))
+
+        resp = client.post(
+            "/admin/inventory/items-brief",
+            json={"item_ids": ["free"]},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.json()["free"]["acquisition_ratio"] is None
 
     def test_rejects_a_non_list_body(self, admin_client):
         client, _, admin, _ = admin_client

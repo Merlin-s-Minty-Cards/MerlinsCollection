@@ -950,6 +950,114 @@ that table only. A mixed-direction group (a trade) renders a **net** total —
 summing magnitudes would report a $50-for-$30 trade as `$80`, a number that
 exists nowhere.
 
+## A TYPO IN THE LEDGER GETS A DIFFERENT TOOL THAN "THIS DID NOT HAPPEN" — EDIT, NOT VOID
+
+RFC 0024 T3/T4. Void says *"this sale did not happen."* It is the wrong tool
+for *"this sale happened, I typed $150 instead of $105"* — voiding and
+re-entering loses the original date, breaks the `batch_id` grouping, breaks
+the item's timeline continuity, and leaves a struck-through phantom in the
+archive that misrepresents what occurred.
+
+`PATCH /admin/transactions/{txn_id}` accepts any subset of `amount`, `date`,
+`payment_method`, `fee`, `show_id`, `notes`. **Never `item_id`, `type` or
+`category`** — re-pointing a leg rewrites two items' histories from one edit;
+the correct expression of "this was the wrong card" is a void plus a fresh
+entry, unchanged by this feature. Refusals: a **voided** transaction is `409`
+(restore first — editing a row that counts toward nothing is incoherent); a
+**trade leg** is `400`, for the same reason a trade cannot be voided at all —
+`_compute_basis_pool` allocated the incoming cost basis pro-rata across every
+leg at confirm time, so a single-leg amount edit would leave that allocation
+inconsistent with its own inputs, and re-running it would rewrite cost bases
+on items that may since have moved on. **A mistaken trade still has no
+correction path** — the exact same recorded limitation the void feature
+already states for a mistaken purchase. An unknown `txn_id` is `404`; a
+disallowed field or an unreadable value is `422`.
+
+**A date change moves the row between DynamoDB month partitions in ONE
+`transact_write_items`, never two calls** — the SK embeds the date
+(`PK = TXN#<YYYY-MM>`, `SK = <ISO date>#<txn_id>`), so a half-applied move
+would duplicate or destroy the ledger row, the exact partial-write class
+`reverse_sales` already exists to prevent. Same date stays a plain
+`put_transaction`, which whole-item `put_item`s and so correctly drops the
+GSI2 show attributes when `show_id` is cleared.
+
+**`cost_basis` follows a corrected PURCHASE amount, guarded on equality with
+the OLD amount.** If the item's current `cost_basis` no longer equals what
+the ledger said before the edit, the sync is skipped and
+`cost_basis_skipped_reason` explains why (`"cost basis was changed manually
+since"`, or `"item not found"`) — never a silent overwrite of a hand
+correction, and never a silent skip either. **RFC 0022 made this the COMMON
+case, not a rare one**: once `cost_basis` is inline-editable on six admin
+tables, an admin correcting the item directly is routine, and every such
+correction breaks the equality the guard checks. `cost_basis_skipped_reason`
+is rendered as plain information in `TransactionEditDialog` (`role="status"`,
+not an error), the same way this file's Universal Inline Editing section
+already documents. Sales never touch `cost_basis` — a sale's `amount` is
+revenue, not an acquisition cost.
+
+Three new `Transaction` fields, mirroring the void feature's shape exactly:
+`edited_at`, `edited_by` (**server-stamped** from `email or username or sub`,
+never client-supplied — same rule as `voided_by`), `edit_history` (a
+`TransactionEdit` per EDIT, not per changed field — a six-field correction is
+one thing that happened, capped at 20 entries for the same 400 KB item-size
+reason `review_reason`/`void_reason` are bounded). **One timeline event per
+transaction, keyed `<txn_id>#edit`, re-put rather than appended** — the sale's
+own event is `TIMELINE#<date>#<txn_id>`, so a same-day edit would otherwise
+overwrite it, identical to how a same-day void is keyed `#void`.
+`ShowAnalyticsSnapshot.stale` is marked for both the OLD and NEW show/date,
+reusing void's own marking function twice rather than a second resolver.
+**`services/ledger.is_countable` is untouched** — an edited transaction still
+counts toward everything it counted toward before; there is no
+`edited_at is None` check anywhere, on the same "one countability definition"
+rule the void section above already states.
+
+The UI is a **dialog** (`TransactionEditDialog`, opened from a per-leg Edit
+button in `SaleDetailModal`, beside the existing Void/Restore), not an RFC
+0022 inline cell — an amount edit here has a side effect on another entity,
+can move a row between DynamoDB partitions, and marks a report stale, which
+needs a surface that can show `cost_basis_skipped_reason` on the way back. It
+sends only the fields that actually changed from the leg's own current value,
+never the whole form.
+
+## THE ACQUISITION RATIO — market at purchase over what we paid, one authority per side
+
+RFC 0024 T1. The owner's *"market @ purchase / amount paid"* — pay $32 for a
+card the market said was worth $100 and the ratio is 312%. Two
+implementations, deliberately, in the same shape as `itemTitle` /
+`adminItemName` / `admin_item_name` / MCP's `toCard`: `acquisition_ratio`
+(`backend/src/merlins_collection/services/acquisition.py`) and
+`acquisitionRatio` (`frontend/lib/acquisition.ts`), pinned together by a
+shared cross-boundary fixture
+(`shared/test-fixtures/acquisition-ratio-cases.json`) rather than by trust —
+`mcp-server/src/condition-pricing.ts`'s unchecked cross-language parity claim
+is the cautionary precedent this test exists to not repeat.
+
+**`None`/`null` when either figure is absent, or when the cost basis is
+zero** — a free card (a throw-in, a bulk lot) is routine at a buy table, and
+its ratio is undefined, not infinite and not zero. Every caller renders an
+em dash, never a guessed number. Tone bands, defined once in `ratioTone()`:
+≥200% good, 100–200% neutral, <100% bad (paid over market), `null` → no chip
+at all, never a grey zero.
+
+**Never stored** — it is derived from `market_value_at_purchase` and
+`cost_basis`, both already on `InventoryItem`, and would go stale the moment
+either changes, including from the transaction-edit `cost_basis` sync
+directly above. Rendered on every deal row (`DealCardRow`'s third line,
+`Market $100.00 · Paid $32.00 · 312%`) and in the richer transaction detail
+`POST /admin/inventory/items-brief` now returns.
+
+**Customer view hides the ratio AND `Paid`; `Market` stays visible.** Price
+paid is our cost basis, and showing a customer that we paid $32 for the card
+we're trading them at $100 is strictly worse than showing them the margin
+percentage — the owner's instruction to hide "percent" is read as "hide what
+tells them our margin." `customerView` is the same page-state prop already
+threaded through `DealSummary`, now also threaded into `DealSearchPanel`,
+`DealStagedColumn` and `DealCardRow` by the same name. **The suppression
+happens at RENDER time, not at stage time** — `DealStagedColumn` strips
+`pricePaid` and forces `showRatio={false}` only while the toggle is on, while
+the staged row's OWN state always keeps the real values, because the
+operator can flip Customer View after cards are already staged.
+
 **Cosigners** (`/admin/cosigners`) — CRUD + payout-link tool for consignors;
 card assignment is still raw item-ID entry (no picker UI, deliberately out of
 scope) on this page specifically. RFC 0012 added assign/unassign elsewhere

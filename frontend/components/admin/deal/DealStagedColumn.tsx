@@ -34,6 +34,13 @@ export interface DealStagedColumnProps {
    * read-only.
    */
   onEditValue?: (index: number, raw: string, parsed: number | null) => void
+  /**
+   * RFC 0024 T2 — same prop, same name, threaded from `/admin/trade`. A
+   * staged row keeps its real `pricePaid` in state (the operator can flip
+   * this toggle after cards are already staged); the suppression happens
+   * here, at render time, not baked into what was staged.
+   */
+  customerView?: boolean
 }
 
 export default function DealStagedColumn({
@@ -45,6 +52,7 @@ export default function DealStagedColumn({
   total,
   emptyLabel,
   onEditValue,
+  customerView = false,
 }: DealStagedColumnProps) {
   // The MoneyInput owns its text while typing, keyed by row index — a
   // half-typed "5" or "50." must not be discarded just because it does not
@@ -65,7 +73,11 @@ export default function DealStagedColumn({
             {rows.map((row, idx) => (
               <DealCardRow
                 key={idx}
-                card={onEditValue ? { ...row, price: null } : row}
+                card={{
+                  ...(onEditValue ? { ...row, price: null } : row),
+                  ...(customerView ? { pricePaid: undefined } : {}),
+                  showRatio: !customerView,
+                }}
                 trailing={
                   <div className="flex items-center gap-2">
                     {onEditValue && (

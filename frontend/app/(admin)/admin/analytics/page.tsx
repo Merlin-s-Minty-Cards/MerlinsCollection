@@ -22,6 +22,10 @@ import TransactionGroups, {
   type ArchiveTransaction,
   type VoidTarget,
 } from '@/components/admin/shared/TransactionGroups'
+import type {
+  TransactionEditPatch,
+  TransactionEditResult,
+} from '@/components/admin/shared/TransactionEditDialog'
 import DataTable, { type Column } from '@/components/admin/shared/DataTable'
 
 // ---------------------------------------------------------------------------
@@ -286,6 +290,19 @@ export default function AdminAnalyticsPage() {
   const handleRestore = async (target: VoidTarget) => {
     await api.post(voidPath(target, 'restore'))
     await refetchDay()
+  }
+
+  // RFC 0024 T3/T4 — a typo correction, always on ONE leg (never a batch_id,
+  // unlike void/restore above). The day's metrics move with an amount/date
+  // edit exactly as they do with a void, so the same refetch-together
+  // discipline applies.
+  const handleEditTransaction = async (
+    txnId: string,
+    patch: TransactionEditPatch,
+  ): Promise<TransactionEditResult> => {
+    const result = await api.patch<TransactionEditResult>(`/transactions/${txnId}`, patch)
+    await refetchDay()
+    return result
   }
 
   const openShowDetail = (show: Show) => {
@@ -698,6 +715,7 @@ export default function AdminAnalyticsPage() {
                     emptyMessage="No transactions for this date"
                     onVoid={handleVoid}
                     onRestore={handleRestore}
+                    onEdit={handleEditTransaction}
                   />
                 </section>
               </>

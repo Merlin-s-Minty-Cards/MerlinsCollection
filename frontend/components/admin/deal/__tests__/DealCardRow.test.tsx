@@ -85,4 +85,66 @@ describe('DealCardRow', () => {
     render(<DealCardRow card={card({ consignorLabel: null })} onAdd={vi.fn()} />)
     expect(screen.queryByText(/consignor:/i)).not.toBeInTheDocument()
   })
+
+  // RFC 0024 T2 — market / paid / ratio on every deal row.
+  describe('acquisition line', () => {
+    it('renders market, paid and ratio together', () => {
+      render(
+        <DealCardRow
+          card={card({ marketValue: '100.00', pricePaid: '32.00', showRatio: true })}
+          onAdd={vi.fn()}
+        />,
+      )
+      expect(screen.getByText(/market\s*\$100\.00/i)).toBeInTheDocument()
+      expect(screen.getByText(/paid\s*\$32\.00/i)).toBeInTheDocument()
+      expect(screen.getByText('313%')).toBeInTheDocument()
+    })
+
+    it('does not render the acquisition line for a row kind that carries neither field', () => {
+      render(<DealCardRow card={card()} onAdd={vi.fn()} />)
+      expect(screen.queryByText(/market\s*\$/i)).not.toBeInTheDocument()
+    })
+
+    it('renders an absent market or paid figure as a dash, never $0.00', () => {
+      render(
+        <DealCardRow
+          card={card({ marketValue: null, pricePaid: null, showRatio: true })}
+          onAdd={vi.fn()}
+        />,
+      )
+      expect(screen.getByText(/market\s*—/i)).toBeInTheDocument()
+      expect(screen.getByText(/paid\s*—/i)).toBeInTheDocument()
+    })
+
+    it('renders no ratio chip at all when the ratio is undefined, not a grey zero', () => {
+      render(
+        <DealCardRow
+          card={card({ marketValue: '100.00', pricePaid: null, showRatio: true })}
+          onAdd={vi.fn()}
+        />,
+      )
+      expect(screen.queryByText(/%/)).not.toBeInTheDocument()
+    })
+
+    it('hides the ratio under customer view while keeping market visible', () => {
+      render(
+        <DealCardRow
+          card={card({ marketValue: '100.00', pricePaid: '32.00', showRatio: false })}
+          onAdd={vi.fn()}
+        />,
+      )
+      expect(screen.getByText(/market\s*\$100\.00/i)).toBeInTheDocument()
+      expect(screen.queryByText('313%')).not.toBeInTheDocument()
+    })
+
+    it('omits the paid segment entirely when the caller does not pass it (customer view)', () => {
+      render(
+        <DealCardRow
+          card={card({ marketValue: '100.00', pricePaid: undefined, showRatio: false })}
+          onAdd={vi.fn()}
+        />,
+      )
+      expect(screen.queryByText(/paid/i)).not.toBeInTheDocument()
+    })
+  })
 })

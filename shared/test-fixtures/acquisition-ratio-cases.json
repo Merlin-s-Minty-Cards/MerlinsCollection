@@ -1,0 +1,47 @@
+{
+  "comment": "Shared oracle for RFC 0024 T1's acquisition_ratio (Python) / acquisitionRatio (TypeScript). Both backend/tests/test_cross_boundary.py and frontend/lib/__tests__/acquisition.test.ts load THIS file and assert their own language's implementation against it, so the two implementations cannot drift the way mcp-server/src/condition-pricing.ts's multiplier table once did (each side had only its own hardcoded expectations; CLAUDE.md records the incident). This file lives under shared/test-fixtures/ rather than shared/ directly: it is a test-only oracle, never read at runtime by either the backend or the frontend build, unlike shared/tool-contract.json which both processes read live. money-like fields (market, cost, expected) are strings, or null, so both a Python Decimal parser and a JS Number parser read the identical exact value with no float round-trip through JSON's number type.",
+  "cases": [
+    {
+      "name": "both present",
+      "market": "100.00",
+      "cost": "32.00",
+      "expected": "312.50"
+    },
+    {
+      "name": "market absent",
+      "market": null,
+      "cost": "32.00",
+      "expected": null
+    },
+    {
+      "name": "cost absent",
+      "market": "100.00",
+      "cost": null,
+      "expected": null
+    },
+    {
+      "name": "cost zero",
+      "market": "100.00",
+      "cost": "0",
+      "expected": null
+    },
+    {
+      "name": "cost zero and market zero",
+      "market": "0",
+      "cost": "0",
+      "expected": null
+    },
+    {
+      "name": "fractional result",
+      "market": "10.00",
+      "cost": "3.00",
+      "expected": "333.33"
+    },
+    {
+      "name": "very large result",
+      "market": "123456.78",
+      "cost": "0.03",
+      "expected": "411522600.00"
+    }
+  ]
+}

@@ -226,6 +226,13 @@ export default function IncomingCardForm({ card, onAdd, onCancel, gradedAllowed 
             // condition-adjusted. Labelled, never presented as a sale price.
             price: card.display_price,
             priceLabel: 'market',
+            // RFC 0024 T2 — the acquisition line updates LIVE as the operator
+            // types the value below, before the leg is ever staged. `pricePaid`
+            // is only present once something parses, so the line doesn't show
+            // "Paid —" while the field is simply still empty.
+            marketValue: card.display_price,
+            ...(parseMoney(value) !== null ? { pricePaid: parseMoney(value) } : {}),
+            showRatio: true,
           }}
         />
       )}

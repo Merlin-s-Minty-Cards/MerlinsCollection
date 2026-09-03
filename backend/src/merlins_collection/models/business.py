@@ -23,6 +23,32 @@ class TransactionType(StrEnum):
     PURCHASE = "purchase"
 
 
+class TransactionFieldChange(BaseModel):
+    """One field's before/after within a single edit. Values are stored as
+    strings (``str(old)``/``str(new)``) so the history survives round-tripping
+    a ``date`` or ``Decimal`` through JSON without a second serializer to keep
+    in sync with the model's own."""
+
+    field: str
+    old: str | None
+    new: str | None
+
+
+class TransactionEdit(BaseModel):
+    """One PATCH to a transaction — one entry per EDIT, not per changed field.
+
+    A six-field correction is one thing that happened; capping the history at
+    20 *fields* would let three corrections exhaust it. Oldest entries drop
+    past ``Transaction.edit_history``'s ``max_length=20``, the same DynamoDB
+    400 KB-ceiling reasoning that already bounds ``review_reason`` and
+    ``void_reason``.
+    """
+
+    at: datetime
+    by: str
+    changes: list[TransactionFieldChange]
+
+
 class ItemCategory(StrEnum):
     """Denormalized item category for Vending-Net-style breakdowns."""
 
@@ -77,6 +103,17 @@ class Transaction(BaseModel):
     # Bounded like ``review_reason``, for the same reason: free text riding
     # into a DynamoDB item with a 400 KB ceiling.
     void_reason: str | None = Field(default=None, max_length=500)
+
+    # RFC 0024 T3 — a typo correction path distinct from void ("this happened,
+    # I typed it wrong") vs void ("this did not happen"). All optional with
+    # None/[] defaults so every existing row still validates and nothing is
+    # backfilled.
+    edited_at: datetime | None = None
+    # SERVER-stamped from the authenticated principal, exactly like
+    # ``voided_by`` — a client's claim about who edited a ledger row is not
+    # evidence.
+    edited_by: str | None = None
+    edit_history: list[TransactionEdit] = Field(default_factory=list, max_length=20)
 
 
 class ExpenseCategory(StrEnum):

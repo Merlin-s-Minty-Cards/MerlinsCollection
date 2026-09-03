@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime, timedelta, timezone
+from datetime import date as _date_type
 from decimal import Decimal
 from typing import Any
 
@@ -29,11 +30,14 @@ from merlins_collection.models.business import (
     Show,
     ShowAnalyticsSnapshot,
     Transaction,
+    TransactionEdit,
+    TransactionFieldChange,
     TransactionType,
 )
 from merlins_collection.services.dynamodb import (
     InventoryRepository,
     LedgerReversalConflictError,
+    TransactionEditConflictError,
 )
 from merlins_collection.services.ledger import countable
 from merlins_collection.services.shows_sort import SORT_FIELDS as SHOW_SORT_FIELDS
@@ -797,4 +801,212 @@ def restore_transaction_batch(
         "batch_id": batch_id,
         "restored": len(restored),
         "items": [r.model_dump(mode="json") for r in restored],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Transaction edit — a typo correction path, distinct from void (RFC 0024 T3)
+#
+# A void says "this sale did not happen"; this says "this happened, I typed
+# $150 instead of $105". Voiding and re-entering a typo would lose the
+# original date, the batch grouping, and the item's timeline continuity, and
+# would leave a struck-through phantom in the archive that misrepresents what
+# occurred. See CLAUDE.md's "THE LEDGER HAS A CORRECTION PATH" section.
+# ---------------------------------------------------------------------------
+
+# Fields a client may never touch. Re-pointing a leg (`item_id`) or its
+# `type`/`category` rewrites two items' histories from one edit — the correct
+# expression of "this was the wrong card" is a void plus a fresh entry, not an
+# edit. `extra="forbid"` turns any of these (or an unknown key) into a 422
+# rather than a silent no-op.
+_TRADE_LEG_EDIT_MESSAGE = (
+    "A trade leg cannot be edited — its incoming cost basis was allocated "
+    "across every leg at confirm time, and a single-leg edit would leave that "
+    "allocation inconsistent with its own inputs. Void the whole trade "
+    "instead (a mistaken trade currently has no correction path)."
+)
+
+# These four correspond to genuinely required, non-nullable fields on
+# `Transaction` — sending one explicitly as `null` is not "clearing" it (there
+# is nothing sensible to clear it TO), so it is rejected rather than silently
+# accepted and left to fail `Transaction`'s own validation invisibly (a plain
+# `model_copy(update=...)` does not revalidate).
+_NON_NULLABLE_EDIT_FIELDS = frozenset({"amount", "date", "payment_method", "fee"})
+
+
+class TransactionEditRequest(BaseModel):
+    """Any subset of these six fields. Anything else is a 422 via
+    ``extra="forbid"`` — the same rule ``LocationLabelUpdate`` already
+    follows for exactly this reason."""
+
+    model_config = {"extra": "forbid"}
+
+    amount: Decimal | None = None
+    # Aliased import: a field literally named ``date`` would otherwise shadow
+    # the ``datetime.date`` class its own annotation refers to (Python 3.14's
+    # deferred annotation evaluation resolves ``date`` against the class's own
+    # namespace, not the module's, once the field exists) — the exact reason
+    # ``models/business.py`` already imports ``date as date_type`` for
+    # ``Transaction.date``.
+    date: _date_type | None = None
+    payment_method: str | None = None
+    fee: Decimal | None = None
+    show_id: str | None = None
+    notes: str | None = None
+
+
+def _edit_repr(value: Any) -> str | None:
+    """Render one field's value for `TransactionFieldChange` — a plain string
+    so the audit trail survives round-tripping a `date`/`Decimal` through JSON
+    without a second serializer to keep in sync with the model's own."""
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def _edit_timeline_event(txn: Transaction, changes: list[TransactionFieldChange]) -> dict[str, Any]:
+    """The one timeline event describing this transaction's most recent edit.
+
+    Keyed ``<txn_id>#edit`` and re-put rather than appended, mirroring
+    ``_void_timeline_event`` exactly and for the identical reason: the
+    original sale event is keyed ``TIMELINE#<date>#<txn_id>``, so a same-day
+    edit — the common case, a typo caught minutes later — would otherwise
+    overwrite the sale itself.
+    """
+    return {
+        "item_id": txn.item_id,
+        "txn_id": f"{txn.txn_id}#edit",
+        "type": "edited",
+        "date": date.today().isoformat(),
+        "amount": str(txn.amount),
+        "edited_txn_id": txn.txn_id,
+        "edited_at": (
+            txn.edited_at.isoformat()
+            if isinstance(txn.edited_at, datetime) else str(txn.edited_at)
+        ),
+        "edited_by": txn.edited_by,
+        "changes": [c.model_dump(mode="json") for c in changes],
+    }
+
+
+@router.patch("/transactions/{txn_id}")
+def edit_transaction(
+    txn_id: str,
+    body: TransactionEditRequest,
+    repo: InventoryRepository = Depends(get_repo),
+    user: AuthenticatedUser = Depends(require_admin),
+) -> dict[str, Any]:
+    """Correct a typo in the ledger, with a server-stamped audit trail.
+
+    Refuses: a voided transaction (409 — restore first, editing a row that
+    counts toward nothing produces an incoherent audit trail); a trade leg
+    (400 — see ``_TRADE_LEG_EDIT_MESSAGE``); an unknown ``txn_id`` (404); a
+    disallowed field or an unreadable value (422, via ``extra="forbid"`` and
+    each field's own Pydantic type).
+    """
+    old_txn = _require_transaction(repo, txn_id)
+    if old_txn.voided_at is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Transaction is voided — restore it before editing",
+        )
+    if old_txn.trade_id is not None:
+        raise HTTPException(status_code=400, detail=_TRADE_LEG_EDIT_MESSAGE)
+
+    provided = body.model_dump(exclude_unset=True)
+    for field in _NON_NULLABLE_EDIT_FIELDS & provided.keys():
+        if provided[field] is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"'{field}' cannot be cleared — supply a value or omit it",
+            )
+
+    field_changes: list[TransactionFieldChange] = []
+    update: dict[str, Any] = {}
+    for field, new_value in provided.items():
+        old_value = getattr(old_txn, field)
+        if new_value == old_value:
+            continue
+        field_changes.append(TransactionFieldChange(
+            field=field, old=_edit_repr(old_value), new=_edit_repr(new_value),
+        ))
+        update[field] = new_value
+
+    if not field_changes:
+        # Every provided value already matched what was stored — nothing
+        # happened, so no audit entry, no timeline event, and no snapshot
+        # is marked stale over a no-op.
+        return {
+            **old_txn.model_dump(mode="json"),
+            "cost_basis_updated": False,
+            "cost_basis_skipped_reason": None,
+        }
+
+    actor = _actor(user)
+    stamped_at = datetime.now(tz=timezone.utc)
+    history = [
+        *old_txn.edit_history,
+        TransactionEdit(at=stamped_at, by=actor, changes=field_changes),
+    ][-20:]
+    new_txn = old_txn.model_copy(update={
+        **update,
+        "edited_at": stamped_at,
+        "edited_by": actor,
+        "edit_history": history,
+    })
+
+    # cost_basis follows a corrected PURCHASE amount, guarded on equality with
+    # the OLD amount so a hand-correction the admin already made on the item
+    # (RFC 0022 made this the COMMON case, not a rare one) is never silently
+    # overwritten. Decided BEFORE the write, from a plain read — the atomic
+    # write's own ConditionExpression re-checks the same equality only as a
+    # concurrency guard against a race in the gap between this read and that
+    # write, not as the decision itself.
+    cost_basis_item_id: str | None = None
+    new_cost_basis: Decimal | None = None
+    old_cost_basis_expected: Decimal | None = None
+    cost_basis_updated = False
+    cost_basis_skipped_reason: str | None = None
+
+    if old_txn.type == TransactionType.PURCHASE and "amount" in update:
+        item = repo.get_inventory_item(old_txn.item_id)
+        if item is None:
+            cost_basis_skipped_reason = "item not found"
+        elif item.cost_basis != old_txn.amount:
+            cost_basis_skipped_reason = "cost basis was changed manually since"
+        else:
+            cost_basis_item_id = old_txn.item_id
+            new_cost_basis = new_txn.amount
+            old_cost_basis_expected = old_txn.amount
+            cost_basis_updated = True
+
+    try:
+        repo.edit_transaction(
+            old_txn=old_txn,
+            new_txn=new_txn,
+            cost_basis_item_id=cost_basis_item_id,
+            new_cost_basis=new_cost_basis,
+            old_cost_basis_expected=old_cost_basis_expected,
+        )
+    except TransactionEditConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="The transaction or its item changed while writing — nothing was written",
+        ) from exc
+
+    repo.put_timeline_event(new_txn.item_id, _edit_timeline_event(new_txn, field_changes))
+
+    # Both the OLD and the NEW show/date are marked stale — if the date moved
+    # between shows, both snapshots are now wrong. `_mark_snapshots_stale`
+    # already resolves "every show whose date matches", so calling it once per
+    # transaction state covers both without duplicating that resolution here.
+    _mark_snapshots_stale(repo, old_txn)
+    _mark_snapshots_stale(repo, new_txn)
+
+    return {
+        **new_txn.model_dump(mode="json"),
+        "cost_basis_updated": cost_basis_updated,
+        "cost_basis_skipped_reason": cost_basis_skipped_reason,
     }

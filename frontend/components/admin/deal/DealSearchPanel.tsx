@@ -47,6 +47,9 @@ export interface DealInventoryItem extends AdminNamedItem {
   location?: string | null
   current_market_value?: string | number | null
   sticker_price?: string | number | null
+  /** Already in `/admin/inventory/search`'s response — RFC 0024 T2 just reads it. */
+  cost_basis?: string | number | null
+  market_value_at_purchase?: string | number | null
 }
 
 const DEBOUNCE_MS = 300
@@ -75,12 +78,17 @@ export interface DealSearchPanelProps {
    * catalog search here — it's a control for a leg kind Sell doesn't have).
    */
   manualEntryAllowed: boolean
+  /** RFC 0024 T2 — same prop, same name, threaded from `/admin/trade`. Hides
+   *  price-paid and the acquisition ratio on inventory rows; market stays. */
+  customerView?: boolean
 }
 
 function InventorySearch({
   onPick,
+  customerView,
 }: {
   onPick: (item: DealInventoryItem) => void
+  customerView: boolean
 }) {
   const api = useAdminApi()
   const [name, setName] = useState('')
@@ -153,6 +161,12 @@ function InventorySearch({
                   // would apply it twice.
                   price: item.sticker_price ?? item.current_market_value,
                   priceLabel: item.sticker_price ? 'sticker' : 'market',
+                  // RFC 0024 T2 — context for the deal, not the headline. Paid
+                  // is our cost basis, so it (and the ratio it feeds) is
+                  // omitted entirely under customer view rather than hidden.
+                  marketValue: item.market_value_at_purchase,
+                  ...(customerView ? {} : { pricePaid: item.cost_basis }),
+                  showRatio: !customerView,
                 }}
                 onAdd={() => onPick(item)}
               />
@@ -172,6 +186,7 @@ export default function DealSearchPanel({
   onPickInventory,
   onManualEntry,
   manualEntryAllowed,
+  customerView = false,
 }: DealSearchPanelProps) {
   const showToggle = sourceForMode(mode) === 'both'
   // Outside trade, the caller's `source` cannot be wrong — but the mode is the
@@ -218,7 +233,7 @@ export default function DealSearchPanel({
         // two of them is a second thing to explain, not a second chance.
         <CardSearchPanel onSelect={onPickCatalog} />
       ) : (
-        <InventorySearch onPick={onPickInventory} />
+        <InventorySearch onPick={onPickInventory} customerView={customerView} />
       )}
     </div>
   )

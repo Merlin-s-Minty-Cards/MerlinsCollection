@@ -30,6 +30,7 @@ from merlins_collection.models.inventory import (
     new_ulid,
     normalize_condition,
 )
+from merlins_collection.services.acquisition import acquisition_ratio
 from merlins_collection.services.card_text import admin_item_name
 from merlins_collection.services.condition_pricing import (
     apply_condition_adjustment,
@@ -961,10 +962,19 @@ def admin_resolve_items_brief(
     than an omitted key for an id that no longer resolves) rather than a
     request per row (CLAUDE.md: "never fire a request per row").
 
-    Deliberately does NOT return a price: the transaction leg's own
-    ``amount`` is the authoritative sold/bought figure the caller already
-    has, and echoing a second copy here (current_market_value? cost_basis?)
-    would just be a figure that can drift from the one that matters.
+    Deliberately does NOT echo a second copy of the amount a leg was
+    actually WORTH: the transaction leg's own ``amount`` remains the sole
+    authority for that, and nothing here claims to be it.
+
+    RFC 0024 T5 added four fields that are NOT a second copy of ``amount`` —
+    ``cost_basis``, ``market_value_at_purchase``, ``acquisition_ratio`` and
+    ``current_market_value`` are different facts about a different moment
+    (what the card cost us, and what the market said then and says now).
+    They cannot drift from ``amount`` because they were never claims about
+    it, which is exactly the distinction this docstring used to elide — an
+    earlier version of it forbade echoing "a second copy" broadly enough to
+    read as forbidding these too. It didn't; update this note again, rather
+    than reverting the fields, if that reasoning ever stops holding.
 
     Name resolution goes through ``admin_item_name`` — the one shared
     authority (CLAUDE.md, "Name resolution: display_name_override wins
@@ -972,7 +982,8 @@ def admin_resolve_items_brief(
     the slab list already use for a card with no display name of its own.
     ``card_id`` is read with ``getattr``, not ``item.card_id``: sealed and
     bulk kinds have no such attribute at all, and reaching for it directly
-    raises ``AttributeError`` instead of returning ``None``.
+    raises ``AttributeError`` instead of returning ``None``. The four money
+    fields use the same ``getattr`` pattern for the same reason.
     """
     item_ids = body.get("item_ids", [])
     if not isinstance(item_ids, list):
@@ -995,7 +1006,28 @@ def admin_resolve_items_brief(
             if card:
                 name = card.name
 
-        result[item_id] = {"name": name or None, "card_id": card_id}
+        cost_basis = getattr(item, "cost_basis", None)
+        market_value_at_purchase = getattr(item, "market_value_at_purchase", None)
+        current_market_value = getattr(item, "current_market_value", None)
+        ratio = acquisition_ratio(market_value_at_purchase, cost_basis)
+
+        # Stringified, not left as `Decimal` — the same discipline
+        # `slabs_sort.py`'s `_slab_row()` already documents: FastAPI's default
+        # encoder would otherwise round-trip a Decimal through `float`, which
+        # is exactly the precision loss CLAUDE.md's money rules exist to
+        # prevent. `None` stays `None` rather than becoming the string "None".
+        result[item_id] = {
+            "name": name or None,
+            "card_id": card_id,
+            "cost_basis": str(cost_basis) if cost_basis is not None else None,
+            "market_value_at_purchase": (
+                str(market_value_at_purchase) if market_value_at_purchase is not None else None
+            ),
+            "acquisition_ratio": str(ratio) if ratio is not None else None,
+            "current_market_value": (
+                str(current_market_value) if current_market_value is not None else None
+            ),
+        }
     return result
 
 

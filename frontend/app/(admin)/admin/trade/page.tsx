@@ -165,6 +165,11 @@ export default function DealPage() {
         agreedValue: leg.agreed_value,
         consignorId: leg.consignor_id ?? null,
         consignorLabel: leg.consignor_label ?? null,
+        // RFC 0024 T2 — the market figure `IncomingLeg` already carries, and
+        // the agreed value doubling as "price paid". Real values always
+        // stored here; `DealStagedColumn` decides what customer view hides.
+        marketValue: leg.market_value ?? null,
+        pricePaid: leg.agreed_value,
       }])
       setFormCard(undefined)
     } catch (err) {
@@ -189,6 +194,10 @@ export default function DealPage() {
         priceLabel: 'value',
         agreedValue: value,
         costBasis,
+        // RFC 0024 T2 — real values always stored; `DealStagedColumn`
+        // decides what customer view hides at render time.
+        marketValue: item.market_value_at_purchase ?? null,
+        pricePaid: costBasis,
       }])
     } catch (err) {
       alert(err instanceof AdminApiError ? err.detail : 'Failed to add card')
@@ -429,6 +438,7 @@ export default function DealPage() {
             onPickInventory={handlePickInventory}
             onManualEntry={() => setFormCard(null)}
             manualEntryAllowed={session.supports.incoming}
+            customerView={customerView}
           />
         ) : (
           <div data-testid="incoming-form">
@@ -452,6 +462,7 @@ export default function DealPage() {
             onRemove={removeIncoming}
             total={incomingTotal}
             emptyLabel="No items coming in yet"
+            customerView={customerView}
           />
         )}
         {session.supports.outgoing && (
@@ -464,6 +475,7 @@ export default function DealPage() {
             onEditValue={editOutgoingValue}
             total={outgoingTotal}
             emptyLabel="No items going out yet"
+            customerView={customerView}
           />
         )}
         <DealSummary

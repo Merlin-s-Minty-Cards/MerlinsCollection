@@ -140,4 +140,45 @@ describe('DealSearchPanel', () => {
     render(<DealSearchPanel mode="sell" source="inventory" {...noop} manualEntryAllowed={false} />)
     expect(screen.queryByRole('button', { name: /manual/i })).not.toBeInTheDocument()
   })
+
+  // RFC 0024 T2 — market @ purchase and cost basis on inventory rows.
+  describe('acquisition figures on inventory rows', () => {
+    it('renders market and paid from cost_basis / market_value_at_purchase', async () => {
+      const user = userEvent.setup({ delay: null })
+      mockInventory([
+        {
+          item_id: 'a',
+          display_name: 'Charizard',
+          card_id: 'en:base1-4',
+          current_market_value: '120.00',
+          cost_basis: '32.00',
+          market_value_at_purchase: '100.00',
+        },
+      ])
+      render(<DealSearchPanel mode="sell" source="inventory" {...noop} />)
+      await user.type(screen.getByLabelText(/card name/i), 'Char')
+      expect(await screen.findByText(/market\s*\$100\.00/i)).toBeInTheDocument()
+      expect(screen.getByText(/paid\s*\$32\.00/i)).toBeInTheDocument()
+      expect(screen.getByText('313%')).toBeInTheDocument()
+    })
+
+    it('hides paid and ratio under customer view, keeps market', async () => {
+      const user = userEvent.setup({ delay: null })
+      mockInventory([
+        {
+          item_id: 'a',
+          display_name: 'Charizard',
+          card_id: 'en:base1-4',
+          current_market_value: '120.00',
+          cost_basis: '32.00',
+          market_value_at_purchase: '100.00',
+        },
+      ])
+      render(<DealSearchPanel mode="sell" source="inventory" {...noop} customerView />)
+      await user.type(screen.getByLabelText(/card name/i), 'Char')
+      expect(await screen.findByText(/market\s*\$100\.00/i)).toBeInTheDocument()
+      expect(screen.queryByText(/paid/i)).not.toBeInTheDocument()
+      expect(screen.queryByText('313%')).not.toBeInTheDocument()
+    })
+  })
 })

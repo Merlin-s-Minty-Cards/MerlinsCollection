@@ -138,6 +138,13 @@ class TestRegistryIsTotal:
         "voided_at",
         "voided_by",
         "void_reason",
+        # Edit metadata (RFC 0024 T3): the same shape as the void fields
+        # above — rendered inline (an "edited …" note, `edit_history`
+        # entries) on the leg/detail popup, not as an archive column to sort
+        # a whole table by.
+        "edited_at",
+        "edited_by",
+        "edit_history",
     }
 
     def test_every_model_field_is_sortable_or_explicitly_excluded(self):

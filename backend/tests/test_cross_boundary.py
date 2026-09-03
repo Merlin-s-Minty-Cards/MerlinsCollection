@@ -11,6 +11,7 @@ moves or renames the constant SHOULD break this test, because it means the
 sync-point needs re-verification.
 """
 
+import json
 import re
 from decimal import Decimal
 from pathlib import Path
@@ -28,6 +29,9 @@ from merlins_collection.services.dynamodb import INVENTORY_SHARD_COUNT
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MCP_REPO = REPO_ROOT / "mcp-server" / "src" / "dynamodb-repository.ts"
 MCP_CONDITION_PRICING = REPO_ROOT / "mcp-server" / "src" / "condition-pricing.ts"
+ACQUISITION_RATIO_CASES = (
+    REPO_ROOT / "shared" / "test-fixtures" / "acquisition-ratio-cases.json"
+)
 
 
 def _read_mcp_source() -> str:
@@ -168,3 +172,46 @@ def test_condition_tier_order_matches():
     assert ts_order == py_order, (
         f"Tier order mismatch: Python={py_order}, TypeScript={ts_order}"
     )
+
+
+# ---- acquisition_ratio (RFC 0024 T1): a shared-fixture pin, not a source parse ----
+#
+# `acquisition_ratio` / `acquisitionRatio` is a computed function, not a
+# literal constant table, so the regex-over-TS-source trick the rest of this
+# file uses cannot pin it — there is no literal answer sitting in the source
+# for a regex to extract. Instead both languages' test suites load ONE shared
+# oracle (`shared/test-fixtures/acquisition-ratio-cases.json`) and assert
+# their own implementation against it independently. If both suites pass, the
+# two implementations agree by transitivity through the shared fixture — the
+# same guarantee this file's other tests give directly, without requiring a
+# Node subprocess inside a pytest run (this module's own docstring commits to
+# "no TS compiler needed").
+#
+# frontend/lib/__tests__/acquisition.test.ts is the other half of this pin.
+
+
+def _load_acquisition_ratio_cases() -> list[dict]:
+    return json.loads(ACQUISITION_RATIO_CASES.read_text(encoding="utf-8"))["cases"]
+
+
+def test_acquisition_ratio_matches_shared_cases():
+    """Python's acquisition_ratio agrees with the shared cross-boundary fixture.
+
+    The TypeScript mirror (acquisitionRatio) is pinned against the identical
+    file in frontend/lib/__tests__/acquisition.test.ts.
+    """
+    from merlins_collection.services.acquisition import acquisition_ratio
+
+    cases = _load_acquisition_ratio_cases()
+    assert len(cases) >= 7, "The shared fixture lost cases — restore it, don't trim this assertion"
+
+    for case in cases:
+        market = Decimal(case["market"]) if case["market"] is not None else None
+        cost = Decimal(case["cost"]) if case["cost"] is not None else None
+        expected = Decimal(case["expected"]) if case["expected"] is not None else None
+
+        actual = acquisition_ratio(market, cost)
+        assert actual == expected, (
+            f"case {case['name']!r}: market={case['market']}, cost={case['cost']} "
+            f"-> Python gave {actual}, fixture expects {expected}"
+        )
