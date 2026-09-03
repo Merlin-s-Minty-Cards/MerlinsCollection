@@ -53,4 +53,10 @@ def is_customer_visible(item) -> bool:
             getattr(item, "location", None) in CUSTOMER_VISIBLE_LOCATIONS
             or getattr(item, "factory_sealed", False)
         )
+        # RFC 0025: a card with no sticker price has no price we are willing
+        # to quote. It is not hidden because it is unimportant — it is hidden
+        # because the alternative is quoting a market estimate as a sale
+        # price. `sticker_price` is on `_ItemBase`, so both customer kinds
+        # (raw, graded) carry it and no `getattr` is needed.
+        and item.sticker_price is not None
     )

@@ -1151,24 +1151,90 @@ vitest does not collect it and `next build` does not typecheck it. Use
 deadlock `waitFor`. `mcp-server/` has no date helper and needs none — it returns
 ISO strings and never formats a calendar date.
 
-**Customer prices are CONDITION-ADJUSTED.** The catalog relays one market
-figure per finish and that figure is a **Near Mint** price. Every
-customer-facing surface scales it by the item's condition
-(`services/condition_pricing.py` — LP ×0.82, MP ×0.58, HP ×0.33, DMG ×0.15,
-`+`/`-` take the midpoint with the neighbouring tier). Before this, a DMG card
-was shown to a buyer at **~6.7× what the business valued it at**, wrong in the
-business's favour. Measured on live stock 2026-08-06: this moved the
-customer-visible total from **$6,143 to $5,005 (−18.5%)** across 73 of 228
-items.
+## THE CUSTOMER PRICE IS THE STICKER — CONDITION ADJUSTMENT NO LONGER APPLIES TO IT (RFC 0025)
 
-**The adjustment is applied in exactly ONE place per surface — do not add a
-second.** `_condition_adjust` in `routers/inventory.py` rewrites
-`summary.market_price` at enrichment, so the tile, the sort and the price bound
-all inherit the same number (this is what keeps RFC 0008 T1's single-authority
-invariant). `/inventory/summary` applies it to its **live** branch only, and MCP
-mirrors both via `mcp-server/src/condition-pricing.ts`. The stored
-`current_market_value` already has the multiplier baked in by the nightly
-denormalizer — **adjusting that would apply it twice.**
+**Superseded 2026-09-03.** Until RFC 0025, the customer price was a **Near
+Mint catalog figure, condition-adjusted at read time** — see the "history"
+subsection below for what that meant and why it existed; none of it is
+current behaviour any more, and nothing below the line describes the live
+system.
+
+**The customer price is now `sticker_price`, full stop, and a card with none
+is not shown at all.** `sticker_price` is what the business actually sells
+the card for — an admin typed it by hand, holding the card and its
+condition. The owner's framing: *"sticker price is essentially the price we
+sell the cards at."* A live catalog estimate is not that, and scaling it by
+condition doesn't make it that either.
+
+`services/customer_visibility.py::is_customer_visible` — the ONE per-item
+predicate behind `customer_visible_items` (filter search, the authed
+dashboard summary), `routers/public.py` (the anonymous featured endpoint),
+and `services/bedrock.py` (chat hydration, both the customer AND — since
+`_hydrate_item` is one shared hydrator by design — the admin analyst
+surfaces) — now requires `item.sticker_price is not None`. **A stickerless
+card in the vault is a routine state, not an edge case**: `/admin/outgoing`
+(Prep Queue) exists specifically to find unstickered available inventory.
+Measured against the live table 2026-09-03 before this shipped: 247
+customer-visible items, 232 stickered (93.9%), 15 not — reported to the
+owner per the RFC's own gate, and the decision to hide the 15 stood.
+
+`_display_price` (`routers/inventory.py`) — the single authority for the
+price **filter** and the price **sort** — is now `return item.sticker_price`.
+**No fallback**: `is_customer_visible` already guarantees a visible item has
+one, so `None` there means a caller is holding an item it should never have
+had. `hidden_no_price` is consequently **structurally always `0`** — kept in
+the response and the counting code stays live, as a tripwire (a test asserts
+the zero) rather than a deletion for a false economy.
+
+**Condition adjustment does NOT apply to a sticker price**, and this is the
+subtle, easy-to-get-backwards part: `apply_condition_adjustment` exists
+because a *catalog* figure is a Near Mint price and needs scaling down for a
+worse-condition card. A sticker is not a catalog figure — a human already
+priced the specific card in the specific condition they were holding.
+Applying the multiplier to it would be the identical double-application
+error this file already warned about for `current_market_value`
+("the nightly denormalizer already baked the multiplier in — adjusting that
+would apply it twice"), just arriving through a different field.
+`_condition_adjust`/`apply_condition_adjustment` were removed from
+`routers/inventory.py`'s customer enrichment path and from
+`services/bedrock.py`'s `_hydrate_item` entirely — **`apply_condition_adjustment`
+itself is not deleted and must not be**: `catalog_sync.refresh_inventory_market_values`
+still bakes it into the stored `current_market_value`, `routers/admin/inventory.py`
+still uses it for admin-facing figures, and `mcp-server/src/condition-pricing.ts`
+still backs the MCP admin path. Its authority over *market* estimates is
+unchanged; it simply no longer decides what a customer is charged.
+
+**MCP mirrors this with a SPLIT, not a collapse.** `Card.value` (the
+customer-visible "what we sell it for" figure `search_inventory`/
+`calculate_inventory_value`/chat quote) reads `sticker_price` only, same as
+`_display_price`. `Card.marketPrice` **keeps its old computation
+unchanged** (live catalog price, condition-adjusted, denormalized/graded/
+listed fallbacks) — it is a genuinely different, still-needed figure:
+`flag_underpriced_cards` compares `value` against `marketPrice` to find
+stock priced below a condition-adjusted market estimate, and collapsing the
+two into one number would make every card look correctly priced by
+definition. Before this RFC the two fields happened to share one
+computation; that was incidental, not a rule to preserve.
+
+<details>
+<summary>History — the pre-RFC-0025 mechanism (for context only, not current behaviour)</summary>
+
+Customer prices used to be CONDITION-ADJUSTED. The catalog relays one market
+figure per finish and that figure is a **Near Mint** price. Every
+customer-facing surface scaled it by the item's condition
+(`services/condition_pricing.py` — LP ×0.82, MP ×0.58, HP ×0.33, DMG ×0.15,
+`+`/`-` take the midpoint with the neighbouring tier). Before THAT change, a
+DMG card was shown to a buyer at ~6.7× what the business valued it at, wrong
+in the business's favour. Measured on live stock 2026-08-06: this moved the
+customer-visible total from $6,143 to $5,005 (−18.5%) across 73 of 228 items.
+
+The adjustment used to be applied in exactly one place per surface:
+`_condition_adjust` in `routers/inventory.py` rewrote `summary.market_price`
+at enrichment, so the tile, the sort and the price bound all inherited the
+same number (RFC 0008 T1's single-authority invariant, at the time). MCP
+mirrored it via `mcp-server/src/condition-pricing.ts`. **All of this is
+retired for the customer price path** — see above for what replaced it.
+</details>
 
 **Name resolution: `display_name_override` wins EVERYWHERE.** One rule, four
 implementations, kept deliberately in sync — `itemTitle`

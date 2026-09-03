@@ -189,7 +189,7 @@ describe('searchInventory', () => {
 })
 
 describe('getInventorySummary', () => {
-  const summary: InventorySummary = { cards_in_vault: 312, est_value: '48231.50', sets_tracked: 27 }
+  const summary: InventorySummary = { cards_in_vault: 312, sets_tracked: 27 }
 
   it('calls GET /inventory/summary and returns the parsed body', async () => {
     mockedApiFetch.mockResolvedValue(summary)

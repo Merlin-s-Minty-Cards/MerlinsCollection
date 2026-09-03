@@ -35,7 +35,6 @@ from merlins_collection.models.inventory import (
     InventoryItem,
     InventorySearchResult,
     Language,
-    _market_price,
     normalize_condition,
 )
 from merlins_collection.rate_limit import rate_limit_search
@@ -66,32 +65,43 @@ def customer_visible_items(repo: InventoryRepository) -> list[InventoryItem]:
 def _display_price(item: EnrichedInventoryItem) -> Decimal | None:
     """THE price of an item, and the only one any customer-facing code may use.
 
-    This is the single authority for the price **filter**, the price **sort**,
-    and the price the **tile renders**. Those three used to read three different
-    figures and only two of them agreed: the bound read ``current_market_value``
-    (denormalized nightly by ``catalog_sync.refresh_inventory_market_values``,
-    therefore stale between runs) while the sort and the tile both read the live
-    ``card.market_price``. The owner reported the consequence — a Rayquaza
-    displaying $517 that still passed ``max_price=500``, because its stale value
-    had been ≤ 500 at the last sync (RFC 0008 §A). **They must never diverge
-    again**: change this function, not a caller.
+    This is the single authority for the price **filter** and the price
+    **sort**. It used to also be described as "the figure the tile renders";
+    that changed under RFC 0025 T2 (`GET /inventory/search`'s wire shape is
+    otherwise unchanged — the frontend's own price rendering is a separate
+    concern this RFC does not touch).
 
-    Mirrors ``frontend/components/inventory/CardTile.tsx``: for raw cards the
-    live catalog ``card.market_price`` (computed per-finish by
-    ``CardSummary.from_catalog``); for graded slabs the catalog price is skipped
-    deliberately — it is an UNGRADED figure and inapplicable to a slab carrying a
-    grade premium. Either way it falls back to ``listed_price``.
+    **RFC 0025: this is ``sticker_price`` — the price the business actually
+    sells the card at**, set by hand with the card and its condition in front
+    of the person setting it. Before this it read a live catalog market
+    figure (condition-adjusted at enrichment), falling back to the
+    permanently-dead ``listed_price``; that was an ESTIMATE of what the card
+    is worth, not what it sells for, and the owner's framing was exact:
+    "sticker price is essentially the price we sell the cards at." History
+    kept below the line for why the OLD contract existed, in case a future
+    reader wonders — not because any of it still applies to this field.
 
-    Requires an ENRICHED item: ``item.card`` is populated by ``_enrich`` and is
-    unset on a bare ``InventoryItem``, so every caller must run after enrichment.
+    Old history: the bound used to read ``current_market_value``
+    (denormalized nightly, therefore stale between runs) while the sort and
+    the tile both read the live ``card.market_price`` — the owner reported
+    the consequence, a Rayquaza displaying $517 that still passed
+    ``max_price=500`` because its stale value had been ≤ 500 at the last sync
+    (RFC 0008 §A). **They must never diverge again**: change this function,
+    not a caller.
 
-    ``None`` is NOT treated as zero and never matches a bound: a card whose price
-    nobody knows cannot honestly be claimed to be under $500. The search counts
-    those exclusions instead and reports them as ``hidden_no_price`` so they are
-    surfaced rather than dropped invisibly (Phase 12, owner decision 2).
+    Requires an ENRICHED item for signature compatibility with existing
+    callers (``item.card`` is populated by ``_enrich``), though it is no
+    longer read here.
+
+    **There is no fallback.** ``is_customer_visible`` already guarantees a
+    visible item has a sticker price, so ``None`` here means a caller is
+    asking about an item it should never have been holding — not a
+    resolvable-elsewhere gap. ``hidden_no_price`` (see ``_apply_price_bounds``)
+    is therefore now structurally always ``0``; it stays in the response and
+    the counting code stays live as a tripwire rather than being deleted for
+    a false economy.
     """
-    market = item.card.market_price if item.kind == "raw" and item.card else None
-    return market if market is not None else item.listed_price
+    return item.sticker_price
 
 
 def _apply_price_bounds(
@@ -320,11 +330,17 @@ def search_inventory(
 
 
 class InventorySummary(BaseModel):
-    """Dashboard header stats over the customer-visible cohort. ``est_value`` is a
-    ``Decimal`` serialized on the wire as a string (existing contract)."""
+    """Dashboard header stats over the customer-visible cohort.
+
+    RFC 0025 T5 removed ``est_value`` (the owner asked for the estimated-value
+    widget to be removed from the dashboard, not merely relabeled) — this also
+    deleted the expensive part of this endpoint: a live, per-item catalog price
+    resolution plus a condition-adjustment pass. ``cards_in_vault`` and
+    ``sets_tracked`` are unaffected; both were always cheap counts over the
+    same ``customer_visible_items`` walk and the same catalog batch-get.
+    """
 
     cards_in_vault: int
-    est_value: Decimal
     sets_tracked: int
 
 
@@ -335,21 +351,6 @@ def inventory_summary(
 ) -> InventorySummary:
     """Header stats for the authenticated dashboard, over the SAME cohort as
     ``/inventory/search`` (available raw/graded items).
-
-    ``est_value`` resolves each item's price LIVE, through the same shared
-    finish-aware helper the search results are rendered with
-    (``models.inventory._market_price``), against the catalog batch this endpoint
-    already fetches for ``sets_tracked``. Two reasons, both from the owner's bug
-    report (Phase 12, Problem 3 / owner decision 1): the dashboard stays correct
-    even when the nightly denormalizer has not run yet, and the header total can
-    never disagree with the per-card prices rendered beneath it.
-
-    The STORED ``current_market_value ?? listed_price`` is the fallback, used
-    whenever the helper yields nothing — an item with no catalog card at all, and
-    equally a graded slab, which by design gets NO catalog price (it has no finish
-    and carries a grade premium the catalog does not know) and must keep its own
-    manually-maintained figure. Items with no price from either source are
-    skipped rather than counted as zero.
 
     ``sets_tracked`` counts the distinct catalog ``set_id`` among items whose
     ``card_id`` resolves in the catalog (NULL-``card_id`` items contribute none).
@@ -366,28 +367,8 @@ def inventory_summary(
     catalog = repo.batch_get_catalog_cards(card_ids) if card_ids else {}
     sets_tracked = len({card.set_id for card in catalog.values()})
 
-    est_value = Decimal(0)
-    for i in items:
-        card = catalog.get(getattr(i, "card_id", None))
-        value = _market_price(card, getattr(i, "finish", None)) if card is not None else None
-        # Same multiplier the tiles apply (see ``_condition_adjust``), or the
-        # header would total a DMG card at its NM figure while the card beneath
-        # it renders 0.15x. Only the LIVE branch is adjusted: the stored fallback
-        # below already has the multiplier baked in by the nightly denormalizer,
-        # and adjusting that would apply it twice.
-        if value is not None and i.kind == "raw" and getattr(i, "condition", None):
-            value, _ = apply_condition_adjustment(
-                value, i.condition, getattr(i, "condition_modifier", None),
-            )
-        if value is None:
-            value = (i.current_market_value if i.current_market_value is not None
-                     else i.listed_price)
-        if value is not None:
-            est_value += value
-
     return InventorySummary(
         cards_in_vault=len(items),
-        est_value=est_value,
         sets_tracked=sets_tracked,
     )
 

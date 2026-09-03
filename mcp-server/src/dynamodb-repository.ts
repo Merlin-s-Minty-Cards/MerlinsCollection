@@ -56,11 +56,22 @@ const SEALED_TYPE_LABELS: Record<string, string> = {
 
 type Row = Record<string, unknown>;
 
-function isPublicInventory(row: Row): boolean {
+// Exported (only) so the cross-boundary parity test
+// (customer-visibility-cases.test.ts) can call it directly against the same
+// shared fixture backend/tests/test_cross_boundary.py runs Python's
+// is_customer_visible against — production code should keep reaching this
+// through listCards()'s filter, not by importing it directly.
+export function isPublicInventory(row: Row): boolean {
   return (
     PUBLIC_KINDS.has(String(row.kind)) &&
     row.status === "available" &&
-    (PUBLIC_LOCATIONS.has(String(row.location)) || row.factory_sealed === true)
+    (PUBLIC_LOCATIONS.has(String(row.location)) || row.factory_sealed === true) &&
+    // RFC 0025: a card with no sticker price has no price we are willing to
+    // quote. Mirrors `is_customer_visible`'s `item.sticker_price is not
+    // None` in services/customer_visibility.py — see
+    // shared/test-fixtures/customer-visibility-cases.json for the pinned
+    // parity cases both sides run.
+    row.sticker_price != null
   );
 }
 
@@ -220,23 +231,40 @@ export class DynamoDbInventoryRepository implements InventoryRepository {
           ? `${row.condition}${row.condition_modifier ?? ""}`
           : `${row.company} ${gradeKey(row.grade)}`,
       quantity: 1, // one inventory record = one physical unit
-      value: this.marketPrice(row, meta, gradedPrices),
+      // RFC 0025 T2/T4: `value` — the customer price — is now the STICKER,
+      // full stop, mirroring `_display_price` in routers/inventory.py.
+      // `marketPrice` deliberately keeps its OLD computation (below):
+      // it is a genuinely different figure, an external market reference
+      // `flag_underpriced_cards` compares `value` against to find stock
+      // priced below market. Collapsing the two into one number would make
+      // every card look correctly priced by definition.
+      value: this.stickerPrice(row),
       marketPrice: this.marketPrice(row, meta, gradedPrices),
       language: languageOf(row),
     };
   }
 
   /**
-   * A card's price, resolved in the SAME order as the dashboard's
-   * `/inventory/summary` (backend `routers/inventory.py:383-391`): the LIVE
-   * finish-aware catalog figure first, then the denormalized
-   * `current_market_value`, then `listed_price`. `null` when no source has one.
+   * An EXTERNAL MARKET REFERENCE for a card — never the customer price.
+   * Resolution order: the LIVE finish-aware catalog figure first (condition-
+   * adjusted for a raw card), then the denormalized `current_market_value`,
+   * then a manually entered graded price, then `listed_price`. `null` when
+   * no source has one.
    *
-   * The order is the whole point (RFC 0008 §D). This used to read the stored
-   * value first, so whenever the nightly denormalizer lagged the catalog, the
-   * chat tools summed stale figures while the dashboard summed live ones and the
-   * two disagreed on a number customers see. Do not "optimize" the stored value
-   * back to the front.
+   * RFC 0025 retired this as "the customer price" — `toCard`'s `value` field
+   * is `sticker_price` now, unconditionally, and does NOT call this method.
+   * This method survives to back `Card.marketPrice`, which
+   * `flag_underpriced_cards` compares `value` against to find stock priced
+   * below a condition-adjusted market estimate — a genuinely different
+   * question ("is this card worth more than we're charging for it?") from
+   * "what does this card cost". Condition adjustment stays here for exactly
+   * that reason: comparing a DMG sticker against an unadjusted NM figure
+   * would flag nearly every damaged card as "underpriced" when it isn't.
+   *
+   * `/inventory/summary`'s own historical per-item loop (once the source of
+   * the "SAME order" this docstring used to claim) was deleted in RFC 0025
+   * T5 along with `est_value` — that comparison no longer exists on the
+   * Python side, so it is not repeated here as a reason for this order.
    */
   private marketPrice(
     row: Row,
@@ -245,11 +273,14 @@ export class DynamoDbInventoryRepository implements InventoryRepository {
   ): number | null {
     const live = this.catalogMarketPrice(row, meta);
     if (live != null) {
-      // The catalog figure is a NM price. The backend scales it by condition on
-      // both customer paths, so chat must too — otherwise filter mode shows a
-      // DMG card at 0.15x and chat quotes the full NM figure for the same card.
-      // Raw singles only: a slab carries a grade, not a tier, and never reaches
-      // this branch anyway (catalogMarketPrice refuses to price one).
+      // The catalog figure is a NM price. Condition-adjusted here so this
+      // market REFERENCE reflects the specific card's condition — a fair
+      // comparison against the sticker `flag_underpriced_cards` checks it
+      // against. (RFC 0025: the customer PRICE — `Card.value` — no longer
+      // goes through this adjustment at all; only this reference figure
+      // still does, and only for that comparison's sake.) Raw singles only:
+      // a slab carries a grade, not a tier, and never reaches this branch
+      // anyway (catalogMarketPrice refuses to price one).
       return row.kind === "raw"
         ? applyConditionAdjustment(
             live,
@@ -275,6 +306,19 @@ export class DynamoDbInventoryRepository implements InventoryRepository {
 
     if (row.listed_price != null) return asNumber(row.listed_price);
     return null;
+  }
+
+  /**
+   * THE customer price (RFC 0025 T2/T4) — mirrors `_display_price` in
+   * `routers/inventory.py` exactly: `sticker_price`, no catalog lookup, no
+   * fallback chain, no condition adjustment. A sticker is a price a human
+   * set holding the specific card and its condition, so there is nothing
+   * left to derive or adjust. `isPublicInventory` already guarantees a row
+   * reaching `toCard` has one, so `null` here would mean a caller is
+   * looking at a row it should never have reached.
+   */
+  private stickerPrice(row: Row): number | null {
+    return row.sticker_price == null ? null : asNumber(row.sticker_price);
   }
 
   /**

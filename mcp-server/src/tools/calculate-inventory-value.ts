@@ -17,9 +17,13 @@ export type InventoryValueResult = {
  * that appears is included in its breakdown, even when its subtotal is zero.
  *
  * A card with no resolvable price (`value === null`) contributes nothing to any
- * total — mirroring the backend's `est_value`, which skips unpriced items rather
- * than valuing them at $0. It still opens its set/condition key, so a cohort of
- * entirely unpriced cards reports as present-at-zero rather than vanishing.
+ * total, rather than being valued at $0 — RFC 0025 made this close to
+ * unreachable in practice (a customer-visible card always has a sticker now,
+ * so `value` is null only if a row without one somehow still reached here),
+ * but the guard stays for the same reason `hidden_no_price` stays a live
+ * tripwire on the backend rather than being deleted. It still opens its
+ * set/condition key, so a cohort of entirely unpriced cards reports as
+ * present-at-zero rather than vanishing.
  */
 export async function calculateInventoryValue(
   repo: InventoryRepository,

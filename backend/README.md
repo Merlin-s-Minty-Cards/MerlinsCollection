@@ -102,7 +102,7 @@ The status codes are deliberate and distinguish *whose* problem it is:
 |---------------|------|---------|
 | `GET /auth/me` | Bearer | Identity + role of the caller |
 | `GET /inventory/search` | Bearer | Filter inventory by name/set/rarity/condition/price |
-| `GET /inventory/summary` | Bearer | Dashboard header stats (`cards_in_vault`, `est_value`, `sets_tracked`) |
+| `GET /inventory/summary` | Bearer | Dashboard header stats (`cards_in_vault`, `sets_tracked` — `est_value` was removed, RFC 0025 T5) |
 | `GET /inventory/facets` | Bearer | Distinct sets/rarities/conditions/languages for filter dropdowns |
 | `POST /chat/` | Bearer | Natural-language inventory chat via Bedrock; takes `conversation_id`, returns it + `title` |
 | `GET /chat/conversations` | Bearer | The caller's own threads, ≤50, `updated_at` descending |

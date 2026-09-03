@@ -54,6 +54,9 @@ def _raw(
         status=status,
         listed_price=Decimal("275.00"),
         current_market_value=Decimal("450.00"),
+        # RFC 0025 T2: `is_customer_visible` (which hydration's visibility
+        # check calls) now requires a sticker price.
+        sticker_price=Decimal("275.00"),
         cost_basis=Decimal("100.00"),
         acquired_at=date.today(),
         finish=finish,
@@ -74,6 +77,7 @@ def _graded(*, item_id: str = "graded-1") -> GradedInventoryItem:
         card_id="en:base1-4",
         listed_price=Decimal("900.00"),
         current_market_value=Decimal("850.00"),
+        sticker_price=Decimal("900.00"),
         cost_basis=Decimal("500.00"),
         acquired_at=date.today(),
         company=GradingCompany.PSA,
@@ -195,7 +199,13 @@ def test_hydration_combines_raw_condition_and_modifier(dynamo_repo):
     assert _hydrate(dynamo_repo, item.item_id).condition == "NM+"
 
 
-def test_hydration_uses_exact_finish_market_price(dynamo_repo):
+def test_hydration_price_ignores_the_catalog_entirely_now(dynamo_repo):
+    """RFC 0025 T4 superseded `test_hydration_uses_exact_finish_market_price`
+    and `test_hydration_falls_back_to_an_available_finish_market_price`, both
+    of which pinned the OLD finish-aware catalog lookup this hydrator used to
+    perform. `_hydrate_item`'s price is now `item.sticker_price` — a rich
+    catalog price band sits right there, at whatever finish, and must NOT be
+    what renders."""
     dynamo_repo.batch_upsert_catalog_cards([
         _catalog(prices={
             "normal": FinishPrice(market=Decimal("300.00")),
@@ -205,20 +215,7 @@ def test_hydration_uses_exact_finish_market_price(dynamo_repo):
     item = _raw(finish="holofoil")
     dynamo_repo.put_inventory_item(item)
 
-    # The resolved price now lives only on DisplayedCard.listed_price — the
-    # nested CardSummary.market_price copy of the same value was dropped
-    # (Council r2 self-review M5: a duplicate, unread field).
-    assert _hydrate(dynamo_repo, item.item_id).listed_price == Decimal("450.00")
-
-
-def test_hydration_falls_back_to_an_available_finish_market_price(dynamo_repo):
-    dynamo_repo.batch_upsert_catalog_cards([
-        _catalog(prices={"reverseHolofoil": FinishPrice(market=Decimal("325.00"))})
-    ])
-    item = _raw(finish="holofoil")
-    dynamo_repo.put_inventory_item(item)
-
-    assert _hydrate(dynamo_repo, item.item_id).listed_price == Decimal("325.00")
+    assert _hydrate(dynamo_repo, item.item_id).listed_price == item.sticker_price
 
 
 def test_hydration_carries_language_so_uncatalogued_jp_items_keep_the_badge(dynamo_repo):

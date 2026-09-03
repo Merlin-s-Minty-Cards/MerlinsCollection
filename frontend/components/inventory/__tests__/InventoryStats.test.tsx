@@ -34,21 +34,22 @@ beforeEach(() => {
 })
 
 describe('InventoryStats', () => {
-  it('renders the three summary values with the existing labels', async () => {
+  // RFC 0025 T5 — the owner asked for the Est. value tile removed, not
+  // relabeled. Two tiles now, never three.
+  it('renders the two summary values with the existing labels', async () => {
     mockedGetSummary.mockResolvedValue({
       cards_in_vault: 312,
-      est_value: '48231.50',
       sets_tracked: 27,
     })
 
     render(<InventoryStats />)
 
     expect(await screen.findByText('312')).toBeInTheDocument()
-    expect(screen.getByText('$48,231.50')).toBeInTheDocument()
     expect(screen.getByText('27')).toBeInTheDocument()
-    for (const label of ['Cards in vault', 'Est. value', 'Sets tracked']) {
+    for (const label of ['Cards in vault', 'Sets tracked']) {
       expect(screen.getByText(label)).toBeInTheDocument()
     }
+    expect(screen.queryByText('Est. value')).not.toBeInTheDocument()
   })
 
   it('renders "—" placeholders while loading (never the old fake numbers)', () => {
@@ -56,18 +57,18 @@ describe('InventoryStats', () => {
 
     render(<InventoryStats />)
 
-    expect(screen.getAllByText('—')).toHaveLength(3)
+    expect(screen.getAllByText('—')).toHaveLength(2)
     expect(screen.queryByText('4,820')).not.toBeInTheDocument()
   })
 
   it('does not fetch before the session token has hydrated (avoids a guaranteed 401)', () => {
     sessionRef.current = { data: null, status: 'loading' }
-    mockedGetSummary.mockResolvedValue({ cards_in_vault: 1, est_value: '1', sets_tracked: 1 })
+    mockedGetSummary.mockResolvedValue({ cards_in_vault: 1, sets_tracked: 1 })
 
     render(<InventoryStats />)
 
     expect(mockedGetSummary).not.toHaveBeenCalled()
-    expect(screen.getAllByText('—')).toHaveLength(3)
+    expect(screen.getAllByText('—')).toHaveLength(2)
   })
 
   it('renders "—" on error, never a crash or the old fake numbers', async () => {
@@ -75,7 +76,7 @@ describe('InventoryStats', () => {
 
     render(<InventoryStats />)
 
-    await waitFor(() => expect(screen.getAllByText('—')).toHaveLength(3))
+    await waitFor(() => expect(screen.getAllByText('—')).toHaveLength(2))
     expect(screen.queryByText('$612k')).not.toBeInTheDocument()
     // labels remain even in the error state
     expect(screen.getByText('Cards in vault')).toBeInTheDocument()

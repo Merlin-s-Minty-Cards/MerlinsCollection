@@ -26,10 +26,12 @@ const TOP_VALUED_LIMIT = 5;
  *
  * A card with no resolvable price (`value === null`) is still HELD — it counts
  * toward `totalCards` and `uniqueSets` — but contributes nothing to `totalValue`
- * and cannot appear in `topValuedCards`. That matches the backend's
- * `/inventory/summary`, where `cards_in_vault` counts every item while
- * `est_value` skips the unpriced ones (routers/inventory.py:387-394). Left to JS
- * coercion a null would sort as 0 and be advertised as a $0 "top valued card".
+ * and cannot appear in `topValuedCards`. Left to JS coercion a null would sort
+ * as 0 and be advertised as a $0 "top valued card". (The backend's own
+ * `/inventory/summary` no longer computes a value total at all as of RFC
+ * 0025 T5 — `est_value` was removed, not merely renamed — so this tool's
+ * `totalValue` has no backend equivalent to stay in sync with any more; it
+ * is now this tool's own figure, over `value` = `sticker_price`.)
  */
 export async function getInventorySummary(
   repo: InventoryRepository,

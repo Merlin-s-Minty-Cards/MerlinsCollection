@@ -2,11 +2,13 @@
 
 import { useEffect, useState } from 'react'
 import { useSession } from 'next-auth/react'
-import { getInventorySummary, formatPrice, type InventorySummary } from '@/lib/inventory'
+import { getInventorySummary, type InventorySummary } from '@/lib/inventory'
 
-// The three dashboard-header stats, in order. Labels are unchanged from the
-// placeholder version; only the values are now real.
-const LABELS = ['Cards in vault', 'Est. value', 'Sets tracked'] as const
+// RFC 0025 T5 — the owner asked for the Est. value tile removed (only the
+// middle tile; two counts are not a valuation, which is why the other two
+// stay). The grid is `auto-fit` below, so dropping a tile needs no layout
+// rework — it just reflows.
+const LABELS = ['Cards in vault', 'Sets tracked'] as const
 
 const PLACEHOLDER = '—'
 
@@ -47,10 +49,9 @@ export default function InventoryStats() {
     summary && !errored
       ? [
           integer.format(summary.cards_in_vault),
-          formatPrice(summary.est_value),
           integer.format(summary.sets_tracked),
         ]
-      : [PLACEHOLDER, PLACEHOLDER, PLACEHOLDER]
+      : [PLACEHOLDER, PLACEHOLDER]
 
   // auto-fit rather than a fixed grid-cols-3: at 390px the three fixed columns
   // were ~105px each while "$10,517.69" at text-lg needs ~110px, so the value

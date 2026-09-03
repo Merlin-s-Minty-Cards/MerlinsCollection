@@ -342,6 +342,9 @@ class TestCustomerLeakGuard:
             _raw(
                 item_id="item-1",
                 listed_price=Decimal("10.00"),
+                # RFC 0025 T2: the customer search's visibility gate now
+                # requires a sticker price.
+                sticker_price=Decimal("10.00"),
                 needs_review=True,
                 review_reason="consignor wants $400 minimum",
                 reviewed_at=datetime(2026, 8, 5, tzinfo=timezone.utc),

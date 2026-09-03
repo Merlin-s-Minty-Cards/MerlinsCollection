@@ -40,6 +40,18 @@ def _catalog(card_id, name, *, set_id="sv1", set_name="Scarlet & Violet", rarity
 
 
 def _raw(card_id, *, condition=Condition.NM, price="10.00", finish="holofoil", location="glass", **extra):
+    # RFC 0025 T2: `is_customer_visible` now requires a sticker price, so
+    # EVERY item this helper builds must carry one by default — every test in
+    # this file that never mentions "sticker" is testing something else
+    # entirely (a name filter, a condition filter, ...) and must keep
+    # constructing a customer-visible item to do it. Defaults to the same
+    # figure as `price` (the old "the" price) so a test that asserted a bound
+    # or sort against `price=` keeps asserting the same thing against the new
+    # single authority. Pass `sticker_price=None` via `**extra`, or mutate the
+    # returned item afterwards (this file's existing convention), to build a
+    # stickerless (hidden) item on purpose.
+    kw = {"sticker_price": Decimal(price)}
+    kw.update(extra)
     return RawInventoryItem(
         card_id=card_id,
         listed_price=Decimal(price),
@@ -48,7 +60,7 @@ def _raw(card_id, *, condition=Condition.NM, price="10.00", finish="holofoil", l
         finish=finish,
         condition=condition,
         location=location,
-        **extra,
+        **kw,
     )
 
 
@@ -56,6 +68,7 @@ def _graded(card_id, *, grade="9", price="50.00", location="glass"):
     return GradedInventoryItem(
         card_id=card_id,
         listed_price=Decimal(price),
+        sticker_price=Decimal(price),
         cost_basis=Decimal("30.00"),
         acquired_at=date.today(),
         company=GradingCompany.PSA,
@@ -395,7 +408,24 @@ def test_summary_empty_inventory_returns_zeroes(inv_client, mint_token):
         headers={"Authorization": f"Bearer {mint_token()}"},
     )
     assert resp.status_code == 200
-    assert resp.json() == {"cards_in_vault": 0, "est_value": "0", "sets_tracked": 0}
+    assert resp.json() == {"cards_in_vault": 0, "sets_tracked": 0}
+
+
+def test_summary_no_longer_carries_est_value(inv_client, mint_token):
+    """RFC 0025 T5 — the owner asked for the Est. value widget removed, not
+    relabeled. A tripwire: the field's absence is a deliberate contract
+    change, not a thing that should silently come back."""
+    client, repo = inv_client
+    item = _raw("sv1-1", price="10.00")
+    item.current_market_value = Decimal("100.00")
+    repo.put_inventory_item(item)
+
+    resp = client.get(
+        "/inventory/summary",
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    assert resp.status_code == 200
+    assert "est_value" not in resp.json()
 
 
 def test_summary_counts_only_available_customer_items(inv_client, mint_token):
@@ -423,31 +453,6 @@ def test_summary_counts_only_available_customer_items(inv_client, mint_token):
     assert resp.json()["cards_in_vault"] == 2
 
 
-def test_summary_est_value_prefers_market_over_listed(inv_client, mint_token):
-    client, repo = inv_client
-    # both prices set -> uses current_market_value (market-first, opposite of _price)
-    both = _raw("sv1-1", price="10.00")
-    both.current_market_value = Decimal("12.50")
-    repo.put_inventory_item(both)
-    # only listed_price -> uses listed_price
-    repo.put_inventory_item(_raw("sv1-2", price="20.00"))
-    # neither price -> skipped from the sum
-    neither = RawInventoryItem(
-        card_id="sv1-3", listed_price=None, current_market_value=None,
-        cost_basis=Decimal("5.00"), acquired_at=date.today(),
-        finish="holofoil", condition=Condition.NM, location="glass",
-    )
-    repo.put_inventory_item(neither)
-
-    resp = client.get(
-        "/inventory/summary",
-        headers={"Authorization": f"Bearer {mint_token()}"},
-    )
-    body = resp.json()
-    assert body["cards_in_vault"] == 3
-    assert body["est_value"] == "32.50"  # 12.50 (market) + 20.00 (listed) + 0 (skipped)
-
-
 def test_summary_sets_tracked_counts_distinct_catalog_sets(inv_client, mint_token):
     client, repo = inv_client
     repo.batch_upsert_catalog_cards([
@@ -460,7 +465,7 @@ def test_summary_sets_tracked_counts_distinct_catalog_sets(inv_client, mint_toke
     repo.put_inventory_item(_raw("sv2-1"))
     # A NULL-card_id item contributes no set.
     orphan = RawInventoryItem(
-        card_id=None, listed_price=Decimal("5.00"),
+        card_id=None, listed_price=Decimal("5.00"), sticker_price=Decimal("5.00"),
         cost_basis=Decimal("2.00"), acquired_at=date.today(),
         finish="holofoil", condition=Condition.NM, location="glass",
     )
@@ -473,20 +478,6 @@ def test_summary_sets_tracked_counts_distinct_catalog_sets(inv_client, mint_toke
     body = resp.json()
     assert body["cards_in_vault"] == 4
     assert body["sets_tracked"] == 2
-
-
-def test_summary_serializes_est_value_as_string(inv_client, mint_token):
-    """Pins the wire contract: est_value is a Decimal serialized as a string."""
-    client, repo = inv_client
-    item = _raw("sv1-1", price="10.00")
-    item.current_market_value = Decimal("100.00")
-    repo.put_inventory_item(item)
-
-    resp = client.get(
-        "/inventory/summary",
-        headers={"Authorization": f"Bearer {mint_token()}"},
-    )
-    assert resp.json()["est_value"] == "100.00"
 
 
 def test_summary_carries_a_rate_cap(inv_client, mint_token):
@@ -600,6 +591,102 @@ def test_customer_visible_items_factory_sealed_is_visible(dynamo_repo):
     assert [i.card_id for i in items] == ["sv1-1"]
 
 
+# ---- RFC 0025 T2 — a customer price IS the sticker; no sticker, no listing ----
+#
+# A stickerless card in the vault is a routine state — the Prep Queue
+# (/admin/outgoing) exists specifically to find unstickered available
+# inventory — not an edge case. `_raw`'s default `sticker_price` (mirroring
+# `price`) is what keeps every test ABOVE this point passing unmodified; the
+# tests below exercise the sticker rule itself.
+
+def test_customer_visible_items_excludes_a_stickerless_item(dynamo_repo):
+    """An available, glass-located raw item with NO sticker price must not
+    reach a customer — a human has not yet decided what to charge for it."""
+    from merlins_collection.routers.inventory import customer_visible_items
+
+    stickerless = _raw("sv1-1")
+    stickerless.sticker_price = None
+    dynamo_repo.put_inventory_item(stickerless)
+
+    items = customer_visible_items(dynamo_repo)
+
+    assert items == []
+
+
+def test_customer_visible_items_includes_a_stickered_item(dynamo_repo):
+    """The same item, once it carries a sticker price, is visible."""
+    from merlins_collection.routers.inventory import customer_visible_items
+
+    stickered = _raw("sv1-1")
+    stickered.sticker_price = Decimal("25.00")
+    dynamo_repo.put_inventory_item(stickered)
+
+    items = customer_visible_items(dynamo_repo)
+
+    assert [i.card_id for i in items] == ["sv1-1"]
+
+
+def test_display_price_returns_the_sticker_and_never_falls_back():
+    """`_display_price` is the sticker, full stop — never `card.market_price`
+    (which may be wildly different, and is a Near Mint catalog figure, not a
+    price a human set holding this specific card) and never `listed_price`
+    (permanently dead, RFC 0008 §B). A direct unit test: `GET /inventory/search`
+    keeps its wire shape unchanged (the RFC's own API contract) — `listed_price`
+    and `card.market_price` are the item's own real values, unrelated to what
+    `_display_price` resolves to; only the filter bound and the sort order are
+    driven by it, which the tests below this one exercise through the endpoint."""
+    from merlins_collection.routers.inventory import _display_price, _enrich
+
+    card = _catalog("sv1-1", "Charizard",
+                     prices={"holofoil": FinishPrice(market=Decimal("999.00"))})
+    item = _raw("sv1-1")
+    item.sticker_price = Decimal("25.00")
+    item.listed_price = Decimal("40.00")
+
+    enriched = _enrich(item, card)
+
+    assert _display_price(enriched) == Decimal("25.00")
+
+
+def test_price_bound_filters_against_the_sticker(inv_client, mint_token):
+    client, repo = inv_client
+    cheap = _raw("sv1-cheap")
+    cheap.sticker_price = Decimal("5.00")
+    repo.put_inventory_item(cheap)
+    pricey = _raw("sv1-pricey")
+    pricey.sticker_price = Decimal("500.00")
+    repo.put_inventory_item(pricey)
+
+    resp = client.get(
+        "/inventory/search",
+        params={"max_price": "100"},
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    assert resp.status_code == 200
+    ids = {i["card_id"] for i in resp.json()["items"]}
+    assert ids == {"sv1-cheap"}
+
+
+def test_hidden_no_price_is_structurally_zero(inv_client, mint_token):
+    """Every customer-visible item now HAS a sticker (the visibility gate
+    itself requires one), so the price bound can never exclude one for lack
+    of a resolvable price — `hidden_no_price` is always 0. Kept as a live
+    field and counting path rather than deleted (a contract change for no
+    gain); this test turns it into a tripwire instead of dead code."""
+    client, repo = inv_client
+    item = _raw("sv1-1")
+    item.sticker_price = Decimal("10.00")
+    repo.put_inventory_item(item)
+
+    resp = client.get(
+        "/inventory/search",
+        params={"max_price": "1"},
+        headers={"Authorization": f"Bearer {mint_token()}"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["hidden_no_price"] == 0
+
+
 def test_search_excludes_items_without_visible_location(inv_client, mint_token):
     """End-to-end: /inventory/search returns 0 results for an AVAILABLE raw item
     with no visible location and no factory_sealed flag."""
@@ -687,31 +774,18 @@ def test_condition_filter_matches_modifier_variants(inv_client, mint_token):
     assert body["total"] == 2
 
 
-def test_price_filter_matches_on_the_live_catalog_price(inv_client, mint_token):
-    """RE-REASONED TWICE, and the second reversal is the one that matters.
-
-    Phase 12 retitled this from ``..._falls_back_to_market_value`` to pin
-    ``current_market_value`` as the price predicate outright. RFC 0008 §A/T1
-    took that authority away again: the denormalized field is rewritten only by
-    the nightly sync and therefore disagrees with the price the tile renders
-    between runs, which is precisely how a $517 card passed ``max_price=500``.
-    The predicate is now ``_display_price`` — the live catalog figure.
-
-    Three items, ``min_price=50``. Only the one the CUSTOMER sees above the bound
-    survives, and its stale $10 is ignored rather than hiding it."""
+def test_price_filter_matches_on_the_sticker_price(inv_client, mint_token):
+    """RFC 0025 T2 superseded the old live-catalog/stale-denormalized
+    reconciliation this test used to exercise (`_display_price` no longer
+    reads the catalog or `current_market_value` at all) — the filter now
+    binds against the sticker, full stop."""
     client, repo = inv_client
-    repo.batch_upsert_catalog_cards([
-        _catalog("sv1-2", "Sprigatito",
-                 prices={"holofoil": FinishPrice(market=Decimal("80"))}),
-    ])
-    repo.put_inventory_item(_raw("sv1-1", price="30"))  # displays $30 — under the bound
-    live_priced = _raw("sv1-2")
-    live_priced.listed_price = None
-    live_priced.current_market_value = Decimal("10")  # stale, and deliberately wrong
-    repo.put_inventory_item(live_priced)
-    no_price = _raw("sv1-3")
-    no_price.listed_price = None
-    repo.put_inventory_item(no_price)
+    under_bound = _raw("sv1-1")
+    under_bound.sticker_price = Decimal("30.00")
+    repo.put_inventory_item(under_bound)
+    over_bound = _raw("sv1-2")
+    over_bound.sticker_price = Decimal("80.00")
+    repo.put_inventory_item(over_bound)
 
     body = client.get(
         "/inventory/search?min_price=50",
@@ -1016,43 +1090,6 @@ def test_search_result_display_name_override_is_none_when_unset(inv_client, mint
 # ---------------------------------------------------------------------------
 
 
-def test_summary_est_value_resolves_through_fallback_finish_chain(inv_client, mint_token):
-    """Phase 12 Finding 6: `est_value` must reflect the finish-aware price, not
-    the raw stored `current_market_value` field. A customer-visible item whose
-    price is resolvable ONLY via the fallback chain (a `normal`-finish item
-    against a card priced solely under `holofoil` — the exact D1 shape,
-    174/213 live nulls) must contribute its resolved market price to
-    `est_value`. A second, genuinely priceless card (no catalog price under
-    any finish) must contribute zero without breaking the sum. Today this
-    fails: `inventory_summary` sums `current_market_value` directly, which was
-    never denormalized for either item, so `est_value` stays "0"."""
-    client, repo = inv_client
-    repo.batch_upsert_catalog_cards([
-        _catalog("sv1-1", "Sprigatito", set_id="sv1",
-                 prices={"holofoil": FinishPrice(market=Decimal("42.00"))}),
-        _catalog("sv1-2", "Floragato", set_id="sv1"),  # no prices at all
-    ])
-
-    priced_via_fallback = _raw("sv1-1", finish="normal")
-    priced_via_fallback.listed_price = None
-    priced_via_fallback.current_market_value = None  # never denormalized (D1)
-    repo.put_inventory_item(priced_via_fallback)
-
-    priceless = _raw("sv1-2", finish="normal")
-    priceless.listed_price = None
-    priceless.current_market_value = None
-    repo.put_inventory_item(priceless)
-
-    resp = client.get(
-        "/inventory/summary",
-        headers={"Authorization": f"Bearer {mint_token()}"},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["cards_in_vault"] == 2
-    assert body["est_value"] == "42.00"
-
-
 def _seed_fallback_priced_item(repo, *, card_id="sv1-1"):
     """A customer-visible `normal`-finish item whose card is priced only under
     `holofoil`, run through the REAL (currently buggy) denormalizer — exactly
@@ -1127,186 +1164,21 @@ def test_search_min_and_max_price_together_no_longer_wipes_inventory(inv_client,
     assert body["items"][0]["card_id"] == "sv1-1"
 
 
-def test_price_filter_falls_back_to_listed_price_with_no_catalog_row(
-    inv_client, mint_token,
-):
-    """REVERSED BY RFC 0008 §A/T1. This test previously asserted the OPPOSITE —
-    that `listed_price` alone must never satisfy a bound, on the Phase 12 / D3
-    reasoning that the field is null on every live item and so pure dead weight.
-
-    That reasoning is about the DATA, not the contract, and T1 makes the contract
-    binding: the filter compares whatever the tile renders, and the tile renders
-    `card.market_price ?? listed_price` (`CardTile.tsx:19`). An unmatched item
-    carrying a sticker price displays that number, so a customer filtering to
-    "$50 and up" must be shown it. Hiding a card the grid would price at $1000
-    is the same class of lie as showing one it prices at $517 under a $500 cap.
-
-    The item that stays out is the one with nothing to display at all."""
-    client, repo = inv_client
-    only_listed = _raw("sv1-1", price="1000.00")
-    only_listed.current_market_value = None  # no catalog row, no market price
-    repo.put_inventory_item(only_listed)
-
-    nothing_to_display = _raw("sv1-2")
-    nothing_to_display.listed_price = None
-    nothing_to_display.current_market_value = Decimal("80.00")
-    repo.put_inventory_item(nothing_to_display)
-
-    resp = client.get(
-        "/inventory/search?min_price=50",
-        headers={"Authorization": f"Bearer {mint_token()}"},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["total"] == 1
-    assert body["items"][0]["card_id"] == "sv1-1"
-    assert body["hidden_no_price"] == 1
-
-
-def test_search_price_bound_excludes_genuinely_priceless_items(inv_client, mint_token):
-    """OPEN DECISION (Phase 12 SCOPE, not resolved by this phase): once the
-    denormalizer fix lands, ~39 live cards remain genuinely priceless
-    (`no_usable_price` — no catalog price under any finish). This test pins
-    the CURRENT documented behavior — a price-bound filter continues to
-    silently exclude such items — because Phase 12's text explicitly leaves
-    open whether the UI instead needs an explicit "no listed price" affordance
-    so they aren't invisibly dropped.
-
-    FLAG FOR A HUMAN: this is a decision point, not a settled contract. This
-    test locks in "silently excluded" only because that is what the phase
-    text calls the CURRENT behavior; it is written so a human notices and
-    confirms rather than has a guess silently locked in by test coverage.
-    """
-    client, repo = inv_client
-    priceless = _raw("sv1-1")
-    priceless.listed_price = None
-    priceless.current_market_value = None
-    repo.put_inventory_item(priceless)
-
-    resp = client.get(
-        "/inventory/search?max_price=999999",
-        headers={"Authorization": f"Bearer {mint_token()}"},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["total"] == 0
-
-
 # ---------------------------------------------------------------------------
-# PHASE 12 / OWNER DECISION 2 (RED, written during GREEN — the decision was
-# still OPEN when the rest of this file's Phase 12 tests were authored).
-#
-# RESOLUTION: priceless items stay EXCLUDED from a price-bounded search (a card
-# with no known price cannot honestly be claimed to be under $500 — the
-# exclusion half is already pinned by
-# `test_search_price_bound_excludes_genuinely_priceless_items` above), BUT they
-# are no longer INVISIBLY dropped: the response carries a count of how many the
-# bound hid, so the UI can say "N cards hidden (no price on file)".
+# PHASE 12's "priceless item" test family (once six tests here) is GONE, not
+# adapted — RFC 0025 T2 removed the scenario it existed to cover. Every test
+# below this comment used to seed a customer-visible item with
+# `listed_price=None` and `current_market_value=None` to construct a
+# "priceless but visible" row and assert on `hidden_no_price`'s count. That
+# row can no longer exist: `is_customer_visible` now requires a sticker
+# price, so a "priceless customer-visible item" is a contradiction, and
+# `hidden_no_price` is structurally always 0 — pinned by the single tripwire
+# test `test_hidden_no_price_is_structurally_zero` above, per the RFC's own
+# instruction ("removing it is a contract change for no gain... add a test
+# asserting it is zero"). Six narrow tests asserting nonzero counts against
+# an impossible fixture would each have to be rewritten into a duplicate of
+# that one tripwire; deleting them is not a coverage loss.
 # ---------------------------------------------------------------------------
-
-
-def test_search_price_bound_reports_the_count_of_priceless_items_it_hid(
-    inv_client, mint_token,
-):
-    """The exclusion stays; the silence does not. A price-bounded search
-    reports how many otherwise-matching items it dropped for having no
-    resolvable price.
-
-    RFC 0008 §A/T1 moved the surviving item's price onto a real catalog row: it
-    used to be priced by `current_market_value` alone, which the bound no longer
-    reads, so the fixture would otherwise have made this a test of three hidden
-    items rather than of the count itself."""
-    client, repo = inv_client
-    repo.batch_upsert_catalog_cards([
-        _catalog("sv1-1", "Sprigatito",
-                 prices={"holofoil": FinishPrice(market=Decimal("80.00"))}),
-    ])
-    priced = _raw("sv1-1")
-    priced.listed_price = None
-    repo.put_inventory_item(priced)
-    for card_id in ("sv1-2", "sv1-3"):
-        priceless = _raw(card_id)
-        priceless.listed_price = None
-        priceless.current_market_value = None
-        repo.put_inventory_item(priceless)
-
-    resp = client.get(
-        "/inventory/search?max_price=500",
-        headers={"Authorization": f"Bearer {mint_token()}"},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["total"] == 1
-    assert body["items"][0]["card_id"] == "sv1-1"
-    assert body["hidden_no_price"] == 2
-
-
-def test_search_reports_zero_hidden_when_the_bound_hides_every_item(
-    inv_client, mint_token,
-):
-    """The owner's reported symptom, made honest: when a price bound empties
-    the whole result set because nothing has a price, the count says so rather
-    than leaving the UI to claim "no cards found"."""
-    client, repo = inv_client
-    priceless = _raw("sv1-1")
-    priceless.listed_price = None
-    priceless.current_market_value = None
-    repo.put_inventory_item(priceless)
-
-    resp = client.get(
-        "/inventory/search?min_price=1&max_price=500",
-        headers={"Authorization": f"Bearer {mint_token()}"},
-    )
-    body = resp.json()
-    assert body["total"] == 0
-    assert body["hidden_no_price"] == 1
-
-
-def test_search_without_a_price_bound_hides_nothing_and_reports_zero(
-    inv_client, mint_token,
-):
-    """No bound, no hiding: priceless items are returned normally and the
-    count is 0, so the UI never renders the affordance spuriously."""
-    client, repo = inv_client
-    priceless = _raw("sv1-1")
-    priceless.listed_price = None
-    priceless.current_market_value = None
-    repo.put_inventory_item(priceless)
-
-    resp = client.get(
-        "/inventory/search",
-        headers={"Authorization": f"Bearer {mint_token()}"},
-    )
-    body = resp.json()
-    assert body["total"] == 1
-    assert body["hidden_no_price"] == 0
-
-
-def test_search_hidden_count_excludes_items_other_filters_already_dropped(
-    inv_client, mint_token,
-):
-    """The count must be honest: it reports items the PRICE BOUND hid, not
-    every priceless item in the vault. A priceless Sprigatito that the `name`
-    filter already excluded was not hidden by the price bound and must not be
-    counted, or the affordance would overstate what widening the range
-    recovers."""
-    client, repo = inv_client
-    repo.batch_upsert_catalog_cards([
-        _catalog("sv1-1", "Sprigatito"),
-        _catalog("sv1-2", "Charizard"),
-    ])
-    for card_id in ("sv1-1", "sv1-2"):
-        priceless = _raw(card_id)
-        priceless.listed_price = None
-        priceless.current_market_value = None
-        repo.put_inventory_item(priceless)
-
-    resp = client.get(
-        "/inventory/search?name=Charizard&max_price=500",
-        headers={"Authorization": f"Bearer {mint_token()}"},
-    )
-    body = resp.json()
-    assert body["total"] == 0
-    assert body["hidden_no_price"] == 1
 
 
 # ---- GET /inventory/facets (Phase 13 — DB-driven dropdown options) ----
@@ -1390,19 +1262,22 @@ def test_facets_excludes_non_visible_items(inv_client, mint_token):
 # ---- GET /inventory/search?sort= (Phase 14 — Sort control) ----
 
 def test_sort_by_price_desc(inv_client, mint_token):
-    """price_desc sorts by the DISPLAY price (card.market_price for raw items),
-    with priceless items (no display price) last."""
+    """RFC 0025 T2: price_desc sorts by the STICKER price — the single figure
+    `_display_price` now resolves to for every result (a customer-visible
+    item always has one; "priceless last" is no longer a reachable case here,
+    since a priceless item can no longer be customer-visible at all — see
+    `test_hidden_no_price_is_structurally_zero`)."""
     client, repo = inv_client
     repo.batch_upsert_catalog_cards([
-        _catalog("sv1-1", "Cheap", prices={"holofoil": FinishPrice(market=Decimal("10"))}),
-        _catalog("sv1-2", "Expensive", prices={"holofoil": FinishPrice(market=Decimal("100"))}),
-        _catalog("sv1-3", "Priceless"),  # no catalog prices → card.market_price = None
+        _catalog("sv1-1", "Cheap"),
+        _catalog("sv1-2", "Expensive"),
     ])
-    repo.put_inventory_item(_raw("sv1-1", price="0"))
-    repo.put_inventory_item(_raw("sv1-2", price="0"))
-    priceless = _raw("sv1-3", price="0")
-    priceless.listed_price = None  # no listed_price fallback either
-    repo.put_inventory_item(priceless)
+    cheap = _raw("sv1-1")
+    cheap.sticker_price = Decimal("10.00")
+    repo.put_inventory_item(cheap)
+    expensive = _raw("sv1-2")
+    expensive.sticker_price = Decimal("100.00")
+    repo.put_inventory_item(expensive)
 
     resp = client.get(
         "/inventory/search?sort=price_desc",
@@ -1410,22 +1285,22 @@ def test_sort_by_price_desc(inv_client, mint_token):
     )
     body = resp.json()
     names = [i["card"]["name"] for i in body["items"]]
-    assert names == ["Expensive", "Cheap", "Priceless"]
+    assert names == ["Expensive", "Cheap"]
 
 
 def test_sort_by_price_asc(inv_client, mint_token):
-    """price_asc sorts by the DISPLAY price ascending, priceless last."""
+    """price_asc sorts by the sticker price ascending."""
     client, repo = inv_client
     repo.batch_upsert_catalog_cards([
-        _catalog("sv1-1", "Cheap", prices={"holofoil": FinishPrice(market=Decimal("10"))}),
-        _catalog("sv1-2", "Expensive", prices={"holofoil": FinishPrice(market=Decimal("100"))}),
-        _catalog("sv1-3", "Priceless"),  # no catalog prices
+        _catalog("sv1-1", "Cheap"),
+        _catalog("sv1-2", "Expensive"),
     ])
-    repo.put_inventory_item(_raw("sv1-1", price="0"))
-    repo.put_inventory_item(_raw("sv1-2", price="0"))
-    priceless = _raw("sv1-3", price="0")
-    priceless.listed_price = None
-    repo.put_inventory_item(priceless)
+    cheap = _raw("sv1-1")
+    cheap.sticker_price = Decimal("10.00")
+    repo.put_inventory_item(cheap)
+    expensive = _raw("sv1-2")
+    expensive.sticker_price = Decimal("100.00")
+    repo.put_inventory_item(expensive)
 
     resp = client.get(
         "/inventory/search?sort=price_asc",
@@ -1433,7 +1308,7 @@ def test_sort_by_price_asc(inv_client, mint_token):
     )
     body = resp.json()
     names = [i["card"]["name"] for i in body["items"]]
-    assert names == ["Cheap", "Expensive", "Priceless"]
+    assert names == ["Cheap", "Expensive"]
 
 
 def test_sort_by_name_asc(inv_client, mint_token):
@@ -1468,141 +1343,31 @@ def test_sort_invalid_falls_back_to_newest(inv_client, mint_token):
 
 
 # ---------------------------------------------------------------------------
-# RFC 0008 §A / T1 — the price bound must compare the price the CUSTOMER SEES.
-#
-# Three code paths used to read three different figures for "the price of a
-# card": the bound read the nightly-denormalized `current_market_value`, while
-# the sort and the rendered tile both read the LIVE `card.market_price`. The
-# owner reported a Rayquaza DISPLAYING $517 that still passed `max_price=500`.
-#
-# These pin the single-authority invariant: filter, sort, and tile all resolve
-# a price through `_display_price`, and may never diverge again.
+# RFC 0008 §A / T1's original invariant — filter, sort, and (formerly) the
+# tile must never diverge on what "the price" of a card is — SURVIVES RFC
+# 0025 T2, but its old test fixtures do not: `_display_price` used to
+# reconcile a LIVE catalog figure against a STALE nightly-denormalized
+# `current_market_value` (the "Rayquaza displayed $517, passed max_price=500"
+# bug), and every test in that block seeded items with `listed_price=None`
+# specifically to exercise that reconciliation. RFC 0025 deleted the
+# reconciliation itself — `_display_price` is now `item.sticker_price`, a
+# single stored field with nothing to disagree with — so those fixtures
+# no longer test a reachable code path. Replaced with the equivalent
+# single-authority check in sticker terms: bound and sort still agree,
+# because both still resolve through the one `_display_price` function.
 # ---------------------------------------------------------------------------
 
-def _live_priced(repo, card_id, name, *, live, stale, finish="holofoil"):
-    """Seed one customer-visible raw item whose LIVE catalog price and STALE
-    denormalized `current_market_value` deliberately disagree.
-
-    `listed_price` is set to None because it is null on every live item by owner
-    decision (Section 1/D3) — so the catalog price is the only figure the tile
-    can render, which is exactly the condition the bug was reported under.
-    """
-    repo.batch_upsert_catalog_cards([
-        _catalog(card_id, name, prices={finish: FinishPrice(market=Decimal(live))}),
-    ])
-    item = _raw(card_id, finish=finish)
-    item.listed_price = None
-    item.current_market_value = Decimal(stale) if stale is not None else None
-    repo.put_inventory_item(item)
-    return item
-
-
-def test_price_bound_excludes_a_card_whose_displayed_price_is_over_the_max(
-    inv_client, mint_token,
-):
-    """The owner's report, exactly: a card DISPLAYING $517 must not survive
-    `max_price=500` on the strength of a stale $400 denormalized value."""
-    client, repo = inv_client
-    _live_priced(repo, "sv1-rayquaza", "Rayquaza", live="517.00", stale="400.00")
-
-    resp = client.get(
-        "/inventory/search?max_price=500",
-        headers={"Authorization": f"Bearer {mint_token()}"},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["total"] == 0
-    # It was excluded for being too expensive, not for being priceless.
-    assert body["hidden_no_price"] == 0
-
-
-def test_price_bound_includes_a_card_whose_displayed_price_is_under_the_max(
-    inv_client, mint_token,
-):
-    """The mirror case: a stale $600 must not hide a card the customer sees at
-    $450. Divergence in the other direction hides real stock from a real buyer."""
-    client, repo = inv_client
-    _live_priced(repo, "sv1-1", "Sprigatito", live="450.00", stale="600.00")
-
-    resp = client.get(
-        "/inventory/search?max_price=500",
-        headers={"Authorization": f"Bearer {mint_token()}"},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["total"] == 1
-    assert body["items"][0]["card_id"] == "sv1-1"
-    assert body["items"][0]["card"]["market_price"] == "450.00"
-
-
-def test_price_bound_returns_normally_priced_stock_and_hides_nothing(
-    inv_client, mint_token,
-):
-    """REGRESSION GUARD FOR THE ORDERING TRAP.
-
-    `_display_price` reads `item.card`, which only `_enrich()` populates. If the
-    bound is pointed at `_display_price` while enrichment still runs AFTER it,
-    `item.card` is None for every item, every card falls back to the permanently
-    null `listed_price`, and the filter silently swallows the ENTIRE inventory
-    into `hidden_no_price` — a failure that reads as "there's just no stock".
-
-    This item is priced only by the catalog, so it can only be returned if
-    enrichment ran first."""
-    client, repo = inv_client
-    _live_priced(repo, "sv1-1", "Sprigatito", live="42.00", stale="42.00")
-
-    resp = client.get(
-        "/inventory/search?max_price=500",
-        headers={"Authorization": f"Bearer {mint_token()}"},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["total"] == 1
-    assert body["hidden_no_price"] == 0
-
-
-def test_price_bound_counts_items_with_no_displayable_price(inv_client, mint_token):
-    """`hidden_no_price` keeps its meaning — "excluded because the price is
-    unknown" — now measured against the figure the tile renders.
-
-    NOTE THE SECOND ITEM. It carries a `current_market_value` well inside the
-    bound but has no catalog row and no `listed_price`, so the customer's tile
-    shows "Price N/A". It is now counted as hidden rather than silently matched
-    on a figure nobody can see. That is deliberate: the denormalized value is no
-    longer an independent source of truth for the filter."""
-    client, repo = inv_client
-    nothing = _raw("sv1-1")
-    nothing.listed_price = None
-    nothing.current_market_value = None
-    repo.put_inventory_item(nothing)
-
-    denormalized_only = _raw("sv1-2")
-    denormalized_only.listed_price = None
-    denormalized_only.current_market_value = Decimal("120.00")
-    repo.put_inventory_item(denormalized_only)
-
-    resp = client.get(
-        "/inventory/search?max_price=500",
-        headers={"Authorization": f"Bearer {mint_token()}"},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["total"] == 0
-    assert body["hidden_no_price"] == 2
-
-
 def test_price_bound_and_price_sort_agree_on_the_same_figure(inv_client, mint_token):
-    """THE INVARIANT THIS TASK EXISTS TO ESTABLISH.
-
-    With a bound applied and `sort=price_desc`, every returned item's DISPLAYED
-    price is inside the bound and the ordering is by that same figure. Each
-    fixture's stale value is deliberately wrong in a different direction, so a
-    filter still reading `current_market_value` returns a different set AND a
-    different order."""
     client, repo = inv_client
-    _live_priced(repo, "sv1-cheap", "Cheap", live="100.00", stale="900.00")
-    _live_priced(repo, "sv1-mid", "Mid", live="300.00", stale="50.00")
-    _live_priced(repo, "sv1-dear", "Dear", live="700.00", stale="20.00")
+    cheap = _raw("sv1-cheap")
+    cheap.sticker_price = Decimal("100.00")
+    repo.put_inventory_item(cheap)
+    mid = _raw("sv1-mid")
+    mid.sticker_price = Decimal("300.00")
+    repo.put_inventory_item(mid)
+    dear = _raw("sv1-dear")
+    dear.sticker_price = Decimal("700.00")
+    repo.put_inventory_item(dear)
 
     resp = client.get(
         "/inventory/search?max_price=500&sort=price_desc",
@@ -1611,9 +1376,6 @@ def test_price_bound_and_price_sort_agree_on_the_same_figure(inv_client, mint_to
     assert resp.status_code == 200
     body = resp.json()
     assert [i["card_id"] for i in body["items"]] == ["sv1-mid", "sv1-cheap"]
-    prices = [Decimal(i["card"]["market_price"]) for i in body["items"]]
-    assert all(p <= Decimal("500") for p in prices)
-    assert prices == sorted(prices, reverse=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1908,31 +1670,3 @@ def test_graded_slabs_are_not_condition_adjusted(inv_client, mint_token):
     assert slab["listed_price"] == "500.00"
 
 
-def test_summary_total_uses_condition_adjusted_prices(inv_client, mint_token):
-    """The dashboard header must not disagree with the tiles beneath it.
-
-    `/inventory/summary` resolves prices live through the same catalog figure
-    the search results use, so it has to apply the SAME condition multiplier —
-    otherwise this change would recreate exactly the header-vs-tile divergence
-    Phase 12 and RFC 0008 T1 removed. One DMG card at a $100 NM figure is $15 of
-    inventory, not $100.
-
-    Note the stored fallback (`current_market_value`) is deliberately NOT
-    adjusted here: the nightly denormalizer already baked the multiplier into it,
-    so adjusting again would apply it twice.
-    """
-    client, repo = inv_client
-    repo.batch_upsert_catalog_cards([
-        _catalog("sv1-sum", "Snorlax",
-                 prices={"holofoil": FinishPrice(market=Decimal("100.00"))}),
-    ])
-    item = _raw("sv1-sum", condition=Condition.DMG)
-    item.listed_price = None
-    repo.put_inventory_item(item)
-
-    resp = client.get(
-        "/inventory/summary",
-        headers={"Authorization": f"Bearer {mint_token()}"},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["est_value"] == "15.00"

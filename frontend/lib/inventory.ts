@@ -135,11 +135,15 @@ export interface InventoryFacets {
   languages: string[]
 }
 
-/** Dashboard header stats over the customer-visible cohort. `est_value` is a
- *  backend Decimal serialized as a string (format it with {@link formatPrice}). */
+/**
+ * Dashboard header stats over the customer-visible cohort.
+ *
+ * RFC 0025 T5 removed `est_value` — the owner asked for the Est. value tile
+ * removed from the dashboard, not merely relabeled. Do not re-add a value
+ * field here; the backend's `InventorySummary` no longer sends one.
+ */
 export interface InventorySummary {
   cards_in_vault: number
-  est_value: string
   sets_tracked: number
 }
 
