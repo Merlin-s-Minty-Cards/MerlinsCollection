@@ -159,6 +159,71 @@ describe('AdminShowPrepPage inline sticker editing', () => {
     const link = await screen.findByTitle('https://www.tcgplayer.com/product/12345')
     expect(link).toHaveAttribute('href', 'https://www.tcgplayer.com/product/12345')
   })
+
+  // RFC 0023 T7 — the TCG Price column now generates a language-aware link
+  // via lib/tcgplayer.ts instead of always assuming the English category.
+  it('generates an English-category search link when no tcg_url is stored and the item is EN', async () => {
+    getMock.mockImplementation((path: string) => {
+      if (path === '/show-prep/mispriced') {
+        return Promise.resolve({
+          items: [{ ...mispricedItem, item_id: 'item-en', tcg_url: null, language: 'EN' }],
+          total_flagged: 1,
+        })
+      }
+      if (path === '/show-prep/location-summary') {
+        return Promise.resolve({ locations: { 'binder-a': 1 }, total: 1 })
+      }
+      if (path === '/locations') {
+        return Promise.resolve([{ value: 'binder-a', label: 'Binder A' }])
+      }
+      return Promise.resolve({})
+    })
+
+    render(<AdminShowPrepPage />)
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    const link = await screen.findByTitle('Search TCGplayer for "Pikachu VMAX"')
+    expect(link).toHaveAttribute(
+      'href',
+      'https://www.tcgplayer.com/search/pokemon/product?q=Pikachu%20VMAX&view=grid'
+    )
+  })
+
+  it('shows the unsupported-language message, not a link, when no tcg_url is stored and the language has no TCGplayer category', async () => {
+    getMock.mockImplementation((path: string) => {
+      if (path === '/show-prep/mispriced') {
+        return Promise.resolve({
+          items: [{ ...mispricedItem, item_id: 'item-ko', tcg_url: null, language: 'KO' }],
+          total_flagged: 1,
+        })
+      }
+      if (path === '/show-prep/location-summary') {
+        return Promise.resolve({ locations: { 'binder-a': 1 }, total: 1 })
+      }
+      if (path === '/locations') {
+        return Promise.resolve([{ value: 'binder-a', label: 'Binder A' }])
+      }
+      return Promise.resolve({})
+    })
+
+    render(<AdminShowPrepPage />)
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    // Short visible label — the full reason lives in the tooltip, not inline,
+    // since this column is only 128px wide (w-32) and the full sentence would
+    // blow the row height up past its neighbours.
+    const notice = await screen.findByText('No TCGplayer link')
+    expect(notice).toHaveAttribute(
+      'title',
+      'TCGplayer only has English and Japanese Pokémon categories — paste a link if you have one.'
+    )
+    // The manual tcg_url field is still editable — the escape hatch never disappears.
+    expect(screen.getByRole('button', { name: /edit stored tcg link for pikachu vmax/i })).toBeInTheDocument()
+  })
 })
 
 // ---------------------------------------------------------------------------

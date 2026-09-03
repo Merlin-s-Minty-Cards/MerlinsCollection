@@ -171,6 +171,12 @@ def _parse_condition_query(value: str) -> tuple[Condition, ConditionModifier | N
 _CUSTOMER_ITEM_FIELDS = {
     "item_id", "kind", "card_id", "listed_price", "current_market_value",
     "acquired_at", "finish", "condition", "condition_modifier", "factory_sealed",
+    # Descriptive tags — "1st Edition", "Full Art" — that are genuinely not
+    # mutually exclusive with `finish` (RFC 0023 §2.2). CUSTOMER-FACING by
+    # design: this describes the physical card, the opposite call from
+    # `language_note`/`review_reason`, which describe our own handling of
+    # the record and stay internal.
+    "finish_attributes",
     "company", "grade", "cert_number", "product_name", "product_type", "card",
     # language (EN/JP) is a deliberate, owner-approved customer-facing exposure:
     # a JP print is a different card at a different price, so buyers must be able

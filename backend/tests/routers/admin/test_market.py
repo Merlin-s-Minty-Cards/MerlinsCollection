@@ -26,9 +26,10 @@ from merlins_collection.models.inventory import (
 
 def _catalog_card(card_id="en:sv1-1", name="Pikachu", set_id="sv1",
                   set_name="Scarlet & Violet", number="001", rarity="Common",
-                  prices=None, detail="brief"):
+                  prices=None, detail="brief", language="EN"):
     return CatalogCard(
         card_id=card_id,
+        language=language,
         name=name,
         set_id=set_id,
         set_name=set_name,
@@ -182,6 +183,56 @@ class TestAdminMarketSearch:
         )
         assert resp.status_code == 200
         assert [c["card_id"] for c in resp.json()["items"]] == ["en:a-4"]
+
+
+class TestAdminMarketSearchLanguage:
+    """RFC 0023 T3 — `language` defaults to EN; an unknown value is a 422."""
+
+    def test_defaults_to_english_only(self, admin_client):
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([
+            _catalog_card(card_id="en:sv1-1", name="Pikachu", language="EN"),
+            _catalog_card(card_id="ja:sv1-1", name="Pikachu", language="JP"),
+        ])
+
+        resp = client.get("/admin/market/search?name=pikachu", headers=_auth(token))
+        assert resp.status_code == 200
+        assert [c["card_id"] for c in resp.json()["items"]] == ["en:sv1-1"]
+
+    def test_explicit_language_scopes_the_search(self, admin_client):
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([
+            _catalog_card(card_id="en:sv1-1", name="Pikachu", language="EN"),
+            _catalog_card(card_id="ja:sv1-1", name="Pikachu", language="JP"),
+        ])
+
+        resp = client.get(
+            "/admin/market/search?name=pikachu&language=JP", headers=_auth(token)
+        )
+        assert resp.status_code == 200
+        assert [c["card_id"] for c in resp.json()["items"]] == ["ja:sv1-1"]
+
+    def test_unknown_language_is_a_422(self, admin_client):
+        client, _, token = admin_client
+        resp = client.get(
+            "/admin/market/search?name=pikachu&language=KLINGON", headers=_auth(token)
+        )
+        assert resp.status_code == 422
+
+    def test_language_scopes_set_search_too(self, admin_client):
+        """The set_id branch reads a different code path (`list_cards_by_set`
+        vs. the cached full scan) and must not skip the same scoping."""
+        client, repo, token = admin_client
+        repo.batch_upsert_catalog_cards([
+            _catalog_card(card_id="en:sv1-1", set_id="sv1", language="EN"),
+            _catalog_card(card_id="ja:sv1-1", set_id="sv1", language="JP"),
+        ])
+
+        resp = client.get(
+            "/admin/market/search?set_id=sv1&language=JP", headers=_auth(token)
+        )
+        assert resp.status_code == 200
+        assert [c["card_id"] for c in resp.json()["items"]] == ["ja:sv1-1"]
 
 
 class TestAdminMarketSearchDisplayPrice:

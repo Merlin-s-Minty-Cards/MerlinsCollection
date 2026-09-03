@@ -62,6 +62,11 @@ class FieldKind(StrEnum):
     RANGE = "range"
     DATE_RANGE = "dateRange"
     PRESENCE = "presence"
+    #: RFC 0023 T5 — a `list[str]` field (`finish_attributes`). `contains`
+    #: means list MEMBERSHIP ("is one of the tags on this item"), never a
+    #: substring inside one entry — the opposite reading `TEXT`'s `contains`
+    #: has, which is why this needed its own kind rather than reusing TEXT.
+    LIST_CONTAINS = "listContains"
 
 
 #: Every field an admin can filter on, and the KIND of control it deserves.
@@ -96,6 +101,8 @@ FILTERABLE_FIELDS: dict[str, FieldKind] = {
     "location": FieldKind.SELECT,
     "language": FieldKind.SELECT,
     "finish": FieldKind.SELECT,
+    # --- listContains: does the list carry this exact tag? ---
+    "finish_attributes": FieldKind.LIST_CONTAINS,
     "company": FieldKind.SELECT,
     "product_type": FieldKind.SELECT,
     "factory_sealed": FieldKind.SELECT,
@@ -111,6 +118,7 @@ FILTERABLE_FIELDS: dict[str, FieldKind] = {
     "product_name": FieldKind.TEXT,
     "description": FieldKind.TEXT,
     "review_reason": FieldKind.TEXT,
+    "language_note": FieldKind.TEXT,
     "cert_number": FieldKind.TEXT,
     "grade_label": FieldKind.TEXT,
     "sticker_notes": FieldKind.TEXT,
@@ -130,6 +138,7 @@ OPS_BY_KIND: dict[FieldKind, frozenset[FilterOp]] = {
     FieldKind.RANGE: frozenset({FilterOp.GTE, FilterOp.LTE}),
     FieldKind.DATE_RANGE: frozenset({FilterOp.GTE, FilterOp.LTE}),
     FieldKind.PRESENCE: frozenset({FilterOp.ISNULL, FilterOp.NOTNULL}),
+    FieldKind.LIST_CONTAINS: frozenset({FilterOp.CONTAINS}),
 }
 
 
@@ -263,6 +272,14 @@ def _matches(item: InventoryItem, f: FieldFilter) -> bool:
         return False
 
     if f.op is FilterOp.CONTAINS:
+        # `finish_attributes` (LIST_CONTAINS) is the one field whose value is
+        # a list, not a scalar. Checked BEFORE the generic substring branch —
+        # `str(["1st Edition"]).lower()` contains "edition" as a plain Python
+        # repr, which would make a TEXT-style substring match falsely agree
+        # with a whole-tag query and silently collapse the distinction
+        # `TestListContains` exists to pin.
+        if isinstance(value, list):
+            return any(f.value.lower() == str(v).lower() for v in value)
         return f.value.lower() in str(value).lower()
     if f.op is FilterOp.EQ:
         # Booleans arrive as "true"/"false" from a browser select, and StrEnums compare

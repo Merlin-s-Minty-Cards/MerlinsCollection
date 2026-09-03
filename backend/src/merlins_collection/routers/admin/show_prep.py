@@ -76,6 +76,7 @@ def get_mispriced_cards(
                     ),
                     "sticker_notes": item.sticker_notes,
                     "tcg_url": item.tcg_url,
+                    "language": item.language,
                     "delta_pct": str(margin_pct),
                     "delta_dollar": str(dollar_delta),
                 })
@@ -93,6 +94,7 @@ def get_mispriced_cards(
                     ),
                     "sticker_notes": item.sticker_notes,
                     "tcg_url": item.tcg_url,
+                    "language": item.language,
                     "delta_pct": str(margin_pct),
                     "delta_dollar": str(dollar_delta),
                 })

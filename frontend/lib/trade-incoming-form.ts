@@ -64,6 +64,8 @@ export interface IncomingLeg {
   condition?: string
   /** raw only */
   finish?: string
+  /** raw only. RFC 0023 T6 — omitted when empty, same shape as set_name/card_number. */
+  finish_attributes?: string[]
   /** graded only */
   company?: string
   /** graded only */
@@ -114,6 +116,9 @@ export interface IncomingLegDraft {
   card_number: string
   condition: string
   finish: string
+  /** RFC 0023 T6 — raw only, like `finish`. Optional so existing callers/fixtures
+   *  that predate this field keep compiling unchanged. */
+  finish_attributes?: string[]
   company: string
   grade: string
   cert_number: string
@@ -162,6 +167,9 @@ export function buildIncomingLeg(draft: IncomingLegDraft): IncomingLeg {
       kind: 'raw',
       condition: draft.condition,
       finish: draft.finish,
+      ...(draft.finish_attributes && draft.finish_attributes.length > 0
+        ? { finish_attributes: draft.finish_attributes }
+        : {}),
     }
   }
 

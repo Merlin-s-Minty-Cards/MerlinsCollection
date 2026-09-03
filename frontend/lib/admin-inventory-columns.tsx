@@ -23,7 +23,7 @@
  */
 
 import type { ReactNode } from 'react'
-import { Trash2 } from 'lucide-react'
+import { ExternalLink, Trash2 } from 'lucide-react'
 import type { Column, EditSpec } from '@/components/admin/shared/DataTable'
 import type { InlineEditCellType, SelectOption } from '@/components/admin/shared/InlineEditCell'
 import CardImage, { TABLE_THUMB_SIZE, TABLE_THUMB_COLUMN } from '@/components/admin/shared/CardImage'
@@ -33,8 +33,9 @@ import OwnershipBadge from '@/components/admin/shared/OwnershipBadge'
 import TriageRowAction from '@/components/admin/shared/TriageRowAction'
 import type { TriageItem } from '@/lib/triage'
 import { adminItemName } from '@/lib/admin-item-name'
-import { CONDITION_OPTIONS as CONDITION_VALUES, formatCondition } from '@/lib/constants'
+import { CONDITION_OPTIONS as CONDITION_VALUES, formatCondition, FINISH_ATTRIBUTE_SUGGESTIONS, LANGUAGE_OPTIONS, PRICED_FINISHES } from '@/lib/constants'
 import { parseMoney } from '@/lib/money'
+import { tcgplayerSearchUrl, TCGPLAYER_UNSUPPORTED_LANGUAGE_MESSAGE } from '@/lib/tcgplayer'
 
 /** RFC 0022 — the `ItemStatus` values a status cell can be set to. */
 const STATUS_OPTIONS: SelectOption[] = [
@@ -61,6 +62,7 @@ export interface InventoryItem {
   sticker_price?: string
   sticker_notes?: string
   finish?: string
+  finish_attributes?: string[]
   language?: string
   notes?: string
   acquired_at?: string
@@ -157,6 +159,40 @@ function fieldEdit(
     undoLabel: options?.undoLabel,
   })
 }
+
+/**
+ * The `multiselect` shape: reads/writes a whole `string[]`, never a
+ * delimiter-joined string (RFC 0022 §1). `value`/`save` are still required by
+ * `EditSpec<T>`'s type, but `EditableCell` never calls them for
+ * `type === 'multiselect'` — it reads `multiselectValue`/`saveMultiselect`
+ * instead — so they are inert stubs here, not a second code path.
+ */
+function multiselectFieldEdit(
+  field: string,
+  options: SelectOption[],
+): (ctx: ColumnRenderContext) => EditSpec<InventoryItem> {
+  return (ctx) => ({
+    type: 'multiselect',
+    options,
+    allowCustom: true,
+    value: () => '',
+    save: async () => {},
+    multiselectValue: (item) => (item[field] as string[] | undefined) ?? [],
+    saveMultiselect: async (item, next) => {
+      await ctx.saveField?.(item, field, next)
+    },
+  })
+}
+
+const FINISH_ATTRIBUTE_OPTIONS: SelectOption[] = FINISH_ATTRIBUTE_SUGGESTIONS.map(
+  (tag) => ({ value: tag, label: tag }),
+)
+
+/** `LANGUAGE_OPTIONS` (lib/constants.ts) as a mutable `SelectOption[]` — the
+ * shared source, not a second hand-typed list (RFC 0023 T3). */
+const LANGUAGE_SELECT_OPTIONS: SelectOption[] = LANGUAGE_OPTIONS.map(
+  (o) => ({ value: o.value, label: o.label }),
+)
 
 // --------------------------------------------------------------------------
 // Cell helpers
@@ -376,17 +412,32 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
   },
   {
     key: 'language', label: 'Language', defaultVisible: false, sortable: true, render: (i) => text(i.language),
-    edit: fieldEdit('select', 'language', { options: [{ value: 'EN', label: 'EN' }, { value: 'JP', label: 'JP' }] }),
+    // RFC 0023 T3 — the full 19-member vocabulary, not just {EN, JP}. Setting
+    // OTHER here also parks the item in Unmatched server-side (the
+    // `_apply_language_transition` router logic) and setting it while a
+    // `card_id` is still linked is a 422 telling the admin to unlink first —
+    // both handled by the existing PUT path this column already calls
+    // through `ctx.saveField`, nothing extra needed on this side.
+    edit: fieldEdit('select', 'language', { options: LANGUAGE_SELECT_OPTIONS }),
   },
   {
     key: 'finish', label: 'Finish', defaultVisible: false, sortable: true, render: (i) => text(i.finish),
+    // RFC 0023 T6 — the measured PRICED_FINISHES vocabulary, not a
+    // hand-typed subset. Was 3 options; `_MARKET_FINISH_FALLBACK` alone
+    // already names 6, and the live catalog carries 7 distinct keys (T4).
     edit: fieldEdit('select', 'finish', {
-      options: [
-        { value: 'normal', label: 'Normal' },
-        { value: 'holofoil', label: 'Holofoil' },
-        { value: 'reverseHolofoil', label: 'Reverse Holofoil' },
-      ],
+      options: PRICED_FINISHES.map((f) => ({ value: f, label: f })),
     }),
+  },
+  {
+    // RFC 0023 T5 — everything about a printing that is genuinely NOT
+    // mutually exclusive with `finish` above (1st Edition, Shadowless, Full
+    // Art, ...). `defaultVisible: true` and `sortable: true` deliberately —
+    // CLAUDE.md records the consignor column shipping false/false
+    // unconsulted and being reversed the next day.
+    key: 'finish_attributes', label: 'Finish Attributes', defaultVisible: true, sortable: true,
+    render: (i) => clamped((i.finish_attributes ?? []).join(', ')),
+    edit: multiselectFieldEdit('finish_attributes', FINISH_ATTRIBUTE_OPTIONS),
   },
   {
     key: 'factory_sealed', label: 'Factory Sealed', defaultVisible: false, sortable: true,
@@ -474,12 +525,43 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
     render: (i) => clamped(i.display_name_override),
     notEditable: 'Editable only from the Triage page — the modal’s Display Name row edits display_name instead.',
   },
-  // Deliberately NOT an <a href>. `tcg_url` is admin-typed free text, and a
-  // `javascript:` value in an href on a list page is a stored-XSS sink that
-  // fires on one click. The detail modal is the place that links out.
+  // The raw stored value is deliberately NOT an <a href>: `tcg_url` is
+  // admin-typed free text, and a `javascript:` value in an href on a list
+  // page is a stored-XSS sink that fires on one click (the detail modal is
+  // the place that links out to it). The icon beside it is safe because it
+  // is never built from the stored string — `tcgplayerSearchUrl` only ever
+  // produces a fixed `https://tcgplayer.com/...` URL from the item's own
+  // language + name (RFC 0023 T7).
   {
     key: 'tcg_url', label: 'TCGplayer URL', defaultVisible: false, sortable: true,
-    render: (i) => clamped(i.tcg_url),
+    render: (i) => {
+      const searchUrl = tcgplayerSearchUrl(i.language, adminItemName(i))
+      return (
+        <div className="flex items-center gap-1.5 min-w-0">
+          {clamped(i.tcg_url)}
+          {searchUrl ? (
+            <a
+              href={searchUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              title="Search TCGplayer"
+              aria-label="Search TCGplayer"
+              className="shrink-0 text-blue-400 hover:text-blue-300 transition-colors"
+            >
+              <ExternalLink size={11} />
+            </a>
+          ) : (
+            <span
+              title={TCGPLAYER_UNSUPPORTED_LANGUAGE_MESSAGE}
+              className="shrink-0 text-pine-600"
+            >
+              <ExternalLink size={11} className="opacity-30" />
+            </span>
+          )}
+        </div>
+      )
+    },
     edit: fieldEdit('url', 'tcg_url'),
   },
   {
@@ -624,7 +706,7 @@ export function saveVisibleColumnKeys(keys: string[]): void {
  * `backend/services/inventory_filters.py` CHARACTER FOR CHARACTER — these
  * strings are the wire contract, not a display label.
  */
-export type FilterKind = 'text' | 'select' | 'range' | 'dateRange' | 'presence'
+export type FilterKind = 'text' | 'select' | 'range' | 'dateRange' | 'presence' | 'listContains'
 
 /** What a filter does to its field. Mirrors the backend `FilterOp` exactly. */
 export type FilterOp = 'contains' | 'eq' | 'gte' | 'lte' | 'isnull' | 'notnull'
@@ -783,8 +865,11 @@ export const INVENTORY_FILTERS: InventoryFilterDef[] = [
   { id: 'reviewedTo', label: 'Reviewed To', columnKey: 'reviewed_at', kind: 'dateRange', op: 'lte' },
 
   {
+    // Was a hand-typed subset ('ZH' isn't even a real Language value — the
+    // real codes are 'ZH-TW'/'ZH-CN' — and the hyphenated ES-MX/PT-BR/PT-PT
+    // variants were missing outright). RFC 0023 T3: the shared source.
     id: 'language', label: 'Language', columnKey: 'language', kind: 'select',
-    options: opts(['EN', 'JP', 'FR', 'DE', 'ES', 'IT', 'PT', 'KO', 'ZH']),
+    options: LANGUAGE_SELECT_OPTIONS,
   },
   {
     id: 'finish', label: 'Finish', columnKey: 'finish', kind: 'select',
@@ -796,6 +881,14 @@ export const INVENTORY_FILTERS: InventoryFilterDef[] = [
       { value: 'holofoil', label: 'Holofoil' },
       { value: 'reverseHolofoil', label: 'Reverse Holofoil' },
     ],
+  },
+  {
+    // Mirrors the backend's FieldKind.LIST_CONTAINS: `contains` here means
+    // "the list carries this exact tag", not a substring search — a plain
+    // text box (ColumnFilter's default branch) is still the right control,
+    // the admin types one attribute name to search for.
+    id: 'finishAttributes', label: 'Finish Attribute', columnKey: 'finish_attributes',
+    kind: 'listContains',
   },
   {
     id: 'factorySealed', label: 'Factory Sealed', columnKey: 'factory_sealed',

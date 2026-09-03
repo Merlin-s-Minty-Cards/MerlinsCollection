@@ -100,6 +100,47 @@ describe('IncomingCardForm', () => {
     expect(onAdd.mock.calls[0][0]).not.toHaveProperty('grade')
   })
 
+  it('uses FinishPicker for the raw finish, offering the measured PRICED_FINISHES vocabulary (RFC 0023 T6)', async () => {
+    render(<IncomingCardForm card={card()} onAdd={vi.fn()} onCancel={vi.fn()} />)
+
+    expect(screen.getByRole('option', { name: '1stEditionHolofoil' })).toBeInTheDocument()
+    // The exact live bug this RFC exists to fix.
+    expect(screen.queryByRole('option', { name: 'firstEditionHolofoil' })).not.toBeInTheDocument()
+  })
+
+  it('includes selected finish_attributes chips on submit (RFC 0023 T6)', async () => {
+    const user = userEvent.setup({ delay: null })
+    const onAdd = vi.fn()
+    render(<IncomingCardForm card={card()} onAdd={onAdd} onCancel={vi.fn()} />)
+
+    await user.click(screen.getByRole('button', { name: '1st Edition' }))
+    await user.click(screen.getByRole('button', { name: 'Shadowless' }))
+    await user.type(screen.getByLabelText(/value/i), '40')
+    await user.click(screen.getByRole('button', { name: /^add$/i }))
+
+    expect(onAdd).toHaveBeenCalledWith(
+      expect.objectContaining({ finish_attributes: ['1st Edition', 'Shadowless'] }),
+    )
+  })
+
+  it('omits finish_attributes entirely when none are chosen', async () => {
+    const user = userEvent.setup({ delay: null })
+    const onAdd = vi.fn()
+    render(<IncomingCardForm card={card()} onAdd={onAdd} onCancel={vi.fn()} />)
+
+    await user.type(screen.getByLabelText(/value/i), '40')
+    await user.click(screen.getByRole('button', { name: /^add$/i }))
+
+    expect(onAdd.mock.calls[0][0]).not.toHaveProperty('finish_attributes')
+  })
+
+  it('offers the full 19-member language vocabulary (RFC 0023 T3), not just EN/JP', async () => {
+    render(<IncomingCardForm card={card()} onAdd={vi.fn()} onCancel={vi.fn()} />)
+
+    expect(screen.getByRole('option', { name: 'Korean' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Other / unsupported' })).toBeInTheDocument()
+  })
+
   it('emits the backend language enum casing, not the display casing', async () => {
     // `Language` on InventoryItem is a case-sensitive StrEnum: EN/JP only.
     const user = userEvent.setup({ delay: null })

@@ -11,6 +11,9 @@ import { describe, it, expect } from 'vitest'
 import {
   CONDITION_OPTIONS,
   LOCATION_OPTIONS,
+  PRICED_FINISHES,
+  FINISH_ATTRIBUTE_SUGGESTIONS,
+  LANGUAGE_OPTIONS,
   parseCondition,
   formatCondition,
 } from '../constants'
@@ -67,6 +70,90 @@ describe('CONDITION_OPTIONS', () => {
     const lpMinusIdx = CONDITION_OPTIONS.indexOf('LP-')
     expect(lpPlusIdx).toBeLessThan(lpIdx)
     expect(lpIdx).toBeLessThan(lpMinusIdx)
+  })
+})
+
+describe('PRICED_FINISHES', () => {
+  // RFC 0023 T4/T5 — measured from the live catalog 2026-09-02, not typed.
+  // Mirrors the backend's `PRICED_FINISHES` tuple in models/inventory.py
+  // character for character; a drift here is exactly the class of bug that
+  // motivated this measurement (the frontend used to offer
+  // `firstEditionHolofoil`, which is in neither list).
+  it('matches the measured backend union exactly', () => {
+    expect(new Set(PRICED_FINISHES)).toEqual(new Set([
+      'normal', 'holofoil', 'reverseHolofoil',
+      '1stEdition', 'unlimited', 'unlimitedHolofoil',
+      '1stEditionHolofoil', '1stEditionNormal',
+    ]))
+  })
+
+  it('has no duplicates', () => {
+    expect(PRICED_FINISHES.length).toBe(new Set(PRICED_FINISHES).size)
+  })
+
+  it('does not contain the old, never-priced firstEditionHolofoil spelling', () => {
+    // The live bug this whole task exists to fix: `IncomingCardForm.tsx`
+    // offered `firstEditionHolofoil`, camelCase but capitalized differently
+    // from the real `1stEditionHolofoil` key, so it silently mispriced.
+    expect(PRICED_FINISHES).not.toContain('firstEditionHolofoil')
+  })
+})
+
+describe('FINISH_ATTRIBUTE_SUGGESTIONS', () => {
+  it('is a non-empty list of suggested, not enforced, tags', () => {
+    expect(FINISH_ATTRIBUTE_SUGGESTIONS.length).toBeGreaterThan(0)
+  })
+
+  it('includes the tags RFC 0023 §2.2 names by example', () => {
+    for (const tag of ['1st Edition', 'Shadowless', 'Full Art', 'Signed']) {
+      expect(FINISH_ATTRIBUTE_SUGGESTIONS).toContain(tag)
+    }
+  })
+
+  it('has no duplicates', () => {
+    expect(FINISH_ATTRIBUTE_SUGGESTIONS.length).toBe(new Set(FINISH_ATTRIBUTE_SUGGESTIONS).size)
+  })
+
+  it('every suggestion fits the backend 40-character bound', () => {
+    for (const tag of FINISH_ATTRIBUTE_SUGGESTIONS) {
+      expect(tag.length).toBeLessThanOrEqual(40)
+    }
+  })
+})
+
+describe('LANGUAGE_OPTIONS', () => {
+  // RFC 0023 T1/T3 — mirrors backend `LANGUAGE_LABELS` (models/inventory.py)
+  // exactly: 18 real TCGdex codes + OTHER, 19 total.
+  it('has all 19 members, EN and JP included', () => {
+    const values = LANGUAGE_OPTIONS.map((o) => o.value)
+    expect(values.length).toBe(19)
+    expect(values).toContain('EN')
+    expect(values).toContain('JP')
+    expect(values).toContain('OTHER')
+  })
+
+  it('has no duplicates', () => {
+    const values = LANGUAGE_OPTIONS.map((o) => o.value)
+    expect(values.length).toBe(new Set(values).size)
+  })
+
+  it('each entry has a value and a real label, not the bare code repeated', () => {
+    for (const opt of LANGUAGE_OPTIONS) {
+      expect(opt.value).toBeTruthy()
+      expect(opt.label).toBeTruthy()
+    }
+    const jp = LANGUAGE_OPTIONS.find((o) => o.value === 'JP')
+    expect(jp?.label).toBe('Japanese')
+    const other = LANGUAGE_OPTIONS.find((o) => o.value === 'OTHER')
+    expect(other?.label).toBe('Other / unsupported')
+  })
+
+  it('includes the hyphenated codes verbatim (zh-tw, es-mx, pt-br, pt-pt)', () => {
+    const values = LANGUAGE_OPTIONS.map((o) => o.value)
+    expect(values).toContain('ZH-TW')
+    expect(values).toContain('ES-MX')
+    expect(values).toContain('PT-BR')
+    expect(values).toContain('PT-PT')
   })
 })
 

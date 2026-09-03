@@ -238,6 +238,104 @@ class TestListCatalogSets:
 
 
 # ===========================================================================
+# RFC 0023 T2 — GET /admin/catalog/languages
+# ===========================================================================
+#
+# The catalog search language filter must only ever offer a language that can
+# return something (RFC 0023 §1.4) -- so it reads THIS, derived from the
+# `catalog_set` registry (the same one `/sets` above reads), never the full
+# `Language` enum. A language `Language` now names but nobody has seeded (see
+# `SEEDED_LANGUAGES`, `models/inventory.py`) has zero registry rows and
+# therefore does not appear here at all.
+
+
+class TestListCatalogLanguages:
+    def test_returns_one_row_per_language_actually_in_the_registry(
+        self, admin_client, dynamo_repo,
+    ):
+        client, _repo, token = admin_client
+        _register(
+            dynamo_repo,
+            _set_row("en:base1", "Base Set", "EN", 102),
+            _set_row("en:sv1", "Scarlet & Violet", "EN", 258),
+            _set_row("ja:base1", "Base Set", "JP", 102),
+        )
+
+        resp = client.get("/admin/catalog/languages", headers=_auth(token))
+
+        assert resp.status_code == 200
+        by_code = {row["code"]: row for row in resp.json()}
+        assert set(by_code) == {"EN", "JP"}
+        assert by_code["EN"]["sets"] == 2
+        assert by_code["JP"]["sets"] == 1
+
+    def test_labels_come_from_the_language_enum(self, admin_client, dynamo_repo):
+        client, _repo, token = admin_client
+        _register(dynamo_repo, _set_row("ja:base1", "Base Set", "JP", 102))
+
+        resp = client.get("/admin/catalog/languages", headers=_auth(token))
+
+        assert resp.json()[0]["label"] == "Japanese"
+
+    def test_a_language_the_enum_names_but_nobody_has_seeded_never_appears(
+        self, admin_client, dynamo_repo,
+    ):
+        """The whole point of deriving this from the registry rather than the
+        enum: RFC 0023 grew `Language` to 19 members, most of them unseeded.
+        Offering one in a search filter would be a control that can only ever
+        return an empty result."""
+        client, _repo, token = admin_client
+        _register(dynamo_repo, _set_row("en:base1", "Base Set", "EN", 102))
+
+        resp = client.get("/admin/catalog/languages", headers=_auth(token))
+
+        assert [row["code"] for row in resp.json()] == ["EN"]
+
+    def test_sorted_alphabetically_by_label(self, admin_client, dynamo_repo):
+        client, _repo, token = admin_client
+        _register(
+            dynamo_repo,
+            _set_row("ja:base1", "Base Set", "JP", 102),
+            _set_row("en:base1", "Base Set", "EN", 102),
+        )
+
+        resp = client.get("/admin/catalog/languages", headers=_auth(token))
+
+        assert [row["label"] for row in resp.json()] == ["English", "Japanese"]
+
+    def test_empty_registry_returns_an_empty_list(self, admin_client):
+        client, _repo, token = admin_client
+
+        resp = client.get("/admin/catalog/languages", headers=_auth(token))
+
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    def test_rejects_a_non_admin_caller(self, admin_client, mint_token):
+        client, _repo, _ = admin_client
+        member_token = mint_token(claims={"cognito:groups": ["members"]})
+
+        resp = client.get("/admin/catalog/languages", headers=_auth(member_token))
+
+        assert resp.status_code == 403
+
+    def test_does_not_scan_the_catalog(self, admin_client, dynamo_repo, monkeypatch):
+        """Same T9 regression guard as `/sets` — this reads the identical
+        registry query, not a fresh scan."""
+        client, _repo, token = admin_client
+        _register(dynamo_repo, _set_row("en:base1", "Base Set", "EN", 102))
+
+        def _forbidden(*args, **kwargs):
+            raise AssertionError("GET /admin/catalog/languages scanned the table.")
+
+        monkeypatch.setattr(dynamo_repo._table, "scan", _forbidden)
+
+        resp = client.get("/admin/catalog/languages", headers=_auth(token))
+
+        assert resp.status_code == 200
+
+
+# ===========================================================================
 # RFC 0011 T9 — GET /admin/catalog/new-cards
 # ===========================================================================
 #

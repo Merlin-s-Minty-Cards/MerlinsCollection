@@ -15,6 +15,7 @@ import { patchRow } from '@/lib/item-update'
 import InlineEditCell from '@/components/admin/shared/InlineEditCell'
 import MoneyInput from '@/components/admin/shared/MoneyInput'
 import { parseMoney } from '@/lib/money'
+import { tcgplayerSearchUrl, TCGPLAYER_UNSUPPORTED_LANGUAGE_MESSAGE } from '@/lib/tcgplayer'
 
 interface MispricedItem {
   item_id: string
@@ -26,6 +27,7 @@ interface MispricedItem {
   sticker_price?: string | null
   sticker_notes?: string | null
   tcg_url?: string | null
+  language?: string
   delta_pct: string
   delta_dollar?: string
   [key: string]: unknown
@@ -362,10 +364,12 @@ export default function AdminShowPrepPage() {
       label: 'TCG Price',
       className: 'w-32',
       render: (item) => {
-        // Fall back to a generated TCGplayer search URL when no link is stored.
-        const searchQuery = encodeURIComponent(item.name || '')
-        const tcgSearchUrl = `https://www.tcgplayer.com/search/pokemon/product?q=${searchQuery}&view=grid`
-        const linkHref = item.tcg_url || tcgSearchUrl
+        // Fall back to a language-aware generated search URL when no link is
+        // stored (RFC 0023 T7). `null` means TCGplayer has no category for
+        // this card's language — that is a fact, not a bug, and must not
+        // silently fall back to the English link (see lib/tcgplayer.ts).
+        const generatedUrl = tcgplayerSearchUrl(item.language, item.name || '')
+        const linkHref = item.tcg_url || generatedUrl
 
         return (
           <InlineEditCell
@@ -377,17 +381,33 @@ export default function AdminShowPrepPage() {
             onSave={(v) => saveItemTcgUrl(item.item_id, v)}
             onError={handleItemEditError}
             displayValue={
-              <a
-                href={linkHref}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={(e) => e.stopPropagation()}
-                className="inline-flex items-center gap-1 text-[10px] text-blue-400 hover:text-blue-300 transition-colors"
-                title={item.tcg_url ? item.tcg_url : `Search TCGplayer for "${item.name}"`}
-              >
-                <ExternalLink size={11} />
-                Check Price
-              </a>
+              linkHref ? (
+                <a
+                  href={linkHref}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  className="inline-flex items-center gap-1 text-[10px] text-blue-400 hover:text-blue-300 transition-colors"
+                  title={item.tcg_url ? item.tcg_url : `Search TCGplayer for "${item.name}"`}
+                >
+                  <ExternalLink size={11} />
+                  Check Price
+                </a>
+              ) : (
+                // The full reason lives in `title`, not inline — this column
+                // is `w-32` (128px), and RFC 0023's own message is ~90
+                // characters. Wrapping the whole sentence into a narrow cell
+                // would blow up that row's height far past its neighbours;
+                // a short label + tooltip keeps the row uniform, the same
+                // shape the stored-link branch above already uses (short
+                // "Check Price" text, full URL in `title`).
+                <span
+                  className="text-[10px] text-pine-500 italic truncate block"
+                  title={TCGPLAYER_UNSUPPORTED_LANGUAGE_MESSAGE}
+                >
+                  No TCGplayer link
+                </span>
+              )
             }
           />
         )

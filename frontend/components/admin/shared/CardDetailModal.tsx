@@ -4,7 +4,11 @@ import { useCallback, useEffect, useState } from 'react'
 import { X, Pencil, Check, XCircle, Flag, Undo2, Lock } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { clearTriageBody, sendToTriageBody } from '@/lib/triage'
-import { CONDITION_OPTIONS, parseCondition, formatCondition } from '@/lib/constants'
+import {
+  CONDITION_OPTIONS, parseCondition, formatCondition, LANGUAGE_OPTIONS,
+  PRICED_FINISHES,
+} from '@/lib/constants'
+import { finishAttributeChipVocabulary } from './FinishPicker'
 import { useCardImages } from '@/lib/use-card-images'
 import { useLocations } from '@/lib/use-locations'
 import { useCosigners } from '@/lib/use-cosigners'
@@ -67,6 +71,14 @@ type FieldType =
   | 'select'
   | 'checkbox'
   | 'date'
+  /**
+   * A `string[]` field (`finish_attributes` only, RFC 0023 T6). Does NOT
+   * route through `editValue` the way every other type does — RFC 0022 §1
+   * explicitly rejects smuggling an array through a joined string, and this
+   * modal's `editValue` is a plain string. It has its own `attributesDraft`
+   * state instead (see `startEdit`/`saveEdit`).
+   */
+  | 'chips'
 
 interface EditableField {
   key: string
@@ -109,13 +121,21 @@ const EDITABLE_FIELDS: EditableField[] = [
   { key: 'product_name', label: 'Product Name', type: 'text', section: 'Identity', kinds: ['sealed'] },
   { key: 'description', label: 'Description', type: 'text', section: 'Identity', kinds: ['bulk'] },
   { key: 'condition', label: 'Condition', type: 'select', section: 'Identity', kinds: ['raw'] },
-  { key: 'finish', label: 'Finish', type: 'text', section: 'Identity', kinds: ['raw'] },
+  { key: 'finish', label: 'Finish', type: 'select', section: 'Identity', kinds: ['raw'] },
+  // Descriptive, not priced — see FinishPicker's own docstring. `chips`
+  // type, not `text`: this is `RawInventoryItem.finish_attributes`, a
+  // `string[]`, and belongs right after `finish` in the Identity section.
+  { key: 'finish_attributes', label: 'Finish Attributes', type: 'chips', section: 'Identity', kinds: ['raw'] },
   { key: 'factory_sealed', label: 'Factory Sealed', type: 'checkbox', section: 'Identity', kinds: ['raw'] },
   { key: 'company', label: 'Grading Company', type: 'text', section: 'Identity', kinds: ['graded'] },
   { key: 'grade', label: 'Grade', type: 'decimal', section: 'Identity', kinds: ['graded'] },
   { key: 'cert_number', label: 'Cert Number', type: 'text', section: 'Identity', kinds: ['graded'] },
   { key: 'product_type', label: 'Product Type', type: 'text', section: 'Identity', kinds: ['sealed'] },
-  { key: 'language', label: 'Language', type: 'text', section: 'Identity' },
+  { key: 'language', label: 'Language', type: 'select', section: 'Identity' },
+  // Only shown when `language === 'OTHER'` (RFC 0023 §1.2) — see
+  // `visibleFields` below. A permanently-visible note field on 99% of cards
+  // (every EN/JP item) would be noise nobody reads.
+  { key: 'language_note', label: 'Language Note', type: 'text', section: 'Identity' },
   { key: 'status', label: 'Status', type: 'text', section: 'Identity' },
   { key: 'location', label: 'Location', type: 'select', section: 'Identity' },
   { key: 'tcg_url', label: 'TCGplayer Link', type: 'text', section: 'Identity' },
@@ -171,6 +191,9 @@ export default function CardDetailModal({
   )
   const [editingField, setEditingField] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
+  // `finish_attributes`'s own draft — see the `'chips'` FieldType note above
+  // for why this is not routed through `editValue`.
+  const [attributesDraft, setAttributesDraft] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // Triage (T11). `triagePanel` is the inline note form — deliberately not a
@@ -263,12 +286,17 @@ export default function CardDetailModal({
   const startEdit = (field: string) => {
     setEditingField(field)
     setEditValue(String(shown?.[field] ?? ''))
+    if (field === 'finish_attributes') {
+      const current = shown?.finish_attributes
+      setAttributesDraft(Array.isArray(current) ? [...(current as string[])] : [])
+    }
     setError(null)
   }
 
   const cancelEdit = () => {
     setEditingField(null)
     setEditValue('')
+    setAttributesDraft([])
     setError(null)
   }
 
@@ -277,15 +305,19 @@ export default function CardDetailModal({
     setSaving(true)
     setError(null)
     try {
+      // `finish_attributes` is a real array the whole way — never routed
+      // through `editValue`'s string, per the `'chips'` FieldType note.
       // A checkbox backs a NON-optional bool on the model, and the update
       // endpoint merges the body straight into it — so the blank-is-null path
       // used for text would be a 422 there rather than a clear.
       const value =
-        FIELDS_BY_KEY.get(editingField)?.type === 'checkbox'
-          ? editValue === 'true'
-          : editValue.trim() === ''
-            ? null
-            : editValue.trim()
+        editingField === 'finish_attributes'
+          ? attributesDraft
+          : FIELDS_BY_KEY.get(editingField)?.type === 'checkbox'
+            ? editValue === 'true'
+            : editValue.trim() === ''
+              ? null
+              : editValue.trim()
       const payload: Record<string, unknown> = { [editingField]: value }
       if (typeof payload.condition === 'string') {
         const { condition, condition_modifier } = parseCondition(payload.condition)
@@ -296,13 +328,14 @@ export default function CardDetailModal({
       if (updated) setCurrent(updated)
       setEditingField(null)
       setEditValue('')
+      setAttributesDraft([])
       onUpdated?.(updated ?? undefined)
     } catch (err) {
       setError(err instanceof AdminApiError ? (err.detail ?? 'Update failed') : 'Update failed')
     } finally {
       setSaving(false)
     }
-  }, [api, editingField, editValue, item, onUpdated])
+  }, [api, editingField, editValue, attributesDraft, item, onUpdated])
 
   const writeTriage = useCallback(
     // No `nextFlagged` parameter any more: `flagged` is DERIVED from the item on
@@ -444,9 +477,13 @@ export default function CardDetailModal({
   // never a local flag the header could disagree with.
   const inVault = shown.status === 'on_hold'
 
-  // Only the fields this kind actually has, per the backend union.
+  // Only the fields this kind actually has, per the backend union — plus
+  // `language_note`, which is further gated on the language actually being
+  // OTHER (RFC 0023 §1.2): a note field visible on every ordinary EN/JP card
+  // is noise nobody reads.
   const visibleFields = EDITABLE_FIELDS.filter(
-    (f) => !f.kinds || f.kinds.includes(kind as ItemKind),
+    (f) => (!f.kinds || f.kinds.includes(kind as ItemKind))
+      && (f.key !== 'language_note' || shown.language === 'OTHER'),
   )
   const sections = SECTION_ORDER.map((name) => ({
     name,
@@ -789,9 +826,11 @@ export default function CardDetailModal({
                       ? formatCondition(String(shown.condition), shown.condition_modifier as string | null | undefined)
                       : field.type === 'checkbox'
                         ? (value ? 'Yes' : 'No')
-                        : value != null && String(value) !== ''
-                          ? String(value)
-                          : '—'
+                        : field.type === 'chips'
+                          ? (Array.isArray(value) && value.length > 0 ? (value as string[]).join(', ') : '—')
+                          : value != null && String(value) !== ''
+                            ? String(value)
+                            : '—'
 
                   return (
                     // `flex-wrap` is how the value STACKS under its label in a
@@ -809,13 +848,13 @@ export default function CardDetailModal({
                     <div
                       key={field.key}
                       className={`flex flex-wrap gap-2 px-3 py-2 rounded-lg bg-pine-800/30 border border-pine-700/20 ${
-                        field.type === 'textarea'
+                        field.type === 'textarea' || (field.type === 'chips' && isEditing)
                           ? 'col-span-full flex-col items-stretch'
                           : 'items-center'
                       }`}
                     >
                       <span className={`text-[10px] text-pine-500 uppercase tracking-wider flex-shrink-0 ${
-                        field.type === 'textarea' ? '' : 'w-24'
+                        field.type === 'textarea' || (field.type === 'chips' && isEditing) ? '' : 'w-24'
                       }`}>
                         {field.label}
                       </span>
@@ -853,6 +892,60 @@ export default function CardDetailModal({
                                 <option key={c} value={c}>{c}</option>
                               ))}
                             </select>
+                          ) : field.type === 'select' && field.key === 'language' ? (
+                            <select
+                              value={editValue}
+                              onChange={(e) => setEditValue(e.target.value)}
+                              className="flex-1 min-w-0 bg-pine-900 border border-mint/30 rounded px-2 py-0.5 text-xs text-pine-100 focus:outline-none focus:border-mint/60"
+                              autoFocus
+                              disabled={saving}
+                            >
+                              {LANGUAGE_OPTIONS.map((l) => (
+                                <option key={l.value} value={l.value}>{l.label}</option>
+                              ))}
+                            </select>
+                          ) : field.type === 'select' && field.key === 'finish' ? (
+                            <select
+                              value={editValue}
+                              onChange={(e) => setEditValue(e.target.value)}
+                              className="flex-1 min-w-0 bg-pine-900 border border-mint/30 rounded px-2 py-0.5 text-xs text-pine-100 focus:outline-none focus:border-mint/60"
+                              autoFocus
+                              disabled={saving}
+                            >
+                              {PRICED_FINISHES.map((f) => (
+                                <option key={f} value={f}>{f}</option>
+                              ))}
+                            </select>
+                          ) : field.type === 'chips' ? (
+                            // finish_attributes (RFC 0023 T6) — a chip toggles
+                            // IMMEDIATELY into `attributesDraft`, but the PUT
+                            // itself still waits for the Save button below,
+                            // same commit gesture as every other field here.
+                            <div className="flex flex-wrap gap-1.5 flex-1">
+                              {finishAttributeChipVocabulary(attributesDraft).map((tag) => {
+                                const selected = attributesDraft.includes(tag)
+                                return (
+                                  <button
+                                    key={tag}
+                                    type="button"
+                                    disabled={saving}
+                                    onClick={() =>
+                                      setAttributesDraft((prev) =>
+                                        prev.includes(tag) ? prev.filter((a) => a !== tag) : [...prev, tag],
+                                      )
+                                    }
+                                    aria-pressed={selected}
+                                    className={`rounded-full px-2.5 py-1 text-[11px] border transition-colors ${
+                                      selected
+                                        ? 'bg-mint/20 border-mint/40 text-mint'
+                                        : 'bg-pine-800/40 border-pine-700/40 text-pine-400 hover:border-pine-600'
+                                    }`}
+                                  >
+                                    {tag}
+                                  </button>
+                                )
+                              })}
+                            </div>
                           ) : field.type === 'textarea' ? (
                             // Deliberately no Enter-to-save: a note is multi-line
                             // free text, so Enter has to insert a newline. Save is

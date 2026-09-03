@@ -7,6 +7,7 @@ from decimal import Decimal
 from merlins_collection.models.inventory import (
     Condition,
     ItemStatus,
+    Language,
     RawInventoryItem,
 )
 
@@ -79,6 +80,43 @@ class TestMispriced:
         assert len(flagged) == 1
         assert flagged[0]["tcg_url"] == "https://www.tcgplayer.com/product/12345"
         assert flagged[0]["sticker_notes"] == "verify grade before pricing"
+
+    def test_mispriced_includes_language(self, admin_client):
+        """RFC 0023 T7: the frontend needs each item's language to pick the
+        right TCGplayer category link (or say none exists) — this endpoint
+        never returned it before, so every mispriced row silently defaulted
+        to an English-category search link regardless of the card's actual
+        language.
+        """
+        client, repo, admin_token = admin_client
+        repo.put_inventory_item(_raw(
+            item_id="jp-item", cost_basis="10.00", current_market_value="50.00",
+            language=Language.JP,
+        ))
+
+        resp = client.get("/admin/show-prep/mispriced", headers=_auth(admin_token))
+        assert resp.status_code == 200
+        flagged = resp.json()["items"]
+        assert len(flagged) == 1
+        assert flagged[0]["language"] == "JP"
+
+    def test_mispriced_includes_language_in_dollar_threshold_mode(self, admin_client):
+        """The endpoint hand-builds two near-identical dicts (percent/dollar
+        threshold modes) — both must carry `language`, not just one."""
+        client, repo, admin_token = admin_client
+        repo.put_inventory_item(_raw(
+            item_id="jp-item", cost_basis="10.00", current_market_value="50.00",
+            language=Language.JP,
+        ))
+
+        resp = client.get(
+            "/admin/show-prep/mispriced?threshold=5&threshold_mode=dollar",
+            headers=_auth(admin_token),
+        )
+        assert resp.status_code == 200
+        flagged = resp.json()["items"]
+        assert len(flagged) == 1
+        assert flagged[0]["language"] == "JP"
 
 
 class TestBulkMove:

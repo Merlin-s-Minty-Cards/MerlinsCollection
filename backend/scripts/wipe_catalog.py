@@ -40,7 +40,7 @@ import sys
 from pathlib import Path
 
 from merlins_collection.config import settings
-from merlins_collection.models.inventory import Language, new_ulid
+from merlins_collection.models.inventory import SEEDED_LANGUAGES, new_ulid
 from merlins_collection.services.dynamodb import (
     ImportInProgressError,
     InventoryRepository,
@@ -134,7 +134,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--language", action="append",
                         choices=sorted(LANGUAGE_API_CODE.values()),
-                        help="API language code to seed (repeatable); default: all")
+                        help="API language code to seed (repeatable); default: "
+                             "every language already seeded (SEEDED_LANGUAGES)")
     parser.add_argument("--execute", action="store_true",
                         help="actually load and delete; without it this is a dry run")
     parser.add_argument("--confirm-table",
@@ -145,8 +146,15 @@ def main(argv=None) -> int:
                              "cross-checked against the set list (the run "
                              "aborts without this)")
     args = parser.parse_args(argv)
-    languages = ([lang for lang in Language if LANGUAGE_API_CODE[lang] in args.language]
-                 if args.language else list(Language))
+    # LANGUAGE_API_CODE, never bare `Language`, when filtering by a requested
+    # code -- `Language` now includes `OTHER`, which carries no API code and
+    # would KeyError on the lookup below before its membership is even
+    # checked. The no-flag default stays `SEEDED_LANGUAGES` (today: EN, JP),
+    # not every language TCGdex speaks -- this is the DESTRUCTIVE wipe+reseed;
+    # a bare `--execute` must never delete-then-reload 16 languages nobody
+    # asked for just because the vocabulary grew (RFC 0023 section 1.3).
+    languages = ([lang for lang in LANGUAGE_API_CODE if LANGUAGE_API_CODE[lang] in args.language]
+                 if args.language else list(SEEDED_LANGUAGES))
 
     table, region = settings.dynamodb_table_name, settings.aws_region
     mode = "WIPING AND RESEEDING" if args.execute else "DRY RUN against"

@@ -292,7 +292,9 @@ describe('AdminInventoryPage — Send to Triage (RFC 0008 T11)', () => {
 //     mode this whole section exists to avoid.
 
 const DEFAULT_HEADERS = [
-  'Name', 'Status', 'Kind', 'Cond', 'Location', 'Price Paid', 'Market', 'Sticker', 'Ownership', 'Consignor', '',
+  'Name', 'Status', 'Kind', 'Cond', 'Location', 'Price Paid', 'Market', 'Sticker', 'Ownership', 'Consignor',
+  // RFC 0023 T5 — finish_attributes joined the default-visible set.
+  'Finish Attributes', '',
 ]
 
 function headers(): string[] {

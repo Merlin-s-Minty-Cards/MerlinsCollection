@@ -24,6 +24,7 @@ from merlins_collection.models.inventory import (
     InventoryItem,
     InventoryItemAdapter,
     ItemStatus,
+    Language,
     _market_price,
     market_price_and_finish,
     new_ulid,
@@ -505,6 +506,7 @@ def admin_update_item(
                 ),
             )
     body = _apply_review_transition(existing, body)
+    body = _apply_language_transition(existing, body)
     body = _apply_no_catalog_match_transition(existing, body)
 
     # Merge: dump existing to dict, overlay with update body, re-validate
@@ -1430,6 +1432,44 @@ def _apply_review_transition(
     else:
         body["reviewed_at"] = datetime.now(tz=timezone.utc)  # rule 1
 
+    return body
+
+
+def _apply_language_transition(
+    existing: InventoryItem, body: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve a ``language`` change into the fields actually written.
+
+    **Setting ``language = OTHER`` also sets ``no_catalog_match = True``, in
+    the same write.** An OTHER card is unmatchable by definition — there is no
+    catalog language to link it to, ever (see ``LANGUAGE_API_CODE`` and the
+    model's ``_other_language_implies_unlinked`` invariant) — so it belongs in
+    Unmatched, not Triage. Leaving it to Triage's *derived* ``missing_card_id``
+    reason would give that queue a floor it can never get under, which is the
+    exact problem RFC 0011 built Unmatched to solve. This runs BEFORE
+    ``_apply_no_catalog_match_transition`` below, so the stamp/timestamp rules
+    there apply to the parking this triggers exactly as they would to a manual
+    one.
+
+    Only a catalog-linkable kind is set to park: sealed and bulk items have no
+    ``card_id`` field at all (the same ``hasattr`` reasoning
+    ``_apply_no_catalog_match_transition``'s rule 1 already documents), and
+    that function 422s any attempt to park one — a sealed OTHER item (a Korean
+    booster box, say) must stay a plain, unremarkable write.
+
+    **If the item is still linked, this does nothing extra.** The 422 for
+    "language=OTHER while still linked" comes from the model's own invariant
+    once the merged row is validated below, with a message telling the admin to
+    unlink first — the same generic merge-then-validate path every other model
+    invariant on this endpoint already goes through.
+
+    Clearing OTHER back to a real language is deliberately NOT handled here —
+    it does not auto-clear ``no_catalog_match``. Leaving a queue is a separate,
+    deliberate admin action, same as unlinking a catalog card is.
+    """
+    if body.get("language") == Language.OTHER and hasattr(existing, "card_id"):
+        body = dict(body)
+        body["no_catalog_match"] = True
     return body
 
 

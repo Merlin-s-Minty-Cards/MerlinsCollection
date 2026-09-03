@@ -351,3 +351,22 @@ class TestLanguageField:
         jp = raw(item_id="jp", language=Language.JP)
 
         assert ids(sort_items([jp, en], "language_asc")) == ["en", "jp"]
+
+
+class TestFinishAttributesField:
+    """RFC 0023 T5 — sorts by COUNT of attributes, not the joined string."""
+
+    @pytest.mark.parametrize("direction", ["asc", "desc"])
+    def test_no_attributes_sorts_last_in_both_directions(self, direction):
+        none = raw(item_id="none", finish_attributes=[])
+        one = raw(item_id="one", finish_attributes=["1st Edition"])
+        many = raw(item_id="many", finish_attributes=["1st Edition", "Shadowless", "Signed"])
+
+        result = ids(sort_items([none, many, one], f"finish_attributes_{direction}"))
+        assert result[-1] == "none"
+
+    def test_ascending_orders_by_count(self):
+        one = raw(item_id="one", finish_attributes=["1st Edition"])
+        many = raw(item_id="many", finish_attributes=["1st Edition", "Shadowless"])
+
+        assert ids(sort_items([many, one], "finish_attributes_asc")) == ["one", "many"]

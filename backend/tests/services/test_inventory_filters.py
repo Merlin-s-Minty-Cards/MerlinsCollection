@@ -294,3 +294,44 @@ class TestBoundValidationIsEager:
     def test_an_unsupported_op_is_still_rejected(self):
         with pytest.raises(ValueError, match="does not support"):
             validate_filters(["status:contains:avail"])
+
+
+class TestListContains:
+    """RFC 0023 T5 — finish_attributes is a list, so `contains` means "is one
+    of the list's entries", not a substring search over the whole list."""
+
+    def test_field_kind_is_registered(self):
+        assert FILTERABLE_FIELDS["finish_attributes"] is FieldKind.LIST_CONTAINS
+
+    def test_only_contains_is_supported(self):
+        assert OPS_BY_KIND[FieldKind.LIST_CONTAINS] == frozenset({FilterOp.CONTAINS})
+
+    def test_matches_an_item_carrying_the_exact_attribute(self):
+        tagged = raw(item_id="tagged", finish_attributes=["1st Edition", "Shadowless"])
+        untagged = raw(item_id="plain", finish_attributes=[])
+
+        result = apply_filters(
+            [tagged, untagged], [parse_filter("finish_attributes:contains:1st Edition")]
+        )
+        assert ids(result) == ["tagged"]
+
+    def test_matches_case_insensitively(self):
+        tagged = raw(item_id="tagged", finish_attributes=["1st Edition"])
+
+        result = apply_filters(
+            [tagged], [parse_filter("finish_attributes:contains:1ST EDITION")]
+        )
+        assert ids(result) == ["tagged"]
+
+    def test_a_substring_of_one_entry_does_not_match(self):
+        """`contains` means list MEMBERSHIP, not a substring inside one entry —
+        the opposite of the TEXT kind's `contains`, which the docstring above
+        exists to distinguish."""
+        tagged = raw(item_id="tagged", finish_attributes=["1st Edition"])
+
+        result = apply_filters([tagged], [parse_filter("finish_attributes:contains:Edition")])
+        assert ids(result) == []
+
+    def test_an_unknown_op_on_the_field_is_rejected(self):
+        with pytest.raises(ValueError, match="does not support"):
+            validate_filters(["finish_attributes:eq:1st Edition"])

@@ -126,3 +126,46 @@ describe('buildIncomingLeg market_value/image_url (Important 7)', () => {
     expect(leg.market_value).toBe(0)
   })
 })
+
+// RFC 0023 T6 — finish_attributes threaded through the incoming-leg builder,
+// same shape as set_name/card_number/image_url: sent only when non-empty.
+describe('buildIncomingLeg finish_attributes (RFC 0023 T6)', () => {
+  const baseDraft: IncomingLegDraft = {
+    card_id: 'en:base1-4',
+    name: 'Charizard',
+    agreed_value: 400,
+    kind: 'raw',
+    set_name: '',
+    card_number: '',
+    condition: 'NM',
+    finish: 'holofoil',
+    company: 'PSA',
+    grade: '',
+    cert_number: '',
+    grade_label: '',
+    language: 'EN',
+    location: 'glass',
+  }
+
+  it('carries finish_attributes through for a raw leg', () => {
+    const leg = buildIncomingLeg({ ...baseDraft, finish_attributes: ['1st Edition', 'Shadowless'] })
+    expect(leg.finish_attributes).toEqual(['1st Edition', 'Shadowless'])
+  })
+
+  it('omits finish_attributes when the draft has none', () => {
+    const leg = buildIncomingLeg({ ...baseDraft, finish_attributes: [] })
+    expect(leg).not.toHaveProperty('finish_attributes')
+  })
+
+  it('omits finish_attributes when the draft does not set it at all', () => {
+    const leg = buildIncomingLeg(baseDraft)
+    expect(leg).not.toHaveProperty('finish_attributes')
+  })
+
+  it('never appears on a graded leg — attributes are a raw-only concept', () => {
+    const leg = buildIncomingLeg({
+      ...baseDraft, kind: 'graded', finish_attributes: ['1st Edition'],
+    })
+    expect(leg).not.toHaveProperty('finish_attributes')
+  })
+})

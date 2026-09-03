@@ -98,6 +98,112 @@ describe('CardDetailModal image resolution', () => {
   })
 })
 
+describe('CardDetailModal language (RFC 0023 T3)', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    putMock.mockReset()
+    getMock.mockResolvedValue(null)
+    postMock.mockResolvedValue({})
+  })
+
+  it('renders the language field as a select over the full 19-member vocabulary, not free text', async () => {
+    render(<CardDetailModal item={{ ...item, language: 'EN' }} onClose={vi.fn()} />)
+
+    fireEvent.click((await screen.findAllByLabelText(/Edit Language/i))[0])
+
+    expect(screen.getByRole('option', { name: 'Korean' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Chinese (Traditional)' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Other / unsupported' })).toBeInTheDocument()
+  })
+
+  it('hides the Language Note row when the language is not OTHER', async () => {
+    render(<CardDetailModal item={{ ...item, language: 'EN' }} onClose={vi.fn()} />)
+    await screen.findAllByLabelText(/Edit Language/i)
+
+    expect(screen.queryByText('Language Note')).not.toBeInTheDocument()
+  })
+
+  it('shows the Language Note row only when the language is OTHER', async () => {
+    render(<CardDetailModal
+      item={{ ...item, language: 'OTHER', language_note: 'Vietnamese' }}
+      onClose={vi.fn()}
+    />)
+
+    expect(await screen.findByText('Language Note')).toBeInTheDocument()
+    expect(screen.getByText('Vietnamese')).toBeInTheDocument()
+  })
+})
+
+describe('CardDetailModal finish + finish_attributes (RFC 0023 T6)', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    putMock.mockReset()
+    getMock.mockResolvedValue(null)
+    postMock.mockResolvedValue({})
+    putMock.mockResolvedValue({})
+  })
+
+  it('renders finish as a select over the measured PRICED_FINISHES vocabulary, not free text', async () => {
+    render(<CardDetailModal item={{ ...item, finish: 'normal' }} onClose={vi.fn()} />)
+
+    fireEvent.click((await screen.findAllByLabelText(/Edit Finish$/i))[0])
+
+    expect(screen.getByRole('option', { name: '1stEditionHolofoil' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'firstEditionHolofoil' })).not.toBeInTheDocument()
+  })
+
+  it('shows the current finish_attributes joined with commas when not editing', async () => {
+    render(
+      <CardDetailModal
+        item={{ ...item, finish_attributes: ['1st Edition', 'Shadowless'] }}
+        onClose={vi.fn()}
+      />
+    )
+    expect(await screen.findByText('1st Edition, Shadowless')).toBeInTheDocument()
+  })
+
+  it('shows an em dash when there are no finish_attributes', async () => {
+    render(<CardDetailModal item={{ ...item, finish_attributes: [] }} onClose={vi.fn()} />)
+    expect(await screen.findByText('Finish Attributes')).toBeInTheDocument()
+  })
+
+  it('toggling a chip and saving PUTs the full attributes array', async () => {
+    render(
+      <CardDetailModal item={{ ...item, finish_attributes: ['1st Edition'] }} onClose={vi.fn()} />
+    )
+
+    fireEvent.click((await screen.findAllByLabelText(/Edit Finish Attributes/i))[0])
+    fireEvent.click(screen.getByRole('button', { name: 'Shadowless' }))
+    fireEvent.click(screen.getByLabelText('Save'))
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith(
+        '/inventory/item-1',
+        { finish_attributes: ['1st Edition', 'Shadowless'] },
+      )
+    )
+  })
+
+  it('toggling an already-selected chip removes it before saving', async () => {
+    render(
+      <CardDetailModal
+        item={{ ...item, finish_attributes: ['1st Edition', 'Shadowless'] }}
+        onClose={vi.fn()}
+      />
+    )
+
+    fireEvent.click((await screen.findAllByLabelText(/Edit Finish Attributes/i))[0])
+    fireEvent.click(screen.getByRole('button', { name: '1st Edition' }))
+    fireEvent.click(screen.getByLabelText('Save'))
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith('/inventory/item-1', { finish_attributes: ['Shadowless'] })
+    )
+  })
+})
+
 describe('CardDetailModal TCGplayer link', () => {
   beforeEach(() => {
     getMock.mockReset()
@@ -789,10 +895,15 @@ describe('CardDetailModal — layout survives zoom (RFC 0010 T6)', () => {
     // label, not an input that moved. Tailwind container queries are not
     // installed in this project, so the stack is done with wrapping plus a floor
     // on the value: it drops below the label exactly when it no longer fits.
+    //
+    // Uses "TCGplayer Link" rather than "Finish" — RFC 0023 T6 turned Finish
+    // into a `<select>`, so `getByDisplayValue('')` no longer finds a plain
+    // text `<input>` there. The class contract under test is generic to any
+    // text-type field, not Finish specifically.
     render(<CardDetailModal item={item} onClose={vi.fn()} />)
-    fireEvent.click(await screen.findByLabelText('Edit Finish'))
+    fireEvent.click(await screen.findByLabelText('Edit TCGplayer Link'))
 
-    const cell = cellFor('Finish')
+    const cell = cellFor('TCGplayer Link')
     const editor = screen.getByDisplayValue('').parentElement as HTMLElement
 
     expect(cell.className).toContain('flex-wrap')

@@ -5,10 +5,11 @@ import { useAdminApi } from '@/lib/admin-api'
 import { useLocations } from '@/lib/use-locations'
 import { useCosigners } from '@/lib/use-cosigners'
 import { parseMoney } from '@/lib/money'
-import { CONDITION_OPTIONS } from '@/lib/constants'
+import { CONDITION_OPTIONS, LANGUAGE_OPTIONS, PRICED_FINISHES } from '@/lib/constants'
 import { buildIncomingLeg, type IncomingLeg } from '@/lib/trade-incoming-form'
 import MoneyInput from '@/components/admin/shared/MoneyInput'
 import CosignorPicker from '@/components/admin/shared/CosignorPicker'
+import FinishPicker from '@/components/admin/shared/FinishPicker'
 import type { PickerCard } from '@/components/admin/shared/CardPickerRow'
 import DealCardRow from './DealCardRow'
 
@@ -30,14 +31,6 @@ import DealCardRow from './DealCardRow'
 
 /** Mirrors `/admin/slabs`' list. Do not invent a second one. */
 const COMPANIES = ['PSA', 'BGS', 'CGC', 'SGC']
-
-const FINISHES = ['normal', 'holofoil', 'reverseHolofoil', 'firstEditionHolofoil']
-
-/** `Language` on `InventoryItem` is a case-sensitive StrEnum: `EN`/`JP` only. */
-const LANGUAGES = [
-  { value: 'EN', label: 'EN' },
-  { value: 'JP', label: 'JP' },
-]
 
 const CERT_DEBOUNCE_MS = 300
 
@@ -81,7 +74,8 @@ export default function IncomingCardForm({ card, onAdd, onCancel, gradedAllowed 
   const [setName_, setSetName] = useState(card?.set_name ?? '')
   const [number, setNumber] = useState(card?.number ?? '')
   const [condition, setCondition] = useState<string>(CONDITION_OPTIONS[0])
-  const [finish, setFinish] = useState(FINISHES[0])
+  const [finish, setFinish] = useState<string>(PRICED_FINISHES[0])
+  const [finishAttributes, setFinishAttributes] = useState<string[]>([])
   const [company, setCompany] = useState(COMPANIES[0])
   const [grade, setGrade] = useState('')
   const [gradeLabel, setGradeLabel] = useState('')
@@ -164,6 +158,7 @@ export default function IncomingCardForm({ card, onAdd, onCancel, gradedAllowed 
         card_number: number,
         condition,
         finish,
+        finish_attributes: finishAttributes,
         company,
         grade,
         cert_number: cert,
@@ -257,37 +252,34 @@ export default function IncomingCardForm({ card, onAdd, onCancel, gradedAllowed 
       </div>
 
       {kind === 'raw' || !gradedSelectable ? (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] uppercase tracking-wider text-pine-400">Condition</span>
-            <select
-              aria-label="Condition"
-              value={condition}
-              className="vault-field w-full rounded-lg px-3 py-2 text-sm"
-              onChange={(e) => setCondition(e.target.value)}
-            >
-              {CONDITION_OPTIONS.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] uppercase tracking-wider text-pine-400">Finish</span>
-            <select
-              aria-label="Finish"
-              value={finish}
-              className="vault-field w-full rounded-lg px-3 py-2 text-sm"
-              onChange={(e) => setFinish(e.target.value)}
-            >
-              {FINISHES.map((f) => (
-                <option key={f} value={f}>
-                  {f}
-                </option>
-              ))}
-            </select>
-          </label>
+        <div className="flex flex-col gap-3">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <label className="flex flex-col gap-1">
+              <span className="text-[11px] uppercase tracking-wider text-pine-400">Condition</span>
+              <select
+                aria-label="Condition"
+                value={condition}
+                className="vault-field w-full rounded-lg px-3 py-2 text-sm"
+                onChange={(e) => setCondition(e.target.value)}
+              >
+                {CONDITION_OPTIONS.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          {/* RFC 0023 T6 — replaces the old hardcoded `FINISHES` array, which
+              offered `firstEditionHolofoil`, a spelling the pricing fallback
+              has never heard of. FinishPicker also carries the attributes
+              chip multi-select, which needs more room than one grid cell. */}
+          <FinishPicker
+            finish={finish}
+            onFinishChange={setFinish}
+            attributes={finishAttributes}
+            onAttributesChange={setFinishAttributes}
+          />
         </div>
       ) : (
         <div className="flex flex-col gap-2">
@@ -358,7 +350,7 @@ export default function IncomingCardForm({ card, onAdd, onCancel, gradedAllowed 
             className="vault-field w-full rounded-lg px-3 py-2 text-sm"
             onChange={(e) => setLanguage(e.target.value)}
           >
-            {LANGUAGES.map((l) => (
+            {LANGUAGE_OPTIONS.map((l) => (
               <option key={l.value} value={l.value}>
                 {l.label}
               </option>

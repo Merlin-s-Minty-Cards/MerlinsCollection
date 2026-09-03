@@ -1321,6 +1321,121 @@ rename-and-migrate path; the frontend cell carries a `title` explaining why,
 per the "a disabled control states why" rule. Frontend reads it via
 `useLocations()`; never hardcode a location list in new code.
 
+## CARD IDENTITY GREW ON THREE AXES — LANGUAGE, FINISH, AND TCGPLAYER LINKS (RFC 0023)
+
+**Language went from 2 members to 19** (`Language` StrEnum,
+`models/inventory.py`) — the 18 real TCGdex codes plus `OTHER`, the manual
+escape hatch for a card TCGdex cannot represent at all. Nothing is renamed
+and nothing is backfilled: every existing row is `EN` or `JP` and stays
+valid unchanged. `JP` keeps the stored value `"JP"` even though the TCGdex
+API code is `"ja"` — `LANGUAGE_API_CODE` already exists to carry that
+translation, and renaming the enum member would invalidate every stored row
+and every `ja:`-prefixed `card_id`'s reverse lookup for a cosmetic gain.
+`frontend/lib/constants.ts`'s `LANGUAGE_OPTIONS` mirrors backend
+`LANGUAGE_LABELS` verbatim and is the one shared source three surfaces read
+from: `CardDetailModal`'s language select (a new `language_note` row — free
+text, **internal**, appears only when the language is `OTHER`),
+`admin-inventory-columns.tsx`'s `language` column edit + filter (previously
+a hand-typed subset that didn't even use real enum values — `'ZH'` is not a
+`Language` member, the real codes are `ZH-TW`/`ZH-CN`), and
+`IncomingCardForm.tsx` (previously hardcoded to `EN`/`JP` only).
+
+**`OTHER` implies `card_id is None`, and setting it also parks the item in
+Unmatched, not Triage** — the exact mirror of the existing `no_catalog_match`
+invariant, for the same reason: there is no catalog language to link an
+`OTHER` item to (`LANGUAGE_API_CODE` has no entry for it — that absence is
+the mechanism), so a linked `OTHER` row is a contradiction, and routing it
+to Triage's derived `missing_card_id` reason would rebuild the exact "floor
+the queue can never get under" that RFC 0011 built Unmatched to remove. A
+422 with "unlink the card first" on a linked item; clearing `OTHER` back to
+a real language does **not** auto-clear `no_catalog_match` — leaving a queue
+is a deliberate action.
+
+**The catalog is seeded per language, on demand — not all 18 at once.**
+`SEEDED_LANGUAGES` (currently `{EN, JP}`) bounds `sync_new_sets`'s and
+`purge_catalog_junk.py`'s walks; extending it is a manual, deliberate edit
+alongside actually running `scripts/seed_catalog.py --language <code>
+--execute`. `GET /admin/catalog/languages` (new) returns only languages that
+actually have `catalog_set` registry rows — `CardSearchPanel`'s language
+filter (`frontend/components/admin/shared/CardSearchPanel.tsx`, defaulting
+to `EN`) uses **only** that scoped list, because a catalog search for an
+unseeded language can only ever return nothing. The admin inventory table's
+own `language` filter is deliberately **not** scoped this way — it offers
+the full 19-member vocabulary, because an admin can legitimately own a
+Korean card before that catalog is ever seeded. Same field, two different
+filter scopes, by design.
+
+**`finish` stays the single priced join key into `card.prices`** —
+`_market_price`/`market_price_and_finish` are unchanged. What changed is
+that the dropdown offering it stopped being a hand-written guess:
+`PRICED_FINISHES` (`models/inventory.py`, mirrored verbatim in
+`frontend/lib/constants.ts`) is **measured, not typed** — a full scan of the
+live catalog on 2026-09-02 (29,123 `CatalogCard` rows) found 7 distinct
+finish keys actually present, unioned with `_MARKET_FINISH_FALLBACK`'s own 6
+for 8 total. The two sets do not fully overlap: `1stEditionNormal` (one of
+the fallback's six) had **zero** live cards, and `1stEdition`/`unlimited`
+(no `Holofoil` suffix) exist live but were never in the fallback. This is
+the concrete evidence the measurement exists to prevent:
+`IncomingCardForm.tsx` used to hardcode a fourth option,
+`firstEditionHolofoil`, a spelling neither list has ever contained, so an
+item staged with it silently fell through the entire pricing fallback.
+
+**`finish_attributes: list[str]`** (`RawInventoryItem`, ≤10 entries, ≤40
+chars each, defaults `[]`) carries everything about a printing that is
+genuinely NOT mutually exclusive with `finish` — 1st Edition, Shadowless,
+Full Art, Signed, ... **Customer-facing** (in `_CUSTOMER_ITEM_FIELDS`) — the
+opposite call from `language_note`/`review_reason` above: this describes the
+CARD, not the business's own handling of the record. **Carries no price
+multiplier, by design** — stated in the model docstring, the same reasoning
+that already killed the admin chat's `stale`/`max_age_days` idea: a 1st
+Edition Shadowless Charizard is worth vastly more than the `holofoil` band
+says, and the honest answer is that the operator hand-prices it
+(`HandValuedBadge` marks it), not that this field invents a guessed number.
+`FINISH_ATTRIBUTE_SUGGESTIONS` (`frontend/lib/constants.ts`) is a
+**suggested**, not enforced, chip vocabulary — free text is always accepted
+alongside it via an "add custom" input, the same "an escape hatch is a
+permanent control" rule this file states elsewhere.
+
+**`FinishPicker`** (`frontend/components/admin/shared/FinishPicker.tsx`) is
+the one priced-finish-select-plus-attribute-chips control, used by
+`IncomingCardForm` (which deleted its old `FINISHES` array — see above) and
+the admin inventory table's `finish_attributes` column via RFC 0022's
+`multiselect` `EditSpec` mechanism, its first real consumer.
+`CardDetailModal` has its own parallel chip implementation rather than
+embedding `FinishPicker` itself — its edit plumbing predates (and is
+architecturally separate from) `InlineEditCell`'s array-typed
+`multiselectValue`/`saveMultiselect` pair, so routing a `string[]` through
+its own single-string `editValue` would have meant smuggling an array
+through a joined string, which RFC 0022 §1 explicitly rejects. The two
+implementations share `finishAttributeChipVocabulary` (exported from
+`FinishPicker.tsx`) rather than duplicating the suggested-plus-selected chip
+computation.
+
+**TCGplayer has exactly two Pokémon categories**, verified 2026-09-02
+against their own category registry (`tcgcsv.com/tcgplayer/categories`, 92
+categories site-wide): `pokemon` (id 3, English) and `pokemon-japan` (id
+85). There is no Korean, Chinese, French, German, Spanish, Italian or
+Portuguese Pokémon category — TCGplayer added Japanese as a dedicated
+category in October 2024 and has added no others since.
+`frontend/lib/tcgplayer.ts`'s `tcgplayerSearchUrl(language, query)` is now
+the one place a TCGplayer URL is built for its two adoption sites
+(`show-prep/page.tsx`'s TCG Price column, `admin-inventory-columns.tsx`'s
+`tcg_url` column) — the real link for `EN`/`JP`, `null` for everything else
+including `OTHER`. **A `null` must never fall back to the English link** —
+an English-category search for a Korean card returns the wrong card or
+nothing, and both are worse than no link; both adoption sites show a
+one-line reason instead. **Not yet adopted in `CardDetailModal.tsx` or
+`card/[id]/page.tsx`** — both still hardcode the English-only link; logged
+in `docs/plans/rfc-0023/follow-ups.md` rather than fixed, since neither was
+in this RFC's stated file list.
+
+**Incidental backend fix, needed because this RFC is what starts generating
+JP links at volume:** `services/card_text.set_hint_from_url`'s marketplace-
+prefix strip widened from `^pokemon-` to `^pokemon-(japan-)?` — a JP product
+slug is `pokemon-japan-...`, not `pokemon-...`, so the old strip left a junk
+`japan` token in every JP set hint with no relationship to the actual set
+name.
+
 ## AN OVERLAY MOUNTED INSIDE A `backdrop-blur` ANCESTOR IS NOT FIXED TO THE VIEWPORT — PORTAL IT
 
 Measured in a real browser 2026-08-27 (RFC-0018 item 9b), on a defect that had

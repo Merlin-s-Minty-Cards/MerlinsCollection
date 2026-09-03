@@ -75,6 +75,11 @@ export default function ColumnFilter({ def, value, onChange, options = [] }: Col
 
     case 'range':
     case 'text':
+    // listContains (RFC 0023 T5): a plain text box is the right control —
+    // the admin types one attribute name ("1st Edition") to search for. The
+    // backend interprets it as list membership, not a substring, but that
+    // distinction lives in `_matches`, not in what control renders here.
+    case 'listContains':
     default:
       // NOT type="number", even for a money bound. A native number input
       // refuses a comma, which makes the owner's `1,300` un-typeable rather

@@ -2119,6 +2119,118 @@ class TestNoCatalogMatchQueue:
 
 
 # ===========================================================================
+# RFC 0023 T1 — `language = OTHER` also parks the item, in one write
+# ===========================================================================
+
+class TestOtherLanguageTransition:
+
+    def test_setting_other_on_a_still_linked_item_is_a_422(self, admin_client):
+        """The model invariant, surfaced at the endpoint an admin actually
+        hits — the same shape as `test_parking_a_still_linked_item_is_a_422`
+        above, for the sibling invariant."""
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="x"))
+
+        resp = client.put(
+            "/admin/inventory/x",
+            json={"language": "OTHER"},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.status_code == 422
+        assert "unlink" in resp.json()["detail"].lower()
+
+    def test_setting_other_while_unlinking_in_one_body_parks_the_item(self, admin_client):
+        """The T6-style one-click gesture: unlink and go OTHER together."""
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="x"))
+
+        resp = client.put(
+            "/admin/inventory/x",
+            json={"language": "OTHER", "card_id": None},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.status_code == 200
+        item = repo.get_inventory_item("x")
+        assert item.language.value == "OTHER"
+        assert item.card_id is None
+        assert item.no_catalog_match is True
+        assert item.no_catalog_match_at is not None
+
+    def test_other_item_appears_in_unmatched_not_triage(self, admin_client):
+        """An OTHER card is unmatchable by definition and belongs in
+        Unmatched — routing it through Triage's derived `missing_card_id`
+        reason would give that queue a floor it can never get under (RFC
+        0011). `display_name_override` is set so the item does not also trip
+        the unrelated `missing_english_name` Triage reason, which would
+        otherwise legitimately still apply to any non-English item."""
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_raw(
+            item_id="x", display_name_override="Mystery Promo",
+        ))
+
+        resp = client.put(
+            "/admin/inventory/x",
+            json={"language": "OTHER", "card_id": None},
+            headers=_auth_header(admin),
+        )
+        assert resp.status_code == 200
+
+        unmatched = client.get(
+            "/admin/inventory/search", params={"no_catalog_match": "true"},
+            headers=_auth_header(admin),
+        )
+        assert [i["item_id"] for i in unmatched.json()["items"]] == ["x"]
+
+        triage = client.get(
+            "/admin/inventory/search", params={"triage": "true"},
+            headers=_auth_header(admin),
+        )
+        assert [i["item_id"] for i in triage.json()["items"]] == []
+
+    def test_clearing_other_back_to_a_real_language_does_not_auto_clear_parking(
+        self, admin_client,
+    ):
+        """Leaving the Unmatched queue is a deliberate admin action, same as
+        unlinking a catalog card is — the language edit alone must not do
+        it."""
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_raw(
+            item_id="x", card_id=None, language="OTHER", no_catalog_match=True,
+        ))
+
+        resp = client.put(
+            "/admin/inventory/x",
+            json={"language": "EN"},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.status_code == 200
+        item = repo.get_inventory_item("x")
+        assert item.language.value == "EN"
+        assert item.no_catalog_match is True  # unchanged
+
+    def test_setting_other_on_a_sealed_item_is_a_plain_unremarkable_write(
+        self, admin_client,
+    ):
+        """Sealed product has no catalog link at all, so OTHER must not try to
+        park it — that would 422 via the sibling no_catalog_match kind guard
+        for a reason the admin never asked about."""
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_sealed(item_id="box"))
+
+        resp = client.put(
+            "/admin/inventory/box",
+            json={"language": "OTHER"},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.status_code == 200
+        assert repo.get_inventory_item("box").language.value == "OTHER"
+
+
+# ===========================================================================
 # POST /admin/inventory/items-brief
 # ===========================================================================
 #

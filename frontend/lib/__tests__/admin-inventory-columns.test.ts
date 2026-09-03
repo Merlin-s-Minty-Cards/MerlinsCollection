@@ -44,6 +44,57 @@ describe('the registry itself', () => {
     }
   })
 
+  it('offers the full 19-member language vocabulary on the language column edit (RFC 0023 T3)', () => {
+    // Before T3 this hardcoded {EN, JP} only — a card in any of the other 17
+    // languages T1 added could never be RE-selected once the item existed.
+    const col = INVENTORY_COLUMNS.find((c) => c.key === 'language')!
+    const ctx = {
+      editingId: null, editField: null, editValue: '', setEditValue: () => {},
+      startEdit: () => {}, saveEdit: () => {}, cancelEdit: () => {},
+      locationOptions: [], getImageUrl: () => null, onRefresh: () => {},
+      onDelete: () => {}, consignorName: () => undefined,
+    }
+    const spec = col.edit!(ctx)
+    const values = (spec.options ?? []).map((o) => o.value)
+    expect(values).toContain('KO')
+    expect(values).toContain('ZH-TW')
+    expect(values).toContain('OTHER')
+    expect(values.length).toBe(19)
+  })
+
+  it('offers the measured PRICED_FINISHES vocabulary on the finish column edit (RFC 0023 T6)', () => {
+    const col = INVENTORY_COLUMNS.find((c) => c.key === 'finish')!
+    const ctx = {
+      editingId: null, editField: null, editValue: '', setEditValue: () => {},
+      startEdit: () => {}, saveEdit: () => {}, cancelEdit: () => {},
+      locationOptions: [], getImageUrl: () => null, onRefresh: () => {},
+      onDelete: () => {}, consignorName: () => undefined,
+    }
+    const spec = col.edit!(ctx)
+    const values = (spec.options ?? []).map((o) => o.value)
+    expect(values).toContain('1stEditionHolofoil')
+    expect(values).toContain('1stEdition')
+    expect(values).not.toContain('firstEditionHolofoil')
+    expect(values.length).toBe(8)
+  })
+
+  it('offers a finish_attributes column, sortable and visible by default (RFC 0023 T5)', () => {
+    // CLAUDE.md records the consignor column shipping defaultVisible/sortable
+    // false/false unconsulted and being reversed the next day for violating
+    // "every column sortable, every column filterable" — this column must not
+    // repeat it.
+    const col = INVENTORY_COLUMNS.find((c) => c.key === 'finish_attributes')
+    expect(col).toBeDefined()
+    expect(col?.defaultVisible).toBe(true)
+    expect(col?.sortable).toBe(true)
+  })
+
+  it('gives finish_attributes an edit spec, not a notEditable reason', () => {
+    const col = INVENTORY_COLUMNS.find((c) => c.key === 'finish_attributes')!
+    expect(col.edit).toBeDefined()
+    expect(col.notEditable).toBeUndefined()
+  })
+
   it('offers a Consignor column, visible by default', () => {
     // Was `defaultVisible: false` — which is also why the Consignor FILTER
     // never appeared by default: `isFilterVisible` gates a filter on its
@@ -256,6 +307,20 @@ describe('every column has a filter', () => {
     }
   })
 
+  it('offers the full 19-member language vocabulary on the language filter (RFC 0023 T3)', () => {
+    const f = INVENTORY_FILTERS.find((x) => x.id === 'language')!
+    const values = (f.options ?? []).map((o) => o.value)
+    expect(values).toContain('ZH-TW')
+    expect(values).toContain('OTHER')
+    expect(values.length).toBe(19)
+  })
+
+  it('has a finish_attributes filter with a real columnKey, kind listContains (RFC 0023 T5)', () => {
+    const f = INVENTORY_FILTERS.find((x) => x.columnKey === 'finish_attributes')
+    expect(f).toBeDefined()
+    expect(f?.kind).toBe('listContains')
+  })
+
   it('has a consignor filter that sends consignor_id, sources cosigners, and follows the Consignor column\'s visibility', () => {
     const consignorFilter = INVENTORY_FILTERS.find((f) => f.id === 'consignor')
     expect(consignorFilter).toBeDefined()
@@ -334,6 +399,7 @@ describe('buildFilterParams', () => {
       range: ['gte', 'lte'],
       dateRange: ['gte', 'lte'],
       presence: ['isnull', 'notnull'],
+      listContains: ['contains'],
     }
     for (const def of INVENTORY_FILTERS) {
       if (def.legacyParam) continue
