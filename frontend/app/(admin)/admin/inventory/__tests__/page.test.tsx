@@ -341,6 +341,40 @@ describe('AdminInventoryPage — configurable columns', () => {
     expect(headers()).toEqual(DEFAULT_HEADERS)
   })
 
+  it('resolves and renders the catalog print number once the Card # column is turned on', async () => {
+    getMock.mockImplementation((path: string) => {
+      if (path === '/locations') return Promise.resolve([])
+      if (path === '/inventory/search') {
+        return Promise.resolve({
+          items: [{
+            item_id: 'item-1', kind: 'raw', display_name: 'Pikachu', card_id: 'sv1-25',
+            location: 'glass', status: 'available', condition: 'NM',
+            cost_basis: '4.00', current_market_value: '12.00', needs_review: false,
+          }],
+          total: 1,
+        })
+      }
+      return Promise.resolve(null)
+    })
+    postMock.mockImplementation((path: string) => {
+      if (path === '/inventory/card-numbers') return Promise.resolve({ 'sv1-25': '25' })
+      return Promise.resolve(null)
+    })
+
+    render(<AdminInventoryPage />)
+    await act(async () => { await Promise.resolve() })
+
+    // Not fetched (or rendered) before the column is turned on — the whole
+    // point of gating on the column's own visibility.
+    expect(postMock).not.toHaveBeenCalledWith('/inventory/card-numbers', expect.anything())
+
+    const picker = await openPicker()
+    fireEvent.click(within(picker).getByRole('checkbox', { name: 'Card #' }))
+
+    expect(await screen.findByText('#25')).toBeInTheDocument()
+    expect(postMock).toHaveBeenCalledWith('/inventory/card-numbers', { card_ids: ['sv1-25'] })
+  })
+
   it('removes a column from the table when it is unchecked', async () => {
     render(<AdminInventoryPage />)
     await act(async () => { await Promise.resolve() })

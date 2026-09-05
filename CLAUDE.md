@@ -363,6 +363,47 @@ day by giving the modal its own `useCosigners()` lookup (same pattern as
 (e.g. an archived consignor, invisible to `useCosigners()` by design) — an
 admin can still trace the row rather than losing the reference entirely.
 
+**Card number (the catalog print number, "25" in "sv1-25") had the SAME
+"present, wired, invisible" shape as the Consignor filter above, on TWO
+surfaces at once — fixed 2026-09-04.** `admin-inventory-columns.tsx` already
+had a `cardNumber` filter with `columnKey: null`, reachable only behind
+"Show all filters", and no `_card_number` column existed for it to follow.
+Separately, `/admin/card/[id]`'s header and its "Set"/"Card Number"
+`DetailRow`s had been written against `item.set_name`/`item.card_number`
+since the page was created, but `GET /admin/inventory/{item_id}`
+(`admin_get_item`) returned a raw dump of the stored item with **no catalog
+join at all** — so both fields were always `undefined` and both pieces of UI
+silently rendered nothing, on every item, the whole time.
+
+Two independent fixes, not one, because the two gaps needed different
+remedies:
+- `admin_get_item` now attaches `set_name`/`card_number` by reading
+  `repo.get_catalog_card(item.card_id)` once, mirroring how it already
+  attaches the derived `condition_multiplier`. **Deliberately not added to
+  `_serialize_item` itself** — that function also backs `admin_search_items`
+  (the LIST endpoint), which returns hundreds of unpaginated rows, and a
+  catalog point-read per row there would add real latency to the busiest
+  page in the admin panel. A single-item fetch pays for exactly one extra
+  read.
+- The admin inventory table gets a new `_card_number` column
+  (`defaultVisible: false`, same as `_image`), resolved client-side via a
+  new `useCardNumbers` hook + `POST /admin/inventory/card-numbers` — **a
+  separate endpoint/hook from `/card-images`, not folded into it**, because
+  the table gates each fetch on its OWN column's visibility
+  (`visible.has(columnKey)`); tying Card # to the Image fetch would mean an
+  admin wanting one without the other pays for both or neither. The
+  `cardNumber` filter's `columnKey` now points at `'_card_number'` — the
+  identical fix shape as the Consignor filter/column pairing above.
+  `useCardImages` and `useCardNumbers` are both thin wrappers over a new
+  shared `useBatchedCardLookup<T>` (extracted, not duplicated, from
+  `useCardImages`'s pre-existing resolved/pending/failed-id bookkeeping) —
+  `useCardImages`'s own public contract (`imageMap`/`getImageUrl`) is
+  unchanged, so none of its ~16 existing callers needed to change.
+
+`Set`/`Artist` remain column-less filters on purpose (unlike `cardNumber`) —
+neither has a rendered column, so there's nothing for `columnKey` to point
+at yet.
+
 ## A FETCH-ONCE ADMIN DROPDOWN HOOK CAN LOSE THE SESSION RACE — depend on `isAuthenticated`
 
 Diagnosed 2026-08-15 while chasing why the Consignor filter's dropdown showed

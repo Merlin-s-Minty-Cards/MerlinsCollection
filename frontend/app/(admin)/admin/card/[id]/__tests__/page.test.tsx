@@ -168,3 +168,78 @@ describe('AdminCardDetailPage TCGplayer link', () => {
     expect(screen.queryByRole('link', { name: /TCGplayer \(stored\)/i })).not.toBeInTheDocument()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Set name + card number — the header and the "Card Number"/"Set" DetailRows
+// have carried these fields since the page was written, but the endpoint
+// never populated them (a raw dump of the stored item, no catalog join),
+// so both silently rendered nothing on every single item. Regression test
+// for `admin_get_item` now attaching `set_name`/`card_number` from the
+// catalog.
+// ---------------------------------------------------------------------------
+
+describe('AdminCardDetailPage set name and card number', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+  })
+
+  it('shows the catalog set name and print number once the backend attaches them', async () => {
+    getMock.mockImplementation((path: string) => {
+      if (path === '/inventory/item-1') {
+        return Promise.resolve({
+          item_id: 'item-1',
+          display_name: 'Pikachu',
+          status: 'available',
+          cost_basis: '10.00',
+          set_name: 'Base Set',
+          card_number: '25',
+        })
+      }
+      if (path === '/inventory/item-1/timeline') return Promise.resolve({ events: [] })
+      if (path === '/inventory/item-1/price-chart') {
+        return Promise.resolve({ points: [], buy_marker: null, timeframe: '1yr', item_id: 'item-1' })
+      }
+      return Promise.resolve({})
+    })
+
+    render(<AdminCardDetailPage />)
+
+    // Rendered in BOTH the header line and the "Set"/"Card Number" DetailRow
+    // body — the whole point of the fix, so two matches is the expected,
+    // passing shape here, not an ambiguity to work around.
+    expect(await screen.findAllByText('Base Set')).toHaveLength(2)
+    expect(screen.getByText('#25')).toBeInTheDocument()
+    const numberRow = screen.getByText('Card Number').closest('div')
+    expect(numberRow).toHaveTextContent('25')
+  })
+
+  it('shows the placeholder, not a crash, for an item the catalog has no record for', async () => {
+    getMock.mockImplementation((path: string) => {
+      if (path === '/inventory/item-1') {
+        return Promise.resolve({
+          item_id: 'item-1',
+          display_name: 'Pikachu',
+          status: 'available',
+          cost_basis: '10.00',
+          set_name: null,
+          card_number: null,
+        })
+      }
+      if (path === '/inventory/item-1/timeline') return Promise.resolve({ events: [] })
+      if (path === '/inventory/item-1/price-chart') {
+        return Promise.resolve({ points: [], buy_marker: null, timeframe: '1yr', item_id: 'item-1' })
+      }
+      return Promise.resolve({})
+    })
+
+    render(<AdminCardDetailPage />)
+
+    await screen.findByText('Pikachu')
+    // Both DetailRows still render the "—" placeholder rather than throwing
+    // or disappearing — `DetailRow`'s existing `value || '—'` fallback.
+    const setRow = screen.getByText('Set').closest('div')
+    const numberRow = screen.getByText('Card Number').closest('div')
+    expect(setRow).toHaveTextContent('—')
+    expect(numberRow).toHaveTextContent('—')
+  })
+})

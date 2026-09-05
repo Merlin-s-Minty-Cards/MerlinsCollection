@@ -5,6 +5,7 @@ import { Plus, RefreshCw, Columns3, EyeOff } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { CONDITION_OPTIONS as COND_VALUES } from '@/lib/constants'
 import { useCardImages } from '@/lib/use-card-images'
+import { useCardNumbers } from '@/lib/use-card-numbers'
 import { useLocations } from '@/lib/use-locations'
 import { useShows } from '@/lib/use-shows'
 import { useCosigners } from '@/lib/use-cosigners'
@@ -34,6 +35,9 @@ import {
 
 /** The image column is a registry entry now, not a second competing toggle. */
 const IMAGE_COLUMN_KEY = '_image'
+/** Same shape as IMAGE_COLUMN_KEY — see useCardNumbers' own docstring for
+ * why Card # gets its own gated fetch rather than riding on the image one. */
+const CARD_NUMBER_COLUMN_KEY = '_card_number'
 
 export default function AdminInventoryPage() {
   const api = useAdminApi()
@@ -103,10 +107,14 @@ export default function AdminInventoryPage() {
 
   const visible = new Set(visibleColumns)
   const showImages = visible.has(IMAGE_COLUMN_KEY)
+  const showCardNumbers = visible.has(CARD_NUMBER_COLUMN_KEY)
 
-  // Resolve card images
+  // Resolve card images and card numbers — two independent fetches, each
+  // gated on its OWN column's visibility, because an admin can want either
+  // without the other (see useCardNumbers' docstring).
   const cardIds = items.map((i) => i.card_id as string | undefined)
   const { getImageUrl } = useCardImages(showImages ? cardIds : [])
+  const { getCardNumber } = useCardNumbers(showCardNumbers ? cardIds : [])
 
   /**
    * Persist on the toggle rather than in an effect. An effect keyed on
@@ -254,7 +262,7 @@ export default function AdminInventoryPage() {
   const columns = toDataTableColumns(visible, {
     editingId, editField, editValue, setEditValue,
     startEdit, saveEdit, cancelEdit,
-    locationOptions, showOptions, getImageUrl,
+    locationOptions, showOptions, getImageUrl, getCardNumber,
     onRefresh: fetchItems,
     onDelete: setDeleteTarget,
     consignorName: (id) => cosignorOptions.find((o) => o.value === id)?.label,

@@ -91,6 +91,12 @@ export interface ColumnRenderContext {
   showOptions?: { value: string; label: string }[]
   /** Mirrors `useCardImages().getImageUrl` exactly — it returns null, not undefined. */
   getImageUrl: (cardId?: string | null) => string | null
+  /**
+   * Mirrors `useCardNumbers().getCardNumber` exactly — same null-not-
+   * undefined contract as `getImageUrl` above, same reason: distinguishes
+   * "not fetched" from "fetched, no number" identically to a caller.
+   */
+  getCardNumber: (cardId?: string | null) => string | null
   onRefresh: () => void
   onDelete: (item: InventoryItem) => void
   /** `useCosigners()` id->name lookup. Undefined for an unassigned/unknown id. */
@@ -241,6 +247,28 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
         size={TABLE_THUMB_SIZE}
       />
     ),
+  },
+  {
+    key: '_card_number',
+    label: 'Card #',
+    defaultVisible: false,
+    // Resolved client-side from card_id via useCardNumbers, same as `_image`
+    // just above — no server-side value to order by (see that hook's own
+    // docstring for why this is a separate fetch from Image rather than
+    // folded into it). The pre-existing `cardNumber` FILTER now points its
+    // `columnKey` here (see INVENTORY_FILTERS below) instead of `null`,
+    // which is what lets it follow this column's visibility in the panel
+    // instead of living only behind "Show all filters" — the identical fix
+    // RFC 0013 T2 already made for the Consignor filter/column pair.
+    notEditable: 'The catalog print number, resolved from card_id — not a stored value of its own.',
+    render: (item, ctx) => {
+      const number = ctx.getCardNumber(item.card_id)
+      return number ? (
+        <span className="text-xs text-pine-400 font-mono">#{number}</span>
+      ) : (
+        <span className="text-xs text-pine-600">—</span>
+      )
+    },
   },
   {
     key: 'display_name',
@@ -933,12 +961,23 @@ export const INVENTORY_FILTERS: InventoryFilterDef[] = [
   { id: 'predecessor', label: 'Predecessor', columnKey: 'predecessor_item_id', kind: 'text' },
   { id: 'itemId', label: 'Item ID', columnKey: 'item_id', kind: 'text' },
 
-  // --- Column-less: catalog joins, see the note above ----------------------
+  // `cardNumber` USED to be column-less too (no rendered column existed to
+  // join `columnKey` to), same shape as the Consignor filter's pre-fix bug
+  // this file's own history already documents: present, wired, and
+  // reachable only behind "Show all filters". Now that `_card_number` is a
+  // real column (client-side, via useCardNumbers — see its entry above),
+  // this filter follows it instead.
+  {
+    id: 'cardNumber', label: 'Card #', columnKey: '_card_number', kind: 'text',
+    legacyParam: 'card_number',
+  },
+
+  // --- Still column-less: catalog joins with no rendered column at all -----
+  // (`set_name`/`artist` aren't shown as columns; only searched as filters.)
   {
     id: 'setId', label: 'Set', columnKey: null, kind: 'select', legacyParam: 'set_id',
     optionSource: 'sets',
   },
-  { id: 'cardNumber', label: 'Card #', columnKey: null, kind: 'text', legacyParam: 'card_number' },
   { id: 'artist', label: 'Artist', columnKey: null, kind: 'text', legacyParam: 'artist' },
   {
     id: 'consignor', label: 'Consignor', columnKey: 'consignor_name', kind: 'select',

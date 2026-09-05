@@ -124,14 +124,26 @@ describe('the registry itself', () => {
   })
 
   it('hides a column-less filter by default and reveals it only under "show all"', () => {
-    // set_name / card_number / artist filter on catalog fields the ordinary
-    // admin search response does not carry, so they have no column to follow.
+    // set / artist filter on catalog fields with no rendered column at all,
+    // so they have no column to follow. `card_number` USED to be here too —
+    // see the next test.
     const catalogOnly = INVENTORY_FILTERS.filter((f) => f.columnKey === null)
     expect(catalogOnly.length).toBeGreaterThan(0)
     for (const f of catalogOnly) {
       expect(isFilterVisible(f, new Set(DEFAULT_VISIBLE_COLUMN_KEYS), false)).toBe(false)
       expect(isFilterVisible(f, new Set(DEFAULT_VISIBLE_COLUMN_KEYS), true)).toBe(true)
     }
+  })
+
+  it('follows the _card_number column\'s visibility, same fix shape as the Consignor filter', () => {
+    // The Card # filter USED to be columnKey: null (present, wired,
+    // reachable only behind "Show all filters" — the identical bug this
+    // file's own history already documents for Consignor). Now that
+    // `_card_number` is a real column, the filter must follow it.
+    const f = INVENTORY_FILTERS.find((x) => x.id === 'cardNumber')!
+    expect(f.columnKey).toBe('_card_number')
+    expect(isFilterVisible(f, new Set(['_card_number']), false)).toBe(true)
+    expect(isFilterVisible(f, new Set(DEFAULT_VISIBLE_COLUMN_KEYS), false)).toBe(false)
   })
 })
 
@@ -228,13 +240,18 @@ describe('storage access that throws is survivable', () => {
 // and that the keys stay parseable as `{field}_{direction}`.
 
 describe('every column is sortable except the two that cannot be', () => {
-  // `_image` renders art resolved client-side from card_id — there is no
-  // server-side value to order by. `_actions` is a pinned button cell.
-  // `consignor_name` USED to be unsortable too (no backend join existed to
-  // order by the resolved label), but `inventory_sort.py` now special-cases
-  // it via a router-supplied id->name map — see test_inventory_sort.py's
-  // TestConsignorNameSort. It belongs in the sortable set now.
-  const UNSORTABLE = new Set(['_image', '_actions'])
+  // `_image` and `_card_number` both render a value resolved client-side
+  // from card_id via a batched lookup (useCardImages/useCardNumbers) —
+  // there is no server-side value to order by, deliberately: joining the
+  // catalog inside `_sort_admin_results` would mean a per-row catalog read
+  // on this table's unpaginated LIST endpoint (see `admin_get_item`'s own
+  // docstring on why that enrichment stayed off the list). `_actions` is a
+  // pinned button cell. `consignor_name` USED to be unsortable too (no
+  // backend join existed to order by the resolved label), but
+  // `inventory_sort.py` now special-cases it via a router-supplied
+  // id->name map — see test_inventory_sort.py's TestConsignorNameSort. It
+  // belongs in the sortable set now.
+  const UNSORTABLE = new Set(['_image', '_card_number', '_actions'])
 
   it('marks every data column sortable', () => {
     const unmarked = INVENTORY_COLUMNS

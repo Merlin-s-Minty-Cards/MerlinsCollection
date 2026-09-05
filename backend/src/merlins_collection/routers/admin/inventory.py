@@ -430,11 +430,37 @@ def admin_get_item(
     item_id: str,
     repo: InventoryRepository = Depends(get_repo),
 ) -> dict[str, Any]:
-    """Get a single inventory item with all admin-visible fields."""
+    """Get a single inventory item with all admin-visible fields.
+
+    Also attaches ``set_name``/``card_number`` from the catalog when the item
+    has a ``card_id`` — DERIVED, not stored, the same discipline
+    ``_serialize_item`` already uses for ``condition_multiplier``. This is
+    what makes ``/admin/card/[id]``'s header and detail panel actually show a
+    number: that page has carried a ``set_name``/``card_number`` field and a
+    "Card Number" `DetailRow` since it was written, but neither this endpoint
+    nor `_serialize_item` ever populated them, so both silently rendered
+    nothing on every item.
+
+    Added HERE rather than inside `_serialize_item` itself: that function
+    also backs `admin_search_items` (the LIST endpoint), which can return
+    hundreds of unpaginated rows — a catalog point-read per row there would
+    multiply into real added latency on the busiest page in the admin panel.
+    A single-item fetch pays for exactly one extra read.
+    """
     item = repo.get_inventory_item(item_id)
     if item is None:
         raise HTTPException(status_code=404, detail="Item not found")
-    return _serialize_item(item)
+    data = _serialize_item(item)
+    # Explicit `None`, not an omitted key, for a sealed/bulk item (no
+    # `card_id` attribute at all — `getattr` rather than `item.card_id`,
+    # same trap `items-brief` already guards against) or an unresolved
+    # `card_id` — same "null rather than omitted" discipline this router
+    # already uses for `condition_multiplier` right above.
+    card_id = getattr(item, "card_id", None)
+    card = repo.get_catalog_card(card_id) if card_id else None
+    data["set_name"] = card.set_name if card else None
+    data["card_number"] = card.number if card else None
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -944,6 +970,40 @@ def admin_resolve_card_images(
             result[card_id] = card.images.small
         else:
             result[card_id] = None
+    return result
+
+
+@router.post("/card-numbers")
+def admin_resolve_card_numbers(
+    body: dict[str, Any],
+    repo: InventoryRepository = Depends(get_repo),
+) -> dict[str, str | None]:
+    """Resolve card_ids to their catalog print number (e.g. "25" in "sv1-25").
+
+    Same batching shape as ``/card-images`` immediately above (one POST,
+    capped at 100, a null rather than an omitted key for an id that doesn't
+    resolve) — CLAUDE.md: "never fire a request per row".
+
+    A SEPARATE endpoint rather than folding this into ``/card-images``'s
+    response, even though both read the same ``CatalogCard``: the admin
+    inventory table gates each lookup on its OWN column's visibility
+    (``visible.has(columnKey)``, `admin/inventory/page.tsx`), exactly like
+    the Image column already does — an admin who wants Card # without Images
+    (or vice versa) should not pay for a fetch of data they didn't ask to
+    see, and folding both into one response would tie the two columns'
+    fetches together even though their visibility toggles are independent.
+    """
+    card_ids = body.get("card_ids", [])
+    if not isinstance(card_ids, list):
+        raise HTTPException(status_code=422, detail="card_ids must be a list")
+    card_ids = card_ids[:100]  # cap to prevent abuse
+
+    result: dict[str, str | None] = {}
+    for card_id in card_ids:
+        if not isinstance(card_id, str):
+            continue
+        card = repo.get_catalog_card(card_id)
+        result[card_id] = card.number if card else None
     return result
 
 

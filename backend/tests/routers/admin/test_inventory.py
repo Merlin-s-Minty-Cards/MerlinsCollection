@@ -726,6 +726,52 @@ class TestAdminGetItem:
         )
         assert resp.status_code == 404
 
+    def test_attaches_set_name_and_card_number_from_the_catalog(self, admin_client):
+        """`/admin/card/[id]`'s header and detail panel have carried a
+        `set_name`/`card_number` field and a "Card Number" `DetailRow` since
+        they were written, but this endpoint never populated them — both
+        silently rendered nothing on every item. DERIVED, not stored, same
+        discipline as `condition_multiplier` right above it."""
+        client, repo, admin_token, _ = admin_client
+        repo.batch_upsert_catalog_cards([
+            _catalog(card_id="sv1-25", name="Pikachu", set_name="Base Set", number="25"),
+        ])
+        repo.put_inventory_item(_raw(item_id="item-42", card_id="sv1-25"))
+
+        resp = client.get(
+            "/admin/inventory/item-42", headers=_auth_header(admin_token)
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["set_name"] == "Base Set"
+        assert data["card_number"] == "25"
+
+    def test_card_number_is_null_not_omitted_for_an_unresolved_card_id(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="item-42", card_id="sv1-does-not-exist"))
+
+        resp = client.get(
+            "/admin/inventory/item-42", headers=_auth_header(admin_token)
+        )
+        data = resp.json()
+        assert data["set_name"] is None
+        assert data["card_number"] is None
+
+    def test_card_number_is_null_for_a_sealed_item_with_no_card_id_at_all(self, admin_client):
+        """Sealed/bulk kinds have no `card_id` attribute at all — reaching
+        for `item.card_id` directly raises AttributeError (same trap
+        `items-brief` already guards against with `getattr`)."""
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_sealed(item_id="box"))
+
+        resp = client.get(
+            "/admin/inventory/box", headers=_auth_header(admin_token)
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["set_name"] is None
+        assert data["card_number"] is None
+
 
 # ===========================================================================
 # Create item
@@ -2228,6 +2274,81 @@ class TestOtherLanguageTransition:
 
         assert resp.status_code == 200
         assert repo.get_inventory_item("box").language.value == "OTHER"
+
+
+# ===========================================================================
+# POST /admin/inventory/card-numbers
+# ===========================================================================
+#
+# Same batching shape as the pre-existing POST /admin/inventory/card-images
+# (card_ids in, capped, one round trip, null-not-omitted for an id that
+# doesn't resolve) — CLAUDE.md: "never fire a request per row". A separate
+# endpoint from /card-images on purpose: the admin inventory table gates
+# each lookup on its OWN column's visibility, so Card # and Image fetches
+# must not be tied together.
+
+class TestAdminCardNumbers:
+    """POST /admin/inventory/card-numbers — card_id -> print number."""
+
+    def test_unauthenticated_returns_401(self, admin_client):
+        client, *_ = admin_client
+        resp = client.post("/admin/inventory/card-numbers", json={"card_ids": []})
+        assert resp.status_code == 401
+
+    def test_non_admin_returns_403(self, admin_client):
+        client, _, _, user_token = admin_client
+        resp = client.post(
+            "/admin/inventory/card-numbers",
+            json={"card_ids": []},
+            headers=_auth_header(user_token),
+        )
+        assert resp.status_code == 403
+
+    def test_resolves_known_ids_to_their_catalog_number(self, admin_client):
+        client, repo, admin, _ = admin_client
+        repo.batch_upsert_catalog_cards([
+            _catalog(card_id="sv1-25", name="Pikachu", number="25"),
+            _catalog(card_id="sv1-4", name="Charizard", number="4"),
+        ])
+
+        resp = client.post(
+            "/admin/inventory/card-numbers",
+            json={"card_ids": ["sv1-25", "sv1-4"]},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"sv1-25": "25", "sv1-4": "4"}
+
+    def test_unresolvable_id_maps_to_null_not_an_omitted_key(self, admin_client):
+        client, _, admin, _ = admin_client
+        resp = client.post(
+            "/admin/inventory/card-numbers",
+            json={"card_ids": ["does-not-exist"]},
+            headers=_auth_header(admin),
+        )
+        assert resp.json() == {"does-not-exist": None}
+
+    def test_caps_at_100_ids(self, admin_client):
+        """Mirrors /card-images's and /items-brief's cap — this is a batch
+        endpoint, not an unbounded one."""
+        client, _, admin, _ = admin_client
+        resp = client.post(
+            "/admin/inventory/card-numbers",
+            json={"card_ids": [f"sv1-{i}" for i in range(150)]},
+            headers=_auth_header(admin),
+        )
+        assert resp.status_code == 200
+        assert len(resp.json()) == 100
+
+    def test_non_list_card_ids_is_a_422(self, admin_client):
+        client, _, admin, _ = admin_client
+        resp = client.post(
+            "/admin/inventory/card-numbers",
+            json={"card_ids": "sv1-25"},
+            headers=_auth_header(admin),
+        )
+        assert resp.status_code == 422
 
 
 # ===========================================================================
