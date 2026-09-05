@@ -129,6 +129,14 @@ def test_admin_system_prompt_forbids_summing_raw_transaction_rows_for_profit():
     assert "is_countable" in lowered
 
 
+def test_admin_system_prompt_mentions_search_admin_docs_for_how_things_work():
+    # RFC 0026: the model should reach for search_admin_docs when asked how
+    # the admin panel works / what something costs, not just for business
+    # numbers — mirrors RFC 0020 item 7's own tool-selection-preference shape.
+    lowered = _ADMIN_SYSTEM_PROMPT.lower()
+    assert "search_admin_docs" in lowered
+
+
 def test_chat_returns_text_on_end_turn():
     client = MagicMock()
     client.converse.return_value = _end_turn("We have 3 Charizard cards.")

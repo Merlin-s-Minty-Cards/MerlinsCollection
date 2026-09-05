@@ -258,6 +258,7 @@ would break every bookmark to fix a URL nobody types.
 | Group | Route | Label | Purpose |
 |---|---|---|---|
 | — | `/admin` | Dashboard | Quick actions, needs-attention queues, position, today, coverage |
+| — | `/admin/docs` | Docs | Searchable admin operations knowledge base — see "ADMIN DOCS TAB" below |
 | **At the show** | `/admin/inventory` | Inventory | Inventory CRUD, granular filters, ownership column |
 | | `/admin/trade` | **Buy / Sell / Trade** | One surface, three modes via `?mode=`. See "Buy / Sell / Trade" below |
 | | `/admin/slabs` | Slabs | Graded intake (cert → staged batch → commit → priced) + the slab list. See "Slabs" below |
@@ -2567,6 +2568,15 @@ math-trust boundary allows (see `_ADMIN_SYSTEM_PROMPT` below):
   an item's `ConsignmentTerms.split_percent`, OUR cut as a 0-1 fraction).
   Not for computing a payout; call `get_consignor_position` for that
 
+**A 9th admin tool, `search_admin_docs`, joined in RFC 0026 — the admin
+operations knowledge base, not business data.** Reads the same
+`services/admin_docs.py` content `GET /admin/docs` serves to the frontend
+Docs tab — see "ADMIN DOCS TAB" below for the full feature. Omitting `query`
+(or category-only) returns a lightweight browse index (id/category/title/
+summary, no body); a non-empty `query` returns full article text, capped at
+`limit`. An unknown `category` raises rather than returning `[]`, mirroring
+`find_pricing_outliers`'s "unknown direction raises" precedent.
+
 **`_ADMIN_SYSTEM_PROMPT` is "librarian" framing, not a lookup-table
 instruction** (RFC 0020 item 7): broad read access, encouraged to
 cross-reference and iterate rather than declare a question unanswerable; a
@@ -2575,6 +2585,74 @@ answers, the four raw `list_*` tools for a breakdown/comparison/filter no
 narrow tool offers; and the math-trust boundary itself as an instruction —
 never sum `amount` across `list_transactions` rows for a profit/revenue
 figure, call `get_profit_summary` instead.
+
+## ADMIN DOCS TAB — the operations knowledge base (RFC 0026)
+
+`/admin/docs`, a **top-level** sidebar entry beside Dashboard, outside the
+three "when you use it" groups — it's reference material relevant at any
+point, not scoped to a workflow stage. Not in `mobileItems`; reached through
+the full drawer on mobile like every other non-mobile-bar tab.
+
+Built because the owner is the only person who knows things like "Sync
+Prices realistically buys ~50 graded lookups a day" or "the trade page's
+percentage is market-at-purchase over what you paid" — knowledge that lived
+only in CLAUDE.md/RFCs and would disappear once the owner stops being the
+one running Claude Code sessions here. The Docs tab translates that into
+plain, admin-facing operational language: what to click, when, why, what it
+costs — never backend implementation internals (DynamoDB keys, Lambda
+packaging) no admin action depends on knowing.
+
+**Content is a plain importable Python list, not a JSON file read off
+disk** — `services/admin_docs_content.py`'s `ARTICLES` (`AdminDocArticle`:
+`id`/`category`/`title`/`summary`/`body`/`keywords`/`related_routes`) and
+`ADMIN_DOC_CATEGORIES` (8 sections: overview, at-the-show, back-office,
+data, money, costs, chat, glossary — the first three mirror `AdminShell`'s
+own sidebar-group labels). This sidesteps the exact "runtime file read that
+doesn't survive packaging" bug class documented above for the admin tool
+contract — a plain Python import ships with the package automatically under
+every install mode, no `shared/` file and no Dockerfile `COPY` line for
+anyone to forget.
+
+**One service, two thin callers — `services/admin_docs.py`.**
+`GET /admin/docs` (`routers/admin/docs.py`, gated by the existing
+`require_admin`) returns `{categories, articles}` in one call — the whole
+knowledge base, full bodies included, the same "just return it all" choice
+`/admin/locations` and `/admin/cosigners` already make for a small dataset.
+The `search_admin_docs` MCP tool (see MCP Tools above) calls the same
+`admin_docs.search()`, so the frontend Docs tab and the analyst chat can
+never see two different answers to the same question.
+
+**`search()`'s browse vs. query modes, and the two guardrails that mirror
+bugs this repo already shipped once:** omitting `query` (or passing `""` —
+what the frontend's cleared search box sends, not `null`) returns an INDEX
+(id/category/title/summary, no `body`); a non-empty `query` returns full
+articles for a case-insensitive substring match against
+title/summary/keywords/body, capped at `limit`. `limit < 0` raises rather
+than mis-slicing (the exact `list_transactions` `[:-1]` bug RFC 0020 item 3
+fixed); an unknown `category` raises rather than silently returning `[]`
+(mirrors `find_pricing_outliers`'s "unknown direction raises"). Both `query`
+and `category` normalize a whitespace-only string to "omitted" — a
+substring search for `"   "` would otherwise match almost every article's
+body, silently defeating browse mode (caught in post-implementation
+adversarial review, not the first pass).
+
+**The frontend never hardcodes the category list** — `AdminDocsExplorer.tsx`
+reads it from `GET /admin/docs`'s own `categories` array, the exact "two
+sources of truth for the same taxonomy" drift this codebase already paid
+for once (the Consignor filter/Card Number column). A non-empty search
+query **overrides** the category filter and searches every article, with
+each hit's category shown as a badge. Article bodies render through the
+existing `MarkdownMessage` (`components/inventory/MarkdownMessage.tsx`,
+built for the chat panel) rather than a second markdown renderer.
+
+**The analyst chat deliberately does NOT get repository access**, though the
+owner raised the idea — a security-boundary call answered by RFC 0018's own
+isolation design (see "THE ADMIN ANALYST CHAT IS A SECOND SURFACE" above):
+source access is a different security posture, not a wider version of the
+current curated-read-only-tools one. `search_admin_docs` is the fix that
+actually serves the underlying need without that exposure.
+
+Full design: `docs/rfcs/0026-admin-docs-tab-and-chat-knowledge-access.md`.
 
 # AWS Services
 | Service         | Purpose                                              |

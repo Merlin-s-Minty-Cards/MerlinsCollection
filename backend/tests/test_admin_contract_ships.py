@@ -74,6 +74,7 @@ def test_the_contract_is_reachable_as_a_package_resource():
         "list_transactions",
         "list_inventory",
         "list_consignors",
+        "search_admin_docs",
     }
 
 

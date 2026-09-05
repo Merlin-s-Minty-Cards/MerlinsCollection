@@ -159,6 +159,26 @@
         }
       },
       "required": []
+    },
+    {
+      "name": "search_admin_docs",
+      "description": "Search the admin operations knowledge base -- how admin-panel pages and buttons work, what they cost or how often to run them, and how displayed figures (e.g. the trade page's acquisition-ratio percent) are calculated. This is DOCUMENTATION, not live business data -- for actual numbers use the other tools. Pass query to search titles/keywords/body and get full article text back (capped at limit). Omit query (or pass an empty string) to get a lightweight browse index (id, category, title, summary -- no body) of every article; narrow with category, or call again with a query once you know what you're looking for.",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Optional. Search text matched case-insensitively against title/keywords/body. Omit (or pass an empty string) to get the browse index instead of full article text."
+        },
+        "category": {
+          "type": "string",
+          "enum": ["overview", "at-the-show", "back-office", "data", "money", "costs", "chat", "glossary"],
+          "description": "Optional. Restrict to one section of the knowledge base."
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Maximum full articles returned when query is given. Defaults to 5. Ignored in browse-index mode (query omitted)."
+        }
+      },
+      "required": []
     }
   ]
 }

@@ -12,6 +12,7 @@ from .analytics import router as analytics_router
 from .catalog import router as catalog_router
 from .chat import router as chat_router
 from .cosigners import router as cosigners_router
+from .docs import router as docs_router
 from .inventory import router as inventory_router
 from .locations import router as locations_router
 from .market import router as market_router
@@ -47,6 +48,7 @@ admin_router.include_router(analytics_router)
 admin_router.include_router(triage_router)
 admin_router.include_router(unmatched_router)
 admin_router.include_router(slabs_router)
+admin_router.include_router(docs_router)
 
 
 @admin_router.get("/health")
