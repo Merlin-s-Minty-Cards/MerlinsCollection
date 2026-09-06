@@ -726,6 +726,52 @@ class TestAdminGetItem:
         )
         assert resp.status_code == 404
 
+    def test_attaches_set_name_and_card_number_from_the_catalog(self, admin_client):
+        """`/admin/card/[id]`'s header and detail panel have carried a
+        `set_name`/`card_number` field and a "Card Number" `DetailRow` since
+        they were written, but this endpoint never populated them — both
+        silently rendered nothing on every item. DERIVED, not stored, same
+        discipline as `condition_multiplier` right above it."""
+        client, repo, admin_token, _ = admin_client
+        repo.batch_upsert_catalog_cards([
+            _catalog(card_id="sv1-25", name="Pikachu", set_name="Base Set", number="25"),
+        ])
+        repo.put_inventory_item(_raw(item_id="item-42", card_id="sv1-25"))
+
+        resp = client.get(
+            "/admin/inventory/item-42", headers=_auth_header(admin_token)
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["set_name"] == "Base Set"
+        assert data["card_number"] == "25"
+
+    def test_card_number_is_null_not_omitted_for_an_unresolved_card_id(self, admin_client):
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="item-42", card_id="sv1-does-not-exist"))
+
+        resp = client.get(
+            "/admin/inventory/item-42", headers=_auth_header(admin_token)
+        )
+        data = resp.json()
+        assert data["set_name"] is None
+        assert data["card_number"] is None
+
+    def test_card_number_is_null_for_a_sealed_item_with_no_card_id_at_all(self, admin_client):
+        """Sealed/bulk kinds have no `card_id` attribute at all — reaching
+        for `item.card_id` directly raises AttributeError (same trap
+        `items-brief` already guards against with `getattr`)."""
+        client, repo, admin_token, _ = admin_client
+        repo.put_inventory_item(_sealed(item_id="box"))
+
+        resp = client.get(
+            "/admin/inventory/box", headers=_auth_header(admin_token)
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["set_name"] is None
+        assert data["card_number"] is None
+
 
 # ===========================================================================
 # Create item
@@ -2119,6 +2165,193 @@ class TestNoCatalogMatchQueue:
 
 
 # ===========================================================================
+# RFC 0023 T1 — `language = OTHER` also parks the item, in one write
+# ===========================================================================
+
+class TestOtherLanguageTransition:
+
+    def test_setting_other_on_a_still_linked_item_is_a_422(self, admin_client):
+        """The model invariant, surfaced at the endpoint an admin actually
+        hits — the same shape as `test_parking_a_still_linked_item_is_a_422`
+        above, for the sibling invariant."""
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="x"))
+
+        resp = client.put(
+            "/admin/inventory/x",
+            json={"language": "OTHER"},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.status_code == 422
+        assert "unlink" in resp.json()["detail"].lower()
+
+    def test_setting_other_while_unlinking_in_one_body_parks_the_item(self, admin_client):
+        """The T6-style one-click gesture: unlink and go OTHER together."""
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_raw(item_id="x"))
+
+        resp = client.put(
+            "/admin/inventory/x",
+            json={"language": "OTHER", "card_id": None},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.status_code == 200
+        item = repo.get_inventory_item("x")
+        assert item.language.value == "OTHER"
+        assert item.card_id is None
+        assert item.no_catalog_match is True
+        assert item.no_catalog_match_at is not None
+
+    def test_other_item_appears_in_unmatched_not_triage(self, admin_client):
+        """An OTHER card is unmatchable by definition and belongs in
+        Unmatched — routing it through Triage's derived `missing_card_id`
+        reason would give that queue a floor it can never get under (RFC
+        0011). `display_name_override` is set so the item does not also trip
+        the unrelated `missing_english_name` Triage reason, which would
+        otherwise legitimately still apply to any non-English item."""
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_raw(
+            item_id="x", display_name_override="Mystery Promo",
+        ))
+
+        resp = client.put(
+            "/admin/inventory/x",
+            json={"language": "OTHER", "card_id": None},
+            headers=_auth_header(admin),
+        )
+        assert resp.status_code == 200
+
+        unmatched = client.get(
+            "/admin/inventory/search", params={"no_catalog_match": "true"},
+            headers=_auth_header(admin),
+        )
+        assert [i["item_id"] for i in unmatched.json()["items"]] == ["x"]
+
+        triage = client.get(
+            "/admin/inventory/search", params={"triage": "true"},
+            headers=_auth_header(admin),
+        )
+        assert [i["item_id"] for i in triage.json()["items"]] == []
+
+    def test_clearing_other_back_to_a_real_language_does_not_auto_clear_parking(
+        self, admin_client,
+    ):
+        """Leaving the Unmatched queue is a deliberate admin action, same as
+        unlinking a catalog card is — the language edit alone must not do
+        it."""
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_raw(
+            item_id="x", card_id=None, language="OTHER", no_catalog_match=True,
+        ))
+
+        resp = client.put(
+            "/admin/inventory/x",
+            json={"language": "EN"},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.status_code == 200
+        item = repo.get_inventory_item("x")
+        assert item.language.value == "EN"
+        assert item.no_catalog_match is True  # unchanged
+
+    def test_setting_other_on_a_sealed_item_is_a_plain_unremarkable_write(
+        self, admin_client,
+    ):
+        """Sealed product has no catalog link at all, so OTHER must not try to
+        park it — that would 422 via the sibling no_catalog_match kind guard
+        for a reason the admin never asked about."""
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_sealed(item_id="box"))
+
+        resp = client.put(
+            "/admin/inventory/box",
+            json={"language": "OTHER"},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.status_code == 200
+        assert repo.get_inventory_item("box").language.value == "OTHER"
+
+
+# ===========================================================================
+# POST /admin/inventory/card-numbers
+# ===========================================================================
+#
+# Same batching shape as the pre-existing POST /admin/inventory/card-images
+# (card_ids in, capped, one round trip, null-not-omitted for an id that
+# doesn't resolve) — CLAUDE.md: "never fire a request per row". A separate
+# endpoint from /card-images on purpose: the admin inventory table gates
+# each lookup on its OWN column's visibility, so Card # and Image fetches
+# must not be tied together.
+
+class TestAdminCardNumbers:
+    """POST /admin/inventory/card-numbers — card_id -> print number."""
+
+    def test_unauthenticated_returns_401(self, admin_client):
+        client, *_ = admin_client
+        resp = client.post("/admin/inventory/card-numbers", json={"card_ids": []})
+        assert resp.status_code == 401
+
+    def test_non_admin_returns_403(self, admin_client):
+        client, _, _, user_token = admin_client
+        resp = client.post(
+            "/admin/inventory/card-numbers",
+            json={"card_ids": []},
+            headers=_auth_header(user_token),
+        )
+        assert resp.status_code == 403
+
+    def test_resolves_known_ids_to_their_catalog_number(self, admin_client):
+        client, repo, admin, _ = admin_client
+        repo.batch_upsert_catalog_cards([
+            _catalog(card_id="sv1-25", name="Pikachu", number="25"),
+            _catalog(card_id="sv1-4", name="Charizard", number="4"),
+        ])
+
+        resp = client.post(
+            "/admin/inventory/card-numbers",
+            json={"card_ids": ["sv1-25", "sv1-4"]},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"sv1-25": "25", "sv1-4": "4"}
+
+    def test_unresolvable_id_maps_to_null_not_an_omitted_key(self, admin_client):
+        client, _, admin, _ = admin_client
+        resp = client.post(
+            "/admin/inventory/card-numbers",
+            json={"card_ids": ["does-not-exist"]},
+            headers=_auth_header(admin),
+        )
+        assert resp.json() == {"does-not-exist": None}
+
+    def test_caps_at_100_ids(self, admin_client):
+        """Mirrors /card-images's and /items-brief's cap — this is a batch
+        endpoint, not an unbounded one."""
+        client, _, admin, _ = admin_client
+        resp = client.post(
+            "/admin/inventory/card-numbers",
+            json={"card_ids": [f"sv1-{i}" for i in range(150)]},
+            headers=_auth_header(admin),
+        )
+        assert resp.status_code == 200
+        assert len(resp.json()) == 100
+
+    def test_non_list_card_ids_is_a_422(self, admin_client):
+        client, _, admin, _ = admin_client
+        resp = client.post(
+            "/admin/inventory/card-numbers",
+            json={"card_ids": "sv1-25"},
+            headers=_auth_header(admin),
+        )
+        assert resp.status_code == 422
+
+
+# ===========================================================================
 # POST /admin/inventory/items-brief
 # ===========================================================================
 #
@@ -2166,7 +2399,11 @@ class TestAdminItemsBrief:
 
         assert resp.status_code == 200
         assert resp.json() == {
-            "x": {"name": "Charizard EX (alt art)", "card_id": "sv1-1"},
+            "x": {
+                "name": "Charizard EX (alt art)", "card_id": "sv1-1",
+                "cost_basis": "10.00", "market_value_at_purchase": None,
+                "acquisition_ratio": None, "current_market_value": "50.00",
+            },
         }
 
     def test_falls_back_to_the_catalog_name_when_the_item_has_none(self, admin_client):
@@ -2180,7 +2417,9 @@ class TestAdminItemsBrief:
             headers=_auth_header(admin),
         )
 
-        assert resp.json() == {"x": {"name": "Pikachu", "card_id": "sv1-1"}}
+        body = resp.json()
+        assert body["x"]["name"] == "Pikachu"
+        assert body["x"]["card_id"] == "sv1-1"
 
     def test_a_sealed_item_has_no_card_id_and_does_not_500(self, admin_client):
         """Sealed/bulk kinds have no `card_id` attribute at all — reaching
@@ -2197,7 +2436,11 @@ class TestAdminItemsBrief:
 
         assert resp.status_code == 200
         assert resp.json() == {
-            "box": {"name": "Obsidian Flames ETB", "card_id": None},
+            "box": {
+                "name": "Obsidian Flames ETB", "card_id": None,
+                "cost_basis": "40.00", "market_value_at_purchase": None,
+                "acquisition_ratio": None, "current_market_value": None,
+            },
         }
 
     def test_an_unknown_item_id_is_null_not_omitted(self, admin_client):
@@ -2212,6 +2455,49 @@ class TestAdminItemsBrief:
 
         assert resp.status_code == 200
         assert resp.json() == {"does-not-exist": None}
+
+    def test_returns_cost_basis_market_at_purchase_and_the_computed_ratio(
+            self, admin_client):
+        """RFC 0024 T5 — the four fields this endpoint gained: `cost_basis`,
+        `market_value_at_purchase`, the ratio computed server-side from
+        those two, and `current_market_value` (a separate, present-day
+        figure). All stringified, never a bare JSON float — the same
+        discipline `slabs_sort.py`'s `_slab_row()` already documents."""
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_raw(
+            item_id="x", card_id="sv1-1", cost_basis="32.00",
+            market_value_at_purchase=Decimal("100.00"),
+            current_market_value="120.00",
+        ))
+
+        resp = client.post(
+            "/admin/inventory/items-brief",
+            json={"item_ids": ["x"]},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()["x"]
+        assert body["cost_basis"] == "32.00"
+        assert body["market_value_at_purchase"] == "100.00"
+        assert body["acquisition_ratio"] == "312.50"
+        assert body["current_market_value"] == "120.00"
+
+    def test_acquisition_ratio_is_null_when_cost_basis_is_absent_or_zero(
+            self, admin_client):
+        client, repo, admin, _ = admin_client
+        repo.put_inventory_item(_raw(
+            item_id="free", card_id="sv1-1", cost_basis="0.00",
+            market_value_at_purchase=Decimal("100.00"),
+        ))
+
+        resp = client.post(
+            "/admin/inventory/items-brief",
+            json={"item_ids": ["free"]},
+            headers=_auth_header(admin),
+        )
+
+        assert resp.json()["free"]["acquisition_ratio"] is None
 
     def test_rejects_a_non_list_body(self, admin_client):
         client, _, admin, _ = admin_client

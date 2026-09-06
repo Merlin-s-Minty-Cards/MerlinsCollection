@@ -92,6 +92,23 @@ export default function SlabsPage() {
     }
   }, [api, priced, sortKey, sortDir])
 
+  // RFC 0022 T4b — grade/cost_basis/status click-to-edit. `grade` and
+  // `cost_basis` arrive as STRINGS (`str(Decimal)`, per SlabRow's own
+  // docstring), so they are parsed back to numbers here before the PUT —
+  // never re-sent as the display string, and never a bare JS `float` either
+  // (a JSON number, same as every other money path in this codebase).
+  const editSlabField = useCallback(
+    async (row: SlabRow, field: string, value: string) => {
+      const body: Record<string, unknown> =
+        field === 'cost_basis' || field === 'grade'
+          ? { [field]: value === '' ? null : Number(value) }
+          : { [field]: value }
+      await api.put(`/inventory/${row.item_id}`, body)
+      loadSlabs()
+    },
+    [api, loadSlabs],
+  )
+
   useEffect(() => {
     loadSlabs()
   }, [loadSlabs])
@@ -341,7 +358,13 @@ export default function SlabsPage() {
             {listError}
           </p>
         )}
-        <SlabList rows={visibleSlabs} sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
+        <SlabList
+          rows={visibleSlabs}
+          sortKey={sortKey}
+          sortDir={sortDir}
+          onSort={handleSort}
+          onEditField={editSlabField}
+        />
       </section>
     </div>
   )

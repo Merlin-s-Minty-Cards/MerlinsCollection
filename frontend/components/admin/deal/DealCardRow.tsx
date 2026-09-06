@@ -3,6 +3,7 @@
 import { Plus } from 'lucide-react'
 import CardImage, { TABLE_THUMB_SIZE } from '@/components/admin/shared/CardImage'
 import { formatMoney } from '@/lib/money'
+import { acquisitionRatio, formatRatio, ratioTone } from '@/lib/acquisition'
 
 /**
  * The ONE row shape for a deal (RFC 0011 T14, §J).
@@ -49,6 +50,26 @@ export interface DealRowCard {
    * `null`/`undefined` omits the line entirely rather than showing a blank one.
    */
   consignorLabel?: string | null
+  /**
+   * RFC 0024 T2 — `market_value_at_purchase` (an owned item) or the catalog's
+   * finish-aware `display_price` (a search result). `undefined` means this row
+   * kind does not carry the concept at all, so the whole acquisition line is
+   * omitted; `null` means the figure is genuinely absent and renders as `—`.
+   */
+  marketValue?: string | number | null
+  /**
+   * `cost_basis` (an owned item) or the value being typed (a staged incoming
+   * leg). Omitted (`undefined`) under customer view — showing what WE paid to
+   * the person across the table is worse than showing the margin percent, so
+   * the caller drops the key entirely rather than passing a hidden value.
+   */
+  pricePaid?: string | number | null
+  /**
+   * `false` under customer view: the ratio segment is dropped entirely, never
+   * rendered as a hidden or greyed chip. Defaults to showing when the ratio
+   * itself resolves to a real number.
+   */
+  showRatio?: boolean
 }
 
 function priceText(value: DealRowCard['price']): string | null {
@@ -76,6 +97,19 @@ export default function DealCardRow({
 }) {
   const money = priceText(card.price)
 
+  // RFC 0024 T2. `undefined` on both keys means this row kind doesn't carry
+  // the concept (e.g. a manual entry) — the whole line is omitted rather than
+  // rendered with two dashes, which would read as "we don't know" instead of
+  // "not applicable here".
+  const hasAcquisitionLine = card.marketValue !== undefined || card.pricePaid !== undefined
+  const marketText = priceText(card.marketValue)
+  const paidText = priceText(card.pricePaid)
+  const ratio = card.showRatio === false ? null : acquisitionRatio(card.marketValue, card.pricePaid)
+  const ratioLabel = formatRatio(ratio)
+  const tone = ratioTone(ratio)
+  const toneClass =
+    tone === 'good' ? 'text-mint' : tone === 'bad' ? 'text-red-400' : 'text-pine-300'
+
   return (
     <div
       data-testid="deal-card-row"
@@ -99,6 +133,21 @@ export default function DealCardRow({
         {card.meta && <div className="truncate text-[10px] text-pine-400">{card.meta}</div>}
         {card.consignorLabel && (
           <div className="truncate text-[10px] text-mint">Consignor: {card.consignorLabel}</div>
+        )}
+        {/* Always rendered when this row kind carries the concept — never
+            behind a hover, and never height-shifting since these are
+            synchronous, already-resolved figures. */}
+        {hasAcquisitionLine && (
+          <div className="truncate text-[10px] text-pine-400">
+            Market {marketText ?? '—'}
+            {card.pricePaid !== undefined && <> · Paid {paidText ?? '—'}</>}
+            {ratioLabel && (
+              <>
+                {' '}
+                · <span className={toneClass}>{ratioLabel}</span>
+              </>
+            )}
+          </div>
         )}
       </div>
 

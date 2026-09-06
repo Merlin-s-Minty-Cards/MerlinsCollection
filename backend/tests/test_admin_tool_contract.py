@@ -191,6 +191,33 @@ def test_list_consignors_accepts_no_arguments_and_returns_the_wired_up_shape(
     }]
 
 
+def test_search_admin_docs_accepts_no_arguments_and_returns_a_browse_index(
+    dynamo_repo,
+):
+    """The wired-up search_admin_docs tool, called with no arguments at all —
+    proves the browse-index path (no body, every article) runs end to end
+    through the actual MCP tool boundary, not just the service function
+    directly. RFC 0026.
+    """
+    server = build_server(dynamo_repo)
+    content, extra = asyncio.run(server.call_tool("search_admin_docs", {}))
+    payload = json.loads(extra["result"])
+
+    assert payload  # the seeded knowledge base is non-empty
+    assert all("body" not in row for row in payload)
+
+
+def test_search_admin_docs_query_returns_full_article_bodies(dynamo_repo):
+    server = build_server(dynamo_repo)
+    content, extra = asyncio.run(
+        server.call_tool("search_admin_docs", {"query": "acquisition"})
+    )
+    payload = json.loads(extra["result"])
+
+    assert payload
+    assert all(row.get("body") for row in payload)
+
+
 def test_the_customer_server_is_never_handed_an_admin_tool():
     """The structural half of decision 6, pinned.
 

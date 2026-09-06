@@ -5,6 +5,7 @@ import { Plus, RefreshCw, Columns3, EyeOff } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { CONDITION_OPTIONS as COND_VALUES } from '@/lib/constants'
 import { useCardImages } from '@/lib/use-card-images'
+import { useCardNumbers } from '@/lib/use-card-numbers'
 import { useLocations } from '@/lib/use-locations'
 import { useShows } from '@/lib/use-shows'
 import { useCosigners } from '@/lib/use-cosigners'
@@ -34,6 +35,9 @@ import {
 
 /** The image column is a registry entry now, not a second competing toggle. */
 const IMAGE_COLUMN_KEY = '_image'
+/** Same shape as IMAGE_COLUMN_KEY — see useCardNumbers' own docstring for
+ * why Card # gets its own gated fetch rather than riding on the image one. */
+const CARD_NUMBER_COLUMN_KEY = '_card_number'
 
 export default function AdminInventoryPage() {
   const api = useAdminApi()
@@ -83,6 +87,10 @@ export default function AdminInventoryPage() {
   const [refreshing, setRefreshing] = useState(false)
   const [refreshResult, setRefreshResult] = useState<string | null>(null)
 
+  // RFC 0022 — a rejected inline edit surfaces here; the cell itself renders
+  // no error text (InlineEditCell's own contract).
+  const [editError, setEditError] = useState<string | null>(null)
+
   // Dynamic locations dropdown
   const { options: locationOptions } = useLocations()
 
@@ -99,10 +107,14 @@ export default function AdminInventoryPage() {
 
   const visible = new Set(visibleColumns)
   const showImages = visible.has(IMAGE_COLUMN_KEY)
+  const showCardNumbers = visible.has(CARD_NUMBER_COLUMN_KEY)
 
-  // Resolve card images
+  // Resolve card images and card numbers — two independent fetches, each
+  // gated on its OWN column's visibility, because an admin can want either
+  // without the other (see useCardNumbers' docstring).
   const cardIds = items.map((i) => i.card_id as string | undefined)
   const { getImageUrl } = useCardImages(showImages ? cardIds : [])
+  const { getCardNumber } = useCardNumbers(showCardNumbers ? cardIds : [])
 
   /**
    * Persist on the toggle rather than in an effect. An effect keyed on
@@ -236,13 +248,25 @@ export default function AdminInventoryPage() {
     }
   }
 
+  // RFC 0022 — the generic click-to-edit commit path every registry `edit`
+  // spec calls: partial PUT, then refetch so any server-side recompute
+  // (denormalized market value, review transitions) is reflected.
+  const saveField = useCallback(
+    async (item: InventoryItem, field: string, value: unknown) => {
+      await api.put(`/inventory/${item.item_id}`, { [field]: value })
+      fetchItems()
+    },
+    [api, fetchItems],
+  )
+
   const columns = toDataTableColumns(visible, {
     editingId, editField, editValue, setEditValue,
     startEdit, saveEdit, cancelEdit,
-    locationOptions, getImageUrl,
+    locationOptions, showOptions, getImageUrl, getCardNumber,
     onRefresh: fetchItems,
     onDelete: setDeleteTarget,
     consignorName: (id) => cosignorOptions.find((o) => o.value === id)?.label,
+    saveField,
   })
 
   // --- Filters ------------------------------------------------------------
@@ -462,6 +486,21 @@ export default function AdminInventoryPage() {
         </div>
       )}
 
+      {/* Inline-edit error toast */}
+      {editError && (
+        <div className="flex items-center gap-2 text-xs text-red-400 bg-red-500/5 border border-red-500/20 rounded-lg px-3 py-2 mb-4">
+          {editError}
+          <button
+            type="button"
+            onClick={() => setEditError(null)}
+            className="ml-auto text-pine-500 hover:text-pine-300"
+            aria-label="Dismiss"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       {/* Table */}
       <DataTable
         columns={columns}
@@ -473,6 +512,7 @@ export default function AdminInventoryPage() {
         onRowClick={(item) => setDetailItem(item)}
         loading={loading}
         emptyMessage="No inventory items match your filters"
+        onEditError={(err) => setEditError(err instanceof AdminApiError ? (err.detail ?? 'Update failed') : 'Update failed')}
       />
 
       {/* Delete confirmation */}

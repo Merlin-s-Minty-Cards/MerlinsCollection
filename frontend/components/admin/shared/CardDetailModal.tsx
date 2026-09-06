@@ -1,10 +1,14 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { X, Pencil, Check, XCircle, Flag, Undo2 } from 'lucide-react'
+import { X, Pencil, Check, XCircle, Flag, Undo2, Lock } from 'lucide-react'
 import { useAdminApi, AdminApiError } from '@/lib/admin-api'
 import { clearTriageBody, sendToTriageBody } from '@/lib/triage'
-import { CONDITION_OPTIONS, parseCondition, formatCondition } from '@/lib/constants'
+import {
+  CONDITION_OPTIONS, parseCondition, formatCondition, LANGUAGE_OPTIONS,
+  PRICED_FINISHES,
+} from '@/lib/constants'
+import { finishAttributeChipVocabulary } from './FinishPicker'
 import { useCardImages } from '@/lib/use-card-images'
 import { useLocations } from '@/lib/use-locations'
 import { useCosigners } from '@/lib/use-cosigners'
@@ -15,6 +19,7 @@ import CosignorPicker from './CosignorPicker'
 import MoneyInput from './MoneyInput'
 import { isHandValued } from '@/lib/valuation'
 import { adminItemName } from '@/lib/admin-item-name'
+import { tcgplayerSearchUrl, TCGPLAYER_UNSUPPORTED_LANGUAGE_MESSAGE, safeTcgHref } from '@/lib/tcgplayer'
 import type { UpdatedItem } from '@/lib/item-update'
 
 interface CardDetailModalProps {
@@ -67,6 +72,14 @@ type FieldType =
   | 'select'
   | 'checkbox'
   | 'date'
+  /**
+   * A `string[]` field (`finish_attributes` only, RFC 0023 T6). Does NOT
+   * route through `editValue` the way every other type does — RFC 0022 §1
+   * explicitly rejects smuggling an array through a joined string, and this
+   * modal's `editValue` is a plain string. It has its own `attributesDraft`
+   * state instead (see `startEdit`/`saveEdit`).
+   */
+  | 'chips'
 
 interface EditableField {
   key: string
@@ -109,13 +122,21 @@ const EDITABLE_FIELDS: EditableField[] = [
   { key: 'product_name', label: 'Product Name', type: 'text', section: 'Identity', kinds: ['sealed'] },
   { key: 'description', label: 'Description', type: 'text', section: 'Identity', kinds: ['bulk'] },
   { key: 'condition', label: 'Condition', type: 'select', section: 'Identity', kinds: ['raw'] },
-  { key: 'finish', label: 'Finish', type: 'text', section: 'Identity', kinds: ['raw'] },
+  { key: 'finish', label: 'Finish', type: 'select', section: 'Identity', kinds: ['raw'] },
+  // Descriptive, not priced — see FinishPicker's own docstring. `chips`
+  // type, not `text`: this is `RawInventoryItem.finish_attributes`, a
+  // `string[]`, and belongs right after `finish` in the Identity section.
+  { key: 'finish_attributes', label: 'Finish Attributes', type: 'chips', section: 'Identity', kinds: ['raw'] },
   { key: 'factory_sealed', label: 'Factory Sealed', type: 'checkbox', section: 'Identity', kinds: ['raw'] },
   { key: 'company', label: 'Grading Company', type: 'text', section: 'Identity', kinds: ['graded'] },
   { key: 'grade', label: 'Grade', type: 'decimal', section: 'Identity', kinds: ['graded'] },
   { key: 'cert_number', label: 'Cert Number', type: 'text', section: 'Identity', kinds: ['graded'] },
   { key: 'product_type', label: 'Product Type', type: 'text', section: 'Identity', kinds: ['sealed'] },
-  { key: 'language', label: 'Language', type: 'text', section: 'Identity' },
+  { key: 'language', label: 'Language', type: 'select', section: 'Identity' },
+  // Only shown when `language === 'OTHER'` (RFC 0023 §1.2) — see
+  // `visibleFields` below. A permanently-visible note field on 99% of cards
+  // (every EN/JP item) would be noise nobody reads.
+  { key: 'language_note', label: 'Language Note', type: 'text', section: 'Identity' },
   { key: 'status', label: 'Status', type: 'text', section: 'Identity' },
   { key: 'location', label: 'Location', type: 'select', section: 'Identity' },
   { key: 'tcg_url', label: 'TCGplayer Link', type: 'text', section: 'Identity' },
@@ -171,6 +192,9 @@ export default function CardDetailModal({
   )
   const [editingField, setEditingField] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
+  // `finish_attributes`'s own draft — see the `'chips'` FieldType note above
+  // for why this is not routed through `editValue`.
+  const [attributesDraft, setAttributesDraft] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // Triage (T11). `triagePanel` is the inline note form — deliberately not a
@@ -179,6 +203,13 @@ export default function CardDetailModal({
   const [triagePanel, setTriagePanel] = useState(false)
   const [triageNote, setTriageNote] = useState('')
   const [triageUndo, setTriageUndo] = useState(false)
+  // Send to Vault (RFC 0022 T7). `vaultPanel` is the confirm step shown ONLY
+  // when already in the vault ("In Vault" -> offer to return to available);
+  // sending TO the vault has no note to type, so that click writes directly,
+  // matching the RFC's "one button, nothing else" scope. `vaultUndo` holds
+  // the PREVIOUS status to restore, or `null` when no undo toast is showing.
+  const [vaultPanel, setVaultPanel] = useState(false)
+  const [vaultUndo, setVaultUndo] = useState<string | null>(null)
   // Consignment assign/unassign (RFC 0012 C3). `consignorPanel` is the
   // inline assign form, matching `triagePanel`'s disclosure pattern.
   const [consignorPanel, setConsignorPanel] = useState(false)
@@ -256,12 +287,17 @@ export default function CardDetailModal({
   const startEdit = (field: string) => {
     setEditingField(field)
     setEditValue(String(shown?.[field] ?? ''))
+    if (field === 'finish_attributes') {
+      const current = shown?.finish_attributes
+      setAttributesDraft(Array.isArray(current) ? [...(current as string[])] : [])
+    }
     setError(null)
   }
 
   const cancelEdit = () => {
     setEditingField(null)
     setEditValue('')
+    setAttributesDraft([])
     setError(null)
   }
 
@@ -270,15 +306,19 @@ export default function CardDetailModal({
     setSaving(true)
     setError(null)
     try {
+      // `finish_attributes` is a real array the whole way — never routed
+      // through `editValue`'s string, per the `'chips'` FieldType note.
       // A checkbox backs a NON-optional bool on the model, and the update
       // endpoint merges the body straight into it — so the blank-is-null path
       // used for text would be a 422 there rather than a clear.
       const value =
-        FIELDS_BY_KEY.get(editingField)?.type === 'checkbox'
-          ? editValue === 'true'
-          : editValue.trim() === ''
-            ? null
-            : editValue.trim()
+        editingField === 'finish_attributes'
+          ? attributesDraft
+          : FIELDS_BY_KEY.get(editingField)?.type === 'checkbox'
+            ? editValue === 'true'
+            : editValue.trim() === ''
+              ? null
+              : editValue.trim()
       const payload: Record<string, unknown> = { [editingField]: value }
       if (typeof payload.condition === 'string') {
         const { condition, condition_modifier } = parseCondition(payload.condition)
@@ -289,13 +329,14 @@ export default function CardDetailModal({
       if (updated) setCurrent(updated)
       setEditingField(null)
       setEditValue('')
+      setAttributesDraft([])
       onUpdated?.(updated ?? undefined)
     } catch (err) {
       setError(err instanceof AdminApiError ? (err.detail ?? 'Update failed') : 'Update failed')
     } finally {
       setSaving(false)
     }
-  }, [api, editingField, editValue, item, onUpdated])
+  }, [api, editingField, editValue, attributesDraft, item, onUpdated])
 
   const writeTriage = useCallback(
     // No `nextFlagged` parameter any more: `flagged` is DERIVED from the item on
@@ -311,6 +352,31 @@ export default function CardDetailModal({
         setTriagePanel(false)
         setTriageNote('')
         setTriageUndo(undoable)
+        onUpdated?.(updated ?? undefined)
+      } catch (err) {
+        setError(err instanceof AdminApiError ? (err.detail ?? 'Update failed') : 'Update failed')
+      } finally {
+        setSaving(false)
+      }
+    },
+    [api, item, onUpdated],
+  )
+
+  // Send to Vault (RFC 0022 T7): PUT { status } through the same partial-
+  // update endpoint every other write here uses — no new endpoint. The
+  // SERVER's `status` is the single answer once the response lands (mirrors
+  // `writeTriage`'s own comment above): `shown`/`inVault` below are derived
+  // from `current`, never a local optimistic flag that could disagree.
+  const writeVault = useCallback(
+    async (nextStatus: string, previousStatus: string | null) => {
+      if (!item) return
+      setSaving(true)
+      setError(null)
+      try {
+        const updated = asItem(await api.put(`/inventory/${item.item_id}`, { status: nextStatus }))
+        if (updated) setCurrent(updated)
+        setVaultPanel(false)
+        setVaultUndo(previousStatus)
         onUpdated?.(updated ?? undefined)
       } catch (err) {
         setError(err instanceof AdminApiError ? (err.detail ?? 'Update failed') : 'Update failed')
@@ -408,10 +474,17 @@ export default function CardDetailModal({
   // DERIVED, never separate state: two sources for "is this card flagged" is how
   // the header comes to disagree with the item it is describing.
   const flagged = Boolean(shown.needs_review)
+  // Same derivation rule as `flagged`: the SERVER's status is the answer,
+  // never a local flag the header could disagree with.
+  const inVault = shown.status === 'on_hold'
 
-  // Only the fields this kind actually has, per the backend union.
+  // Only the fields this kind actually has, per the backend union — plus
+  // `language_note`, which is further gated on the language actually being
+  // OTHER (RFC 0023 §1.2): a note field visible on every ordinary EN/JP card
+  // is noise nobody reads.
   const visibleFields = EDITABLE_FIELDS.filter(
-    (f) => !f.kinds || f.kinds.includes(kind as ItemKind),
+    (f) => (!f.kinds || f.kinds.includes(kind as ItemKind))
+      && (f.key !== 'language_note' || shown.language === 'OTHER'),
   )
   const sections = SECTION_ORDER.map((name) => ({
     name,
@@ -476,6 +549,34 @@ export default function CardDetailModal({
                            hover:border-amber-400/40 transition-colors disabled:opacity-50"
               >
                 <Flag size={12} /> Send to Triage
+              </button>
+            )}
+            {/* Send to Vault (RFC 0022 T7) — same reach as Send to Triage,
+                the five pages that mount this modal. "In Vault" offers to
+                return the item to available rather than silently re-writing
+                on_hold, mirroring the Triage button's own no-op-reads-broken
+                reasoning. */}
+            {inVault ? (
+              <button
+                type="button"
+                onClick={() => setVaultPanel((open) => !open)}
+                disabled={saving}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium
+                           text-sky-300 bg-sky-400/10 border border-sky-400/30
+                           hover:bg-sky-400/20 transition-colors disabled:opacity-50"
+              >
+                <Lock size={12} /> In Vault
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => writeVault('on_hold', String(shown.status ?? ''))}
+                disabled={saving}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium
+                           text-pine-300 border border-pine-700/60 hover:text-sky-300
+                           hover:border-sky-400/40 transition-colors disabled:opacity-50"
+              >
+                <Lock size={12} /> Send to Vault
               </button>
             )}
             <button
@@ -548,6 +649,45 @@ export default function CardDetailModal({
                 </div>
               </>
             )}
+          </div>
+        )}
+
+        {/* Vault panel — the confirm step for returning an on_hold item to
+            available. Sending TO the vault has no note to type, so it writes
+            directly from the header button above with no panel at all. */}
+        {vaultPanel && inVault && (
+          <div className="border-b border-pine-700/40 bg-pine-900/60 px-5 py-3 flex items-center justify-between gap-3">
+            <p className="text-[11px] text-pine-400">In Vault (on hold).</p>
+            <button
+              type="button"
+              onClick={() => writeVault('available', null)}
+              disabled={saving}
+              className="px-2.5 py-1 rounded-md text-[11px] font-medium text-mint
+                         border border-mint/30 hover:bg-mint/10 disabled:opacity-50"
+            >
+              Return to available
+            </button>
+          </div>
+        )}
+
+        {/* Undo — same affordance as the Triage row action: a mis-click on
+            Send to Vault pulls a card out of customer-visible stock, and this
+            is the cheap way back without a confirm dialog in the way. */}
+        {vaultUndo !== null && (
+          <div
+            role="status"
+            className="flex items-center justify-between gap-3 border-b border-sky-400/20
+                       bg-sky-400/10 px-5 py-2 text-[11px] text-pine-100"
+          >
+            <span>Sent to Vault.</span>
+            <button
+              type="button"
+              onClick={() => writeVault(vaultUndo, null)}
+              disabled={saving}
+              className="flex items-center gap-1 text-mint hover:text-mint/80 disabled:opacity-50"
+            >
+              <Undo2 size={12} /> Undo
+            </button>
           </div>
         )}
 
@@ -687,9 +827,11 @@ export default function CardDetailModal({
                       ? formatCondition(String(shown.condition), shown.condition_modifier as string | null | undefined)
                       : field.type === 'checkbox'
                         ? (value ? 'Yes' : 'No')
-                        : value != null && String(value) !== ''
-                          ? String(value)
-                          : '—'
+                        : field.type === 'chips'
+                          ? (Array.isArray(value) && value.length > 0 ? (value as string[]).join(', ') : '—')
+                          : value != null && String(value) !== ''
+                            ? String(value)
+                            : '—'
 
                   return (
                     // `flex-wrap` is how the value STACKS under its label in a
@@ -707,13 +849,13 @@ export default function CardDetailModal({
                     <div
                       key={field.key}
                       className={`flex flex-wrap gap-2 px-3 py-2 rounded-lg bg-pine-800/30 border border-pine-700/20 ${
-                        field.type === 'textarea'
+                        field.type === 'textarea' || (field.type === 'chips' && isEditing)
                           ? 'col-span-full flex-col items-stretch'
                           : 'items-center'
                       }`}
                     >
                       <span className={`text-[10px] text-pine-500 uppercase tracking-wider flex-shrink-0 ${
-                        field.type === 'textarea' ? '' : 'w-24'
+                        field.type === 'textarea' || (field.type === 'chips' && isEditing) ? '' : 'w-24'
                       }`}>
                         {field.label}
                       </span>
@@ -751,6 +893,60 @@ export default function CardDetailModal({
                                 <option key={c} value={c}>{c}</option>
                               ))}
                             </select>
+                          ) : field.type === 'select' && field.key === 'language' ? (
+                            <select
+                              value={editValue}
+                              onChange={(e) => setEditValue(e.target.value)}
+                              className="flex-1 min-w-0 bg-pine-900 border border-mint/30 rounded px-2 py-0.5 text-xs text-pine-100 focus:outline-none focus:border-mint/60"
+                              autoFocus
+                              disabled={saving}
+                            >
+                              {LANGUAGE_OPTIONS.map((l) => (
+                                <option key={l.value} value={l.value}>{l.label}</option>
+                              ))}
+                            </select>
+                          ) : field.type === 'select' && field.key === 'finish' ? (
+                            <select
+                              value={editValue}
+                              onChange={(e) => setEditValue(e.target.value)}
+                              className="flex-1 min-w-0 bg-pine-900 border border-mint/30 rounded px-2 py-0.5 text-xs text-pine-100 focus:outline-none focus:border-mint/60"
+                              autoFocus
+                              disabled={saving}
+                            >
+                              {PRICED_FINISHES.map((f) => (
+                                <option key={f} value={f}>{f}</option>
+                              ))}
+                            </select>
+                          ) : field.type === 'chips' ? (
+                            // finish_attributes (RFC 0023 T6) — a chip toggles
+                            // IMMEDIATELY into `attributesDraft`, but the PUT
+                            // itself still waits for the Save button below,
+                            // same commit gesture as every other field here.
+                            <div className="flex flex-wrap gap-1.5 flex-1">
+                              {finishAttributeChipVocabulary(attributesDraft).map((tag) => {
+                                const selected = attributesDraft.includes(tag)
+                                return (
+                                  <button
+                                    key={tag}
+                                    type="button"
+                                    disabled={saving}
+                                    onClick={() =>
+                                      setAttributesDraft((prev) =>
+                                        prev.includes(tag) ? prev.filter((a) => a !== tag) : [...prev, tag],
+                                      )
+                                    }
+                                    aria-pressed={selected}
+                                    className={`rounded-full px-2.5 py-1 text-[11px] border transition-colors ${
+                                      selected
+                                        ? 'bg-mint/20 border-mint/40 text-mint'
+                                        : 'bg-pine-800/40 border-pine-700/40 text-pine-400 hover:border-pine-600'
+                                    }`}
+                                  >
+                                    {tag}
+                                  </button>
+                                )
+                              })}
+                            </div>
                           ) : field.type === 'textarea' ? (
                             // Deliberately no Enter-to-save: a note is multi-line
                             // free text, so Enter has to insert a newline. Save is
@@ -1022,18 +1218,39 @@ export default function CardDetailModal({
             ) : null}
             {/* `acquired_at` and the grading trio used to be repeated here; they
                 now have real, editable rows in the sections above. */}
-            <a
-              href={
-                shown.tcg_url
-                  ? String(shown.tcg_url)
-                  : `https://www.tcgplayer.com/search/pokemon/product?q=${encodeURIComponent(name)}&view=grid`
+            {(() => {
+              // `tcg_url` is admin-typed free text, never a value this code
+              // generates — a `javascript:` value here is a stored-XSS sink
+              // that fires on one click (RFC 0023 follow-ups #3, guarded the
+              // same way on show-prep and the inventory table). Only a real
+              // http(s) URL may ever back the href; anything else falls back
+              // to a language-aware generated search link exactly as if
+              // nothing were stored (RFC 0023 follow-ups #2 — this modal used
+              // to hardcode the English-only category).
+              const safeStoredUrl = safeTcgHref(shown.tcg_url)
+              const generatedUrl = tcgplayerSearchUrl(
+                typeof shown.language === 'string' ? shown.language : undefined,
+                name,
+              )
+              const linkHref = safeStoredUrl || generatedUrl
+              if (!linkHref) {
+                return (
+                  <span className="text-pine-500" title={TCGPLAYER_UNSUPPORTED_LANGUAGE_MESSAGE}>
+                    No TCGplayer link
+                  </span>
+                )
               }
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-blue-400 hover:text-blue-300"
-            >
-              TCGplayer {shown.tcg_url ? 'Link' : 'Search'} ↗
-            </a>
+              return (
+                <a
+                  href={linkHref}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-blue-400 hover:text-blue-300"
+                >
+                  TCGplayer {safeStoredUrl ? 'Link' : 'Search'} ↗
+                </a>
+              )
+            })()}
           </section>
           </div>
         </div>

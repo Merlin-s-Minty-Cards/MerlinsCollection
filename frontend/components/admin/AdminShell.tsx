@@ -19,6 +19,7 @@ import {
   BarChart3,
   History,
   Users,
+  BookOpen,
   PanelLeftClose,
   PanelLeft,
   ChevronDown,
@@ -48,6 +49,13 @@ import AdminChat from './AdminChat'
  */
 const topLevel = [
   { href: '/admin', label: 'Dashboard', icon: LayoutDashboard },
+  // RFC 0026: reference material, not scoped to "when you use it" the way
+  // the three groups below are — sits beside Dashboard rather than being
+  // forced into At the show/Back office/Data. Deliberately NOT in
+  // `mobileItems`: the four phone slots are the highest-frequency at-a-show
+  // actions, and Docs is reached through the full drawer like every other
+  // non-mobile-bar tab.
+  { href: '/admin/docs', label: 'Docs', icon: BookOpen },
 ]
 
 const navGroups = [

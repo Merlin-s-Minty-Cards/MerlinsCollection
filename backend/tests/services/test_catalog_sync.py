@@ -13,10 +13,14 @@ from merlins_collection.models.inventory import (
     ItemStatus,
     Language,
     RawInventoryItem,
+    SEEDED_LANGUAGES,
     SealedInventoryItem,
 )
 from merlins_collection.models.catalog import FinishPrice
 from merlins_collection.services.catalog_sync import (
+    EXCLUDED_SERIES,
+    TCG_POCKET_SET_IDS,
+    excluded_set_ids,
     refresh_inventory_market_values,
     run_daily_sync,
     snapshot_graded_prices,
@@ -676,7 +680,7 @@ def test_refresh_held_prices_counts_a_legacy_non_composite_card_id_as_unparsable
     from merlins_collection.services.catalog_sync import refresh_held_prices
 
     dynamo_repo.put_inventory_item(_raw_item(card_id="xy7-54"))     # legacy id
-    dynamo_repo.put_inventory_item(_raw_item(card_id="fr:xy7-54"))  # unspoken language
+    dynamo_repo.put_inventory_item(_raw_item(card_id="vi:xy7-54"))  # unspoken language
     dynamo_repo.put_inventory_item(_raw_item(card_id=HELD_ID_EN))   # a real one
     client = FakeTcgdexClient(cards={(Language.EN, "swsh1-1"): RAW})
 
@@ -1078,15 +1082,19 @@ def test_write_path_agrees_with_read_path_for_every_finish_combination(
 
 
 class FakeSetsClient:
-    """Serves ``list_sets``/``iter_brief_cards`` per language, mirroring
-    ``FakeClient`` in ``tests/scripts/test_seed_catalog.py`` — the same shape,
-    scoped to the two breadth-pass calls ``sync_new_sets`` reuses."""
+    """Serves ``list_sets``/``iter_brief_cards``/``get_series`` per language,
+    mirroring ``FakeClient`` in ``tests/scripts/test_seed_catalog.py`` — the
+    same shape, scoped to the breadth-pass calls ``sync_new_sets`` reuses."""
 
-    def __init__(self, sets_by_language=None, cards_by_language=None):
+    def __init__(self, sets_by_language=None, cards_by_language=None,
+                 series_by_language=None, series_error=None):
         self.sets_by_language = sets_by_language or {}
         self.cards_by_language = cards_by_language or {}
+        self.series_by_language = series_by_language or {}
+        self.series_error = series_error
         self.set_calls = []
         self.card_calls = []
+        self.series_calls = []
 
     def list_sets(self, language):
         self.set_calls.append(language)
@@ -1095,6 +1103,53 @@ class FakeSetsClient:
     def iter_brief_cards(self, language):
         self.card_calls.append(language)
         yield from self.cards_by_language.get(language, [])
+
+    def get_series(self, language, series_id):
+        self.series_calls.append((language, series_id))
+        if self.series_error:
+            raise self.series_error
+        return self.series_by_language.get(language, {}).get(series_id)
+
+
+TCGP_SET = {"id": "A1", "name": "Genetic Apex"}
+TCGP_CARD_ROW = {"id": "A1-1", "localId": "1", "name": "Pikachu (Pocket)"}
+TCGP_SERIES = {"id": "tcgp", "name": "Pokémon TCG Pocket", "sets": [{"id": "A1"}]}
+
+
+# ---------------------------------------------------------------------------
+# excluded_set_ids — RFC 0021 T2
+# ---------------------------------------------------------------------------
+
+
+def test_excluded_set_ids_resolves_the_series_live_with_one_call_per_language():
+    client = FakeSetsClient(series_by_language={Language.EN: {"tcgp": TCGP_SERIES}})
+
+    result = excluded_set_ids(client, Language.EN)
+
+    assert result == {"A1"}
+    assert client.series_calls == [(Language.EN, "tcgp")]  # one call, not one per set
+
+
+def test_excluded_set_ids_falls_back_to_the_literal_on_a_lookup_failure():
+    client = FakeSetsClient(series_error=RuntimeError("tcgdex is down"))
+
+    result = excluded_set_ids(client, Language.EN)
+
+    assert result == TCG_POCKET_SET_IDS  # the hardcoded fallback, not an empty set
+
+
+def test_excluded_set_ids_handles_an_unknown_series_id_without_crashing():
+    """``get_series`` returning ``None`` (a 404) must have no effect and must
+    not raise -- a series ``EXCLUDED_SERIES`` names that this build can't find."""
+    client = FakeSetsClient(series_by_language={Language.EN: {}})
+
+    result = excluded_set_ids(client, Language.EN)
+
+    assert result == frozenset()
+
+
+def test_excluded_series_names_tcg_pocket():
+    assert EXCLUDED_SERIES == frozenset({"tcgp"})
 
 
 SWSH1_SET = {"id": "swsh1", "name": "Sword & Shield"}
@@ -1127,6 +1182,23 @@ def test_sync_new_sets_adds_only_missing_sets(dynamo_repo):
     assert dynamo_repo.get_catalog_card("en:swsh2-2") is not None
     # the already-populated set is untouched: still exactly the one seeded card
     assert len(dynamo_repo.list_cards_by_set("en:swsh1")) == 1
+
+
+def test_sync_new_sets_only_walks_seeded_languages_not_every_enum_member(dynamo_repo):
+    """RFC 0023 grew `Language` to 19 members (18 real codes + OTHER). Walking
+    every one here would silently start seeding (via `iter_brief_cards` +
+    `batch_upsert_catalog_cards`) every language's full catalog on the next
+    "check for new sets" click, exactly the all-18-at-once seed RFC 0023
+    section 1.3 rejects. This must stay bounded to `SEEDED_LANGUAGES`."""
+    client = FakeSetsClient(sets_by_language={
+        Language.EN: [SWSH1_SET],
+        Language.KO: [{"id": "kosv1", "name": "Korean Scarlet & Violet"}],
+    })
+
+    sync_new_sets(dynamo_repo, client)
+
+    assert set(client.set_calls) == SEEDED_LANGUAGES
+    assert Language.KO not in client.set_calls
 
 
 def test_sync_new_sets_never_overwrites_existing_card(dynamo_repo):
@@ -1201,6 +1273,59 @@ def test_sync_new_sets_writer_preserves_a_priced_card_even_when_misclassified_as
     stored = dynamo_repo.get_catalog_card("en:swsh1-1")
     assert stored.detail == "full"
     assert stored.prices["holofoil"].market == Decimal("9.25")  # untouched, not overwritten
+
+
+def test_sync_new_sets_never_walks_a_tcg_pocket_set(dynamo_repo):
+    """A digital-only TCG Pocket set must be skipped BEFORE the
+    ``list_cards_by_set`` emptiness check -- it never appears in ``new_sets``
+    and its cards are never written, even though ``iter_brief_cards`` (which
+    is not filterable by set) still yields them."""
+    client = FakeSetsClient(
+        sets_by_language={Language.EN: [TCGP_SET]},
+        cards_by_language={Language.EN: [TCGP_CARD_ROW]},
+        series_by_language={Language.EN: {"tcgp": TCGP_SERIES}},
+    )
+
+    summary = sync_new_sets(dynamo_repo, client)
+
+    assert summary["new_sets"] == []
+    assert summary["cards_added"] == 0
+    assert summary["sets_skipped_digital"] == 1
+    assert dynamo_repo.get_catalog_card("en:A1-1") is None
+    assert dynamo_repo.list_catalog_sets() == []  # never registered either
+
+
+def test_sync_new_sets_still_ingests_a_physical_set_alongside_an_excluded_one(dynamo_repo):
+    """The exclusion is a filter on ONE named set, not a wildcard: a genuinely
+    new physical set in the same run must still be seeded normally."""
+    client = FakeSetsClient(
+        sets_by_language={Language.EN: [TCGP_SET, SWSH2_SET]},
+        cards_by_language={Language.EN: [TCGP_CARD_ROW, *SWSH2_CARD_ROWS]},
+        series_by_language={Language.EN: {"tcgp": TCGP_SERIES}},
+    )
+
+    summary = sync_new_sets(dynamo_repo, client)
+
+    assert summary["new_sets"] == ["en:swsh2"]
+    assert summary["cards_added"] == 2
+    assert summary["sets_skipped_digital"] == 1
+    assert dynamo_repo.get_catalog_card("en:swsh2-1") is not None
+    assert dynamo_repo.get_catalog_card("en:A1-1") is None
+
+
+def test_sync_new_sets_series_lookup_failure_still_skips_via_the_fallback(dynamo_repo):
+    """A TCGdex outage on the series endpoint must not take the whole run down
+    over a cosmetic filter, and must not let the digital set through either."""
+    client = FakeSetsClient(
+        sets_by_language={Language.EN: [TCGP_SET]},
+        cards_by_language={Language.EN: [TCGP_CARD_ROW]},
+        series_error=RuntimeError("tcgdex is down"),
+    )
+
+    summary = sync_new_sets(dynamo_repo, client)
+
+    assert summary["cards_added"] == 0
+    assert dynamo_repo.get_catalog_card("en:A1-1") is None
 
 
 def test_sync_new_sets_dry_run_writes_nothing(dynamo_repo):

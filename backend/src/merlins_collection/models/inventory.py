@@ -44,13 +44,42 @@ class Language(StrEnum):
     JP item resolves to a JP catalog row, never to its English twin. Records
     written before the field existed simply validate as ``EN``, the default.
 
-    ``EN`` and ``JP`` are the only members and that is deliberate — the source
-    spreadsheet contains no other language, and every added member is another
-    axis of matcher ambiguity for data that does not exist (RFC 0003 §4).
+    RFC 0023 grew this from ``EN``/``JP`` to all 18 language codes TCGdex
+    speaks, plus ``OTHER`` — the original two-member docstring's "every added
+    member is another axis of matcher ambiguity for data that does not exist"
+    (RFC 0003 §4) was correct for a spreadsheet-only data source and is
+    superseded by the owner's requirement that the business can enter a card in
+    any language it actually buys, including one TCGdex cannot represent at all.
+
+    Nothing is renamed and nothing is backfilled: every addition here is
+    additive, and every row written before this change is ``EN`` or ``JP`` and
+    stays valid unchanged.
     """
 
     EN = "EN"
-    JP = "JP"
+    JP = "JP"  # api code "ja" -- the value stays "JP", see LANGUAGE_API_CODE
+    FR = "FR"
+    DE = "DE"
+    ES = "ES"
+    ES_MX = "ES-MX"
+    IT = "IT"
+    PT = "PT"
+    PT_BR = "PT-BR"
+    PT_PT = "PT-PT"
+    NL = "NL"
+    PL = "PL"
+    RU = "RU"
+    KO = "KO"
+    ZH_TW = "ZH-TW"
+    ZH_CN = "ZH-CN"
+    ID = "ID"
+    TH = "TH"
+    # The manual escape hatch: a card TCGdex does not carry at all (a regional
+    # printing, an oddity, a language the API does not speak). Carries no API
+    # code by design -- see LANGUAGE_API_CODE and the `_other_language_
+    # implies_unlinked` validator below, which is the mechanism that makes an
+    # OTHER item unfetchable and unlinkable rather than a soft convention.
+    OTHER = "OTHER"
 
     @property
     def label(self) -> str:
@@ -58,7 +87,48 @@ class Language(StrEnum):
         return LANGUAGE_LABELS.get(self, self.value)
 
 
-LANGUAGE_LABELS = {Language.EN: "English", Language.JP: "Japanese"}
+LANGUAGE_LABELS = {
+    Language.EN: "English",
+    Language.JP: "Japanese",
+    Language.FR: "French",
+    Language.DE: "German",
+    Language.ES: "Spanish",
+    Language.ES_MX: "Spanish (Mexico)",
+    Language.IT: "Italian",
+    Language.PT: "Portuguese",
+    Language.PT_BR: "Portuguese (Brazil)",
+    Language.PT_PT: "Portuguese (Portugal)",
+    Language.NL: "Dutch",
+    Language.PL: "Polish",
+    Language.RU: "Russian",
+    Language.KO: "Korean",
+    Language.ZH_TW: "Chinese (Traditional)",
+    Language.ZH_CN: "Chinese (Simplified)",
+    Language.ID: "Indonesian",
+    Language.TH: "Thai",
+    Language.OTHER: "Other / unsupported",
+}
+
+# Languages actually loaded into the catalog today. Kept separate from
+# `Language` itself (which now names every language TCGdex speaks, plus
+# `OTHER`) because "support this language" and "the catalog is seeded for it"
+# are different questions -- RFC 0023 section 1.3 is explicit that seeding is
+# opt-in per language, not all-18-at-once (~100k rows, a multi-hour walk, a
+# `catalog_cache` several times its documented ~93 MB).
+#
+# Anything that walks TCGdex per-language on an unattended trigger --
+# `services.catalog_sync._sync_new_sets` (the "check for new sets" button AND
+# the monthly scheduled catalog sync) and `scripts/purge_catalog_junk.py`'s
+# exclusion precompute -- must iterate THIS, never bare `Language`, or growing
+# the enum silently turns a routine run into an unplanned seed of every
+# language nobody has opted into.
+#
+# Extend this set only when `scripts/seed_catalog.py --language <code>
+# --execute` has actually been run for that language -- seeding is a
+# deliberate, owner-directed action (RFC 0023's own framing: "the owner seeds
+# a language when there is stock that needs it"), not something that happens
+# because the enum grew.
+SEEDED_LANGUAGES = frozenset({Language.EN, Language.JP})
 
 # The attribute holding the sheet's card-name text, per item kind. One fact, one
 # place: the review page, the applier and the language backfill all read it from
@@ -203,6 +273,13 @@ class _ItemBase(BaseModel):
     item_id: str = Field(default_factory=new_ulid)
     status: ItemStatus = ItemStatus.AVAILABLE
     language: Language = Language.EN
+    # Free text recording what an OTHER item actually is ("Vietnamese",
+    # "Traditional Chinese promo, not in catalog") -- there is no catalog
+    # language to attach to it, so this is the only record of what the admin
+    # meant. INTERNAL, same rule as `review_reason`: a customer has no use for
+    # our cataloguing gap, only for the fact that this is a real, distinct
+    # printing. See RFC 0023 §1.2.
+    language_note: str | None = Field(default=None, max_length=100)
     location: str | None = None
     cost_basis: Decimal
     market_value_at_purchase: Decimal | None = None
@@ -286,15 +363,38 @@ class _ItemBase(BaseModel):
             )
         return self
 
-    @field_validator("display_name_override", "review_reason", mode="before")
+    @model_validator(mode="after")
+    def _other_language_implies_unlinked(self):
+        """``language == OTHER`` implies ``card_id is None``.
+
+        The exact mirror of ``_unmatched_implies_unlinked`` above, for the same
+        reason: there is no catalog language to link an OTHER item to (``OTHER``
+        carries no entry in ``LANGUAGE_API_CODE``, so the composite ``card_id``
+        cannot even be constructed), so a linked OTHER row is a contradiction. An
+        admin moving a linked item to OTHER must unlink it in the same write —
+        see ``routers.admin.inventory._apply_language_transition``, which is
+        what makes that a one-click gesture rather than a rejected half-step.
+
+        ``getattr``, not attribute access: sealed and bulk items have no
+        ``card_id`` field at all, and OTHER is always fine for them.
+        """
+        if self.language is Language.OTHER and getattr(self, "card_id", None) is not None:
+            raise ValueError(
+                "language cannot be set to OTHER on an item that still has a "
+                "card_id; unlink the card first"
+            )
+        return self
+
+    @field_validator("display_name_override", "review_reason", "language_note",
+                      mode="before")
     @classmethod
     def _blank_admin_text_is_none(cls, value: object) -> object:
         """Trim, and treat a blank string as "not set".
 
         Clearing the box in the admin UI submits ``""``. For
         ``display_name_override`` that would out-rank the catalog name and
-        render a NAMELESS tile; for ``review_reason`` it would render an empty
-        chip on the Triage row. Both have to mean "remove it" instead. Runs
+        render a NAMELESS tile; for ``review_reason``/``language_note`` it would
+        render an empty chip. All three have to mean "remove it" instead. Runs
         before the length bound, so a padded-but-legal value is trimmed rather
         than rejected.
         """
@@ -317,6 +417,20 @@ class RawInventoryItem(_ItemBase):
     card_id: str | None = None
     display_name: str | None = None
     finish: str
+    # Everything about a physical printing that is genuinely NOT mutually
+    # exclusive with the priced `finish` above — 1st Edition, Shadowless,
+    # Full Art, Signed, ... (RFC 0023 §2.2). `finish` stays the single join
+    # key into `card.prices`; this is purely descriptive and carries NO
+    # price multiplier — a 1st Edition Shadowless Charizard is worth vastly
+    # more than the `holofoil` band says, and the honest answer is that the
+    # operator hand-prices it (`HandValuedBadge`), not that this field
+    # invents a guessed number. Defaults to `[]` so every existing row
+    # validates unchanged. CUSTOMER-FACING (unlike `language_note` /
+    # `review_reason`): this describes the CARD, not our handling of the
+    # record, so it belongs in `_CUSTOMER_ITEM_FIELDS`.
+    finish_attributes: list[Annotated[str, Field(max_length=40)]] = Field(
+        default_factory=list, max_length=10,
+    )
     condition: Condition
     condition_modifier: ConditionModifier | None = None
     factory_sealed: bool = False
@@ -420,6 +534,28 @@ InventoryItemAdapter: TypeAdapter[InventoryItem] = TypeAdapter(InventoryItem)
 _MARKET_FINISH_FALLBACK = (
     "normal", "holofoil", "reverseHolofoil",
     "1stEditionHolofoil", "1stEditionNormal", "unlimitedHolofoil",
+)
+
+
+#: The priced-finish vocabulary offered by the UI (RFC 0023 §2.1) — a UI list,
+#: not a validator. Measured, not typed: a full scan of the live catalog on
+#: 2026-09-02 (29,123 `CatalogCard` rows, `docs/plans/rfc-0023/progress.md`'s
+#: T4 summary) found 7 distinct keys actually present in `CatalogCard.prices`.
+#: Union that measurement with `_MARKET_FINISH_FALLBACK`'s own six above — the
+#: two sets do NOT coincide: `1stEditionNormal` (one of the fallback's six)
+#: had ZERO live cards, while `1stEdition`/`unlimited` (no `Holofoil` suffix)
+#: exist live but were never in the fallback. This is the concrete evidence
+#: that motivated measuring rather than typing: the frontend used to offer
+#: `firstEditionHolofoil`, a string neither list has ever contained.
+#:
+#: `_map_finish` (services/tcgdex.py) camelizes unknown provider keys rather
+#: than dropping them, so `finish` itself is NEVER validated against this
+#: list — a real card whose finish the provider adds tomorrow must stay
+#: enterable. `PRICED_FINISHES` only bounds what the UI *offers* as a choice.
+PRICED_FINISHES = (
+    "normal", "holofoil", "reverseHolofoil",
+    "1stEdition", "unlimited", "unlimitedHolofoil",
+    "1stEditionHolofoil", "1stEditionNormal",
 )
 
 

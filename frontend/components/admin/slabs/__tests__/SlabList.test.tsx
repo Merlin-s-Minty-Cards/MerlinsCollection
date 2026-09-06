@@ -93,4 +93,26 @@ describe('SlabList', () => {
     render(<SlabList rows={[]} />)
     expect(screen.getByText(/no slabs/i)).toBeInTheDocument()
   })
+
+  it('is read-only when no onEditField is supplied, unchanged from before RFC 0022', () => {
+    render(<SlabList rows={[slab()]} />)
+    expect(screen.queryByRole('button', { name: /^Edit /i })).not.toBeInTheDocument()
+  })
+
+  it('grade/cost_basis/status become click-to-edit when onEditField is supplied', async () => {
+    const { fireEvent, act } = await import('@testing-library/react')
+    const onEditField = vi.fn().mockResolvedValue(undefined)
+    render(<SlabList rows={[slab()]} onEditField={onEditField} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Grade' }))
+    const input = screen.getByRole('textbox', { name: 'Edit Grade' })
+    fireEvent.change(input, { target: { value: '9' } })
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Enter' })
+    })
+    // The row displays "10" as a STRING; the caller (not this component)
+    // owns parsing it back to a number before the PUT — this component just
+    // hands the raw committed string through.
+    expect(onEditField).toHaveBeenCalledWith(expect.objectContaining({ item_id: '01J0' }), 'grade', '9')
+  })
 })

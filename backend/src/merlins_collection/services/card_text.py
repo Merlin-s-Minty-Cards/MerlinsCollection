@@ -163,7 +163,11 @@ def set_hint_from_url(url) -> str:
     match = _TCG_PRODUCT_RE.search(str(url or ""))
     if not match:
         return ""
-    slug = re.sub(r"^pokemon-", "", match.group(1).lower())
+    # Strips the marketplace prefix AND, when present, the Japan-category
+    # segment (RFC 0023 T7) — a JP product slug is `pokemon-japan-...`, not
+    # `pokemon-...`, so stripping only the first left a junk `japan` token in
+    # every JP set hint with no relationship to the actual set name.
+    slug = re.sub(r"^pokemon-(japan-)?", "", match.group(1).lower())
     return " ".join(slug.replace("-", " ").split())
 
 

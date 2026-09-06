@@ -15,6 +15,7 @@ import { patchRow } from '@/lib/item-update'
 import InlineEditCell from '@/components/admin/shared/InlineEditCell'
 import MoneyInput from '@/components/admin/shared/MoneyInput'
 import { parseMoney } from '@/lib/money'
+import { tcgplayerSearchUrl, TCGPLAYER_UNSUPPORTED_LANGUAGE_MESSAGE, safeTcgHref } from '@/lib/tcgplayer'
 
 interface MispricedItem {
   item_id: string
@@ -26,6 +27,7 @@ interface MispricedItem {
   sticker_price?: string | null
   sticker_notes?: string | null
   tcg_url?: string | null
+  language?: string
   delta_pct: string
   delta_dollar?: string
   [key: string]: unknown
@@ -281,6 +283,16 @@ export default function AdminShowPrepPage() {
       key: 'location',
       label: 'Location',
       render: (item) => <span className="text-xs text-pine-300 capitalize">{item.location || '—'}</span>,
+      edit: {
+        type: 'select',
+        options: locationOptions,
+        value: (item) => item.location ?? '',
+        save: async (item, next) => {
+          await api.put(`/inventory/${item.item_id}`, { location: next || null })
+          fetchMispriced()
+        },
+        undoLabel: 'Location',
+      },
     },
     {
       key: 'cost_basis',
@@ -288,6 +300,15 @@ export default function AdminShowPrepPage() {
       sortable: true,
       className: 'text-right',
       render: (item) => <PriceDisplay value={item.cost_basis} className="text-xs text-pine-300" />,
+      edit: {
+        type: 'money',
+        value: (item) => (item.cost_basis != null ? String(item.cost_basis) : ''),
+        save: async (item, next) => {
+          await api.put(`/inventory/${item.item_id}`, { cost_basis: next || null })
+          fetchMispriced()
+        },
+        undoLabel: 'Cost basis',
+      },
     },
     {
       key: 'current_market_value',
@@ -343,10 +364,19 @@ export default function AdminShowPrepPage() {
       label: 'TCG Price',
       className: 'w-32',
       render: (item) => {
-        // Fall back to a generated TCGplayer search URL when no link is stored.
-        const searchQuery = encodeURIComponent(item.name || '')
-        const tcgSearchUrl = `https://www.tcgplayer.com/search/pokemon/product?q=${searchQuery}&view=grid`
-        const linkHref = item.tcg_url || tcgSearchUrl
+        // Fall back to a language-aware generated search URL when no link is
+        // stored (RFC 0023 T7). `null` means TCGplayer has no category for
+        // this card's language — that is a fact, not a bug, and must not
+        // silently fall back to the English link (see lib/tcgplayer.ts).
+        const generatedUrl = tcgplayerSearchUrl(item.language, item.name || '')
+        // `item.tcg_url` is admin-typed free text, never a value this code
+        // generates — a `javascript:` value here is a stored-XSS sink that
+        // fires on one click (RFC 0023 follow-ups #3; the identical field
+        // is guarded the same way in `admin-inventory-columns.tsx`). Only a
+        // real http(s) URL may ever back the href; anything else falls back
+        // to the generated search link exactly as if nothing were stored.
+        const safeStoredUrl = safeTcgHref(item.tcg_url)
+        const linkHref = safeStoredUrl || generatedUrl
 
         return (
           <InlineEditCell
@@ -358,17 +388,33 @@ export default function AdminShowPrepPage() {
             onSave={(v) => saveItemTcgUrl(item.item_id, v)}
             onError={handleItemEditError}
             displayValue={
-              <a
-                href={linkHref}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={(e) => e.stopPropagation()}
-                className="inline-flex items-center gap-1 text-[10px] text-blue-400 hover:text-blue-300 transition-colors"
-                title={item.tcg_url ? item.tcg_url : `Search TCGplayer for "${item.name}"`}
-              >
-                <ExternalLink size={11} />
-                Check Price
-              </a>
+              linkHref ? (
+                <a
+                  href={linkHref}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  className="inline-flex items-center gap-1 text-[10px] text-blue-400 hover:text-blue-300 transition-colors"
+                  title={safeStoredUrl ? safeStoredUrl : `Search TCGplayer for "${item.name}"`}
+                >
+                  <ExternalLink size={11} />
+                  Check Price
+                </a>
+              ) : (
+                // The full reason lives in `title`, not inline — this column
+                // is `w-32` (128px), and RFC 0023's own message is ~90
+                // characters. Wrapping the whole sentence into a narrow cell
+                // would blow up that row's height far past its neighbours;
+                // a short label + tooltip keeps the row uniform, the same
+                // shape the stored-link branch above already uses (short
+                // "Check Price" text, full URL in `title`).
+                <span
+                  className="text-[10px] text-pine-500 italic truncate block"
+                  title={TCGPLAYER_UNSUPPORTED_LANGUAGE_MESSAGE}
+                >
+                  No TCGplayer link
+                </span>
+              )
             }
           />
         )

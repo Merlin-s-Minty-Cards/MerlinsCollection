@@ -97,6 +97,58 @@ def list_catalog_sets(
     return sorted(summaries, key=lambda s: (s.set_name.lower(), s.language, s.set_id))
 
 
+class CatalogLanguageSummary(BaseModel):
+    """One language actually present in the catalog, for the search filter.
+
+    ``code`` is the ``Language`` enum VALUE ("EN", "JP", ...), matching
+    ``CatalogSetSummary.language`` above — not the TCGdex API code ("en",
+    "ja"), which is a URL-path detail this response has no reason to leak.
+    """
+
+    code: str
+    label: str
+    sets: int
+
+
+@router.get("/languages", response_model=list[CatalogLanguageSummary])
+def list_catalog_languages(
+    repo: InventoryRepository = Depends(get_repo),
+) -> list[CatalogLanguageSummary]:
+    """Every language that ACTUALLY has catalog rows, with how many sets.
+
+    RFC 0023 grew ``Language`` to 19 members (18 real TCGdex codes + ``OTHER``)
+    while the catalog itself stays seeded per language, on demand (see
+    ``SEEDED_LANGUAGES``, ``models/inventory.py``) — most members have zero
+    rows. Offering all 19 in a search filter would let an admin pick a
+    language that can only ever return nothing, so this endpoint derives the
+    list from the SAME ``catalog_set`` registry ``/sets`` above already
+    reads (one query, no scan), grouped and counted, rather than from the
+    enum. An empty catalog answers ``[]`` honestly, same as ``/sets``.
+    """
+    registry = repo.list_catalog_sets()
+    counts: dict[str, int] = {}
+    for row in registry:
+        code = row.get("language")
+        if not code:
+            continue
+        counts[code] = counts.get(code, 0) + 1
+
+    def _label(code: str) -> str:
+        try:
+            return Language(code).label
+        except ValueError:
+            # A registry row from a language build this process no longer
+            # recognizes (should not happen — nothing removes enum members —
+            # but answering with the raw code beats a 500 on a filter list).
+            return code
+
+    summaries = [
+        CatalogLanguageSummary(code=code, label=_label(code), sets=count)
+        for code, count in counts.items()
+    ]
+    return sorted(summaries, key=lambda s: s.label)
+
+
 class NewCard(BaseModel):
     """One newly-catalogued card, as the dashboard widget renders it.
 

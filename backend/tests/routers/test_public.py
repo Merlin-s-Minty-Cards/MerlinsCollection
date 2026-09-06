@@ -42,11 +42,18 @@ def _catalog(card_id, name, *, set_id="sv1", small=None):
 
 
 def _raw(card_id, *, market=None, listed="10.00", status=ItemStatus.AVAILABLE):
+    # RFC 0025 T2: `customer_visible_items` (called by the featured endpoint)
+    # now requires a sticker price. The featured endpoint's own market-first
+    # RANKING is untouched by this RFC (`GET /public/featured`'s API contract
+    # stays "unchanged shape; the cohort narrows") — only the VISIBILITY gate
+    # does, so `sticker_price` is set independently of `market`/`listed` here
+    # rather than derived from either, and defaults to always-visible.
     return RawInventoryItem(
         card_id=card_id,
         status=status,
         listed_price=Decimal(listed) if listed is not None else None,
         current_market_value=Decimal(market) if market is not None else None,
+        sticker_price=Decimal("10.00"),
         cost_basis=Decimal("5.00"),
         acquired_at=date.today(),
         finish="holofoil",
@@ -60,6 +67,7 @@ def _graded(card_id, *, market=None, listed="50.00"):
         card_id=card_id,
         listed_price=Decimal(listed) if listed is not None else None,
         current_market_value=Decimal(market) if market is not None else None,
+        sticker_price=Decimal("50.00"),
         cost_basis=Decimal("30.00"),
         acquired_at=date.today(),
         company=GradingCompany.PSA,

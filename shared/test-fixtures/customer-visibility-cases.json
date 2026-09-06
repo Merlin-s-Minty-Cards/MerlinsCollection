@@ -1,0 +1,103 @@
+{
+  "cases": [
+    {
+      "name": "available raw, glass, stickered -> visible",
+      "status": "available",
+      "kind": "raw",
+      "location": "glass",
+      "factory_sealed": false,
+      "sticker_price": "25.00",
+      "expected": true
+    },
+    {
+      "name": "available raw, glass, NO sticker -> hidden (RFC 0025)",
+      "status": "available",
+      "kind": "raw",
+      "location": "glass",
+      "factory_sealed": false,
+      "sticker_price": null,
+      "expected": false
+    },
+    {
+      "name": "available graded, toploader, stickered -> visible",
+      "status": "available",
+      "kind": "graded",
+      "location": "toploader",
+      "factory_sealed": false,
+      "sticker_price": "500.00",
+      "expected": true
+    },
+    {
+      "name": "available graded, toploader, no sticker -> hidden",
+      "status": "available",
+      "kind": "graded",
+      "location": "toploader",
+      "factory_sealed": false,
+      "sticker_price": null,
+      "expected": false
+    },
+    {
+      "name": "available raw, no location, not factory sealed -> hidden",
+      "status": "available",
+      "kind": "raw",
+      "location": null,
+      "factory_sealed": false,
+      "sticker_price": "10.00",
+      "expected": false
+    },
+    {
+      "name": "available raw, factory sealed, no location, stickered -> visible",
+      "status": "available",
+      "kind": "raw",
+      "location": null,
+      "factory_sealed": true,
+      "sticker_price": "10.00",
+      "expected": true
+    },
+    {
+      "name": "available raw, factory sealed, no location, no sticker -> hidden",
+      "status": "available",
+      "kind": "raw",
+      "location": null,
+      "factory_sealed": true,
+      "sticker_price": null,
+      "expected": false
+    },
+    {
+      "name": "available raw, storage location (not visible), stickered -> hidden",
+      "status": "available",
+      "kind": "raw",
+      "location": "storage",
+      "factory_sealed": false,
+      "sticker_price": "10.00",
+      "expected": false
+    },
+    {
+      "name": "sold raw, glass, stickered -> hidden (status)",
+      "status": "sold",
+      "kind": "raw",
+      "location": "glass",
+      "factory_sealed": false,
+      "sticker_price": "10.00",
+      "expected": false
+    },
+    {
+      "name": "available bulk, glass, stickered -> hidden (kind)",
+      "status": "available",
+      "kind": "bulk",
+      "location": "glass",
+      "factory_sealed": false,
+      "sticker_price": "10.00",
+      "expected": false
+    },
+    {
+      "name": "available sealed product, glass, stickered -> hidden (kind)",
+      "status": "available",
+      "kind": "sealed",
+      "location": "glass",
+      "factory_sealed": false,
+      "sticker_price": "10.00",
+      "expected": false
+    }
+  ]
+}

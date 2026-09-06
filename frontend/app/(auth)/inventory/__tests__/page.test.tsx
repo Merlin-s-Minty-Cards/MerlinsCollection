@@ -5,7 +5,7 @@ import { describe, it, expect, vi } from 'vitest'
 // InventoryStats fetches /inventory/summary on mount via apiFetch; resolve it so
 // the effect doesn't reject. Its real behavior has dedicated tests.
 vi.mock('@/lib/api', () => ({
-  apiFetch: vi.fn().mockResolvedValue({ cards_in_vault: 0, est_value: '0', sets_tracked: 0 }),
+  apiFetch: vi.fn().mockResolvedValue({ cards_in_vault: 0, sets_tracked: 0 }),
 }))
 
 // The panels read the NextAuth session; the layout's SessionProvider isn't in

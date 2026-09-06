@@ -258,6 +258,7 @@ would break every bookmark to fix a URL nobody types.
 | Group | Route | Label | Purpose |
 |---|---|---|---|
 | — | `/admin` | Dashboard | Quick actions, needs-attention queues, position, today, coverage |
+| — | `/admin/docs` | Docs | Searchable admin operations knowledge base — see "ADMIN DOCS TAB" below |
 | **At the show** | `/admin/inventory` | Inventory | Inventory CRUD, granular filters, ownership column |
 | | `/admin/trade` | **Buy / Sell / Trade** | One surface, three modes via `?mode=`. See "Buy / Sell / Trade" below |
 | | `/admin/slabs` | Slabs | Graded intake (cert → staged batch → commit → priced) + the slab list. See "Slabs" below |
@@ -362,6 +363,47 @@ day by giving the modal its own `useCosigners()` lookup (same pattern as
 `ctx.consignorName`), falling back to the raw id only when it can't resolve
 (e.g. an archived consignor, invisible to `useCosigners()` by design) — an
 admin can still trace the row rather than losing the reference entirely.
+
+**Card number (the catalog print number, "25" in "sv1-25") had the SAME
+"present, wired, invisible" shape as the Consignor filter above, on TWO
+surfaces at once — fixed 2026-09-04.** `admin-inventory-columns.tsx` already
+had a `cardNumber` filter with `columnKey: null`, reachable only behind
+"Show all filters", and no `_card_number` column existed for it to follow.
+Separately, `/admin/card/[id]`'s header and its "Set"/"Card Number"
+`DetailRow`s had been written against `item.set_name`/`item.card_number`
+since the page was created, but `GET /admin/inventory/{item_id}`
+(`admin_get_item`) returned a raw dump of the stored item with **no catalog
+join at all** — so both fields were always `undefined` and both pieces of UI
+silently rendered nothing, on every item, the whole time.
+
+Two independent fixes, not one, because the two gaps needed different
+remedies:
+- `admin_get_item` now attaches `set_name`/`card_number` by reading
+  `repo.get_catalog_card(item.card_id)` once, mirroring how it already
+  attaches the derived `condition_multiplier`. **Deliberately not added to
+  `_serialize_item` itself** — that function also backs `admin_search_items`
+  (the LIST endpoint), which returns hundreds of unpaginated rows, and a
+  catalog point-read per row there would add real latency to the busiest
+  page in the admin panel. A single-item fetch pays for exactly one extra
+  read.
+- The admin inventory table gets a new `_card_number` column
+  (`defaultVisible: false`, same as `_image`), resolved client-side via a
+  new `useCardNumbers` hook + `POST /admin/inventory/card-numbers` — **a
+  separate endpoint/hook from `/card-images`, not folded into it**, because
+  the table gates each fetch on its OWN column's visibility
+  (`visible.has(columnKey)`); tying Card # to the Image fetch would mean an
+  admin wanting one without the other pays for both or neither. The
+  `cardNumber` filter's `columnKey` now points at `'_card_number'` — the
+  identical fix shape as the Consignor filter/column pairing above.
+  `useCardImages` and `useCardNumbers` are both thin wrappers over a new
+  shared `useBatchedCardLookup<T>` (extracted, not duplicated, from
+  `useCardImages`'s pre-existing resolved/pending/failed-id bookkeeping) —
+  `useCardImages`'s own public contract (`imageMap`/`getImageUrl`) is
+  unchanged, so none of its ~16 existing callers needed to change.
+
+`Set`/`Artist` remain column-less filters on purpose (unlike `cardNumber`) —
+neither has a rendered column, so there's nothing for `columnKey` to point
+at yet.
 
 ## A FETCH-ONCE ADMIN DROPDOWN HOOK CAN LOSE THE SESSION RACE — depend on `isAuthenticated`
 
@@ -550,6 +592,77 @@ at all — the "every tab" goal is not met yet; see
 `CardDetailModal` — the modal's "Display Name" row still edits `display_name`,
 the import-materialized fallback, which is a silent no-op on a catalog-matched
 item (follow-ups.md, T10 row 3).
+
+**"Send to Vault" (RFC 0022 T7) lives beside Send to Triage in the same
+modal, on the same reach** — the five pages above, no new wiring per page.
+It PUTs `{status: 'on_hold'}` through the existing
+`PUT /admin/inventory/{item_id}` (no new endpoint) and reads **"In Vault"**
+once the server confirms `status === 'on_hold'`, offering to return the item
+to `available`. Sending TO the vault has no note to type, so — unlike Send
+to Triage — it writes directly on click with no inline form. Same undo
+affordance (a 5-second-equivalent toast restoring the previous status), and
+the button's state is derived from the refetched item, never an optimistic
+local flag — the exact rule `writeTriage`'s own comment already states.
+
+## UNIVERSAL ADMIN INLINE EDITING (RFC 0022)
+
+Every value in every admin table is click-to-edit where it makes sense, via
+one shared mechanism: `InlineEditCell` (`components/admin/shared/`, 9 input
+types — `text|textarea|money|number|date|select|multiselect|checkbox|url`)
+rendered by `DataTable` when a `Column<T>` carries an `edit: EditSpec<T>`.
+The read-only presentation is byte-identical to before; the affordance is a
+hover background + pencil on hover/focus, and the cell stays
+keyboard-focusable (Enter opens the editor) because hover may never be the
+only route to a control.
+
+**`multiselect` is array-typed on purpose, not a delimiter-joined string** —
+`InlineEditCell` takes separate `multiselectValue: string[]` /
+`onSaveMultiselect: (v: string[]) => …` props for it, and `EditSpec<T>`
+mirrors that split (`multiselectValue`/`saveMultiselect`, alongside the
+scalar `value`/`save` every other type uses). Built ahead of any real
+consumer in this RFC specifically so RFC 0023's `finish_attributes` column
+has a mechanism to use rather than bolting on a second one.
+
+**Undo, not confirmation** (owner decision): `EditSpec.undoLabel`, when set,
+shows a 5-second "`‹label›` → `‹new value›` · Undo" toast after a successful
+commit; Undo re-issues `save` with the value captured *before* the edit. Set
+only on `status`, `cost_basis`, `sticker_price`, `listed_price`, `location`
+(consignor reassignment has no inline column yet — see the exclusion note
+below). Everything else commits silently. The toast lives inside
+`DataTable` itself, not a separate component — it needs the row/column/
+previous-value context only the table has.
+
+**A `Column<T>` with `edit` conflicts with `onRowClick` on the SAME
+cell** — `InlineEditCell`'s click handler calls `stopPropagation()`, so an
+editable cell silently eats a row-level click. Found live on
+`/admin/cosigners` (rows are click-to-select; making `name` editable broke
+selecting a consignor entirely — reverted) and on the Analytics Shows tab
+(kept `date` editable, dropped `name`, which is that tab's click-to-detail
+target). **Before adding `edit` to a column on a page with `onRowClick`,
+check whether that column is the actual click target for row navigation** —
+DataTable-level tests cannot catch this because they don't exercise both
+features on one cell at once.
+
+**`INVENTORY_COLUMNS` (`lib/admin-inventory-columns.tsx`) is the reference
+registry and the only one with a totality test today**
+(`lib/__tests__/admin-inventory-columns.test.ts`): every column carries
+either `edit` or a `notEditable` reason string ≥10 characters, never both —
+the length check is the point, mirroring the `admin-tool-contract.json`
+lesson elsewhere in this file where a parity test diffed key sets while
+every value was an empty stub. **Only `card_id` and consignment/
+`consignor_name` are excluded by owner decision** ("everything except
+card_id and consignment"); every other exclusion (`current_market_value`,
+identity/audit fields, derived columns) has its own stated reason.
+`/admin/shows`, `/admin/cosigners`, `SlabList` gained real inline editing
+too but **not yet a formal registry + totality test of their own** — a
+known, deliberate gap (not an oversight), left as a follow-up.
+
+**`SlabList` gotcha, same one `slabs_sort.py` already documents:** `grade`
+and `cost_basis` are `str(Decimal)` on the wire. The component has no
+`api`/side-effect capability of its own — it takes an optional
+`onEditField(row, field, value)` prop, and the PARENT PAGE
+(`/admin/slabs`) is what parses the string back to a JSON number before the
+PUT, never re-sending the display string and never a bare Python float.
 
 **The one rule that must not be broken:** assigning an English display name
 writes `display_name_override` and **never** `card_id`. Re-pointing a card is a
@@ -879,6 +992,114 @@ that table only. A mixed-direction group (a trade) renders a **net** total —
 summing magnitudes would report a $50-for-$30 trade as `$80`, a number that
 exists nowhere.
 
+## A TYPO IN THE LEDGER GETS A DIFFERENT TOOL THAN "THIS DID NOT HAPPEN" — EDIT, NOT VOID
+
+RFC 0024 T3/T4. Void says *"this sale did not happen."* It is the wrong tool
+for *"this sale happened, I typed $150 instead of $105"* — voiding and
+re-entering loses the original date, breaks the `batch_id` grouping, breaks
+the item's timeline continuity, and leaves a struck-through phantom in the
+archive that misrepresents what occurred.
+
+`PATCH /admin/transactions/{txn_id}` accepts any subset of `amount`, `date`,
+`payment_method`, `fee`, `show_id`, `notes`. **Never `item_id`, `type` or
+`category`** — re-pointing a leg rewrites two items' histories from one edit;
+the correct expression of "this was the wrong card" is a void plus a fresh
+entry, unchanged by this feature. Refusals: a **voided** transaction is `409`
+(restore first — editing a row that counts toward nothing is incoherent); a
+**trade leg** is `400`, for the same reason a trade cannot be voided at all —
+`_compute_basis_pool` allocated the incoming cost basis pro-rata across every
+leg at confirm time, so a single-leg amount edit would leave that allocation
+inconsistent with its own inputs, and re-running it would rewrite cost bases
+on items that may since have moved on. **A mistaken trade still has no
+correction path** — the exact same recorded limitation the void feature
+already states for a mistaken purchase. An unknown `txn_id` is `404`; a
+disallowed field or an unreadable value is `422`.
+
+**A date change moves the row between DynamoDB month partitions in ONE
+`transact_write_items`, never two calls** — the SK embeds the date
+(`PK = TXN#<YYYY-MM>`, `SK = <ISO date>#<txn_id>`), so a half-applied move
+would duplicate or destroy the ledger row, the exact partial-write class
+`reverse_sales` already exists to prevent. Same date stays a plain
+`put_transaction`, which whole-item `put_item`s and so correctly drops the
+GSI2 show attributes when `show_id` is cleared.
+
+**`cost_basis` follows a corrected PURCHASE amount, guarded on equality with
+the OLD amount.** If the item's current `cost_basis` no longer equals what
+the ledger said before the edit, the sync is skipped and
+`cost_basis_skipped_reason` explains why (`"cost basis was changed manually
+since"`, or `"item not found"`) — never a silent overwrite of a hand
+correction, and never a silent skip either. **RFC 0022 made this the COMMON
+case, not a rare one**: once `cost_basis` is inline-editable on six admin
+tables, an admin correcting the item directly is routine, and every such
+correction breaks the equality the guard checks. `cost_basis_skipped_reason`
+is rendered as plain information in `TransactionEditDialog` (`role="status"`,
+not an error), the same way this file's Universal Inline Editing section
+already documents. Sales never touch `cost_basis` — a sale's `amount` is
+revenue, not an acquisition cost.
+
+Three new `Transaction` fields, mirroring the void feature's shape exactly:
+`edited_at`, `edited_by` (**server-stamped** from `email or username or sub`,
+never client-supplied — same rule as `voided_by`), `edit_history` (a
+`TransactionEdit` per EDIT, not per changed field — a six-field correction is
+one thing that happened, capped at 20 entries for the same 400 KB item-size
+reason `review_reason`/`void_reason` are bounded). **One timeline event per
+transaction, keyed `<txn_id>#edit`, re-put rather than appended** — the sale's
+own event is `TIMELINE#<date>#<txn_id>`, so a same-day edit would otherwise
+overwrite it, identical to how a same-day void is keyed `#void`.
+`ShowAnalyticsSnapshot.stale` is marked for both the OLD and NEW show/date,
+reusing void's own marking function twice rather than a second resolver.
+**`services/ledger.is_countable` is untouched** — an edited transaction still
+counts toward everything it counted toward before; there is no
+`edited_at is None` check anywhere, on the same "one countability definition"
+rule the void section above already states.
+
+The UI is a **dialog** (`TransactionEditDialog`, opened from a per-leg Edit
+button in `SaleDetailModal`, beside the existing Void/Restore), not an RFC
+0022 inline cell — an amount edit here has a side effect on another entity,
+can move a row between DynamoDB partitions, and marks a report stale, which
+needs a surface that can show `cost_basis_skipped_reason` on the way back. It
+sends only the fields that actually changed from the leg's own current value,
+never the whole form.
+
+## THE ACQUISITION RATIO — market at purchase over what we paid, one authority per side
+
+RFC 0024 T1. The owner's *"market @ purchase / amount paid"* — pay $32 for a
+card the market said was worth $100 and the ratio is 312%. Two
+implementations, deliberately, in the same shape as `itemTitle` /
+`adminItemName` / `admin_item_name` / MCP's `toCard`: `acquisition_ratio`
+(`backend/src/merlins_collection/services/acquisition.py`) and
+`acquisitionRatio` (`frontend/lib/acquisition.ts`), pinned together by a
+shared cross-boundary fixture
+(`shared/test-fixtures/acquisition-ratio-cases.json`) rather than by trust —
+`mcp-server/src/condition-pricing.ts`'s unchecked cross-language parity claim
+is the cautionary precedent this test exists to not repeat.
+
+**`None`/`null` when either figure is absent, or when the cost basis is
+zero** — a free card (a throw-in, a bulk lot) is routine at a buy table, and
+its ratio is undefined, not infinite and not zero. Every caller renders an
+em dash, never a guessed number. Tone bands, defined once in `ratioTone()`:
+≥200% good, 100–200% neutral, <100% bad (paid over market), `null` → no chip
+at all, never a grey zero.
+
+**Never stored** — it is derived from `market_value_at_purchase` and
+`cost_basis`, both already on `InventoryItem`, and would go stale the moment
+either changes, including from the transaction-edit `cost_basis` sync
+directly above. Rendered on every deal row (`DealCardRow`'s third line,
+`Market $100.00 · Paid $32.00 · 312%`) and in the richer transaction detail
+`POST /admin/inventory/items-brief` now returns.
+
+**Customer view hides the ratio AND `Paid`; `Market` stays visible.** Price
+paid is our cost basis, and showing a customer that we paid $32 for the card
+we're trading them at $100 is strictly worse than showing them the margin
+percentage — the owner's instruction to hide "percent" is read as "hide what
+tells them our margin." `customerView` is the same page-state prop already
+threaded through `DealSummary`, now also threaded into `DealSearchPanel`,
+`DealStagedColumn` and `DealCardRow` by the same name. **The suppression
+happens at RENDER time, not at stage time** — `DealStagedColumn` strips
+`pricePaid` and forces `showRatio={false}` only while the toggle is on, while
+the staged row's OWN state always keeps the real values, because the
+operator can flip Customer View after cards are already staged.
+
 **Cosigners** (`/admin/cosigners`) — CRUD + payout-link tool for consignors;
 card assignment is still raw item-ID entry (no picker UI, deliberately out of
 scope) on this page specifically. RFC 0012 added assign/unassign elsewhere
@@ -972,24 +1193,104 @@ vitest does not collect it and `next build` does not typecheck it. Use
 deadlock `waitFor`. `mcp-server/` has no date helper and needs none — it returns
 ISO strings and never formats a calendar date.
 
-**Customer prices are CONDITION-ADJUSTED.** The catalog relays one market
-figure per finish and that figure is a **Near Mint** price. Every
-customer-facing surface scales it by the item's condition
-(`services/condition_pricing.py` — LP ×0.82, MP ×0.58, HP ×0.33, DMG ×0.15,
-`+`/`-` take the midpoint with the neighbouring tier). Before this, a DMG card
-was shown to a buyer at **~6.7× what the business valued it at**, wrong in the
-business's favour. Measured on live stock 2026-08-06: this moved the
-customer-visible total from **$6,143 to $5,005 (−18.5%)** across 73 of 228
-items.
+## THE CUSTOMER PRICE IS THE STICKER — CONDITION ADJUSTMENT NO LONGER APPLIES TO IT (RFC 0025)
 
-**The adjustment is applied in exactly ONE place per surface — do not add a
-second.** `_condition_adjust` in `routers/inventory.py` rewrites
-`summary.market_price` at enrichment, so the tile, the sort and the price bound
-all inherit the same number (this is what keeps RFC 0008 T1's single-authority
-invariant). `/inventory/summary` applies it to its **live** branch only, and MCP
-mirrors both via `mcp-server/src/condition-pricing.ts`. The stored
-`current_market_value` already has the multiplier baked in by the nightly
-denormalizer — **adjusting that would apply it twice.**
+**Superseded 2026-09-03.** Until RFC 0025, the customer price was a **Near
+Mint catalog figure, condition-adjusted at read time** — see the "history"
+subsection below for what that meant and why it existed; none of it is
+current behaviour any more, and nothing below the line describes the live
+system.
+
+**The customer price is now `sticker_price`, full stop, and a card with none
+is not shown at all.** `sticker_price` is what the business actually sells
+the card for — an admin typed it by hand, holding the card and its
+condition. The owner's framing: *"sticker price is essentially the price we
+sell the cards at."* A live catalog estimate is not that, and scaling it by
+condition doesn't make it that either.
+
+`services/customer_visibility.py::is_customer_visible` — the ONE per-item
+predicate behind `customer_visible_items` (filter search, the authed
+dashboard summary), `routers/public.py` (the anonymous featured endpoint),
+and `services/bedrock.py` (chat hydration, both the customer AND — since
+`_hydrate_item` is one shared hydrator by design — the admin analyst
+surfaces) — now requires `item.sticker_price is not None`. **A stickerless
+card in the vault is a routine state, not an edge case**: `/admin/outgoing`
+(Prep Queue) exists specifically to find unstickered available inventory.
+Measured against the live table 2026-09-03 before this shipped: 247
+customer-visible items, 232 stickered (93.9%), 15 not — reported to the
+owner per the RFC's own gate, and the decision to hide the 15 stood.
+
+`_display_price` (`routers/inventory.py`) — the single authority for the
+price **filter** and the price **sort** — is now `return item.sticker_price`.
+**No fallback**: `is_customer_visible` already guarantees a visible item has
+one, so `None` there means a caller is holding an item it should never have
+had. `hidden_no_price` is consequently **structurally always `0`** — kept in
+the response and the counting code stays live, as a tripwire (a test asserts
+the zero) rather than a deletion for a false economy.
+
+**The tile itself gained the field one round later — RFC 0025 follow-ups #7,
+closed at Round 9 closeout (2026-09-03).** The RFC shipped `_display_price` as
+the filter/sort authority but never added `sticker_price` to
+`_CUSTOMER_ITEM_FIELDS`, so the actual price text a customer read on a card
+tile was still `frontend/lib/inventory.ts::toPresentedCard`'s pre-RFC
+computation (`item.card?.market_price ?? item.listed_price`) — a customer
+could filter or sort by the sticker and see a different number rendered.
+`sticker_price` now joins the allowlist (additive; nothing else moved) and
+`toPresentedCard` reads it directly, so the tile can no longer disagree with
+what it was just filtered/sorted by. The chat-mode path needed no change:
+`services/bedrock.py::_hydrate_item` already set `listed_price =
+item.sticker_price` under the original T2 task, so only the filter-mode
+search tile had drifted.
+
+**Condition adjustment does NOT apply to a sticker price**, and this is the
+subtle, easy-to-get-backwards part: `apply_condition_adjustment` exists
+because a *catalog* figure is a Near Mint price and needs scaling down for a
+worse-condition card. A sticker is not a catalog figure — a human already
+priced the specific card in the specific condition they were holding.
+Applying the multiplier to it would be the identical double-application
+error this file already warned about for `current_market_value`
+("the nightly denormalizer already baked the multiplier in — adjusting that
+would apply it twice"), just arriving through a different field.
+`_condition_adjust`/`apply_condition_adjustment` were removed from
+`routers/inventory.py`'s customer enrichment path and from
+`services/bedrock.py`'s `_hydrate_item` entirely — **`apply_condition_adjustment`
+itself is not deleted and must not be**: `catalog_sync.refresh_inventory_market_values`
+still bakes it into the stored `current_market_value`, `routers/admin/inventory.py`
+still uses it for admin-facing figures, and `mcp-server/src/condition-pricing.ts`
+still backs the MCP admin path. Its authority over *market* estimates is
+unchanged; it simply no longer decides what a customer is charged.
+
+**MCP mirrors this with a SPLIT, not a collapse.** `Card.value` (the
+customer-visible "what we sell it for" figure `search_inventory`/
+`calculate_inventory_value`/chat quote) reads `sticker_price` only, same as
+`_display_price`. `Card.marketPrice` **keeps its old computation
+unchanged** (live catalog price, condition-adjusted, denormalized/graded/
+listed fallbacks) — it is a genuinely different, still-needed figure:
+`flag_underpriced_cards` compares `value` against `marketPrice` to find
+stock priced below a condition-adjusted market estimate, and collapsing the
+two into one number would make every card look correctly priced by
+definition. Before this RFC the two fields happened to share one
+computation; that was incidental, not a rule to preserve.
+
+<details>
+<summary>History — the pre-RFC-0025 mechanism (for context only, not current behaviour)</summary>
+
+Customer prices used to be CONDITION-ADJUSTED. The catalog relays one market
+figure per finish and that figure is a **Near Mint** price. Every
+customer-facing surface scaled it by the item's condition
+(`services/condition_pricing.py` — LP ×0.82, MP ×0.58, HP ×0.33, DMG ×0.15,
+`+`/`-` take the midpoint with the neighbouring tier). Before THAT change, a
+DMG card was shown to a buyer at ~6.7× what the business valued it at, wrong
+in the business's favour. Measured on live stock 2026-08-06: this moved the
+customer-visible total from $6,143 to $5,005 (−18.5%) across 73 of 228 items.
+
+The adjustment used to be applied in exactly one place per surface:
+`_condition_adjust` in `routers/inventory.py` rewrote `summary.market_price`
+at enrichment, so the tile, the sort and the price bound all inherited the
+same number (RFC 0008 T1's single-authority invariant, at the time). MCP
+mirrored it via `mcp-server/src/condition-pricing.ts`. **All of this is
+retired for the customer price path** — see above for what replaced it.
+</details>
 
 **Name resolution: `display_name_override` wins EVERYWHERE.** One rule, four
 implementations, kept deliberately in sync — `itemTitle`
@@ -1240,10 +1541,146 @@ constants.ts`).
 once from the legacy `InventoryLocation` enum unioned with distinct location
 values already present on inventory, then editable by admins. Endpoints
 (`backend/src/merlins_collection/routers/admin/locations.py`):
-`GET /admin/locations`, `POST /admin/locations`, `DELETE /admin/locations/
+`GET /admin/locations`, `POST /admin/locations`, `PATCH /admin/locations/
+{value}` (RFC 0022 T6 — `label` only, any other key including `value` itself
+is a 422 via `extra="forbid"`, never a silent no-op), `DELETE /admin/locations/
 {value}` (blocked with 409 if the location is still in use by any item).
-Frontend reads it via `useLocations()`; never hardcode a location list in new
-code.
+**`value` is permanently not editable at any price** — it's the join key
+stored on every inventory item pointing at that location, and there is no
+rename-and-migrate path; the frontend cell carries a `title` explaining why,
+per the "a disabled control states why" rule. Frontend reads it via
+`useLocations()`; never hardcode a location list in new code.
+
+## CARD IDENTITY GREW ON THREE AXES — LANGUAGE, FINISH, AND TCGPLAYER LINKS (RFC 0023)
+
+**Language went from 2 members to 19** (`Language` StrEnum,
+`models/inventory.py`) — the 18 real TCGdex codes plus `OTHER`, the manual
+escape hatch for a card TCGdex cannot represent at all. Nothing is renamed
+and nothing is backfilled: every existing row is `EN` or `JP` and stays
+valid unchanged. `JP` keeps the stored value `"JP"` even though the TCGdex
+API code is `"ja"` — `LANGUAGE_API_CODE` already exists to carry that
+translation, and renaming the enum member would invalidate every stored row
+and every `ja:`-prefixed `card_id`'s reverse lookup for a cosmetic gain.
+`frontend/lib/constants.ts`'s `LANGUAGE_OPTIONS` mirrors backend
+`LANGUAGE_LABELS` verbatim and is the one shared source three surfaces read
+from: `CardDetailModal`'s language select (a new `language_note` row — free
+text, **internal**, appears only when the language is `OTHER`),
+`admin-inventory-columns.tsx`'s `language` column edit + filter (previously
+a hand-typed subset that didn't even use real enum values — `'ZH'` is not a
+`Language` member, the real codes are `ZH-TW`/`ZH-CN`), and
+`IncomingCardForm.tsx` (previously hardcoded to `EN`/`JP` only).
+
+**`OTHER` implies `card_id is None`, and setting it also parks the item in
+Unmatched, not Triage** — the exact mirror of the existing `no_catalog_match`
+invariant, for the same reason: there is no catalog language to link an
+`OTHER` item to (`LANGUAGE_API_CODE` has no entry for it — that absence is
+the mechanism), so a linked `OTHER` row is a contradiction, and routing it
+to Triage's derived `missing_card_id` reason would rebuild the exact "floor
+the queue can never get under" that RFC 0011 built Unmatched to remove. A
+422 with "unlink the card first" on a linked item; clearing `OTHER` back to
+a real language does **not** auto-clear `no_catalog_match` — leaving a queue
+is a deliberate action.
+
+**The catalog is seeded per language, on demand — not all 18 at once.**
+`SEEDED_LANGUAGES` (currently `{EN, JP}`) bounds `sync_new_sets`'s and
+`purge_catalog_junk.py`'s walks; extending it is a manual, deliberate edit
+alongside actually running `scripts/seed_catalog.py --language <code>
+--execute`. `GET /admin/catalog/languages` (new) returns only languages that
+actually have `catalog_set` registry rows — `CardSearchPanel`'s language
+filter (`frontend/components/admin/shared/CardSearchPanel.tsx`, defaulting
+to `EN`) uses **only** that scoped list, because a catalog search for an
+unseeded language can only ever return nothing. The admin inventory table's
+own `language` filter is deliberately **not** scoped this way — it offers
+the full 19-member vocabulary, because an admin can legitimately own a
+Korean card before that catalog is ever seeded. Same field, two different
+filter scopes, by design.
+
+**`finish` stays the single priced join key into `card.prices`** —
+`_market_price`/`market_price_and_finish` are unchanged. What changed is
+that the dropdown offering it stopped being a hand-written guess:
+`PRICED_FINISHES` (`models/inventory.py`, mirrored verbatim in
+`frontend/lib/constants.ts`) is **measured, not typed** — a full scan of the
+live catalog on 2026-09-02 (29,123 `CatalogCard` rows) found 7 distinct
+finish keys actually present, unioned with `_MARKET_FINISH_FALLBACK`'s own 6
+for 8 total. The two sets do not fully overlap: `1stEditionNormal` (one of
+the fallback's six) had **zero** live cards, and `1stEdition`/`unlimited`
+(no `Holofoil` suffix) exist live but were never in the fallback. This is
+the concrete evidence the measurement exists to prevent:
+`IncomingCardForm.tsx` used to hardcode a fourth option,
+`firstEditionHolofoil`, a spelling neither list has ever contained, so an
+item staged with it silently fell through the entire pricing fallback.
+
+**`finish_attributes: list[str]`** (`RawInventoryItem`, ≤10 entries, ≤40
+chars each, defaults `[]`) carries everything about a printing that is
+genuinely NOT mutually exclusive with `finish` — 1st Edition, Shadowless,
+Full Art, Signed, ... **Customer-facing** (in `_CUSTOMER_ITEM_FIELDS`) — the
+opposite call from `language_note`/`review_reason` above: this describes the
+CARD, not the business's own handling of the record. **Carries no price
+multiplier, by design** — stated in the model docstring, the same reasoning
+that already killed the admin chat's `stale`/`max_age_days` idea: a 1st
+Edition Shadowless Charizard is worth vastly more than the `holofoil` band
+says, and the honest answer is that the operator hand-prices it
+(`HandValuedBadge` marks it), not that this field invents a guessed number.
+`FINISH_ATTRIBUTE_SUGGESTIONS` (`frontend/lib/constants.ts`) is a
+**suggested**, not enforced, chip vocabulary — free text is always accepted
+alongside it via an "add custom" input, the same "an escape hatch is a
+permanent control" rule this file states elsewhere.
+
+**`FinishPicker`** (`frontend/components/admin/shared/FinishPicker.tsx`) is
+the one priced-finish-select-plus-attribute-chips control, used by
+`IncomingCardForm` (which deleted its old `FINISHES` array — see above) and
+the admin inventory table's `finish_attributes` column via RFC 0022's
+`multiselect` `EditSpec` mechanism, its first real consumer.
+`CardDetailModal` has its own parallel chip implementation rather than
+embedding `FinishPicker` itself — its edit plumbing predates (and is
+architecturally separate from) `InlineEditCell`'s array-typed
+`multiselectValue`/`saveMultiselect` pair, so routing a `string[]` through
+its own single-string `editValue` would have meant smuggling an array
+through a joined string, which RFC 0022 §1 explicitly rejects. The two
+implementations share `finishAttributeChipVocabulary` (exported from
+`FinishPicker.tsx`) rather than duplicating the suggested-plus-selected chip
+computation.
+
+**TCGplayer has exactly two Pokémon categories**, verified 2026-09-02
+against their own category registry (`tcgcsv.com/tcgplayer/categories`, 92
+categories site-wide): `pokemon` (id 3, English) and `pokemon-japan` (id
+85). There is no Korean, Chinese, French, German, Spanish, Italian or
+Portuguese Pokémon category — TCGplayer added Japanese as a dedicated
+category in October 2024 and has added no others since.
+`frontend/lib/tcgplayer.ts`'s `tcgplayerSearchUrl(language, query)` is now
+the one place a TCGplayer URL is built, adopted on four surfaces —
+`show-prep/page.tsx`'s TCG Price column, `admin-inventory-columns.tsx`'s
+`tcg_url` column, and — closed at Round 9 closeout (2026-09-03),
+RFC 0023 follow-ups #2 — `CardDetailModal.tsx`'s Quick Info link and
+`card/[id]/page.tsx`'s TCGplayer buttons, both of which used to hardcode the
+English-only category regardless of the item's actual language. All four
+show the real link for `EN`/`JP`, `null` for everything else including
+`OTHER`. **A `null` must never fall back to the English link** — an
+English-category search for a Korean card returns the wrong card or
+nothing, and both are worse than no link; every adoption site shows a
+one-line reason (`TCGPLAYER_UNSUPPORTED_LANGUAGE_MESSAGE`) instead.
+
+**A stored `tcg_url` is admin-typed free text and must never be used as an
+`<a href>` unvalidated — RFC 0023 follow-ups #3, closed the same day.**
+`show-prep/page.tsx` originally rendered `item.tcg_url` directly as an href
+(a `javascript:` value is a stored-XSS sink that fires on one click, the
+exact shape `admin-inventory-columns.tsx`'s own comment on the identical
+field already warned against); `CardDetailModal.tsx` had the same gap, and
+`card/[id]/page.tsx` had only a weaker `startsWith('http')` check. All three
+now go through `lib/tcgplayer.ts`'s `safeTcgHref`, which delegates to the
+existing `lib/safe-href.ts` (already used to vet Sanity-authored article
+links — parses with the real `URL` constructor rather than a regex, so it
+also catches whitespace/case tricks a naive `^https?:\/\//` check would
+miss) and narrows the result to http(s) only. An unsafe or malformed stored
+value now falls back to the generated search link exactly as if nothing
+were stored, on all three surfaces.
+
+**Incidental backend fix, needed because this RFC is what starts generating
+JP links at volume:** `services/card_text.set_hint_from_url`'s marketplace-
+prefix strip widened from `^pokemon-` to `^pokemon-(japan-)?` — a JP product
+slug is `pokemon-japan-...`, not `pokemon-...`, so the old strip left a junk
+`japan` token in every JP set hint with no relationship to the actual set
+name.
 
 ## AN OVERLAY MOUNTED INSIDE A `backdrop-blur` ANCESTOR IS NOT FIXED TO THE VIEWPORT — PORTAL IT
 
@@ -1656,8 +2093,8 @@ variables — the general shape to copy whenever a new piece of infra has a
 meaningfully different blast radius than what already exists, rather than
 folding it into a stack that also carries this secret-wipe risk.
 
-**Catalog seed + sync (one-time owner action, not scheduled).** Needed only for
-a fresh/empty table, which the live one is not. With AWS creds, from `backend/`:
+**Catalog seed (one-time owner action).** Needed only for a fresh/empty
+table, which the live one is not. With AWS creds, from `backend/`:
 
 ```bash
 cd backend
@@ -1667,9 +2104,15 @@ cd backend
 ```
 
 then press **Sync Prices** on `/admin/market`, or run `scripts/daily_sync.py`
-the same way. This is not part of the scheduled daily sync — the daily sync
-refreshes prices for cards already in the catalog, it does not seed the
-catalog itself.
+the same way. This is not the scheduled sync — seeding is a one-time bootstrap
+that populates catalog IDENTITY rows; it does not run on a schedule and does
+not price anything.
+
+**The daily/monthly price and catalog sync IS scheduled (RFC 0021), via
+`MerlinsSyncStack`** — see "MerlinsSyncStack — the restored daily/monthly
+sync" below. Before RFC 0021 this section read "not scheduled" because it
+genuinely wasn't: RFC 0014's migration off ECS deleted the schedule that used
+to invoke `scripts/scheduled_sync.py`, and nothing replaced it until now.
 
 **Every script here needs the venv interpreter spelled out.** A bare `python`
 resolves to an unrelated environment that cannot import `merlins_collection`,
@@ -1735,6 +2178,64 @@ instead of only when a set is entirely absent. That early-out is why a promo
 catalogued into a set we already hold was invisible. The extra walk is the
 accepted cost; **restoring the early-out will look like an optimization and
 is the bug.**
+
+**TCG Pocket (digital-only) sets are excluded at INGEST, not just at query
+time (RFC 0021) — a DIFFERENT filter from the `sync_new_sets` early-out
+above, and the two must not be confused.** TCGdex carries Pokémon TCG Pocket
+under series `tcgp`; both `sync_new_sets` and `seed_catalog.seed_language`
+now resolve that series' set ids (`services.catalog_sync.excluded_set_ids`,
+one `GET /{lang}/series/tcgp` call per language, cached per run) and skip
+them before ever walking their cards. A TCG Pocket card is not physical
+inventory — no TCGplayer/Cardmarket pricing, no card to buy/sell/grade — and
+it used to pollute every catalog autocomplete an operator uses at a buy
+table. `scripts/purge_catalog_junk.py` is the one-time cleanup for rows
+ingested before this exclusion existed; the exclusion above is what stops it
+recurring.
+
+## MerlinsSyncStack — the restored daily/monthly sync (RFC 0021)
+
+A FIFTH, deliberately independent stack (`infra/lib/sync-stack.ts`), on the
+same "shares no resource, can't drag another stack into a deploy" reasoning
+as `MerlinsCognitoBrandingStack`. EventBridge Scheduler → ECS Fargate
+`RunTask`, invoking the existing, already-tested
+`python -m scripts.scheduled_sync --job <prices|catalog>` dispatcher — the
+job was never broken, it just had no caller after RFC 0014 deleted the ECS
+constructs that used to invoke it.
+
+| Schedule | Cron (UTC) | Job | Why |
+|---|---|---|---|
+| `merlins-sync-prices` | `0 9 * * ? *` (09:00 = 01:00/02:00 Pacific) | `--job prices` → `run_daily_sync` | Overnight in the business's own timezone; carries the ~24-minute weekly catalog cycle as its long tail |
+| `merlins-sync-catalog` | `0 15 2 * ? *` (15:00 on the 2nd) | `--job catalog` → `sync_new_sets` | New sets release monthly at most. **Deliberately a different day/hour from `prices`** — two concurrent catalog writers is not a state either job was designed for; six hours of separation is cheaper than building a lock for a job that runs twice a month |
+
+Task role grants `Query`/`GetItem`/`PutItem`/`UpdateItem`/`BatchWriteItem`/
+`Scan` on `merlins-cards` — mirrors
+`deploy/backend-task-role-permissions.json`'s `BusinessTable` statement;
+**any new action the sync needs goes in both places or they drift.** The
+image asset builds `backend/Dockerfile`'s **`runtime`** target, not
+`lambda` — this is an ECS task with no Lambda Runtime API to talk to, the
+exact opposite of `MerlinsBackendStack`'s own image, and
+`infra/test/sync-stack.test.ts` pins the target against the synthesized
+**asset manifest** (the `--target` build arg is not a CloudFormation
+template property, so the template alone can't prove it — same "verify the
+built artifact" discipline as the Lambda-stage trap this repo already
+documents, applied in reverse). No `Fn::ImportValue` anywhere: the table
+name is a plain string prop from `infra/bin/infra.ts`, same as every other
+stack, specifically so a sync-only change can never pull `MerlinsBackendStack`
+into its deploy.
+
+`assignPublicIp: true` in public subnets, no NAT gateway — the job needs to
+reach `api.tcgdex.net` and `pokemonpricetracker.com`, and a NAT gateway costs
+~$32/month to avoid a public IP on a task that runs twice a month.
+
+**Deploy only via `bash scripts/deploy-sync.sh`** (mirrors
+`deploy-frontend.sh`'s secret-recovery pattern, scoped to this stack's one
+secret, `POKEMONPRICETRACKER_API_KEY`) — a hand-run `cdk deploy
+MerlinsSyncStack` from a shell missing that export writes an EMPTY key,
+silently degrading the nightly job's graded pricing while every other step
+still reports success. Always `--exclusively`. `bash scripts/verify-sync.sh`
+is the standing post-deploy check (schedule state, most recent task run, the
+last structured JSON summary line in CloudWatch Logs, and a one-shot manual
+invocation command so the first run doesn't have to wait for the schedule).
 
 # Test Commands
 
@@ -2067,6 +2568,15 @@ math-trust boundary allows (see `_ADMIN_SYSTEM_PROMPT` below):
   an item's `ConsignmentTerms.split_percent`, OUR cut as a 0-1 fraction).
   Not for computing a payout; call `get_consignor_position` for that
 
+**A 9th admin tool, `search_admin_docs`, joined in RFC 0026 — the admin
+operations knowledge base, not business data.** Reads the same
+`services/admin_docs.py` content `GET /admin/docs` serves to the frontend
+Docs tab — see "ADMIN DOCS TAB" below for the full feature. Omitting `query`
+(or category-only) returns a lightweight browse index (id/category/title/
+summary, no body); a non-empty `query` returns full article text, capped at
+`limit`. An unknown `category` raises rather than returning `[]`, mirroring
+`find_pricing_outliers`'s "unknown direction raises" precedent.
+
 **`_ADMIN_SYSTEM_PROMPT` is "librarian" framing, not a lookup-table
 instruction** (RFC 0020 item 7): broad read access, encouraged to
 cross-reference and iterate rather than declare a question unanswerable; a
@@ -2075,6 +2585,74 @@ answers, the four raw `list_*` tools for a breakdown/comparison/filter no
 narrow tool offers; and the math-trust boundary itself as an instruction —
 never sum `amount` across `list_transactions` rows for a profit/revenue
 figure, call `get_profit_summary` instead.
+
+## ADMIN DOCS TAB — the operations knowledge base (RFC 0026)
+
+`/admin/docs`, a **top-level** sidebar entry beside Dashboard, outside the
+three "when you use it" groups — it's reference material relevant at any
+point, not scoped to a workflow stage. Not in `mobileItems`; reached through
+the full drawer on mobile like every other non-mobile-bar tab.
+
+Built because the owner is the only person who knows things like "Sync
+Prices realistically buys ~50 graded lookups a day" or "the trade page's
+percentage is market-at-purchase over what you paid" — knowledge that lived
+only in CLAUDE.md/RFCs and would disappear once the owner stops being the
+one running Claude Code sessions here. The Docs tab translates that into
+plain, admin-facing operational language: what to click, when, why, what it
+costs — never backend implementation internals (DynamoDB keys, Lambda
+packaging) no admin action depends on knowing.
+
+**Content is a plain importable Python list, not a JSON file read off
+disk** — `services/admin_docs_content.py`'s `ARTICLES` (`AdminDocArticle`:
+`id`/`category`/`title`/`summary`/`body`/`keywords`/`related_routes`) and
+`ADMIN_DOC_CATEGORIES` (8 sections: overview, at-the-show, back-office,
+data, money, costs, chat, glossary — the first three mirror `AdminShell`'s
+own sidebar-group labels). This sidesteps the exact "runtime file read that
+doesn't survive packaging" bug class documented above for the admin tool
+contract — a plain Python import ships with the package automatically under
+every install mode, no `shared/` file and no Dockerfile `COPY` line for
+anyone to forget.
+
+**One service, two thin callers — `services/admin_docs.py`.**
+`GET /admin/docs` (`routers/admin/docs.py`, gated by the existing
+`require_admin`) returns `{categories, articles}` in one call — the whole
+knowledge base, full bodies included, the same "just return it all" choice
+`/admin/locations` and `/admin/cosigners` already make for a small dataset.
+The `search_admin_docs` MCP tool (see MCP Tools above) calls the same
+`admin_docs.search()`, so the frontend Docs tab and the analyst chat can
+never see two different answers to the same question.
+
+**`search()`'s browse vs. query modes, and the two guardrails that mirror
+bugs this repo already shipped once:** omitting `query` (or passing `""` —
+what the frontend's cleared search box sends, not `null`) returns an INDEX
+(id/category/title/summary, no `body`); a non-empty `query` returns full
+articles for a case-insensitive substring match against
+title/summary/keywords/body, capped at `limit`. `limit < 0` raises rather
+than mis-slicing (the exact `list_transactions` `[:-1]` bug RFC 0020 item 3
+fixed); an unknown `category` raises rather than silently returning `[]`
+(mirrors `find_pricing_outliers`'s "unknown direction raises"). Both `query`
+and `category` normalize a whitespace-only string to "omitted" — a
+substring search for `"   "` would otherwise match almost every article's
+body, silently defeating browse mode (caught in post-implementation
+adversarial review, not the first pass).
+
+**The frontend never hardcodes the category list** — `AdminDocsExplorer.tsx`
+reads it from `GET /admin/docs`'s own `categories` array, the exact "two
+sources of truth for the same taxonomy" drift this codebase already paid
+for once (the Consignor filter/Card Number column). A non-empty search
+query **overrides** the category filter and searches every article, with
+each hit's category shown as a badge. Article bodies render through the
+existing `MarkdownMessage` (`components/inventory/MarkdownMessage.tsx`,
+built for the chat panel) rather than a second markdown renderer.
+
+**The analyst chat deliberately does NOT get repository access**, though the
+owner raised the idea — a security-boundary call answered by RFC 0018's own
+isolation design (see "THE ADMIN ANALYST CHAT IS A SECOND SURFACE" above):
+source access is a different security posture, not a wider version of the
+current curated-read-only-tools one. `search_admin_docs` is the fix that
+actually serves the underlying need without that exposure.
+
+Full design: `docs/rfcs/0026-admin-docs-tab-and-chat-knowledge-access.md`.
 
 # AWS Services
 | Service         | Purpose                                              |

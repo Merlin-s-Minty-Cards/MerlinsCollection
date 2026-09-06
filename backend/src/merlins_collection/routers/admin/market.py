@@ -18,7 +18,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from merlins_collection.dependencies import get_repo
-from merlins_collection.models.inventory import market_price_and_finish, new_ulid
+from merlins_collection.models.inventory import Language, market_price_and_finish, new_ulid
 from merlins_collection.services import catalog_cache
 from merlins_collection.services.card_text import (
     admin_item_name,
@@ -89,6 +89,14 @@ def market_search(
     name: str | None = Query(None, max_length=200),
     set_id: str | None = Query(None),
     number: str | None = Query(None),
+    # RFC 0023 T3 — defaults to EN so this endpoint's pre-existing behavior
+    # (every card was implicitly EN, since that was the only seeded
+    # language) does not change for a caller that never passes it. Typed as
+    # `Language` rather than `str`: FastAPI/Pydantic validates an enum query
+    # param automatically, so an unrecognized code is a 422 with no extra
+    # code here — the same mechanism every other enum query param in this
+    # codebase already relies on.
+    language: Language = Query(Language.EN),
     repo: InventoryRepository = Depends(get_repo),
 ) -> MarketSearchResult:
     """Search the synced catalog for cards by name, set, and/or number.
@@ -109,6 +117,11 @@ def market_search(
         # that partial result would make every later name search miss
         # everything outside that set.
         cards = _scan_catalog(repo)
+
+    # Scope to one language BEFORE the name/number filters — a Base Set
+    # Charizard in EN and JP share a name and share a set, so leaving this
+    # until after those filters would still return both.
+    cards = [c for c in cards if c.language == language]
 
     # Apply name filter
     if name is not None:

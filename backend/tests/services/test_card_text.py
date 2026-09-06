@@ -296,6 +296,21 @@ def test_set_hint_from_url_handles_base_set_and_returns_empty_for_non_product():
     assert set_hint_from_url(None) == ""
 
 
+def test_set_hint_from_url_strips_the_japan_category_segment_too():
+    """RFC 0023 T7: a JP product slug is `pokemon-japan-...`, not `pokemon-...`.
+
+    Before the fix, only a leading `pokemon-` was stripped, so a JP URL left a
+    junk `japan` token in the hint that has no relationship to the actual set
+    name and would spuriously fail `sets_agree`'s token-containment check.
+    """
+    url = "https://www.tcgplayer.com/product/600000/pokemon-japan-scarlet-ex-charizard-ex-006"
+    hint = set_hint_from_url(url)
+    assert "japan" not in hint.split()
+    assert "pokemon" not in hint.split()
+    # The real set tokens still survive the strip.
+    assert "scarlet" in hint and "charizard" in hint
+
+
 # =============================================================================
 # PHASE 3.1 — language beyond the name
 # marker — the TCG Link's `Language=` query param, and a SET-based JP fallback

@@ -336,6 +336,14 @@ export default function AdminCosignersPage() {
           {item.name}
         </span>
       ),
+      // RFC 0022 T4b: NOT made click-to-edit. This page's rows are click-to-
+      // SELECT (onRowClick below reveals the consignor's assigned cards),
+      // and InlineEditCell's cell click handler calls stopPropagation() —
+      // making any cell here click-to-edit silently breaks the more
+      // fundamental row-selection interaction. Fixing that would mean
+      // reworking this page's selection affordance (e.g. a dedicated
+      // "select" control per row), which is a page redesign, not a
+      // mechanical edit-adoption change — left as a follow-up.
     },
     {
       key: 'email',

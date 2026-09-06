@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from merlins_collection.dependencies import get_repo
 from merlins_collection.services import locations as locations_service
@@ -35,6 +35,26 @@ _CONFLICT_DETAIL = "Location list was modified concurrently; retry"
 class LocationCreate(BaseModel):
     value: str
     label: str | None = None
+
+
+class LocationLabelUpdate(BaseModel):
+    """RFC 0022 T6 — `label` only. `value` is deliberately absent: it is the
+    join key stored on every inventory item and there is no rename-and-
+    migrate path, so sending it is a 422 (via `extra="forbid"`), never a
+    silent no-op — the same rule the sort/filter registries already follow
+    for an unknown field.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    label: str
+
+    @field_validator("label")
+    @classmethod
+    def _label_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("label must not be empty")
+        return value
 
 
 @router.get("")
@@ -90,6 +110,36 @@ def create_location(
             raise
         raise HTTPException(status_code=409, detail=_CONFLICT_DETAIL) from exc
     return entry
+
+
+@router.patch("/{value}")
+def patch_location_label(
+    value: str,
+    body: LocationLabelUpdate,
+    repo: InventoryRepository = Depends(get_repo),
+) -> dict[str, str]:
+    """Rename a location's label. `value` (the join key) is never editable."""
+    if len(body.label) > _MAX_LABEL_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=f"label must be at most {_MAX_LABEL_LENGTH} characters",
+        )
+
+    current, gen = locations_service.get_locations_with_generation(repo)
+    if not any(loc["value"] == value for loc in current):
+        raise HTTPException(status_code=404, detail=f"Unknown location '{value}'")
+
+    updated = [
+        {"value": loc["value"], "label": body.label if loc["value"] == value else loc["label"]}
+        for loc in current
+    ]
+    try:
+        repo.put_location_config(updated, expected_generation=gen)
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+            raise
+        raise HTTPException(status_code=409, detail=_CONFLICT_DETAIL) from exc
+    return {"value": value, "label": body.label}
 
 
 @router.delete("/{value}", status_code=204)

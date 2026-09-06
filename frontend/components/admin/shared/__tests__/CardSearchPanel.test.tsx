@@ -37,6 +37,16 @@ vi.mock('@/lib/use-catalog-sets', () => ({
     sets.map((s) => ({ id: s.set_id, name: s.set_name })),
 }))
 
+vi.mock('@/lib/use-catalog-languages', () => ({
+  useCatalogLanguages: () => ({
+    languages: [
+      { code: 'EN', label: 'English', sets: 218 },
+      { code: 'JP', label: 'Japanese', sets: 177 },
+    ],
+    loading: false,
+  }),
+}))
+
 function mockResults(items: unknown[]) {
   getMock.mockResolvedValue({ items, total: items.length })
 }
@@ -71,6 +81,35 @@ describe('CardSearchPanel', () => {
 
     await waitFor(() => expect(getMock).toHaveBeenCalledWith('/market/search',
       expect.objectContaining({ name: 'Charizard', number: '4' })))
+  })
+
+  it('defaults the language filter to EN and sends it (RFC 0023 T3)', async () => {
+    const user = userEvent.setup({ delay: null })
+    render(<CardSearchPanel onSelect={vi.fn()} />)
+
+    await user.type(screen.getByLabelText('Card name'), 'Charizard')
+
+    await waitFor(() => expect(getMock).toHaveBeenCalledWith('/market/search',
+      expect.objectContaining({ name: 'Charizard', language: 'EN' })))
+  })
+
+  it('offers only languages that actually have catalog rows, from useCatalogLanguages', async () => {
+    render(<CardSearchPanel onSelect={vi.fn()} />)
+
+    expect(screen.getByRole('option', { name: 'English' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Japanese' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'Korean' })).not.toBeInTheDocument()
+  })
+
+  it('sends the chosen language once one is picked', async () => {
+    const user = userEvent.setup({ delay: null })
+    render(<CardSearchPanel onSelect={vi.fn()} />)
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Language' }), 'JP')
+    await user.type(screen.getByLabelText('Card name'), 'Charizard')
+
+    await waitFor(() => expect(getMock).toHaveBeenCalledWith('/market/search',
+      expect.objectContaining({ name: 'Charizard', language: 'JP' })))
   })
 
   it('includes the chosen set once one is picked', async () => {

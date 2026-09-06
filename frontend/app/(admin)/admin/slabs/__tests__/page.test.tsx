@@ -121,6 +121,32 @@ describe('Slabs page', () => {
     expect(mockApi.get).toHaveBeenLastCalledWith('/slabs', undefined)
   })
 
+  // RFC 0022 T4b — grade is `str(Decimal)` on the wire; the page parses it
+  // back to a JSON NUMBER before the PUT, never re-sending the display string.
+  it('edits a slab grade inline and sends it as a number, not the displayed string', async () => {
+    mockApi.get.mockResolvedValueOnce({
+      items: [{
+        item_id: 'item-1', card_id: 'en:swsh8-271', name: 'Gengar VMAX',
+        cert_number: '89787279', company: 'PSA', grade: '9', cost_basis: '300.00',
+        status: 'available', market_value: null, value_as_of: null, price_source: null,
+      }],
+      total: 1,
+    })
+    mockApi.put.mockResolvedValue({})
+    render(<SlabsPage />)
+    await screen.findByText('89787279')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Grade' }))
+    const input = screen.getByRole('textbox', { name: 'Edit Grade' })
+    fireEvent.change(input, { target: { value: '10' } })
+    await waitFor(() => {})
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    await waitFor(() =>
+      expect(mockApi.put).toHaveBeenCalledWith('/inventory/item-1', { grade: 10 }),
+    )
+  })
+
   // ---- RFC 0010 T0: a comma-typed cost survives the whole path -------------
 
   it('sends buy_price as a JSON number when the cost was typed as 1,300', async () => {

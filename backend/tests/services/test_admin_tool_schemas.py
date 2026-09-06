@@ -64,3 +64,23 @@ def test_find_pricing_outliers_direction_is_constrained_to_its_three_values():
     schema = _schema_for("find_pricing_outliers")
     direction_schema = schema["inputSchema"]["json"]["properties"]["direction"]
     assert set(direction_schema.get("enum", [])) == {"over", "under", "unpriced"}
+
+
+def test_search_admin_docs_category_enum_matches_the_real_categories():
+    """The contract's `category` enum is a second, hand-maintained copy of
+    `ADMIN_DOC_CATEGORIES`'s ids (same shape as `find_pricing_outliers`'s
+    `direction` enum mirroring `_OUTLIER_DIRECTIONS` elsewhere in this file)
+    — cheap to guard against drifting silently out of sync, so it is."""
+    from merlins_collection.services.admin_docs_content import ADMIN_DOC_CATEGORIES
+
+    schema = _schema_for("search_admin_docs")
+    category_schema = schema["inputSchema"]["json"]["properties"]["category"]
+    assert set(category_schema.get("enum", [])) == {c[0] for c in ADMIN_DOC_CATEGORIES}
+
+
+def test_search_admin_docs_takes_no_required_arguments():
+    """RFC 0026 — the browse-index mode (no `query`) must be a valid call,
+    the same "all time needs no literal dates" shape `get_profit_summary`
+    already needed."""
+    schema = _schema_for("search_admin_docs")
+    assert schema["inputSchema"]["json"]["required"] == []

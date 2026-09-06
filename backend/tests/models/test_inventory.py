@@ -438,3 +438,177 @@ class TestUnmatchedInvariant:
 
         assert "no_catalog_match" not in _CUSTOMER_ITEM_FIELDS
         assert "no_catalog_match_at" not in _CUSTOMER_ITEM_FIELDS
+
+
+# ===========================================================================
+# RFC 0023 T1 — Language grows to 18 codes + OTHER, and `language_note`
+# ===========================================================================
+
+
+def test_language_gains_sixteen_new_members_plus_other():
+    """The no-migration guarantee: EN/JP keep their stored values, and a
+    hand-typed nonsense code still raises rather than silently coercing."""
+    assert Language.EN == "EN"
+    assert Language.JP == "JP"
+    assert Language("KO") is Language.KO
+    assert Language("ZH-TW") is Language.ZH_TW
+    assert Language("OTHER") is Language.OTHER
+    with pytest.raises(ValueError):
+        Language("KLINGON")
+
+
+def test_a_stored_en_row_from_before_this_change_still_validates():
+    """No migration, no backfill — every existing row is EN or JP."""
+    item = InventoryItemAdapter.validate_python({
+        "kind": "raw", "card_id": "en:base1-4", "cost_basis": Decimal("4"),
+        "acquired_at": date(2025, 1, 1), "finish": "holofoil", "condition": "NM",
+        "language": "EN",
+    })
+    assert item.language is Language.EN
+
+
+def test_a_stored_jp_row_from_before_this_change_still_validates():
+    item = InventoryItemAdapter.validate_python({
+        "kind": "raw", "card_id": "ja:sv1-1", "cost_basis": Decimal("4"),
+        "acquired_at": date(2025, 1, 1), "finish": "holofoil", "condition": "NM",
+        "language": "JP",
+    })
+    assert item.language is Language.JP
+
+
+class TestOtherLanguageInvariant:
+    """``language == OTHER`` implies ``card_id is None`` — the exact mirror of
+    ``no_catalog_match``'s own invariant above and for the same reason: there
+    is no catalog language to link an OTHER item to, so a linked OTHER row is
+    a contradiction.
+    """
+
+    def test_cannot_set_other_on_an_item_that_still_has_a_card_id(self):
+        with pytest.raises(ValidationError, match="unlink the card first"):
+            RawInventoryItem(**_base(
+                finish="normal", condition="NM", card_id="en:base1-4",
+                language=Language.OTHER,
+            ))
+
+    def test_other_with_no_card_id_is_fine(self):
+        item = RawInventoryItem(**_base(
+            finish="normal", condition="NM", card_id=None, language=Language.OTHER,
+        ))
+        assert item.language is Language.OTHER
+
+    def test_a_graded_slab_can_be_other_too(self):
+        item = GradedInventoryItem(**_base(
+            card_id=None, company=GradingCompany.PSA, grade=Decimal("9"),
+            cert_number="12345678", language=Language.OTHER,
+        ))
+        assert item.language is Language.OTHER
+
+    def test_a_sealed_item_can_be_other_with_no_special_handling(self):
+        """Sealed product has no ``card_id`` field at all — OTHER is always
+        fine for it, same as it always was for ``no_catalog_match``."""
+        item = SealedInventoryItem(**_base(
+            product_name="Korean Booster Box", product_type=SealedProductType.BOOSTER_BOX,
+            language=Language.OTHER,
+        ))
+        assert item.language is Language.OTHER
+
+
+def test_language_note_is_not_a_customer_field():
+    from merlins_collection.routers.inventory import _CUSTOMER_ITEM_FIELDS
+
+    assert "language_note" not in _CUSTOMER_ITEM_FIELDS
+
+
+# --- RFC 0023 T5: finish_attributes ----------------------------------------
+
+class TestFinishAttributes:
+    def test_defaults_to_an_empty_list(self):
+        item = RawInventoryItem(**_base(finish="normal", condition="NM"))
+        assert item.finish_attributes == []
+
+    def test_accepts_a_list_of_descriptive_tags(self):
+        item = RawInventoryItem(**_base(
+            finish="holofoil", condition="NM",
+            finish_attributes=["1st Edition", "Shadowless"],
+        ))
+        assert item.finish_attributes == ["1st Edition", "Shadowless"]
+
+    def test_rejects_more_than_ten_entries(self):
+        with pytest.raises(ValidationError):
+            RawInventoryItem(**_base(
+                finish="normal", condition="NM",
+                finish_attributes=[f"tag{i}" for i in range(11)],
+            ))
+
+    def test_accepts_exactly_ten_entries(self):
+        item = RawInventoryItem(**_base(
+            finish="normal", condition="NM",
+            finish_attributes=[f"tag{i}" for i in range(10)],
+        ))
+        assert len(item.finish_attributes) == 10
+
+    def test_rejects_an_entry_over_forty_characters(self):
+        with pytest.raises(ValidationError):
+            RawInventoryItem(**_base(
+                finish="normal", condition="NM",
+                finish_attributes=["x" * 41],
+            ))
+
+    def test_accepts_an_entry_at_exactly_forty_characters(self):
+        item = RawInventoryItem(**_base(
+            finish="normal", condition="NM",
+            finish_attributes=["x" * 40],
+        ))
+        assert item.finish_attributes == ["x" * 40]
+
+    def test_is_a_customer_field(self):
+        """The opposite call from language_note/review_reason: attributes are a
+        DESCRIPTION of the card ("1st Edition", "Full Art"), not a note about
+        our handling of the record, so they are customer-facing (RFC 0023 §2.2)."""
+        from merlins_collection.routers.inventory import _CUSTOMER_ITEM_FIELDS
+
+        assert "finish_attributes" in _CUSTOMER_ITEM_FIELDS
+
+    def test_do_not_affect_market_price(self):
+        """Attributes are descriptive only — `_market_price`/`market_price_and_finish`
+        take a bare `finish` string and never see this field. Proven by actually
+        pricing two otherwise-identical items rather than trusting that by reading."""
+        from merlins_collection.models.inventory import market_price_and_finish
+
+        card = _catalog_with_prices({"1stEditionHolofoil": "500.00"})
+        plain = RawInventoryItem(**_base(finish="1stEditionHolofoil", condition="NM"))
+        attributed = RawInventoryItem(**_base(
+            finish="1stEditionHolofoil", condition="NM",
+            finish_attributes=["1st Edition", "Shadowless"],
+        ))
+        assert (market_price_and_finish(card, plain.finish)
+                == market_price_and_finish(card, attributed.finish))
+
+
+def test_priced_finishes_is_the_measured_union():
+    """RFC 0023 T4's live-catalog measurement (2026-09-02, 29,123 cards
+    scanned — see docs/plans/rfc-0023/progress.md) union with
+    `_MARKET_FINISH_FALLBACK`'s six. Order-independent: this is a UI
+    vocabulary, not a priority list (that is what the fallback tuple is for)."""
+    from merlins_collection.models.inventory import _MARKET_FINISH_FALLBACK, PRICED_FINISHES
+
+    assert set(PRICED_FINISHES) == set(_MARKET_FINISH_FALLBACK) | {
+        "normal", "holofoil", "reverseHolofoil",
+        "1stEdition", "unlimited", "unlimitedHolofoil", "1stEditionHolofoil",
+    }
+    # No duplicates — a UI dropdown built from this must not repeat an entry.
+    assert len(PRICED_FINISHES) == len(set(PRICED_FINISHES))
+
+
+def test_a_blank_language_note_normalizes_to_none():
+    item = RawInventoryItem(**_base(
+        finish="normal", condition="NM", card_id=None, language_note="   ",
+    ))
+    assert item.language_note is None
+
+
+def test_a_language_note_is_bounded_at_100_chars():
+    with pytest.raises(ValidationError):
+        RawInventoryItem(**_base(
+            finish="normal", condition="NM", card_id=None, language_note="x" * 101,
+        ))

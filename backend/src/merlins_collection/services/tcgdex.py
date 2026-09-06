@@ -56,7 +56,32 @@ logger = logging.getLogger(__name__)
 # footgun, so the rule is: the enum is for the domain, the code is for the URL,
 # and the code is what goes in `card_id` — because a stored `card_id` must be
 # enough on its own to rebuild the card's request path.
-LANGUAGE_API_CODE = {Language.EN: "en", Language.JP: "ja"}
+#
+# One entry per `Language` member EXCEPT `OTHER`, verified live against TCGdex
+# 2026-09-02 (its own 404 validation body enumerates exactly these 18 codes —
+# the docs site claims 14 and is stale). `OTHER` deliberately has no entry:
+# there is no API code to give it, and that absence is what makes an OTHER
+# item unfetchable rather than a soft convention (RFC 0023 §1.2).
+LANGUAGE_API_CODE = {
+    Language.EN: "en",
+    Language.JP: "ja",
+    Language.FR: "fr",
+    Language.ES: "es",
+    Language.ES_MX: "es-mx",
+    Language.IT: "it",
+    Language.PT: "pt",
+    Language.PT_BR: "pt-br",
+    Language.PT_PT: "pt-pt",
+    Language.DE: "de",
+    Language.NL: "nl",
+    Language.PL: "pl",
+    Language.RU: "ru",
+    Language.KO: "ko",
+    Language.ZH_TW: "zh-tw",
+    Language.ID: "id",
+    Language.TH: "th",
+    Language.ZH_CN: "zh-cn",
+}
 LANGUAGE_BY_API_CODE = {code: language for language, code in LANGUAGE_API_CODE.items()}
 
 # TCGdex returns an extensionless, quality-less image base URL; the suffix is
@@ -788,6 +813,25 @@ class TcgdexClient:
     def list_sets(self, language: Language) -> list[dict]:
         """All sets for a language (bare array of ``{id, name, …}``)."""
         return self._get(f"/{LANGUAGE_API_CODE[language]}/sets") or []
+
+    def list_series(self, language: Language) -> list[dict]:
+        """All series for a language (bare array of ``{id, name, logo}``)."""
+        return self._get(f"/{LANGUAGE_API_CODE[language]}/series") or []
+
+    def get_series(self, language: Language, series_id: str) -> dict | None:
+        """Fetch one series in full, including its ``sets`` array.
+
+        Same 404 -> ``None`` / other-error -> raise contract as ``get_card`` —
+        the caller (``excluded_set_ids``) treats a 404 as "nothing to exclude"
+        and anything else as a failure to fall back on.
+        """
+        code = LANGUAGE_API_CODE[language]
+        try:
+            return self._get(f"/{code}/series/{quote(series_id, safe='')}")
+        except TcgdexError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
 
     def get_card(self, language: Language, tcgdex_id: str) -> dict | None:
         """Fetch one card in full; return ``None`` on 404, raise on other errors."""

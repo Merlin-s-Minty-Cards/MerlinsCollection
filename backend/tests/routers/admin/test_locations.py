@@ -195,6 +195,117 @@ class TestLocationsAdminManaged:
         assert r.status_code == 422
 
 
+class TestPatchLocationLabel:
+    """RFC 0022 T6 — PATCH /admin/locations/{value}, `label` only.
+
+    `value` is the join key stored on every inventory item and there is no
+    rename-and-migrate path, so it is permanently not editable — sending it
+    is a 422, never a silent no-op, matching the sort/filter registries'
+    existing "unknown field is a 422" rule.
+    """
+
+    def test_renames_the_label(self, admin_client):
+        client, _repo, token = admin_client
+        client.post(
+            "/admin/locations",
+            json={"value": "show_box_g", "label": "Show Box G"},
+            headers=_auth(token),
+        )
+        r = client.patch(
+            "/admin/locations/show_box_g",
+            json={"label": "Renamed Box"},
+            headers=_auth(token),
+        )
+        assert r.status_code == 200
+        assert r.json() == {"value": "show_box_g", "label": "Renamed Box"}
+        listing = client.get("/admin/locations", headers=_auth(token)).json()
+        assert {"value": "show_box_g", "label": "Renamed Box"} in listing
+
+    def test_unknown_location_404(self, admin_client):
+        client, _repo, token = admin_client
+        r = client.patch(
+            "/admin/locations/does_not_exist",
+            json={"label": "New Label"},
+            headers=_auth(token),
+        )
+        assert r.status_code == 404
+
+    def test_empty_label_422(self, admin_client):
+        client, _repo, token = admin_client
+        client.post(
+            "/admin/locations",
+            json={"value": "show_box_h", "label": "Show Box H"},
+            headers=_auth(token),
+        )
+        r = client.patch(
+            "/admin/locations/show_box_h",
+            json={"label": ""},
+            headers=_auth(token),
+        )
+        assert r.status_code == 422
+
+    def test_whitespace_only_label_422(self, admin_client):
+        client, _repo, token = admin_client
+        client.post(
+            "/admin/locations",
+            json={"value": "show_box_i", "label": "Show Box I"},
+            headers=_auth(token),
+        )
+        r = client.patch(
+            "/admin/locations/show_box_i",
+            json={"label": "   "},
+            headers=_auth(token),
+        )
+        assert r.status_code == 422
+
+    def test_label_too_long_422(self, admin_client):
+        client, _repo, token = admin_client
+        client.post(
+            "/admin/locations",
+            json={"value": "show_box_j", "label": "Show Box J"},
+            headers=_auth(token),
+        )
+        r = client.patch(
+            "/admin/locations/show_box_j",
+            json={"label": "x" * 61},
+            headers=_auth(token),
+        )
+        assert r.status_code == 422
+
+    def test_sending_value_is_422_not_a_silent_no_op(self, admin_client):
+        client, _repo, token = admin_client
+        client.post(
+            "/admin/locations",
+            json={"value": "show_box_k", "label": "Show Box K"},
+            headers=_auth(token),
+        )
+        r = client.patch(
+            "/admin/locations/show_box_k",
+            json={"label": "New Label", "value": "renamed_value"},
+            headers=_auth(token),
+        )
+        assert r.status_code == 422
+        # And nothing was silently applied either.
+        listing = client.get("/admin/locations", headers=_auth(token)).json()
+        values = [o["value"] for o in listing]
+        assert "show_box_k" in values
+        assert "renamed_value" not in values
+
+    def test_unknown_field_422(self, admin_client):
+        client, _repo, token = admin_client
+        client.post(
+            "/admin/locations",
+            json={"value": "show_box_l", "label": "Show Box L"},
+            headers=_auth(token),
+        )
+        r = client.patch(
+            "/admin/locations/show_box_l",
+            json={"notes": "not a real field"},
+            headers=_auth(token),
+        )
+        assert r.status_code == 422
+
+
 class TestLocationConfigConcurrency:
     """Optimistic-concurrency guard on the single CONFIG#LOCATIONS row.
 

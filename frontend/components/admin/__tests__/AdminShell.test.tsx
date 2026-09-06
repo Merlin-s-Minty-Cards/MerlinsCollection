@@ -191,6 +191,7 @@ const ALL_DESTINATIONS: [string, RegExp][] = [
   ['/admin/history', /^history$/i],
   ['/admin/cosigners', /^cosigners$/i],
   ['/admin/locations', /^locations$/i],
+  ['/admin/docs', /^docs$/i],
 ]
 
 describe('AdminShell grouped navigation (RFC 0010 T13)', () => {
@@ -323,6 +324,30 @@ describe('AdminShell grouped navigation (RFC 0010 T13)', () => {
     expect(hrefs).toEqual([
       '/admin', '/admin/inventory', '/admin/trade', '/admin/slabs',
     ])
+  })
+})
+
+// ===========================================================================
+// RFC 0026 — Docs tab: top-level, not scoped to a "when you use it" group
+// ===========================================================================
+
+describe('AdminShell Docs nav (RFC 0026)', () => {
+  it('links to /admin/docs as a TOP-LEVEL entry, not inside one of the three groups', () => {
+    renderShell()
+    const link = screen.getByRole('link', { name: /^docs$/i })
+    expect(link).toHaveAttribute('href', '/admin/docs')
+    // Every group's item list renders inside a `role="group"` panel
+    // (`nav-group-<id>`) — a top-level item, like Dashboard, has no such
+    // ancestor at all.
+    expect(link.closest('[role="group"]')).toBeNull()
+  })
+
+  it('does NOT add Docs to the mobile nav\'s four explicit entries', () => {
+    const wrapper = renderShell()
+    const mobile = wrapper.querySelectorAll('nav')[1]
+    const hrefs = Array.from(mobile.querySelectorAll('a')).map((a) => a.getAttribute('href'))
+    expect(hrefs).not.toContain('/admin/docs')
+    expect(hrefs).toHaveLength(4)
   })
 })
 

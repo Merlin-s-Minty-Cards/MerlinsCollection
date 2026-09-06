@@ -119,6 +119,24 @@ ARGS = ["--language", "en", "--execute", "--confirm-table", "merlins-cards-test"
 # ---------------------------------------------------------------------------
 
 
+def test_no_language_flag_defaults_to_seeded_languages_not_every_enum_member(
+    wired, dynamo_repo, capsys,
+):
+    """RFC 0023 grew ``Language`` to 19 members (18 real codes + OTHER). Before
+    the fix this branch resolved via ``list(Language)``, and ``OTHER`` has no
+    ``LANGUAGE_API_CODE`` entry -- a bare ``wipe_catalog.py --execute`` with no
+    ``--language`` flag at all would KeyError immediately, and even a
+    ``--language en`` invocation crashed the SAME way in the filtering branch
+    (the dict lookup runs before the ``in`` check short-circuits it). This is
+    also the DESTRUCTIVE wipe+reseed, so a default that silently became "all
+    18 languages" instead of crashing would be worse: proves it stays bounded
+    to exactly EN and JP (``SEEDED_LANGUAGES``)."""
+    assert wired.main([]) == 0  # no --language at all; must not KeyError
+
+    scope = capsys.readouterr().out
+    assert "(en, ja)" in scope  # the run's own reported scope -- not all 18
+
+
 def test_the_wipe_is_a_dry_run_by_default(wired, dynamo_repo, capsys):
     _stale_table(dynamo_repo)
 

@@ -124,6 +124,19 @@ def _flag(field: str) -> Callable[[InventoryItem], bool | None]:
     return extract
 
 
+def _finish_attributes_count(item: InventoryItem) -> int | None:
+    """Sorts by COUNT, not the joined string (RFC 0023 T5 — either is a valid
+    reading of "sort by finish_attributes"; count answers "how much is known
+    about this printing", which is the more useful order at a glance).
+
+    An empty list is "nothing recorded" — the same missing-sorts-last bucket
+    a blank text field or a null money field already falls into, achieved the
+    same way every other extractor here achieves it: returning `None`.
+    """
+    value = getattr(item, "finish_attributes", None)
+    return None if not value else len(value)
+
+
 def _effective_name(item: InventoryItem) -> str | None:
     """The name an admin sees — ``display_name_override`` first, then the fallbacks.
 
@@ -151,6 +164,7 @@ SORT_FIELDS: dict[str, Callable[[InventoryItem], Any]] = {
     "condition_modifier": _text("condition_modifier"),
     "language": _text("language"),
     "finish": _text("finish"),
+    "finish_attributes": _finish_attributes_count,
     "location": _text("location"),
     "product_name": _text("product_name"),
     "product_type": _text("product_type"),
@@ -185,6 +199,7 @@ SORT_FIELDS: dict[str, Callable[[InventoryItem], Any]] = {
     "value_note": _text("value_note"),
     "sticker_notes": _text("sticker_notes"),
     "review_reason": _text("review_reason"),
+    "language_note": _text("language_note"),
     "display_name_override": _text("display_name_override"),
     "tcg_url": _text("tcg_url"),
     # Provenance

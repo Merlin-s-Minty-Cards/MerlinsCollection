@@ -1,11 +1,14 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { X, Undo2, RotateCcw } from 'lucide-react'
+import { X, Undo2, RotateCcw, Pencil } from 'lucide-react'
 import { useAdminApi } from '@/lib/admin-api'
 import { useCardImages } from '@/lib/use-card-images'
+import { formatTimestamp } from '@/lib/dates'
+import { computeLegProfit } from '@/lib/leg-profit'
 import CardImage, { TABLE_THUMB_SIZE } from './CardImage'
 import SignedAmount from './SignedAmount'
+import ProfitBadge from './ProfitBadge'
 import type { ArchiveTransaction } from './TransactionGroups'
 
 /**
@@ -30,6 +33,13 @@ import type { ArchiveTransaction } from './TransactionGroups'
 interface ItemBrief {
   name: string | null
   card_id: string | null
+  /** RFC 0024 T5 — different facts about a different moment than `amount`,
+   *  never a second copy of it. See `/admin/inventory/items-brief`'s
+   *  docstring for why these don't drift from the leg's own sold price. */
+  cost_basis?: string | null
+  market_value_at_purchase?: string | null
+  acquisition_ratio?: string | null
+  current_market_value?: string | null
 }
 
 export interface SaleDetailModalProps {
@@ -40,10 +50,27 @@ export interface SaleDetailModalProps {
    *  `TransactionGroups` already owns; this component only triggers it. */
   onVoidLeg?: (leg: ArchiveTransaction) => void
   onRestoreLeg?: (leg: ArchiveTransaction) => void
+  /** RFC 0024 T4 — opens `TransactionEditDialog` in the parent. Omitted
+   *  (rather than disabled) on a voided leg — editing a row that counts
+   *  toward nothing is refused server-side with a 409, so the control simply
+   *  isn't offered there, the same "an affordance that always fails is worse
+   *  than none" rule void's own button already follows for a purchase. */
+  onEditLeg?: (leg: ArchiveTransaction) => void
 }
 
 function isCountable(row: ArchiveTransaction): boolean {
   return row.voided_at == null
+}
+
+/** `edited Aug 12, 2026, 10:00 AM · merlin`, mirroring `VoidedNote` exactly. */
+function EditedNote({ leg }: { leg: ArchiveTransaction }) {
+  if (!leg.edited_at) return null
+  return (
+    <span data-testid="edited-note" className="text-[10px] text-pine-400">
+      edited {formatTimestamp(leg.edited_at)}
+      {leg.edited_by ? ` · ${leg.edited_by}` : ''}
+    </span>
+  )
 }
 
 export default function SaleDetailModal({
@@ -51,6 +78,7 @@ export default function SaleDetailModal({
   onClose,
   onVoidLeg,
   onRestoreLeg,
+  onEditLeg,
 }: SaleDetailModalProps) {
   const api = useAdminApi()
   const [briefs, setBriefs] = useState<Record<string, ItemBrief | null>>({})
@@ -129,29 +157,54 @@ export default function SaleDetailModal({
                   <p className={`truncate text-xs text-pine-100 ${voided ? 'line-through' : ''}`}>
                     {brief?.name || leg.item_id}
                   </p>
-                  <SignedAmount value={leg.amount} type={leg.type} className="text-xs" />
+                  <div className="flex items-center gap-2">
+                    <SignedAmount value={leg.amount} type={leg.type} className="text-xs" />
+                    {/* RFC 0024 T5 — sales only: a purchase leg's `amount` IS
+                        the cost, so "profit" on it is meaningless. Display-only,
+                        computed at render from the batched items-brief lookup;
+                        never stored. */}
+                    {leg.type === 'sale' && (() => {
+                      const legProfit = computeLegProfit(leg.amount, brief?.cost_basis)
+                      return legProfit && <ProfitBadge {...legProfit} />
+                    })()}
+                  </div>
+                  <div>
+                    <EditedNote leg={leg} />
+                  </div>
                 </div>
-                {voided
-                  ? onRestoreLeg && (
+                <div className="flex flex-shrink-0 items-center gap-1">
+                  {!voided && onEditLeg && (
                     <button
                       type="button"
-                      aria-label="Restore this card"
-                      onClick={() => onRestoreLeg(leg)}
-                      className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium text-mint hover:bg-mint/10 transition-colors flex-shrink-0"
+                      aria-label="Edit this card"
+                      onClick={() => onEditLeg(leg)}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium text-pine-300 hover:bg-pine-700/40 transition-colors"
                     >
-                      <RotateCcw size={11} /> Restore
-                    </button>
-                  )
-                  : leg.type === 'sale' && onVoidLeg && (
-                    <button
-                      type="button"
-                      aria-label="Void this card"
-                      onClick={() => onVoidLeg(leg)}
-                      className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium text-red-400 hover:bg-red-500/10 transition-colors flex-shrink-0"
-                    >
-                      <Undo2 size={11} /> Void
+                      <Pencil size={11} /> Edit
                     </button>
                   )}
+                  {voided
+                    ? onRestoreLeg && (
+                      <button
+                        type="button"
+                        aria-label="Restore this card"
+                        onClick={() => onRestoreLeg(leg)}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium text-mint hover:bg-mint/10 transition-colors"
+                      >
+                        <RotateCcw size={11} /> Restore
+                      </button>
+                    )
+                    : leg.type === 'sale' && onVoidLeg && (
+                      <button
+                        type="button"
+                        aria-label="Void this card"
+                        onClick={() => onVoidLeg(leg)}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium text-red-400 hover:bg-red-500/10 transition-colors"
+                      >
+                        <Undo2 size={11} /> Void
+                      </button>
+                    )}
+                </div>
               </li>
             )
           })}

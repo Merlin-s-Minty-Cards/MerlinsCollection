@@ -20,14 +20,21 @@ export type Card = {
   condition: string;
   quantity: number;
   /**
-   * Current value per unit (maps to CardResult.currentValue). `null` when no
-   * price could be resolved from any source — NOT 0. A zero would be summed
-   * into totals as a real $0 valuation and would rank in `topValuedCards`;
-   * `null` lets callers skip the item, the way the backend's
-   * `/inventory/summary` skips it (routers/inventory.py:387-391).
+   * The customer price per unit (maps to CardResult.currentValue) — RFC
+   * 0025: this is `sticker_price`, unconditionally. `null` only when a row
+   * with no sticker somehow reaches here (it shouldn't:
+   * `DynamoDbInventoryRepository`'s `isPublicInventory` already excludes
+   * one) — NOT 0. A zero would be summed into totals as a real $0 valuation
+   * and would rank in `topValuedCards`; `null` lets callers skip the item.
    */
   value: number | null;
-  /** External market reference price per unit (used for flagging underpriced cards). */
+  /**
+   * An EXTERNAL MARKET REFERENCE price per unit — a live, condition-adjusted
+   * catalog estimate, deliberately NOT the same figure as `value` since RFC
+   * 0025. Used by `flag_underpriced_cards` to compare what we charge
+   * (`value`) against what the market suggests the card (in this condition)
+   * is worth.
+   */
   marketPrice: number | null;
   /**
    * Print language — part of the card's identity, not a label. A JP print is a

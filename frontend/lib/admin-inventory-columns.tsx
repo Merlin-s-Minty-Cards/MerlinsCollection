@@ -23,8 +23,9 @@
  */
 
 import type { ReactNode } from 'react'
-import { Pencil, Trash2 } from 'lucide-react'
-import type { Column } from '@/components/admin/shared/DataTable'
+import { ExternalLink, Trash2 } from 'lucide-react'
+import type { Column, EditSpec } from '@/components/admin/shared/DataTable'
+import type { InlineEditCellType, SelectOption } from '@/components/admin/shared/InlineEditCell'
 import CardImage, { TABLE_THUMB_SIZE, TABLE_THUMB_COLUMN } from '@/components/admin/shared/CardImage'
 import StatusBadge from '@/components/admin/shared/StatusBadge'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
@@ -32,8 +33,18 @@ import OwnershipBadge from '@/components/admin/shared/OwnershipBadge'
 import TriageRowAction from '@/components/admin/shared/TriageRowAction'
 import type { TriageItem } from '@/lib/triage'
 import { adminItemName } from '@/lib/admin-item-name'
-import { CONDITION_OPTIONS as CONDITION_VALUES, formatCondition } from '@/lib/constants'
+import { CONDITION_OPTIONS as CONDITION_VALUES, formatCondition, FINISH_ATTRIBUTE_SUGGESTIONS, LANGUAGE_OPTIONS, PRICED_FINISHES } from '@/lib/constants'
 import { parseMoney } from '@/lib/money'
+import { tcgplayerSearchUrl, TCGPLAYER_UNSUPPORTED_LANGUAGE_MESSAGE } from '@/lib/tcgplayer'
+
+/** RFC 0022 — the `ItemStatus` values a status cell can be set to. */
+const STATUS_OPTIONS: SelectOption[] = [
+  { value: 'available', label: 'Available' },
+  { value: 'sold', label: 'Sold' },
+  { value: 'lost', label: 'Lost' },
+  { value: 'on_hold', label: 'On Hold' },
+  { value: 'consigned', label: 'Consigned' },
+]
 
 /** One inventory row as the admin search returns it (a full `model_dump`). */
 export interface InventoryItem {
@@ -51,6 +62,7 @@ export interface InventoryItem {
   sticker_price?: string
   sticker_notes?: string
   finish?: string
+  finish_attributes?: string[]
   language?: string
   notes?: string
   acquired_at?: string
@@ -75,12 +87,29 @@ export interface ColumnRenderContext {
   saveEdit: () => void
   cancelEdit: () => void
   locationOptions: { value: string; label: string }[]
+  /** RFC 0022 T4a: `useShows()`'s options, for the `acquired_show_id` select. */
+  showOptions?: { value: string; label: string }[]
   /** Mirrors `useCardImages().getImageUrl` exactly — it returns null, not undefined. */
   getImageUrl: (cardId?: string | null) => string | null
+  /**
+   * Mirrors `useCardNumbers().getCardNumber` exactly — same null-not-
+   * undefined contract as `getImageUrl` above, same reason: distinguishes
+   * "not fetched" from "fetched, no number" identically to a caller.
+   */
+  getCardNumber: (cardId?: string | null) => string | null
   onRefresh: () => void
   onDelete: (item: InventoryItem) => void
   /** `useCosigners()` id->name lookup. Undefined for an unassigned/unknown id. */
   consignorName: (consignorId: string | undefined | null) => string | undefined
+  /**
+   * RFC 0022 — the generic click-to-edit commit path every registry-driven
+   * `edit` spec below calls: `PUT /admin/inventory/{id}` with `{[field]:
+   * value}`, then the page's own refresh. Pages needing different behavior
+   * on a specific column (Prep Queue's sticker_price patch-and-drop) override
+   * that one column's `edit.save` after calling `toDataTableColumns` — this
+   * default is what every OTHER column and every OTHER page gets for free.
+   */
+  saveField?: (item: InventoryItem, field: string, value: unknown) => Promise<void>
 }
 
 export interface InventoryColumnDef {
@@ -95,7 +124,81 @@ export interface InventoryColumnDef {
   /** Always rendered, never offered in the picker (the row actions cell). */
   pinned?: boolean
   render: (item: InventoryItem, ctx: ColumnRenderContext) => ReactNode
+  /**
+   * Present ⇒ click-to-edit, built from `ctx` (so it can reach
+   * `ctx.saveField`/option lists). Absent ⇒ `notEditable` is REQUIRED — the
+   * totality test (T5) fails a column shipping neither, per CLAUDE.md's
+   * "a parity test that diffs only key sets cannot catch an empty stub"
+   * lesson: the reason string is what the test actually checks.
+   */
+  edit?: (ctx: ColumnRenderContext) => EditSpec<InventoryItem>
+  /** Required when `edit` is absent. At least 10 characters — see above. */
+  notEditable?: string
 }
+
+/** `''`/`null`/`undefined` all coerce to `null` on save — clearing a field is a real edit, not an error. Checkbox coerces to a real boolean. */
+function coerceForSave(type: InlineEditCellType, raw: string): unknown {
+  if (type === 'checkbox') return raw === 'true'
+  return raw === '' ? null : raw
+}
+
+/** The common shape: read `item[field]` as a string, save through `ctx.saveField`. */
+function fieldEdit(
+  type: InlineEditCellType,
+  field: string,
+  options?: {
+    options?: SelectOption[]
+    undoLabel?: string
+    value?: (item: InventoryItem) => string
+  },
+): (ctx: ColumnRenderContext) => EditSpec<InventoryItem> {
+  return (ctx) => ({
+    type,
+    options: options?.options,
+    value: options?.value ?? ((item) => {
+      const v = item[field]
+      return v == null ? '' : String(v)
+    }),
+    save: async (item, next) => {
+      await ctx.saveField?.(item, field, coerceForSave(type, next))
+    },
+    undoLabel: options?.undoLabel,
+  })
+}
+
+/**
+ * The `multiselect` shape: reads/writes a whole `string[]`, never a
+ * delimiter-joined string (RFC 0022 §1). `value`/`save` are still required by
+ * `EditSpec<T>`'s type, but `EditableCell` never calls them for
+ * `type === 'multiselect'` — it reads `multiselectValue`/`saveMultiselect`
+ * instead — so they are inert stubs here, not a second code path.
+ */
+function multiselectFieldEdit(
+  field: string,
+  options: SelectOption[],
+): (ctx: ColumnRenderContext) => EditSpec<InventoryItem> {
+  return (ctx) => ({
+    type: 'multiselect',
+    options,
+    allowCustom: true,
+    value: () => '',
+    save: async () => {},
+    multiselectValue: (item) => (item[field] as string[] | undefined) ?? [],
+    saveMultiselect: async (item, next) => {
+      await ctx.saveField?.(item, field, next)
+    },
+  })
+}
+
+const FINISH_ATTRIBUTE_OPTIONS: SelectOption[] = FINISH_ATTRIBUTE_SUGGESTIONS.map(
+  (tag) => ({ value: tag, label: tag }),
+)
+
+/** `LANGUAGE_OPTIONS` (lib/constants.ts) as a mutable `SelectOption[]` — the
+ * shared source, not a second hand-typed list (RFC 0023 T3). */
+const LANGUAGE_SELECT_OPTIONS: SelectOption[] = LANGUAGE_OPTIONS.map(
+  (o) => ({ value: o.value, label: o.label }),
+)
 
 // --------------------------------------------------------------------------
 // Cell helpers
@@ -136,6 +239,7 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
     label: 'Image',
     defaultVisible: false,
     className: TABLE_THUMB_COLUMN,
+    notEditable: 'Card art, resolved from card_id — not a stored value of its own.',
     render: (item, ctx) => (
       <CardImage
         imageUrl={ctx.getImageUrl(item.card_id)}
@@ -143,6 +247,28 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
         size={TABLE_THUMB_SIZE}
       />
     ),
+  },
+  {
+    key: '_card_number',
+    label: 'Card #',
+    defaultVisible: false,
+    // Resolved client-side from card_id via useCardNumbers, same as `_image`
+    // just above — no server-side value to order by (see that hook's own
+    // docstring for why this is a separate fetch from Image rather than
+    // folded into it). The pre-existing `cardNumber` FILTER now points its
+    // `columnKey` here (see INVENTORY_FILTERS below) instead of `null`,
+    // which is what lets it follow this column's visibility in the panel
+    // instead of living only behind "Show all filters" — the identical fix
+    // RFC 0013 T2 already made for the Consignor filter/column pair.
+    notEditable: 'The catalog print number, resolved from card_id — not a stored value of its own.',
+    render: (item, ctx) => {
+      const number = ctx.getCardNumber(item.card_id)
+      return number ? (
+        <span className="text-xs text-pine-400 font-mono">#{number}</span>
+      ) : (
+        <span className="text-xs text-pine-600">—</span>
+      )
+    },
   },
   {
     key: 'display_name',
@@ -155,6 +281,11 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
         {adminItemName(item)}
       </span>
     ),
+    // Composite: falls back override -> display_name -> product_name via
+    // adminItemName. Editing this cell would leave "which field did that
+    // write?" ambiguous, and CLAUDE.md is explicit that display_name_override
+    // is editable ONLY from Triage.
+    notEditable: 'Composite name — edit display_name_override from the Triage page.',
   },
   {
     key: 'status',
@@ -162,6 +293,7 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
     defaultVisible: true,
     sortable: true,
     render: (item) => <StatusBadge status={item.status} />,
+    edit: fieldEdit('select', 'status', { options: STATUS_OPTIONS, undoLabel: 'Status' }),
   },
   {
     key: 'kind',
@@ -169,6 +301,10 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
     defaultVisible: true,
     sortable: true,
     render: (item) => <span className="text-xs capitalize text-pine-300">{item.kind}</span>,
+    // The discriminated-union tag: raw/graded/sealed/bulk carry entirely
+    // different required fields, so changing it in place is a data migration,
+    // not an edit.
+    notEditable: 'Changing kind would leave required fields for the new kind unset. Delete and re-add instead.',
   },
   {
     key: 'condition',
@@ -185,41 +321,29 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
         {item.condition ? formatCondition(item.condition, item.condition_modifier) : EM_DASH}
       </span>
     ),
+    // The combined display string ("LP+") is what the backend's
+    // `_split_combined_condition` expects under the `condition` key — it
+    // expands it into condition + condition_modifier itself.
+    edit: fieldEdit('select', 'condition', {
+      options: CONDITION_VALUES.map((v) => ({ value: v, label: v })),
+      value: (item) => (item.condition ? formatCondition(item.condition, item.condition_modifier) : ''),
+    }),
   },
   {
     key: 'location',
     label: 'Location',
     defaultVisible: true,
     sortable: true,
-    render: (item, ctx) => {
-      if (ctx.editingId === item.item_id && ctx.editField === 'location') {
-        return (
-          <select
-            aria-label={`Edit location for ${adminItemName(item, item.item_id)}`}
-            value={ctx.editValue}
-            onChange={(e) => ctx.setEditValue(e.target.value)}
-            onBlur={ctx.saveEdit}
-            className="vault-field px-1.5 py-0.5 text-xs w-28 rounded"
-            autoFocus
-          >
-            {ctx.locationOptions.map((loc) => (
-              <option key={loc.value} value={loc.value}>{loc.label}</option>
-            ))}
-          </select>
-        )
-      }
-      return (
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); ctx.startEdit(item, 'location') }}
-          className="text-xs text-pine-300 hover:text-mint cursor-pointer flex items-center gap-1 group"
-          title="Click to edit"
-        >
-          <span className="capitalize">{item.location ?? EM_DASH}</span>
-          <Pencil size={10} className="opacity-0 group-hover:opacity-100" />
-        </button>
-      )
-    },
+    render: (item) => <span className="text-xs text-pine-300 capitalize">{item.location ?? EM_DASH}</span>,
+    edit: (ctx) => ({
+      type: 'select',
+      options: ctx.locationOptions,
+      value: (item) => item.location ?? '',
+      save: async (item, next) => {
+        await ctx.saveField?.(item, 'location', next || null)
+      },
+      undoLabel: 'Location',
+    }),
   },
   {
     key: 'cost_basis',
@@ -228,6 +352,7 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
     sortable: true,
     className: 'text-right',
     render: (item) => money(item.cost_basis, 'text-xs text-pine-300'),
+    edit: fieldEdit('money', 'cost_basis', { undoLabel: 'Cost basis' }),
   },
   {
     key: 'current_market_value',
@@ -236,6 +361,7 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
     sortable: true,
     className: 'text-right',
     render: (item) => money(item.current_market_value, 'text-xs text-mint'),
+    notEditable: 'Denormalized nightly by refresh_inventory_market_values; a hand edit is overwritten on the next run.',
   },
   {
     key: 'sticker_price',
@@ -243,39 +369,17 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
     defaultVisible: true,
     sortable: true,
     className: 'text-right',
-    render: (item, ctx) => {
+    render: (item) => {
       const sticker = item.sticker_price as string | undefined
       const stickerNotes = item.sticker_notes as string | undefined
-      if (ctx.editingId === item.item_id && ctx.editField === 'sticker_price') {
-        return (
-          <input
-            type="number"
-            step="0.01"
-            value={ctx.editValue}
-            onChange={(e) => ctx.setEditValue(e.target.value)}
-            onBlur={ctx.saveEdit}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') ctx.saveEdit()
-              if (e.key === 'Escape') ctx.cancelEdit()
-            }}
-            className="vault-field px-1.5 py-0.5 text-xs w-20 rounded text-right"
-            autoFocus
-          />
-        )
-      }
       return (
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); ctx.startEdit(item, 'sticker_price') }}
-          className="text-xs text-amber-400/80 hover:text-amber-300 cursor-pointer flex items-center gap-1 group justify-end w-full"
-          title={stickerNotes ? `Note: ${stickerNotes}` : 'Click to edit sticker price'}
-        >
-          <span className="font-mono">{sticker ? `$${parseFloat(sticker).toFixed(2)}` : EM_DASH}</span>
-          {stickerNotes && <span className="text-[8px] text-pine-500">*</span>}
-          <Pencil size={10} className="opacity-0 group-hover:opacity-100" />
-        </button>
+        <span className="text-xs text-amber-400/80 font-mono flex items-center gap-1 justify-end">
+          {sticker ? `$${parseFloat(sticker).toFixed(2)}` : EM_DASH}
+          {stickerNotes && <span className="text-[8px] text-pine-500" title={stickerNotes}>*</span>}
+        </span>
       )
     },
+    edit: fieldEdit('money', 'sticker_price', { undoLabel: 'Sticker price' }),
   },
   {
     key: 'consignment',
@@ -285,6 +389,7 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
     // column asks, and ConsignmentTerms is not a comparable value.
     sortable: true,
     render: (item) => <OwnershipBadge consigned={item.consignment != null} />,
+    notEditable: 'Nested object; split % and consignor move together. Edit via the Cosigners link form or CardDetailModal.',
   },
   {
     key: 'consignor_name',
@@ -302,6 +407,11 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
       const id = (item.consignment as { consignor_id?: string } | null)?.consignor_id
       return text(ctx.consignorName(id))
     },
+    // Same nested-object reason as `consignment` above — this column is a
+    // resolved NAME, not a raw field, and reassigning the consignor without
+    // touching split_percent would need a merge the backend's shallow-merge
+    // PUT does not do.
+    notEditable: 'Derived from consignment.consignor_id. Edit via the Cosigners link form or CardDetailModal.',
   },
 
   // --- Off by default: the fields that existed but were never displayable ---
@@ -311,18 +421,84 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
     defaultVisible: false,
     sortable: true,
     render: (item) => yesNo(item.needs_review),
+    edit: fieldEdit('checkbox', 'needs_review'),
   },
-  { key: 'review_reason', label: 'Review Reason', defaultVisible: false, sortable: true, render: (i) => clamped(i.review_reason) },
-  { key: 'reviewed_at', label: 'Reviewed', defaultVisible: false, sortable: true, render: (i) => text(i.reviewed_at, 'text-xs font-mono text-pine-400') },
-  { key: 'card_id', label: 'Card ID', defaultVisible: false, sortable: true, render: (i) => text(i.card_id, 'text-xs font-mono text-pine-400') },
-  { key: 'language', label: 'Language', defaultVisible: false, sortable: true, render: (i) => text(i.language) },
-  { key: 'finish', label: 'Finish', defaultVisible: false, sortable: true, render: (i) => text(i.finish) },
-  { key: 'factory_sealed', label: 'Factory Sealed', defaultVisible: false, sortable: true, render: (i) => yesNo(i.factory_sealed) },
-  { key: 'company', label: 'Grading Co.', defaultVisible: false, sortable: true, render: (i) => text(i.company) },
-  { key: 'grade', label: 'Grade', defaultVisible: false, sortable: true, render: (i) => text(i.grade, 'text-xs font-mono text-pine-300') },
-  { key: 'cert_number', label: 'Cert #', defaultVisible: false, sortable: true, render: (i) => text(i.cert_number, 'text-xs font-mono text-pine-400') },
-  { key: 'product_type', label: 'Product Type', defaultVisible: false, sortable: true, render: (i) => text(i.product_type) },
-  { key: 'description', label: 'Description', defaultVisible: false, sortable: true, render: (i) => clamped(i.description) },
+  {
+    key: 'review_reason', label: 'Review Reason', defaultVisible: false, sortable: true,
+    render: (i) => clamped(i.review_reason),
+    edit: fieldEdit('textarea', 'review_reason'),
+  },
+  {
+    key: 'reviewed_at', label: 'Reviewed', defaultVisible: false, sortable: true,
+    render: (i) => text(i.reviewed_at, 'text-xs font-mono text-pine-400'),
+    notEditable: 'Server-stamped accountability field — a client claim about who reviewed this is not evidence.',
+  },
+  {
+    key: 'card_id', label: 'Card ID', defaultVisible: false, sortable: true,
+    render: (i) => text(i.card_id, 'text-xs font-mono text-pine-400'),
+    notEditable: 'Re-pointing a card is a confirmed action with a before/after diff. Use Triage re-point.',
+  },
+  {
+    key: 'language', label: 'Language', defaultVisible: false, sortable: true, render: (i) => text(i.language),
+    // RFC 0023 T3 — the full 19-member vocabulary, not just {EN, JP}. Setting
+    // OTHER here also parks the item in Unmatched server-side (the
+    // `_apply_language_transition` router logic) and setting it while a
+    // `card_id` is still linked is a 422 telling the admin to unlink first —
+    // both handled by the existing PUT path this column already calls
+    // through `ctx.saveField`, nothing extra needed on this side.
+    edit: fieldEdit('select', 'language', { options: LANGUAGE_SELECT_OPTIONS }),
+  },
+  {
+    key: 'finish', label: 'Finish', defaultVisible: false, sortable: true, render: (i) => text(i.finish),
+    // RFC 0023 T6 — the measured PRICED_FINISHES vocabulary, not a
+    // hand-typed subset. Was 3 options; `_MARKET_FINISH_FALLBACK` alone
+    // already names 6, and the live catalog carries 7 distinct keys (T4).
+    edit: fieldEdit('select', 'finish', {
+      options: PRICED_FINISHES.map((f) => ({ value: f, label: f })),
+    }),
+  },
+  {
+    // RFC 0023 T5 — everything about a printing that is genuinely NOT
+    // mutually exclusive with `finish` above (1st Edition, Shadowless, Full
+    // Art, ...). `defaultVisible: true` and `sortable: true` deliberately —
+    // CLAUDE.md records the consignor column shipping false/false
+    // unconsulted and being reversed the next day.
+    key: 'finish_attributes', label: 'Finish Attributes', defaultVisible: true, sortable: true,
+    render: (i) => clamped((i.finish_attributes ?? []).join(', ')),
+    edit: multiselectFieldEdit('finish_attributes', FINISH_ATTRIBUTE_OPTIONS),
+  },
+  {
+    key: 'factory_sealed', label: 'Factory Sealed', defaultVisible: false, sortable: true,
+    render: (i) => yesNo(i.factory_sealed),
+    edit: fieldEdit('checkbox', 'factory_sealed'),
+  },
+  {
+    key: 'company', label: 'Grading Co.', defaultVisible: false, sortable: true, render: (i) => text(i.company),
+    edit: fieldEdit('select', 'company', {
+      options: [{ value: 'PSA', label: 'PSA' }, { value: 'BGS', label: 'BGS' }, { value: 'CGC', label: 'CGC' }, { value: 'SGC', label: 'SGC' }],
+    }),
+  },
+  {
+    key: 'grade', label: 'Grade', defaultVisible: false, sortable: true,
+    render: (i) => text(i.grade, 'text-xs font-mono text-pine-300'),
+    edit: fieldEdit('text', 'grade'),
+  },
+  {
+    key: 'cert_number', label: 'Cert #', defaultVisible: false, sortable: true,
+    render: (i) => text(i.cert_number, 'text-xs font-mono text-pine-400'),
+    edit: fieldEdit('text', 'cert_number'),
+  },
+  {
+    key: 'product_type', label: 'Product Type', defaultVisible: false, sortable: true, render: (i) => text(i.product_type),
+    edit: fieldEdit('select', 'product_type', {
+      options: opts(['booster_box', 'etb', 'bundle', 'booster_pack', 'collection_box', 'other']),
+    }),
+  },
+  {
+    key: 'description', label: 'Description', defaultVisible: false, sortable: true,
+    render: (i) => clamped(i.description),
+    edit: fieldEdit('textarea', 'description'),
+  },
   {
     key: 'market_value_at_purchase',
     label: 'Market at Purchase',
@@ -330,6 +506,7 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
     sortable: true,
     className: 'text-right',
     render: (i) => money(i.market_value_at_purchase, 'text-xs text-pine-300'),
+    edit: fieldEdit('money', 'market_value_at_purchase'),
   },
   {
     key: 'listed_price',
@@ -338,20 +515,98 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
     sortable: true,
     className: 'text-right',
     render: (i) => money(i.listed_price, 'text-xs text-pine-300'),
+    edit: fieldEdit('money', 'listed_price', { undoLabel: 'Listed price' }),
   },
-  { key: 'sticker_notes', label: 'Sticker Notes', defaultVisible: false, sortable: true, render: (i) => clamped(i.sticker_notes) },
-  { key: 'acquired_at', label: 'Acquired', defaultVisible: false, sortable: true, render: (i) => text(i.acquired_at, 'text-xs font-mono text-pine-300') },
-  { key: 'acquired_show_id', label: 'Acquired Show', defaultVisible: false, sortable: true, render: (i) => text(i.acquired_show_id, 'text-xs font-mono text-pine-400') },
-  { key: 'notes', label: 'Notes', defaultVisible: false, sortable: true, render: (i) => clamped(i.notes) },
-  { key: 'value_note', label: 'Value Note', defaultVisible: false, sortable: true, render: (i) => clamped(i.value_note) },
-  { key: 'display_name_override', label: 'Name Override', defaultVisible: false, sortable: true, render: (i) => clamped(i.display_name_override) },
-  // Deliberately NOT an <a href>. `tcg_url` is admin-typed free text, and a
-  // `javascript:` value in an href on a list page is a stored-XSS sink that
-  // fires on one click. The detail modal is the place that links out.
-  { key: 'tcg_url', label: 'TCGplayer URL', defaultVisible: false, sortable: true, render: (i) => clamped(i.tcg_url) },
-  { key: 'lineage_id', label: 'Lineage ID', defaultVisible: false, sortable: true, render: (i) => text(i.lineage_id, 'text-xs font-mono text-pine-400') },
-  { key: 'predecessor_item_id', label: 'Predecessor', defaultVisible: false, sortable: true, render: (i) => text(i.predecessor_item_id, 'text-xs font-mono text-pine-400') },
-  { key: 'item_id', label: 'Item ID', defaultVisible: false, sortable: true, render: (i) => text(i.item_id, 'text-xs font-mono text-pine-400') },
+  {
+    key: 'sticker_notes', label: 'Sticker Notes', defaultVisible: false, sortable: true,
+    render: (i) => clamped(i.sticker_notes),
+    edit: fieldEdit('textarea', 'sticker_notes'),
+  },
+  {
+    key: 'acquired_at', label: 'Acquired', defaultVisible: false, sortable: true,
+    render: (i) => text(i.acquired_at, 'text-xs font-mono text-pine-300'),
+    edit: fieldEdit('date', 'acquired_at'),
+  },
+  {
+    key: 'acquired_show_id', label: 'Acquired Show', defaultVisible: false, sortable: true,
+    render: (i) => text(i.acquired_show_id, 'text-xs font-mono text-pine-400'),
+    edit: (ctx) => ({
+      type: 'select',
+      options: ctx.showOptions ?? [],
+      value: (item) => (item.acquired_show_id as string | undefined) ?? '',
+      save: async (item, next) => {
+        await ctx.saveField?.(item, 'acquired_show_id', next || null)
+      },
+    }),
+  },
+  {
+    key: 'notes', label: 'Notes', defaultVisible: false, sortable: true, render: (i) => clamped(i.notes),
+    edit: fieldEdit('textarea', 'notes'),
+  },
+  {
+    key: 'value_note', label: 'Value Note', defaultVisible: false, sortable: true,
+    render: (i) => clamped(i.value_note),
+    edit: fieldEdit('textarea', 'value_note'),
+  },
+  {
+    key: 'display_name_override', label: 'Name Override', defaultVisible: false, sortable: true,
+    render: (i) => clamped(i.display_name_override),
+    notEditable: 'Editable only from the Triage page — the modal’s Display Name row edits display_name instead.',
+  },
+  // The raw stored value is deliberately NOT an <a href>: `tcg_url` is
+  // admin-typed free text, and a `javascript:` value in an href on a list
+  // page is a stored-XSS sink that fires on one click (the detail modal is
+  // the place that links out to it). The icon beside it is safe because it
+  // is never built from the stored string — `tcgplayerSearchUrl` only ever
+  // produces a fixed `https://tcgplayer.com/...` URL from the item's own
+  // language + name (RFC 0023 T7).
+  {
+    key: 'tcg_url', label: 'TCGplayer URL', defaultVisible: false, sortable: true,
+    render: (i) => {
+      const searchUrl = tcgplayerSearchUrl(i.language, adminItemName(i))
+      return (
+        <div className="flex items-center gap-1.5 min-w-0">
+          {clamped(i.tcg_url)}
+          {searchUrl ? (
+            <a
+              href={searchUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              title="Search TCGplayer"
+              aria-label="Search TCGplayer"
+              className="shrink-0 text-blue-400 hover:text-blue-300 transition-colors"
+            >
+              <ExternalLink size={11} />
+            </a>
+          ) : (
+            <span
+              title={TCGPLAYER_UNSUPPORTED_LANGUAGE_MESSAGE}
+              className="shrink-0 text-pine-600"
+            >
+              <ExternalLink size={11} className="opacity-30" />
+            </span>
+          )}
+        </div>
+      )
+    },
+    edit: fieldEdit('url', 'tcg_url'),
+  },
+  {
+    key: 'lineage_id', label: 'Lineage ID', defaultVisible: false, sortable: true,
+    render: (i) => text(i.lineage_id, 'text-xs font-mono text-pine-400'),
+    notEditable: 'Trade-lineage identity, written only by the trade confirm path.',
+  },
+  {
+    key: 'predecessor_item_id', label: 'Predecessor', defaultVisible: false, sortable: true,
+    render: (i) => text(i.predecessor_item_id, 'text-xs font-mono text-pine-400'),
+    notEditable: 'Trade-lineage identity, written only by the trade confirm path.',
+  },
+  {
+    key: 'item_id', label: 'Item ID', defaultVisible: false, sortable: true,
+    render: (i) => text(i.item_id, 'text-xs font-mono text-pine-400'),
+    notEditable: 'Primary identity key — never reassignable.',
+  },
 
   {
     key: '_actions',
@@ -361,6 +616,7 @@ export const INVENTORY_COLUMNS: InventoryColumnDef[] = [
     defaultVisible: false,
     pinned: true,
     className: 'w-20',
+    notEditable: 'Row action buttons, not a data cell.',
     render: (item, ctx) => (
       <div className="flex items-center gap-1 justify-end">
         {/* Spotting a bad card mid-workflow is the use case, so this flags
@@ -404,6 +660,7 @@ export function toDataTableColumns(
       sortable: c.sortable,
       className: c.className,
       render: (item: InventoryItem) => c.render(item, ctx),
+      edit: c.edit?.(ctx),
     }))
 }
 
@@ -477,7 +734,7 @@ export function saveVisibleColumnKeys(keys: string[]): void {
  * `backend/services/inventory_filters.py` CHARACTER FOR CHARACTER — these
  * strings are the wire contract, not a display label.
  */
-export type FilterKind = 'text' | 'select' | 'range' | 'dateRange' | 'presence'
+export type FilterKind = 'text' | 'select' | 'range' | 'dateRange' | 'presence' | 'listContains'
 
 /** What a filter does to its field. Mirrors the backend `FilterOp` exactly. */
 export type FilterOp = 'contains' | 'eq' | 'gte' | 'lte' | 'isnull' | 'notnull'
@@ -636,8 +893,11 @@ export const INVENTORY_FILTERS: InventoryFilterDef[] = [
   { id: 'reviewedTo', label: 'Reviewed To', columnKey: 'reviewed_at', kind: 'dateRange', op: 'lte' },
 
   {
+    // Was a hand-typed subset ('ZH' isn't even a real Language value — the
+    // real codes are 'ZH-TW'/'ZH-CN' — and the hyphenated ES-MX/PT-BR/PT-PT
+    // variants were missing outright). RFC 0023 T3: the shared source.
     id: 'language', label: 'Language', columnKey: 'language', kind: 'select',
-    options: opts(['EN', 'JP', 'FR', 'DE', 'ES', 'IT', 'PT', 'KO', 'ZH']),
+    options: LANGUAGE_SELECT_OPTIONS,
   },
   {
     id: 'finish', label: 'Finish', columnKey: 'finish', kind: 'select',
@@ -649,6 +909,14 @@ export const INVENTORY_FILTERS: InventoryFilterDef[] = [
       { value: 'holofoil', label: 'Holofoil' },
       { value: 'reverseHolofoil', label: 'Reverse Holofoil' },
     ],
+  },
+  {
+    // Mirrors the backend's FieldKind.LIST_CONTAINS: `contains` here means
+    // "the list carries this exact tag", not a substring search — a plain
+    // text box (ColumnFilter's default branch) is still the right control,
+    // the admin types one attribute name to search for.
+    id: 'finishAttributes', label: 'Finish Attribute', columnKey: 'finish_attributes',
+    kind: 'listContains',
   },
   {
     id: 'factorySealed', label: 'Factory Sealed', columnKey: 'factory_sealed',
@@ -693,12 +961,23 @@ export const INVENTORY_FILTERS: InventoryFilterDef[] = [
   { id: 'predecessor', label: 'Predecessor', columnKey: 'predecessor_item_id', kind: 'text' },
   { id: 'itemId', label: 'Item ID', columnKey: 'item_id', kind: 'text' },
 
-  // --- Column-less: catalog joins, see the note above ----------------------
+  // `cardNumber` USED to be column-less too (no rendered column existed to
+  // join `columnKey` to), same shape as the Consignor filter's pre-fix bug
+  // this file's own history already documents: present, wired, and
+  // reachable only behind "Show all filters". Now that `_card_number` is a
+  // real column (client-side, via useCardNumbers — see its entry above),
+  // this filter follows it instead.
+  {
+    id: 'cardNumber', label: 'Card #', columnKey: '_card_number', kind: 'text',
+    legacyParam: 'card_number',
+  },
+
+  // --- Still column-less: catalog joins with no rendered column at all -----
+  // (`set_name`/`artist` aren't shown as columns; only searched as filters.)
   {
     id: 'setId', label: 'Set', columnKey: null, kind: 'select', legacyParam: 'set_id',
     optionSource: 'sets',
   },
-  { id: 'cardNumber', label: 'Card #', columnKey: null, kind: 'text', legacyParam: 'card_number' },
   { id: 'artist', label: 'Artist', columnKey: null, kind: 'text', legacyParam: 'artist' },
   {
     id: 'consignor', label: 'Consignor', columnKey: 'consignor_name', kind: 'select',

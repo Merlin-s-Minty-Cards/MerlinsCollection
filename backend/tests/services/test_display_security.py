@@ -25,6 +25,7 @@ def _graded(item_id: str, cert_image_url: str | None = None):
         card_id="en:test-1",
         status=ItemStatus.AVAILABLE,
         listed_price=Decimal("500.00"),
+        sticker_price=Decimal("500.00"),
         cost_basis=Decimal("300.00"),
         acquired_at=date.today(),
         cert_number="12345678",

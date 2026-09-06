@@ -91,6 +91,12 @@ function rawItem(overrides: Item = {}): Item {
     card_id: "base1-4",
     status: "available",
     listed_price: 250,
+    // RFC 0025: `isPublicInventory` now requires a sticker price. Deliberately
+    // a DIFFERENT figure from `listed_price`/`current_market_value` in this
+    // default fixture, so a test asserting on `card.value` (sticker) versus
+    // `card.marketPrice` (the old catalog-derived reference, unaffected by
+    // RFC 0025) can never pass by the two numbers coincidentally matching.
+    sticker_price: 225,
     cost_basis: 100,
     current_market_value: 300,
     acquired_at: "2026-04-01",
@@ -111,6 +117,7 @@ function gradedItem(overrides: Item = {}): Item {
     card_id: "base1-4",
     status: "available",
     listed_price: 900,
+    sticker_price: 850,
     cost_basis: 500,
     current_market_value: null,
     acquired_at: "2026-04-01",
@@ -181,11 +188,14 @@ describe("listCards", () => {
         set: "base1",
         condition: "NM",
         quantity: 1, // one record = one physical unit; legacy quantity is ignored
-        // RFC 0008 §D: the LIVE catalog holofoil band (320.5) wins over the
-        // denormalized current_market_value (300) on the row. This assertion
-        // used to read 300 — that was the bug: it pinned the priority order
-        // that made chat totals disagree with the dashboard.
-        value: 320.5,
+        // RFC 0025: `value` is the STICKER (225, this fixture's default) —
+        // the customer price — and no longer the resolved catalog/market
+        // figure at all. `marketPrice` keeps the OLD resolution (RFC 0008
+        // §D: the live catalog holofoil band, 320.5, over the denormalized
+        // current_market_value, 300) because it now serves a different job
+        // (the underpricing comparison `flag_underpriced_cards` makes), not
+        // because it is still "the" customer price.
+        value: 225,
         marketPrice: 320.5,
         language: "EN", // no stored language attribute → defaults to EN
       },
@@ -713,17 +723,21 @@ describe("marketPrice resolution order (mirrors /inventory/summary)", () => {
   });
 });
 
-// The bug this task exists to fix, stated as the equality it broke. The Python
-// side cannot run from vitest, so the expected total is the backend's documented
-// walk (routers/inventory.py:383-391) applied to this fixture term by term:
-//   stale raw   → catalog holofoil 517 wins over current_market_value 400  → 517
-//   graded slab → no catalog price for a slab, keeps current_market_value  → 700
-//   no catalog  → falls through to current_market_value                    → 250
-//   no price    → skipped, not counted as zero                             →   0
-//                                                                    est_value  1467
-// cards_in_vault counts all four; only est_value skips the unpriced one.
-describe("chat totals agree with the dashboard", () => {
-  it("sums the same est_value /inventory/summary would over the same rows", async () => {
+// RFC 0025: `getInventorySummary`'s total used to have a documented backend
+// equivalent (`/inventory/summary`'s `est_value`) this test proved agreement
+// with, fixing a bug where the two disagreed. `est_value` was DELETED in T5,
+// not merely renamed, so there is no backend figure left to agree with —
+// this now pins `totalValue` as purely this tool's own sum of `value`
+// (sticker prices), which is what RFC 0025 T2/T4 made `value` mean.
+//
+// The old fixture's fourth row (an "unpriced but still held" item) is gone
+// too: a customer-visible row without a sticker is now a contradiction —
+// `isPublicInventory` excludes it before `listCards` ever sees it — so
+// "held but unpriced, counted in totalCards but not totalValue" is no
+// longer a reachable state to test, the same way `hidden_no_price` became
+// structurally zero on the backend.
+describe("chat totals sum sticker prices", () => {
+  it("sums each card's sticker price, not the old catalog/market resolution", async () => {
     const { repo } = repoWith(
       {
         "INV#0": [{
@@ -731,38 +745,30 @@ describe("chat totals agree with the dashboard", () => {
             rawItem({
               SK: "ITEM#01JRAW000000000000000001",
               item_id: "01JRAW000000000000000001",
-              current_market_value: 400, // stale: the denormalizer lags the catalog
+              sticker_price: 480,
+              current_market_value: 400, // decoy — must not be what's summed
             }),
             rawItem({
               SK: "ITEM#01JRAW000000000000000002",
               item_id: "01JRAW000000000000000002",
               card_id: null, // JP print: no catalog match by design
               display_name: "Chespin #84",
-              current_market_value: 250,
-            }),
-            rawItem({
-              SK: "ITEM#01JRAW000000000000000003",
-              item_id: "01JRAW000000000000000003",
-              card_id: null,
-              display_name: "Unpriced #1",
-              current_market_value: null,
-              listed_price: null,
+              sticker_price: 250,
             }),
           ],
         }],
-        "INV#1": [{ Items: [gradedItem({ current_market_value: 700 })] }],
+        "INV#1": [{ Items: [gradedItem({ sticker_price: 700, current_market_value: 999 })] }],
       },
       { "CARD#base1-4|META": meta("base1-4", { prices: { holofoil: { market: 517 } } }) },
     );
 
     const summary = await getInventorySummary(repo);
 
-    expect(summary.totalValue).toBe(1467);
-    expect(summary.totalCards).toBe(4); // the unpriced item is still held
-    // ...but it is not advertised as a $0 "top valued card".
+    expect(summary.totalValue).toBe(1430); // 480 + 250 + 700
+    expect(summary.totalCards).toBe(3);
     expect(summary.topValuedCards).toEqual([
       { name: "Charizard", value: 700 }, // the slab
-      { name: "Charizard", value: 517 }, // the stale raw, repriced live
+      { name: "Charizard", value: 480 }, // the raw item
       { name: "Chespin #84", value: 250 },
     ]);
   });

@@ -44,6 +44,57 @@ describe('the registry itself', () => {
     }
   })
 
+  it('offers the full 19-member language vocabulary on the language column edit (RFC 0023 T3)', () => {
+    // Before T3 this hardcoded {EN, JP} only — a card in any of the other 17
+    // languages T1 added could never be RE-selected once the item existed.
+    const col = INVENTORY_COLUMNS.find((c) => c.key === 'language')!
+    const ctx = {
+      editingId: null, editField: null, editValue: '', setEditValue: () => {},
+      startEdit: () => {}, saveEdit: () => {}, cancelEdit: () => {},
+      locationOptions: [], getImageUrl: () => null, onRefresh: () => {},
+      onDelete: () => {}, consignorName: () => undefined,
+    }
+    const spec = col.edit!(ctx)
+    const values = (spec.options ?? []).map((o) => o.value)
+    expect(values).toContain('KO')
+    expect(values).toContain('ZH-TW')
+    expect(values).toContain('OTHER')
+    expect(values.length).toBe(19)
+  })
+
+  it('offers the measured PRICED_FINISHES vocabulary on the finish column edit (RFC 0023 T6)', () => {
+    const col = INVENTORY_COLUMNS.find((c) => c.key === 'finish')!
+    const ctx = {
+      editingId: null, editField: null, editValue: '', setEditValue: () => {},
+      startEdit: () => {}, saveEdit: () => {}, cancelEdit: () => {},
+      locationOptions: [], getImageUrl: () => null, onRefresh: () => {},
+      onDelete: () => {}, consignorName: () => undefined,
+    }
+    const spec = col.edit!(ctx)
+    const values = (spec.options ?? []).map((o) => o.value)
+    expect(values).toContain('1stEditionHolofoil')
+    expect(values).toContain('1stEdition')
+    expect(values).not.toContain('firstEditionHolofoil')
+    expect(values.length).toBe(8)
+  })
+
+  it('offers a finish_attributes column, sortable and visible by default (RFC 0023 T5)', () => {
+    // CLAUDE.md records the consignor column shipping defaultVisible/sortable
+    // false/false unconsulted and being reversed the next day for violating
+    // "every column sortable, every column filterable" — this column must not
+    // repeat it.
+    const col = INVENTORY_COLUMNS.find((c) => c.key === 'finish_attributes')
+    expect(col).toBeDefined()
+    expect(col?.defaultVisible).toBe(true)
+    expect(col?.sortable).toBe(true)
+  })
+
+  it('gives finish_attributes an edit spec, not a notEditable reason', () => {
+    const col = INVENTORY_COLUMNS.find((c) => c.key === 'finish_attributes')!
+    expect(col.edit).toBeDefined()
+    expect(col.notEditable).toBeUndefined()
+  })
+
   it('offers a Consignor column, visible by default', () => {
     // Was `defaultVisible: false` — which is also why the Consignor FILTER
     // never appeared by default: `isFilterVisible` gates a filter on its
@@ -73,14 +124,26 @@ describe('the registry itself', () => {
   })
 
   it('hides a column-less filter by default and reveals it only under "show all"', () => {
-    // set_name / card_number / artist filter on catalog fields the ordinary
-    // admin search response does not carry, so they have no column to follow.
+    // set / artist filter on catalog fields with no rendered column at all,
+    // so they have no column to follow. `card_number` USED to be here too —
+    // see the next test.
     const catalogOnly = INVENTORY_FILTERS.filter((f) => f.columnKey === null)
     expect(catalogOnly.length).toBeGreaterThan(0)
     for (const f of catalogOnly) {
       expect(isFilterVisible(f, new Set(DEFAULT_VISIBLE_COLUMN_KEYS), false)).toBe(false)
       expect(isFilterVisible(f, new Set(DEFAULT_VISIBLE_COLUMN_KEYS), true)).toBe(true)
     }
+  })
+
+  it('follows the _card_number column\'s visibility, same fix shape as the Consignor filter', () => {
+    // The Card # filter USED to be columnKey: null (present, wired,
+    // reachable only behind "Show all filters" — the identical bug this
+    // file's own history already documents for Consignor). Now that
+    // `_card_number` is a real column, the filter must follow it.
+    const f = INVENTORY_FILTERS.find((x) => x.id === 'cardNumber')!
+    expect(f.columnKey).toBe('_card_number')
+    expect(isFilterVisible(f, new Set(['_card_number']), false)).toBe(true)
+    expect(isFilterVisible(f, new Set(DEFAULT_VISIBLE_COLUMN_KEYS), false)).toBe(false)
   })
 })
 
@@ -177,13 +240,18 @@ describe('storage access that throws is survivable', () => {
 // and that the keys stay parseable as `{field}_{direction}`.
 
 describe('every column is sortable except the two that cannot be', () => {
-  // `_image` renders art resolved client-side from card_id — there is no
-  // server-side value to order by. `_actions` is a pinned button cell.
-  // `consignor_name` USED to be unsortable too (no backend join existed to
-  // order by the resolved label), but `inventory_sort.py` now special-cases
-  // it via a router-supplied id->name map — see test_inventory_sort.py's
-  // TestConsignorNameSort. It belongs in the sortable set now.
-  const UNSORTABLE = new Set(['_image', '_actions'])
+  // `_image` and `_card_number` both render a value resolved client-side
+  // from card_id via a batched lookup (useCardImages/useCardNumbers) —
+  // there is no server-side value to order by, deliberately: joining the
+  // catalog inside `_sort_admin_results` would mean a per-row catalog read
+  // on this table's unpaginated LIST endpoint (see `admin_get_item`'s own
+  // docstring on why that enrichment stayed off the list). `_actions` is a
+  // pinned button cell. `consignor_name` USED to be unsortable too (no
+  // backend join existed to order by the resolved label), but
+  // `inventory_sort.py` now special-cases it via a router-supplied
+  // id->name map — see test_inventory_sort.py's TestConsignorNameSort. It
+  // belongs in the sortable set now.
+  const UNSORTABLE = new Set(['_image', '_card_number', '_actions'])
 
   it('marks every data column sortable', () => {
     const unmarked = INVENTORY_COLUMNS
@@ -254,6 +322,20 @@ describe('every column has a filter', () => {
     for (const f of INVENTORY_FILTERS) {
       if (f.columnKey !== null) expect(keys.has(f.columnKey)).toBe(true)
     }
+  })
+
+  it('offers the full 19-member language vocabulary on the language filter (RFC 0023 T3)', () => {
+    const f = INVENTORY_FILTERS.find((x) => x.id === 'language')!
+    const values = (f.options ?? []).map((o) => o.value)
+    expect(values).toContain('ZH-TW')
+    expect(values).toContain('OTHER')
+    expect(values.length).toBe(19)
+  })
+
+  it('has a finish_attributes filter with a real columnKey, kind listContains (RFC 0023 T5)', () => {
+    const f = INVENTORY_FILTERS.find((x) => x.columnKey === 'finish_attributes')
+    expect(f).toBeDefined()
+    expect(f?.kind).toBe('listContains')
   })
 
   it('has a consignor filter that sends consignor_id, sources cosigners, and follows the Consignor column\'s visibility', () => {
@@ -334,6 +416,7 @@ describe('buildFilterParams', () => {
       range: ['gte', 'lte'],
       dateRange: ['gte', 'lte'],
       presence: ['isnull', 'notnull'],
+      listContains: ['contains'],
     }
     for (const def of INVENTORY_FILTERS) {
       if (def.legacyParam) continue
@@ -359,5 +442,52 @@ describe('a filter follows its column', () => {
   it('is revealed by the show-all escape hatch regardless', () => {
     const notes = INVENTORY_FILTERS.find((f) => f.id === 'notes')!
     expect(isFilterVisible(notes, new Set(['status']), true)).toBe(true)
+  })
+})
+
+// ===========================================================================
+// RFC 0022 T5 — a column cannot ship silently uneditable
+// ===========================================================================
+//
+// CLAUDE.md's own lesson (the admin-tool-contract parity test that diffed key
+// sets while every value was an empty `{}` stub): a totality test that only
+// checks PRESENCE would pass even if `notEditable` were `''` on every column.
+// So the reason string itself is asserted, not just that the key exists.
+
+describe('every INVENTORY_COLUMNS entry has an edit spec or a real reason', () => {
+  it('carries either `edit` or a `notEditable` reason of at least 10 characters', () => {
+    for (const col of INVENTORY_COLUMNS) {
+      const hasEdit = typeof col.edit === 'function'
+      const hasReason = typeof col.notEditable === 'string' && col.notEditable.trim().length >= 10
+      expect(
+        hasEdit || hasReason,
+        `column ${col.key} has neither edit nor a real notEditable reason`,
+      ).toBe(true)
+      // Never both — a column that is click-to-edit needs no excuse, and a
+      // stated excuse alongside a real editor is a stale comment nobody removed.
+      expect(hasEdit && hasReason, `column ${col.key} has BOTH edit and notEditable`).toBe(false)
+    }
+  })
+
+  it('never ships an edit spec whose type is missing from InlineEditCell\'s own union', () => {
+    // Loose but cheap: catches a typo'd type string (`'slect'`) that would
+    // otherwise render nothing and fail silently in the browser only.
+    const KNOWN_TYPES = new Set([
+      'text', 'textarea', 'money', 'number', 'date',
+      'select', 'multiselect', 'checkbox', 'url',
+    ])
+    // A minimal stand-in context — only what `edit()` factories actually read.
+    const ctx = {
+      editingId: null, editField: null, editValue: '', setEditValue: () => {},
+      startEdit: () => {}, saveEdit: () => {}, cancelEdit: () => {},
+      locationOptions: [], showOptions: [], getImageUrl: () => null,
+      onRefresh: () => {}, onDelete: () => {}, consignorName: () => undefined,
+      saveField: async () => {},
+    }
+    for (const col of INVENTORY_COLUMNS) {
+      if (!col.edit) continue
+      const spec = col.edit(ctx as never)
+      expect(KNOWN_TYPES.has(spec.type), `column ${col.key} has unknown edit.type ${spec.type}`).toBe(true)
+    }
   })
 })

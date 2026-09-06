@@ -22,6 +22,10 @@ import TransactionGroups, {
   type ArchiveTransaction,
   type VoidTarget,
 } from '@/components/admin/shared/TransactionGroups'
+import type {
+  TransactionEditPatch,
+  TransactionEditResult,
+} from '@/components/admin/shared/TransactionEditDialog'
 import DataTable, { type Column } from '@/components/admin/shared/DataTable'
 
 // ---------------------------------------------------------------------------
@@ -288,6 +292,19 @@ export default function AdminAnalyticsPage() {
     await refetchDay()
   }
 
+  // RFC 0024 T3/T4 — a typo correction, always on ONE leg (never a batch_id,
+  // unlike void/restore above). The day's metrics move with an amount/date
+  // edit exactly as they do with a void, so the same refetch-together
+  // discipline applies.
+  const handleEditTransaction = async (
+    txnId: string,
+    patch: TransactionEditPatch,
+  ): Promise<TransactionEditResult> => {
+    const result = await api.patch<TransactionEditResult>(`/transactions/${txnId}`, patch)
+    await refetchDay()
+    return result
+  }
+
   const openShowDetail = (show: Show) => {
     setSelectedShow(show)
     setShowViewMode('detail')
@@ -353,6 +370,17 @@ export default function AdminAnalyticsPage() {
       sortable: true,
       className: 'w-28',
       render: (row) => <span className="text-xs font-mono text-pine-300">{formatISODate(row.date)}</span>,
+      // Only name/date here per the RFC's scope for this tab — Sold/Bought/
+      // Net/Items below are a ShowAnalytics JOIN, not shows_sort.py fields,
+      // and stay display-only.
+      edit: {
+        type: 'date',
+        value: (row) => row.date,
+        save: async (row, next) => {
+          await api.put(`/shows/${row.show_id}`, { date: next })
+          fetchShows()
+        },
+      },
     },
     {
       key: 'name',
@@ -372,6 +400,13 @@ export default function AdminAnalyticsPage() {
           )}
         </div>
       ),
+      // RFC 0022 T4b: NOT made click-to-edit, unlike /admin/shows' own name
+      // column. This row's name text IS the row-click target (onRowClick
+      // opens the show detail below), and InlineEditCell's cell click
+      // handler calls stopPropagation() — making it editable here would
+      // silently break that navigation, same conflict found on
+      // /admin/cosigners. `date` (a less obvious click target) keeps its
+      // edit; renaming a show still works from /admin/shows.
     },
     {
       key: '_sold',
@@ -680,6 +715,7 @@ export default function AdminAnalyticsPage() {
                     emptyMessage="No transactions for this date"
                     onVoid={handleVoid}
                     onRestore={handleRestore}
+                    onEdit={handleEditTransaction}
                   />
                 </section>
               </>

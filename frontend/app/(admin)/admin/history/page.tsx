@@ -12,7 +12,6 @@ import {
   ArrowRightLeft,
   DollarSign,
   ExternalLink,
-  AlertTriangle,
   Pencil,
   Undo2,
   RotateCcw,
@@ -26,6 +25,7 @@ import SearchInput from '@/components/admin/shared/SearchInput'
 import PriceDisplay from '@/components/admin/shared/PriceDisplay'
 import SignedAmount from '@/components/admin/shared/SignedAmount'
 import StatusBadge from '@/components/admin/shared/StatusBadge'
+import ProfitBadge from '@/components/admin/shared/ProfitBadge'
 import { adminItemName } from '@/lib/admin-item-name'
 
 // ---------------------------------------------------------------------------
@@ -313,25 +313,14 @@ export default function AdminHistoryPage() {
     }
   }
 
-  /** Format step_profit as +$x.xx / -$x.xx with color and cost_basis guard. */
+  /** `step_profit` with color and the $0-cost-basis guard — rendered by the
+   *  ONE shared `ProfitBadge` (RFC 0024 T5) the sale-detail popup also uses,
+   *  rather than a second copy of the same warning logic. */
   const renderStepProfit = (node: LineageNode) => {
     if (node.step_profit == null) return null
     const profit = parseFloat(node.step_profit)
-    const isPositive = profit >= 0
     const costBasisZero = node.acquired_cost === '0' || node.acquired_cost === '0.00'
-
-    return (
-      <span className="inline-flex items-center gap-1">
-        <span className={isPositive ? 'text-mint' : 'text-red-400'}>
-          {isPositive ? '+' : '-'}${Math.abs(profit).toFixed(2)}
-        </span>
-        {costBasisZero && (
-          <span title="Profit may be overstated — cost basis is $0 (consigned)">
-            <AlertTriangle size={11} className="text-amber-400" />
-          </span>
-        )}
-      </span>
-    )
+    return <ProfitBadge profit={profit} costBasisZero={costBasisZero} />
   }
 
   // ---------------------------------------------------------------------------

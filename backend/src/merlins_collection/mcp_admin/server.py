@@ -28,7 +28,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from merlins_collection.services import admin_analytics
+from merlins_collection.services import admin_analytics, admin_docs
 from merlins_collection.services.dynamodb import InventoryRepository
 
 #: Every tool on this server is read-only (owner decision 1). This is asserted
@@ -252,5 +252,29 @@ def build_server(repo: InventoryRepository) -> FastMCP:
                 repo, include_archived=include_archived, limit=limit
             )
         )
+
+    @server.tool(
+        name="search_admin_docs",
+        description=(
+            "Search the admin operations knowledge base -- how admin-panel "
+            "pages and buttons work, what they cost or how often to run "
+            "them, and how displayed figures (e.g. the trade page's "
+            "acquisition-ratio percent) are calculated. This is "
+            "DOCUMENTATION, not live business data -- for actual numbers use "
+            "the other tools. Pass query to search titles/keywords/body and "
+            "get full article text back (capped at limit). Omit query (or "
+            "pass an empty string) to get a lightweight browse index (id, "
+            "category, title, summary -- no body) of every article; narrow "
+            "with category, or call again with a query once you know what "
+            "you're looking for."
+        ),
+        annotations=READ_ONLY,
+    )
+    def search_admin_docs(
+        query: str | None = None,
+        category: str | None = None,
+        limit: int = 5,
+    ) -> str:
+        return _json(admin_docs.search(query=query, category=category, limit=limit))
 
     return server

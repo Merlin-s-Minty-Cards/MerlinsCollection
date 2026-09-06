@@ -24,11 +24,13 @@ from merlins_collection.models.inventory import (
     InventoryItem,
     InventoryItemAdapter,
     ItemStatus,
+    Language,
     _market_price,
     market_price_and_finish,
     new_ulid,
     normalize_condition,
 )
+from merlins_collection.services.acquisition import acquisition_ratio
 from merlins_collection.services.card_text import admin_item_name
 from merlins_collection.services.condition_pricing import (
     apply_condition_adjustment,
@@ -428,11 +430,37 @@ def admin_get_item(
     item_id: str,
     repo: InventoryRepository = Depends(get_repo),
 ) -> dict[str, Any]:
-    """Get a single inventory item with all admin-visible fields."""
+    """Get a single inventory item with all admin-visible fields.
+
+    Also attaches ``set_name``/``card_number`` from the catalog when the item
+    has a ``card_id`` — DERIVED, not stored, the same discipline
+    ``_serialize_item`` already uses for ``condition_multiplier``. This is
+    what makes ``/admin/card/[id]``'s header and detail panel actually show a
+    number: that page has carried a ``set_name``/``card_number`` field and a
+    "Card Number" `DetailRow` since it was written, but neither this endpoint
+    nor `_serialize_item` ever populated them, so both silently rendered
+    nothing on every item.
+
+    Added HERE rather than inside `_serialize_item` itself: that function
+    also backs `admin_search_items` (the LIST endpoint), which can return
+    hundreds of unpaginated rows — a catalog point-read per row there would
+    multiply into real added latency on the busiest page in the admin panel.
+    A single-item fetch pays for exactly one extra read.
+    """
     item = repo.get_inventory_item(item_id)
     if item is None:
         raise HTTPException(status_code=404, detail="Item not found")
-    return _serialize_item(item)
+    data = _serialize_item(item)
+    # Explicit `None`, not an omitted key, for a sealed/bulk item (no
+    # `card_id` attribute at all — `getattr` rather than `item.card_id`,
+    # same trap `items-brief` already guards against) or an unresolved
+    # `card_id` — same "null rather than omitted" discipline this router
+    # already uses for `condition_multiplier` right above.
+    card_id = getattr(item, "card_id", None)
+    card = repo.get_catalog_card(card_id) if card_id else None
+    data["set_name"] = card.set_name if card else None
+    data["card_number"] = card.number if card else None
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -505,6 +533,7 @@ def admin_update_item(
                 ),
             )
     body = _apply_review_transition(existing, body)
+    body = _apply_language_transition(existing, body)
     body = _apply_no_catalog_match_transition(existing, body)
 
     # Merge: dump existing to dict, overlay with update body, re-validate
@@ -944,6 +973,40 @@ def admin_resolve_card_images(
     return result
 
 
+@router.post("/card-numbers")
+def admin_resolve_card_numbers(
+    body: dict[str, Any],
+    repo: InventoryRepository = Depends(get_repo),
+) -> dict[str, str | None]:
+    """Resolve card_ids to their catalog print number (e.g. "25" in "sv1-25").
+
+    Same batching shape as ``/card-images`` immediately above (one POST,
+    capped at 100, a null rather than an omitted key for an id that doesn't
+    resolve) — CLAUDE.md: "never fire a request per row".
+
+    A SEPARATE endpoint rather than folding this into ``/card-images``'s
+    response, even though both read the same ``CatalogCard``: the admin
+    inventory table gates each lookup on its OWN column's visibility
+    (``visible.has(columnKey)``, `admin/inventory/page.tsx`), exactly like
+    the Image column already does — an admin who wants Card # without Images
+    (or vice versa) should not pay for a fetch of data they didn't ask to
+    see, and folding both into one response would tie the two columns'
+    fetches together even though their visibility toggles are independent.
+    """
+    card_ids = body.get("card_ids", [])
+    if not isinstance(card_ids, list):
+        raise HTTPException(status_code=422, detail="card_ids must be a list")
+    card_ids = card_ids[:100]  # cap to prevent abuse
+
+    result: dict[str, str | None] = {}
+    for card_id in card_ids:
+        if not isinstance(card_id, str):
+            continue
+        card = repo.get_catalog_card(card_id)
+        result[card_id] = card.number if card else None
+    return result
+
+
 @router.post("/items-brief")
 def admin_resolve_items_brief(
     body: dict[str, Any],
@@ -959,10 +1022,19 @@ def admin_resolve_items_brief(
     than an omitted key for an id that no longer resolves) rather than a
     request per row (CLAUDE.md: "never fire a request per row").
 
-    Deliberately does NOT return a price: the transaction leg's own
-    ``amount`` is the authoritative sold/bought figure the caller already
-    has, and echoing a second copy here (current_market_value? cost_basis?)
-    would just be a figure that can drift from the one that matters.
+    Deliberately does NOT echo a second copy of the amount a leg was
+    actually WORTH: the transaction leg's own ``amount`` remains the sole
+    authority for that, and nothing here claims to be it.
+
+    RFC 0024 T5 added four fields that are NOT a second copy of ``amount`` —
+    ``cost_basis``, ``market_value_at_purchase``, ``acquisition_ratio`` and
+    ``current_market_value`` are different facts about a different moment
+    (what the card cost us, and what the market said then and says now).
+    They cannot drift from ``amount`` because they were never claims about
+    it, which is exactly the distinction this docstring used to elide — an
+    earlier version of it forbade echoing "a second copy" broadly enough to
+    read as forbidding these too. It didn't; update this note again, rather
+    than reverting the fields, if that reasoning ever stops holding.
 
     Name resolution goes through ``admin_item_name`` — the one shared
     authority (CLAUDE.md, "Name resolution: display_name_override wins
@@ -970,7 +1042,8 @@ def admin_resolve_items_brief(
     the slab list already use for a card with no display name of its own.
     ``card_id`` is read with ``getattr``, not ``item.card_id``: sealed and
     bulk kinds have no such attribute at all, and reaching for it directly
-    raises ``AttributeError`` instead of returning ``None``.
+    raises ``AttributeError`` instead of returning ``None``. The four money
+    fields use the same ``getattr`` pattern for the same reason.
     """
     item_ids = body.get("item_ids", [])
     if not isinstance(item_ids, list):
@@ -993,7 +1066,28 @@ def admin_resolve_items_brief(
             if card:
                 name = card.name
 
-        result[item_id] = {"name": name or None, "card_id": card_id}
+        cost_basis = getattr(item, "cost_basis", None)
+        market_value_at_purchase = getattr(item, "market_value_at_purchase", None)
+        current_market_value = getattr(item, "current_market_value", None)
+        ratio = acquisition_ratio(market_value_at_purchase, cost_basis)
+
+        # Stringified, not left as `Decimal` — the same discipline
+        # `slabs_sort.py`'s `_slab_row()` already documents: FastAPI's default
+        # encoder would otherwise round-trip a Decimal through `float`, which
+        # is exactly the precision loss CLAUDE.md's money rules exist to
+        # prevent. `None` stays `None` rather than becoming the string "None".
+        result[item_id] = {
+            "name": name or None,
+            "card_id": card_id,
+            "cost_basis": str(cost_basis) if cost_basis is not None else None,
+            "market_value_at_purchase": (
+                str(market_value_at_purchase) if market_value_at_purchase is not None else None
+            ),
+            "acquisition_ratio": str(ratio) if ratio is not None else None,
+            "current_market_value": (
+                str(current_market_value) if current_market_value is not None else None
+            ),
+        }
     return result
 
 
@@ -1430,6 +1524,44 @@ def _apply_review_transition(
     else:
         body["reviewed_at"] = datetime.now(tz=timezone.utc)  # rule 1
 
+    return body
+
+
+def _apply_language_transition(
+    existing: InventoryItem, body: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve a ``language`` change into the fields actually written.
+
+    **Setting ``language = OTHER`` also sets ``no_catalog_match = True``, in
+    the same write.** An OTHER card is unmatchable by definition — there is no
+    catalog language to link it to, ever (see ``LANGUAGE_API_CODE`` and the
+    model's ``_other_language_implies_unlinked`` invariant) — so it belongs in
+    Unmatched, not Triage. Leaving it to Triage's *derived* ``missing_card_id``
+    reason would give that queue a floor it can never get under, which is the
+    exact problem RFC 0011 built Unmatched to solve. This runs BEFORE
+    ``_apply_no_catalog_match_transition`` below, so the stamp/timestamp rules
+    there apply to the parking this triggers exactly as they would to a manual
+    one.
+
+    Only a catalog-linkable kind is set to park: sealed and bulk items have no
+    ``card_id`` field at all (the same ``hasattr`` reasoning
+    ``_apply_no_catalog_match_transition``'s rule 1 already documents), and
+    that function 422s any attempt to park one — a sealed OTHER item (a Korean
+    booster box, say) must stay a plain, unremarkable write.
+
+    **If the item is still linked, this does nothing extra.** The 422 for
+    "language=OTHER while still linked" comes from the model's own invariant
+    once the merged row is validated below, with a message telling the admin to
+    unlink first — the same generic merge-then-validate path every other model
+    invariant on this endpoint already goes through.
+
+    Clearing OTHER back to a real language is deliberately NOT handled here —
+    it does not auto-clear ``no_catalog_match``. Leaving a queue is a separate,
+    deliberate admin action, same as unlinking a catalog card is.
+    """
+    if body.get("language") == Language.OTHER and hasattr(existing, "card_id"):
+        body = dict(body)
+        body["no_catalog_match"] = True
     return body
 
 

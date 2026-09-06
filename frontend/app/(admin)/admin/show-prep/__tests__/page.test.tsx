@@ -102,6 +102,32 @@ describe('AdminShowPrepPage inline sticker editing', () => {
     expect(putMock).not.toHaveBeenCalled()
   })
 
+  it('edits location inline via a select (RFC 0022 T4a)', async () => {
+    render(<AdminShowPrepPage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit Location' }))
+    const select = screen.getByRole('combobox', { name: 'Edit Location' })
+    await act(async () => {
+      fireEvent.change(select, { target: { value: 'binder-a' } })
+    })
+    // Same value as stored -> dirty-check skips the round trip.
+    expect(putMock).not.toHaveBeenCalledWith('/inventory/item-1', expect.objectContaining({ location: expect.anything() }))
+  })
+
+  it('edits cost_basis inline as money (RFC 0022 T4a)', async () => {
+    render(<AdminShowPrepPage />)
+    await act(async () => { await Promise.resolve() })
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit Price Paid' }))
+    const input = screen.getByRole('textbox', { name: 'Edit Price Paid' })
+    fireEvent.change(input, { target: { value: '12.50' } })
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Enter' })
+    })
+    expect(putMock).toHaveBeenCalledWith('/inventory/item-1', { cost_basis: '12.5' })
+  })
+
   it('surfaces a failure message and keeps the editor open when the PUT rejects', async () => {
     putMock.mockRejectedValueOnce(new Error('boom'))
     render(<AdminShowPrepPage />)
@@ -132,6 +158,109 @@ describe('AdminShowPrepPage inline sticker editing', () => {
     })
     const link = await screen.findByTitle('https://www.tcgplayer.com/product/12345')
     expect(link).toHaveAttribute('href', 'https://www.tcgplayer.com/product/12345')
+  })
+
+  // RFC 0023 T7 — the TCG Price column now generates a language-aware link
+  // via lib/tcgplayer.ts instead of always assuming the English category.
+  it('generates an English-category search link when no tcg_url is stored and the item is EN', async () => {
+    getMock.mockImplementation((path: string) => {
+      if (path === '/show-prep/mispriced') {
+        return Promise.resolve({
+          items: [{ ...mispricedItem, item_id: 'item-en', tcg_url: null, language: 'EN' }],
+          total_flagged: 1,
+        })
+      }
+      if (path === '/show-prep/location-summary') {
+        return Promise.resolve({ locations: { 'binder-a': 1 }, total: 1 })
+      }
+      if (path === '/locations') {
+        return Promise.resolve([{ value: 'binder-a', label: 'Binder A' }])
+      }
+      return Promise.resolve({})
+    })
+
+    render(<AdminShowPrepPage />)
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    const link = await screen.findByTitle('Search TCGplayer for "Pikachu VMAX"')
+    expect(link).toHaveAttribute(
+      'href',
+      'https://www.tcgplayer.com/search/pokemon/product?q=Pikachu%20VMAX&view=grid'
+    )
+  })
+
+  it('shows the unsupported-language message, not a link, when no tcg_url is stored and the language has no TCGplayer category', async () => {
+    getMock.mockImplementation((path: string) => {
+      if (path === '/show-prep/mispriced') {
+        return Promise.resolve({
+          items: [{ ...mispricedItem, item_id: 'item-ko', tcg_url: null, language: 'KO' }],
+          total_flagged: 1,
+        })
+      }
+      if (path === '/show-prep/location-summary') {
+        return Promise.resolve({ locations: { 'binder-a': 1 }, total: 1 })
+      }
+      if (path === '/locations') {
+        return Promise.resolve([{ value: 'binder-a', label: 'Binder A' }])
+      }
+      return Promise.resolve({})
+    })
+
+    render(<AdminShowPrepPage />)
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    // Short visible label — the full reason lives in the tooltip, not inline,
+    // since this column is only 128px wide (w-32) and the full sentence would
+    // blow the row height up past its neighbours.
+    const notice = await screen.findByText('No TCGplayer link')
+    expect(notice).toHaveAttribute(
+      'title',
+      'TCGplayer only has English and Japanese Pokémon categories — paste a link if you have one.'
+    )
+    // The manual tcg_url field is still editable — the escape hatch never disappears.
+    expect(screen.getByRole('button', { name: /edit stored tcg link for pikachu vmax/i })).toBeInTheDocument()
+  })
+
+  // RFC 0023 follow-ups #3 — `tcg_url` is admin-typed free text; it must
+  // never be used as an `<a href>` directly, since a `javascript:` value is
+  // a stored-XSS sink that fires on one click.
+  it('falls back to a generated search link instead of using an unsafe stored tcg_url as href', async () => {
+    getMock.mockImplementation((path: string) => {
+      if (path === '/show-prep/mispriced') {
+        return Promise.resolve({
+          items: [{
+            ...mispricedItem,
+            item_id: 'item-xss',
+            tcg_url: 'javascript:alert(1)',
+            language: 'EN',
+          }],
+          total_flagged: 1,
+        })
+      }
+      if (path === '/show-prep/location-summary') {
+        return Promise.resolve({ locations: { 'binder-a': 1 }, total: 1 })
+      }
+      if (path === '/locations') {
+        return Promise.resolve([{ value: 'binder-a', label: 'Binder A' }])
+      }
+      return Promise.resolve({})
+    })
+
+    render(<AdminShowPrepPage />)
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    const link = await screen.findByTitle('Search TCGplayer for "Pikachu VMAX"')
+    expect(link).toHaveAttribute(
+      'href',
+      'https://www.tcgplayer.com/search/pokemon/product?q=Pikachu%20VMAX&view=grid'
+    )
+    expect(link).not.toHaveAttribute('href', 'javascript:alert(1)')
   })
 })
 

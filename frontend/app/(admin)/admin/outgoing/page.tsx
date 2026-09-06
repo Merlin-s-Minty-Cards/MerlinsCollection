@@ -328,6 +328,20 @@ export default function AdminPrepQueuePage() {
       render: (item) => (
         <span className="text-[11px] text-pine-300 font-mono">{item.condition || '—'}</span>
       ),
+      // This queue's own fetch never carries `condition_modifier` (the
+      // display never has, either — `item.condition || '—'` above, no
+      // `formatCondition`), so the edit offers bare tiers only rather than
+      // risk a select showing a value ("LP") that silently drops a "+"/"-"
+      // this page was never reading in the first place.
+      edit: {
+        type: 'select',
+        options: ['NM', 'LP', 'MP', 'HP', 'DMG'].map((v) => ({ value: v, label: v })),
+        value: (item) => item.condition ?? '',
+        save: async (item, next) => {
+          await api.put(`/inventory/${item.item_id}`, { condition: next || null })
+          fetchItems()
+        },
+      },
     },
     {
       key: 'sticker_price',
@@ -419,6 +433,15 @@ export default function AdminPrepQueuePage() {
       sortable: true,
       className: 'text-right w-20',
       render: (item) => <PriceDisplay value={item.cost_basis} className="text-xs text-pine-400" />,
+      edit: {
+        type: 'money',
+        value: (item) => item.cost_basis ?? '',
+        save: async (item, next) => {
+          await api.put(`/inventory/${item.item_id}`, { cost_basis: next || null })
+          fetchItems()
+        },
+        undoLabel: 'Cost basis',
+      },
     },
     {
       key: 'current_market_value',
@@ -426,6 +449,8 @@ export default function AdminPrepQueuePage() {
       sortable: true,
       className: 'text-right w-20',
       render: (item) => <PriceDisplay value={item.current_market_value} className="text-xs text-pine-400" />,
+      // Denormalized nightly by refresh_inventory_market_values; a hand edit
+      // is overwritten on the next run. Same reasoning as /admin/inventory.
     },
     {
       key: '_triage',

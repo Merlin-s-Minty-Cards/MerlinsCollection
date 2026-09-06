@@ -53,6 +53,7 @@ def _raw(item_id: str, *, status=ItemStatus.AVAILABLE, value="25.00"):
         status=status,
         listed_price=Decimal("20.00"),
         current_market_value=Decimal(value),
+        sticker_price=Decimal("20.00"),
         cost_basis=Decimal("10.00"),
         acquired_at=date.today(),
         finish="normal",

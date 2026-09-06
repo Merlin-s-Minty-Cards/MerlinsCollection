@@ -257,6 +257,22 @@ def test_purge_leaves_another_languages_catalog_alone(dynamo_repo):
     assert counts["catalog_card"] == 1
 
 
+def test_purge_scopes_by_a_hyphenated_language_code(dynamo_repo):
+    """RFC 0023's new codes (``zh-tw``, ``es-mx``, ``pt-br``, ...) are
+    hyphenated, unlike ``en``/``ja``. ``_card_language`` reads the API-code
+    prefix straight off the stored PK string, so this needs no new code — only
+    a test proving a hyphen doesn't break the scope."""
+    dynamo_repo.batch_upsert_catalog_cards([_card("zh-tw:sv1-25")])
+    dynamo_repo.batch_upsert_catalog_cards([_card("en:base1-9")])  # in scope, stale
+
+    counts = dynamo_repo.purge_card_data(keep_catalog_gen="G2", languages={"en"},
+                                         dry_run=False)
+
+    assert dynamo_repo.get_catalog_card("zh-tw:sv1-25") is not None
+    assert dynamo_repo.get_catalog_card("en:base1-9") is None
+    assert counts["catalog_card"] == 1
+
+
 def test_purge_still_removes_legacy_rows_that_carry_no_language_prefix(dynamo_repo):
     """The dead pokemontcg.io catalog is exactly what the wipe exists to remove.
 
@@ -269,6 +285,68 @@ def test_purge_still_removes_legacy_rows_that_carry_no_language_prefix(dynamo_re
                                 dry_run=False)
 
     assert dynamo_repo.get_catalog_card("xy7-54") is None
+
+
+# ---------------------------------------------------------------------------
+# RFC 0021 T3 — repository methods `scripts/purge_catalog_junk.py` needs
+#
+# Distinct from `purge_card_data` above: that method scopes on catalog
+# GENERATION (the load-then-swap reseed). These delete a NAMED card or set
+# outright, keyed by id, for the junk purge -- a different operation with a
+# different caller and no generation involved.
+# ---------------------------------------------------------------------------
+
+
+def test_delete_catalog_card_partition_removes_the_card_and_its_price_children(dynamo_repo):
+    """The whole `CARD#<id>` partition goes -- the identity row AND its
+    PRICE#/GRADEDPRICE# children -- so nothing orphaned survives to be read."""
+    dynamo_repo.batch_upsert_catalog_cards([_card("en:A1-1")])
+    dynamo_repo.append_price_points([_point("en:A1-1")])
+    dynamo_repo.set_graded_market_value("en:A1-1", "PSA", "10", Decimal("50"))
+
+    deleted = dynamo_repo.delete_catalog_card_partition("en:A1-1")
+
+    assert deleted == 3  # META + one PRICE#RAW# row + one GRADEDPRICE# row
+    assert dynamo_repo.get_catalog_card("en:A1-1") is None
+    assert dynamo_repo.get_price_history("en:A1-1") == []
+    assert dynamo_repo.get_graded_market_value("en:A1-1", "PSA", "10") is None
+
+
+def test_delete_catalog_card_partition_leaves_other_cards_alone(dynamo_repo):
+    dynamo_repo.batch_upsert_catalog_cards([_card("en:A1-1"), _card("en:base1-4")])
+
+    dynamo_repo.delete_catalog_card_partition("en:A1-1")
+
+    assert dynamo_repo.get_catalog_card("en:base1-4") is not None
+
+
+def test_delete_catalog_card_partition_on_a_missing_card_deletes_nothing(dynamo_repo):
+    assert dynamo_repo.delete_catalog_card_partition("en:nope-1") == 0
+
+
+def test_delete_catalog_sets_removes_registry_rows(dynamo_repo):
+    dynamo_repo.put_catalog_sets([
+        {"set_id": "en:A1", "set_name": "Genetic Apex", "language": "EN",
+         "card_count": 0, "updated_at": "2026-01-01T00:00:00+00:00"},
+        {"set_id": "en:base1", "set_name": "Base Set", "language": "EN",
+         "card_count": 1, "updated_at": "2026-01-01T00:00:00+00:00"},
+    ])
+
+    deleted = dynamo_repo.delete_catalog_sets(["en:A1"])
+
+    assert deleted == 1
+    registry = {s["set_id"] for s in dynamo_repo.list_catalog_sets()}
+    assert registry == {"en:base1"}
+
+
+def test_delete_catalog_sets_on_an_empty_list_deletes_nothing(dynamo_repo):
+    dynamo_repo.put_catalog_sets([
+        {"set_id": "en:base1", "set_name": "Base Set", "language": "EN",
+         "card_count": 1, "updated_at": "2026-01-01T00:00:00+00:00"},
+    ])
+
+    assert dynamo_repo.delete_catalog_sets([]) == 0
+    assert len(dynamo_repo.list_catalog_sets()) == 1
 
 
 def test_a_dry_run_does_not_count_rows_the_reseed_would_replace(dynamo_repo):

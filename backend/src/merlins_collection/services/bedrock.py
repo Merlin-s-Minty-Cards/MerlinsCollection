@@ -21,8 +21,6 @@ from merlins_collection.models.chat import (
     DisplayedCard,
     DisplayPanel,
 )
-from merlins_collection.models.inventory import market_price_and_finish
-from merlins_collection.services.condition_pricing import apply_condition_adjustment
 from merlins_collection.services.customer_visibility import is_customer_visible
 
 logger = logging.getLogger(__name__)
@@ -274,7 +272,14 @@ _ADMIN_SYSTEM_PROMPT = (
     "sets, printings, finishes and languages, and the operator is comparing "
     "your answer against physical cards in their hand.\n\n"
     "Money figures arrive as strings to preserve exact decimal values. Report "
-    "them as given; do not round or reformat them into something else."
+    "them as given; do not round or reformat them into something else.\n\n"
+    "When the operator asks HOW something works, what a button costs, how "
+    "often to run it, or how a displayed figure is calculated — as opposed "
+    "to asking for the business's own numbers — call search_admin_docs "
+    "rather than guessing from general knowledge of Pokemon card businesses. "
+    "It searches this business's own operations knowledge base and is the "
+    "authority on questions like 'how often should I press Sync Prices' or "
+    "'how is the acquisition ratio calculated'."
 )
 
 
@@ -423,22 +428,7 @@ def _hydrate_item(repo, item_id: str, *, visible=is_customer_visible) -> Display
             catalog = repo.get_catalog_card(card_id)
 
         card_summary = None
-        market_price = None
         if catalog is not None:
-            if item.kind == "raw":
-                market_price, _finish = market_price_and_finish(
-                    catalog, getattr(item, "finish", None)
-                )
-                if market_price is not None:
-                    # Council item 3: apply the SAME condition adjustment
-                    # routers/inventory.py::_condition_adjust applies at
-                    # enrichment, so a DMG card's chat price matches its
-                    # filter-mode price instead of shipping the NM figure.
-                    market_price, _note = apply_condition_adjustment(
-                        market_price,
-                        item.condition,
-                        getattr(item, "condition_modifier", None),
-                    )
             card_summary = CardSummary(
                 card_id=catalog.card_id,
                 name=catalog.name,
@@ -447,20 +437,19 @@ def _hydrate_item(repo, item_id: str, *, visible=is_customer_visible) -> Display
                 image_small=catalog.images.small,
             )
 
-        # Council item 3: mirrors routers/inventory.py::_display_price — "THE
-        # price ... the only one any customer-facing code may use" — rather
-        # than a local current_market_value ?? listed_price re-derivation
-        # (the fourth price derivation, already diverging from the other
-        # three). market_price above is already condition-adjusted for raw
-        # items, exactly as _condition_adjust applies it at enrichment; this
-        # is the same two-step fallback _display_price applies, inlined
-        # rather than imported because services/bedrock.py cannot import
-        # routers/inventory.py without a circular import (dependencies.py,
-        # which routers/inventory.py imports for get_repo, imports
-        # BedrockChatService from this module).
-        display_price = market_price if item.kind == "raw" else None
-        if display_price is None:
-            display_price = item.listed_price
+        # RFC 0025 T4: mirrors routers/inventory.py::_display_price, which is
+        # now `item.sticker_price` — full stop, for the identical reason
+        # stated there: a sticker is a price a human set holding the card
+        # and its condition, not a Near Mint catalog figure, so there is no
+        # catalog lookup and no condition adjustment left to apply (applying
+        # one would scale an already condition-inclusive number a second
+        # time). This is the SAME hydrator the admin analyst chat uses
+        # (`visible=ADMIN_VISIBILITY`, see this function's own docstring:
+        # "ONE hydrator... never a second admin copy") — RFC 0025 names no
+        # exception for it among the admin surfaces that keep condition
+        # adjustment (routers/admin/inventory.py, the MCP admin path), so
+        # both hydration callers get the simplified figure.
+        display_price = item.sticker_price
 
         condition = None
         if item.kind == "raw":

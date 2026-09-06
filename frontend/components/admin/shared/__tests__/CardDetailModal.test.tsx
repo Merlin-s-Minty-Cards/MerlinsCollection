@@ -98,6 +98,112 @@ describe('CardDetailModal image resolution', () => {
   })
 })
 
+describe('CardDetailModal language (RFC 0023 T3)', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    putMock.mockReset()
+    getMock.mockResolvedValue(null)
+    postMock.mockResolvedValue({})
+  })
+
+  it('renders the language field as a select over the full 19-member vocabulary, not free text', async () => {
+    render(<CardDetailModal item={{ ...item, language: 'EN' }} onClose={vi.fn()} />)
+
+    fireEvent.click((await screen.findAllByLabelText(/Edit Language/i))[0])
+
+    expect(screen.getByRole('option', { name: 'Korean' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Chinese (Traditional)' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Other / unsupported' })).toBeInTheDocument()
+  })
+
+  it('hides the Language Note row when the language is not OTHER', async () => {
+    render(<CardDetailModal item={{ ...item, language: 'EN' }} onClose={vi.fn()} />)
+    await screen.findAllByLabelText(/Edit Language/i)
+
+    expect(screen.queryByText('Language Note')).not.toBeInTheDocument()
+  })
+
+  it('shows the Language Note row only when the language is OTHER', async () => {
+    render(<CardDetailModal
+      item={{ ...item, language: 'OTHER', language_note: 'Vietnamese' }}
+      onClose={vi.fn()}
+    />)
+
+    expect(await screen.findByText('Language Note')).toBeInTheDocument()
+    expect(screen.getByText('Vietnamese')).toBeInTheDocument()
+  })
+})
+
+describe('CardDetailModal finish + finish_attributes (RFC 0023 T6)', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    putMock.mockReset()
+    getMock.mockResolvedValue(null)
+    postMock.mockResolvedValue({})
+    putMock.mockResolvedValue({})
+  })
+
+  it('renders finish as a select over the measured PRICED_FINISHES vocabulary, not free text', async () => {
+    render(<CardDetailModal item={{ ...item, finish: 'normal' }} onClose={vi.fn()} />)
+
+    fireEvent.click((await screen.findAllByLabelText(/Edit Finish$/i))[0])
+
+    expect(screen.getByRole('option', { name: '1stEditionHolofoil' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'firstEditionHolofoil' })).not.toBeInTheDocument()
+  })
+
+  it('shows the current finish_attributes joined with commas when not editing', async () => {
+    render(
+      <CardDetailModal
+        item={{ ...item, finish_attributes: ['1st Edition', 'Shadowless'] }}
+        onClose={vi.fn()}
+      />
+    )
+    expect(await screen.findByText('1st Edition, Shadowless')).toBeInTheDocument()
+  })
+
+  it('shows an em dash when there are no finish_attributes', async () => {
+    render(<CardDetailModal item={{ ...item, finish_attributes: [] }} onClose={vi.fn()} />)
+    expect(await screen.findByText('Finish Attributes')).toBeInTheDocument()
+  })
+
+  it('toggling a chip and saving PUTs the full attributes array', async () => {
+    render(
+      <CardDetailModal item={{ ...item, finish_attributes: ['1st Edition'] }} onClose={vi.fn()} />
+    )
+
+    fireEvent.click((await screen.findAllByLabelText(/Edit Finish Attributes/i))[0])
+    fireEvent.click(screen.getByRole('button', { name: 'Shadowless' }))
+    fireEvent.click(screen.getByLabelText('Save'))
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith(
+        '/inventory/item-1',
+        { finish_attributes: ['1st Edition', 'Shadowless'] },
+      )
+    )
+  })
+
+  it('toggling an already-selected chip removes it before saving', async () => {
+    render(
+      <CardDetailModal
+        item={{ ...item, finish_attributes: ['1st Edition', 'Shadowless'] }}
+        onClose={vi.fn()}
+      />
+    )
+
+    fireEvent.click((await screen.findAllByLabelText(/Edit Finish Attributes/i))[0])
+    fireEvent.click(screen.getByRole('button', { name: '1st Edition' }))
+    fireEvent.click(screen.getByLabelText('Save'))
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith('/inventory/item-1', { finish_attributes: ['Shadowless'] })
+    )
+  })
+})
+
 describe('CardDetailModal TCGplayer link', () => {
   beforeEach(() => {
     getMock.mockReset()
@@ -117,7 +223,47 @@ describe('CardDetailModal TCGplayer link', () => {
   it('falls back to a generated TCGplayer search link when no tcg_url is stored', async () => {
     // Mirrors show-prep/page.tsx's `_tcg_url` column fallback — without this,
     // items that never had tcg_url set show no link at all (round7-handoff §10).
-    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+    // `language: 'EN'` mirrors the backend's real default (`_ItemBase.language
+    // = Language.EN`) — every real item carries it, this fixture just predates
+    // RFC 0023.
+    render(<CardDetailModal item={{ ...item, language: 'EN' }} onClose={vi.fn()} />)
+
+    const link = await screen.findByRole('link', { name: /TCGplayer/i })
+    expect(link).toHaveAttribute(
+      'href',
+      'https://www.tcgplayer.com/search/pokemon/product?q=Pikachu&view=grid',
+    )
+  })
+
+  // RFC 0023 follow-ups #2 — this modal used to hardcode the English-only
+  // TCGplayer category regardless of the item's actual language.
+  it('generates a Japan-category search link for a JP item with no stored tcg_url', async () => {
+    render(<CardDetailModal item={{ ...item, language: 'JP' }} onClose={vi.fn()} />)
+
+    const link = await screen.findByRole('link', { name: /TCGplayer/i })
+    expect(link).toHaveAttribute(
+      'href',
+      'https://www.tcgplayer.com/search/pokemon-japan/product?productLineName=pokemon-japan&q=Pikachu&view=grid',
+    )
+  })
+
+  it('shows a no-link message, not a link, for a language TCGplayer has no category for', async () => {
+    render(<CardDetailModal item={{ ...item, language: 'KO' }} onClose={vi.fn()} />)
+
+    expect(await screen.findByText('No TCGplayer link')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /TCGplayer/i })).not.toBeInTheDocument()
+  })
+
+  // RFC 0023 follow-ups #3 — `tcg_url` is admin-typed free text; it must
+  // never be used as an `<a href>` directly, since a `javascript:` value is
+  // a stored-XSS sink that fires on one click.
+  it('falls back to a generated search link instead of using an unsafe stored tcg_url as href', async () => {
+    render(
+      <CardDetailModal
+        item={{ ...item, language: 'EN', tcg_url: 'javascript:alert(1)' }}
+        onClose={vi.fn()}
+      />
+    )
 
     const link = await screen.findByRole('link', { name: /TCGplayer/i })
     expect(link).toHaveAttribute(
@@ -464,6 +610,89 @@ describe('CardDetailModal — Send to Triage', () => {
 })
 
 // ===========================================================================
+// RFC 0022 T7 — Send to Vault
+// ===========================================================================
+//
+// A deliberate copy of the Send to Triage shape above, not a new pattern:
+// same reach (the five pages that mount this modal), same "reads differently
+// once already in that state" rule, same undo affordance. The one real
+// difference: sending TO the vault has no note to type, so it writes
+// directly with no inline form — see the RFC's exact scope, "sets status to
+// on_hold, and nothing else."
+describe('CardDetailModal — Send to Vault', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    postMock.mockReset()
+    putMock.mockReset()
+    getMock.mockResolvedValue(null)
+    postMock.mockResolvedValue({})
+    putMock.mockResolvedValue({})
+  })
+
+  it('offers a Send to Vault action for an item that is not already on_hold', async () => {
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+    expect(await screen.findByRole('button', { name: /send to vault/i })).toBeInTheDocument()
+  })
+
+  it('writes status: on_hold directly, with no intermediate form', async () => {
+    putMock.mockResolvedValue({ ...item, status: 'on_hold' })
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /send to vault/i }))
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith('/inventory/item-1', { status: 'on_hold' }),
+    )
+  })
+
+  it('reads "In Vault" for an item already on_hold, and never silently re-writes it', async () => {
+    render(<CardDetailModal item={{ ...item, status: 'on_hold' }} onClose={vi.fn()} />)
+
+    expect(await screen.findByRole('button', { name: /in vault/i })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /send to vault/i })).not.toBeInTheDocument()
+  })
+
+  it('the server response, not a local flag, decides what the button reads', async () => {
+    // Same rule the existing comment on writeTriage states explicitly: the
+    // button must reflect the REFETCHED item, never an optimistic flag that
+    // could disagree with it. Here the PUT response omits `status` entirely
+    // (a malformed/partial server reply), so the button must NOT have
+    // already flipped to "In Vault" on the strength of the click alone.
+    putMock.mockResolvedValueOnce({ item_id: 'item-1' })
+    render(<CardDetailModal item={item} onClose={vi.fn()} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /send to vault/i }))
+    await waitFor(() => expect(putMock).toHaveBeenCalled())
+
+    expect(screen.getByRole('button', { name: /send to vault/i })).toBeInTheDocument()
+  })
+
+  it('offers to return an already-vaulted item to available', async () => {
+    render(<CardDetailModal item={{ ...item, status: 'on_hold' }} onClose={vi.fn()} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /in vault/i }))
+    fireEvent.click(screen.getByRole('button', { name: /return to available/i }))
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith('/inventory/item-1', { status: 'available' }),
+    )
+  })
+
+  it('offers an Undo that restores the previous status', async () => {
+    const available = { ...item, status: 'available' }
+    putMock.mockResolvedValue({ ...available, status: 'on_hold' })
+    render(<CardDetailModal item={available} onClose={vi.fn()} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /send to vault/i }))
+    fireEvent.click(await screen.findByRole('button', { name: /undo/i }))
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenLastCalledWith('/inventory/item-1', { status: 'available' }),
+    )
+  })
+})
+
+// ===========================================================================
 // RFC 0010 T5 — an edit shows up immediately, and the parent is handed the row
 // ===========================================================================
 //
@@ -706,10 +935,15 @@ describe('CardDetailModal — layout survives zoom (RFC 0010 T6)', () => {
     // label, not an input that moved. Tailwind container queries are not
     // installed in this project, so the stack is done with wrapping plus a floor
     // on the value: it drops below the label exactly when it no longer fits.
+    //
+    // Uses "TCGplayer Link" rather than "Finish" — RFC 0023 T6 turned Finish
+    // into a `<select>`, so `getByDisplayValue('')` no longer finds a plain
+    // text `<input>` there. The class contract under test is generic to any
+    // text-type field, not Finish specifically.
     render(<CardDetailModal item={item} onClose={vi.fn()} />)
-    fireEvent.click(await screen.findByLabelText('Edit Finish'))
+    fireEvent.click(await screen.findByLabelText('Edit TCGplayer Link'))
 
-    const cell = cellFor('Finish')
+    const cell = cellFor('TCGplayer Link')
     const editor = screen.getByDisplayValue('').parentElement as HTMLElement
 
     expect(cell.className).toContain('flex-wrap')

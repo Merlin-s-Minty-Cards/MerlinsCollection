@@ -192,7 +192,7 @@ describe('AdminInventoryPage inline location edit no-op guard', () => {
     render(<AdminInventoryPage />)
     await act(async () => { await Promise.resolve() })
 
-    fireEvent.click(screen.getByTitle('Click to edit'))
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Location' }))
     const select = screen.getByRole('combobox', { name: /edit location/i })
     fireEvent.blur(select)
 
@@ -292,7 +292,9 @@ describe('AdminInventoryPage — Send to Triage (RFC 0008 T11)', () => {
 //     mode this whole section exists to avoid.
 
 const DEFAULT_HEADERS = [
-  'Name', 'Status', 'Kind', 'Cond', 'Location', 'Price Paid', 'Market', 'Sticker', 'Ownership', 'Consignor', '',
+  'Name', 'Status', 'Kind', 'Cond', 'Location', 'Price Paid', 'Market', 'Sticker', 'Ownership', 'Consignor',
+  // RFC 0023 T5 — finish_attributes joined the default-visible set.
+  'Finish Attributes', '',
 ]
 
 function headers(): string[] {
@@ -337,6 +339,40 @@ describe('AdminInventoryPage — configurable columns', () => {
     await act(async () => { await Promise.resolve() })
 
     expect(headers()).toEqual(DEFAULT_HEADERS)
+  })
+
+  it('resolves and renders the catalog print number once the Card # column is turned on', async () => {
+    getMock.mockImplementation((path: string) => {
+      if (path === '/locations') return Promise.resolve([])
+      if (path === '/inventory/search') {
+        return Promise.resolve({
+          items: [{
+            item_id: 'item-1', kind: 'raw', display_name: 'Pikachu', card_id: 'sv1-25',
+            location: 'glass', status: 'available', condition: 'NM',
+            cost_basis: '4.00', current_market_value: '12.00', needs_review: false,
+          }],
+          total: 1,
+        })
+      }
+      return Promise.resolve(null)
+    })
+    postMock.mockImplementation((path: string) => {
+      if (path === '/inventory/card-numbers') return Promise.resolve({ 'sv1-25': '25' })
+      return Promise.resolve(null)
+    })
+
+    render(<AdminInventoryPage />)
+    await act(async () => { await Promise.resolve() })
+
+    // Not fetched (or rendered) before the column is turned on — the whole
+    // point of gating on the column's own visibility.
+    expect(postMock).not.toHaveBeenCalledWith('/inventory/card-numbers', expect.anything())
+
+    const picker = await openPicker()
+    fireEvent.click(within(picker).getByRole('checkbox', { name: 'Card #' }))
+
+    expect(await screen.findByText('#25')).toBeInTheDocument()
+    expect(postMock).toHaveBeenCalledWith('/inventory/card-numbers', { card_ids: ['sv1-25'] })
   })
 
   it('removes a column from the table when it is unchecked', async () => {
@@ -404,10 +440,10 @@ describe('AdminInventoryPage — configurable columns', () => {
     render(<AdminInventoryPage />)
     await act(async () => { await Promise.resolve() })
 
-    fireEvent.click(screen.getByTitle('Click to edit'))
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Location' }))
     const select = screen.getByRole('combobox', { name: /edit location/i })
+    // `select` commits on change now (RFC 0022), not on blur.
     fireEvent.change(select, { target: { value: 'binder' } })
-    fireEvent.blur(select)
 
     await waitFor(() =>
       expect(putMock).toHaveBeenCalledWith('/inventory/item-1', { location: 'binder' }),

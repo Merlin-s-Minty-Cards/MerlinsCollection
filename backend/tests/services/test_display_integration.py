@@ -32,6 +32,7 @@ def _raw(item_id: str, card_id: str | None, name: str):
         card_id=card_id,
         status=ItemStatus.AVAILABLE,
         listed_price=Decimal("20.00"),
+        sticker_price=Decimal("20.00"),
         cost_basis=Decimal("10.00"),
         acquired_at=date.today(),
         finish="normal",

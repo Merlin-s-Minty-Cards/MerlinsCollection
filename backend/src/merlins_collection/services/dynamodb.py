@@ -168,6 +168,18 @@ class LedgerReversalConflictError(Exception):
     """
 
 
+class TransactionEditConflictError(Exception):
+    """A transaction edit's atomic write was cancelled and wrote NOTHING.
+
+    Raised when the old ledger row was deleted or voided out from under a
+    date-moving edit, or when a concurrent write changed the item's
+    ``cost_basis`` between this edit's own equality check and the atomic
+    write that was about to apply it. Distinct from
+    ``LedgerReversalConflictError`` because it names a different write path
+    (RFC 0024 T3's edit, not a void/restore).
+    """
+
+
 class ImportInProgressError(Exception):
     """Another import already holds the single-flight import lock.
 
@@ -1086,6 +1098,39 @@ class InventoryRepository:
                 return
             kwargs["ExclusiveStartKey"] = last
 
+    def delete_catalog_card_partition(self, card_id: str) -> int:
+        """Delete the whole ``CARD#<card_id>`` partition; return rows removed.
+
+        For ``scripts/purge_catalog_junk.py`` (RFC 0021) — a different caller
+        and a different key than ``purge_card_data`` above, which scopes on
+        catalog GENERATION for the reseed swap. This deletes a NAMED card
+        outright, keyed only by id, and takes its ``PRICE#RAW#…`` /
+        ``GRADEDPRICE#…`` children with it: deleting just the ``META`` row
+        would orphan price history nothing could ever read again.
+        """
+        items = self._query_all(KeyConditionExpression=Key("PK").eq(f"CARD#{card_id}"))
+        if not items:
+            return 0
+        with self._table.batch_writer() as batch:
+            for item in items:
+                batch.delete_item(Key={"PK": item["PK"], "SK": item["SK"]})
+        return len(items)
+
+    def delete_catalog_sets(self, set_ids) -> int:
+        """Remove registry rows for sets with no surviving catalog cards.
+
+        For ``scripts/purge_catalog_junk.py`` (RFC 0021). The caller must only
+        pass a set id once every one of its cards has actually been deleted —
+        deregistering a set with survivors would make it invisible to the Set
+        filter while it still matches search.
+        """
+        deleted = 0
+        with self._table.batch_writer() as batch:
+            for set_id in set_ids:
+                batch.delete_item(Key={"PK": self._CATALOG_SETS_PK, "SK": f"SET#{set_id}"})
+                deleted += 1
+        return deleted
+
     def list_cards_by_set(self, set_id):
         """Return every catalog card in a set via the GSI1 ``SET#`` partition."""
         items = self._query_all(
@@ -1526,6 +1571,71 @@ class InventoryRepository:
         except ClientError as exc:
             if exc.response["Error"]["Code"] == "TransactionCanceledException":
                 raise ItemAlreadySoldError(txn.item_id) from exc
+            raise
+
+    def edit_transaction(
+        self,
+        *,
+        old_txn: Transaction,
+        new_txn: Transaction,
+        cost_basis_item_id: str | None = None,
+        new_cost_basis: Decimal | None = None,
+        old_cost_basis_expected: Decimal | None = None,
+    ) -> None:
+        """Apply one edit to a ledger row, atomically (RFC 0024 T3).
+
+        Always PUTs the new transaction row. If the date moved (the SK embeds
+        it), ALSO deletes the old key in the SAME ``transact_write_items`` call
+        — never two calls, which could duplicate or destroy the row on a
+        half-applied write, the same partial-write class ``reverse_sales`` was
+        built to eliminate. The delete is guarded by ``attribute_exists(SK)``
+        so a concurrent void or a second edit racing this one cannot make it
+        land on a row that already moved.
+
+        ``cost_basis_item_id`` is provided only when the CALLER has already
+        decided — from a plain read, before this method is invoked — that the
+        item's cost basis should follow a corrected purchase amount. The
+        ``ConditionExpression`` here re-checks that same equality at write
+        time as a concurrency guard, not as the decision itself: if a
+        concurrent write changed the item's basis in the gap between that read
+        and this call, the WHOLE edit (ledger included) is cancelled and
+        ``TransactionEditConflictError`` is raised, so the ledger and the item
+        can never end up disagreeing about what basis was applied.
+        """
+        new_keys = self._txn_keys(new_txn)
+        old_keys = self._txn_keys(old_txn)
+        body = _serialize(new_txn.model_dump(mode="python"))
+        actions: list[dict] = [
+            {"Put": {
+                "TableName": self._table_name,
+                "Item": {**new_keys, "entity": "transaction", **self._gen(), **body},
+            }},
+        ]
+        if new_keys["SK"] != old_keys["SK"] or new_keys.get("PK") != old_keys.get("PK"):
+            actions.append({"Delete": {
+                "TableName": self._table_name,
+                "Key": {"PK": old_keys["PK"], "SK": old_keys["SK"]},
+                "ConditionExpression": "attribute_exists(SK)",
+            }})
+        if cost_basis_item_id is not None:
+            actions.append({"Update": {
+                "TableName": self._table_name,
+                "Key": {
+                    "PK": f"INV#{_bucket(cost_basis_item_id)}",
+                    "SK": f"ITEM#{cost_basis_item_id}",
+                },
+                "UpdateExpression": "SET cost_basis = :new",
+                "ConditionExpression": "attribute_exists(PK) AND cost_basis = :old",
+                "ExpressionAttributeValues": {
+                    ":new": _serialize(new_cost_basis),
+                    ":old": _serialize(old_cost_basis_expected),
+                },
+            }})
+        try:
+            self._resource.meta.client.transact_write_items(TransactItems=actions)
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "TransactionCanceledException":
+                raise TransactionEditConflictError(new_txn.txn_id) from exc
             raise
 
     # ---- expense ledger (own EXP# month partitions; deliberately off GSI2) ----

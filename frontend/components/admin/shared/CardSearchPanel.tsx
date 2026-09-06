@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useAdminApi } from '@/lib/admin-api'
 import { useCatalogSets, toComboboxSets } from '@/lib/use-catalog-sets'
+import { useCatalogLanguages } from '@/lib/use-catalog-languages'
 import SetCombobox from '@/components/shared/SetCombobox'
 import CardPickerRow, { type PickerCard } from './CardPickerRow'
 
@@ -48,10 +49,14 @@ export default function CardSearchPanel({
 }: CardSearchPanelProps) {
   const api = useAdminApi()
   const { sets } = useCatalogSets()
+  const { languages, loading: languagesLoading } = useCatalogLanguages()
 
   const [name, setName] = useState(initialName)
   const [number, setNumber] = useState(initialNumber)
   const [setId, setSetId] = useState('')
+  // Defaults to EN, mirroring the backend's own default (RFC 0023 T3) — a
+  // buy table search is EN unless the operator says otherwise.
+  const [language, setLanguage] = useState('EN')
   const [results, setResults] = useState<PickerCard[]>([])
 
   // Requests do not resolve in send order -- without this guard, a slow
@@ -60,13 +65,13 @@ export default function CardSearchPanel({
   const seqRef = useRef(0)
   const nameRef = useRef<HTMLInputElement>(null)
 
-  const search = useCallback(async (n: string, num: string, set: string) => {
+  const search = useCallback(async (n: string, num: string, set: string, lang: string) => {
     if (!n.trim() && !num.trim() && !set.trim()) {
       setResults([])
       return
     }
     const seq = ++seqRef.current
-    const params: Record<string, string> = {}
+    const params: Record<string, string> = { language: lang }
     if (n.trim()) params.name = n.trim()
     if (num.trim()) params.number = num.trim()
     if (set.trim()) params.set_id = set.trim()
@@ -81,13 +86,13 @@ export default function CardSearchPanel({
   }, [api])
 
   useEffect(() => {
-    const t = setTimeout(() => search(name, number, setId), DEBOUNCE_MS)
+    const t = setTimeout(() => search(name, number, setId, language), DEBOUNCE_MS)
     return () => clearTimeout(t)
-  }, [name, number, setId, search])
+  }, [name, number, setId, language, search])
 
   return (
     <div className="flex flex-col gap-2.5">
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-[2fr_1fr_2fr]">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-[2fr_1fr_2fr_1fr]">
         <input
           ref={nameInputRef ?? nameRef}
           aria-label="Card name"
@@ -117,6 +122,22 @@ export default function CardSearchPanel({
           emptyLabel="All sets"
           className="vault-field w-full rounded-lg px-2.5 py-1.5 text-xs"
         />
+        {/* Only offers languages that actually have catalog rows (T2's
+            GET /admin/catalog/languages) — offering all 19 would let the
+            operator pick a language a search can only ever return nothing
+            for (RFC 0023 §1.4). */}
+        <select
+          aria-label="Language"
+          value={language}
+          disabled={languagesLoading || languages.length === 0}
+          className="vault-field w-full rounded-lg px-2.5 py-1.5 text-xs"
+          onChange={(e) => setLanguage(e.target.value)}
+        >
+          {languages.length === 0 && <option value={language}>{language}</option>}
+          {languages.map((l) => (
+            <option key={l.code} value={l.code}>{l.label}</option>
+          ))}
+        </select>
       </div>
 
       {onManualEntry && (

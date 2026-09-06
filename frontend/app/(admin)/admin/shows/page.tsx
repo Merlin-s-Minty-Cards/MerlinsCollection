@@ -189,6 +189,18 @@ export default function AdminShowsPage() {
       render: (show) => (
         <span className="text-xs font-mono text-pine-300">{show.date}</span>
       ),
+      // The show SK embeds the date, and put_show sweeps superseded rows
+      // after writing — an existing, already-correct mechanism, not
+      // something this edit needs to know about (see CLAUDE.md's put_show
+      // gotcha note). A plain PUT is all this cell needs to do.
+      edit: {
+        type: 'date',
+        value: (show) => show.date,
+        save: async (show, next) => {
+          await api.put(`/shows/${show.show_id}`, { date: next })
+          fetchShows()
+        },
+      },
     },
     {
       key: 'name',
@@ -205,6 +217,14 @@ export default function AdminShowsPage() {
           )}
         </span>
       ),
+      edit: {
+        type: 'text',
+        value: (show) => show.name,
+        save: async (show, next) => {
+          await api.put(`/shows/${show.show_id}`, { name: next })
+          fetchShows()
+        },
+      },
     },
     {
       key: 'venue',
@@ -213,6 +233,14 @@ export default function AdminShowsPage() {
       render: (show) => (
         <span className="text-xs text-pine-300">{show.venue || '—'}</span>
       ),
+      edit: {
+        type: 'text',
+        value: (show) => show.venue ?? '',
+        save: async (show, next) => {
+          await api.put(`/shows/${show.show_id}`, { venue: next || null })
+          fetchShows()
+        },
+      },
     },
     {
       key: 'city',
@@ -221,6 +249,14 @@ export default function AdminShowsPage() {
       render: (show) => (
         <span className="text-xs text-pine-300">{show.city || '—'}</span>
       ),
+      edit: {
+        type: 'text',
+        value: (show) => show.city ?? '',
+        save: async (show, next) => {
+          await api.put(`/shows/${show.show_id}`, { city: next || null })
+          fetchShows()
+        },
+      },
     },
     {
       key: 'sales_goal',
@@ -228,6 +264,14 @@ export default function AdminShowsPage() {
       className: 'text-right',
       sortable: true,
       render: (show) => <PriceDisplay value={show.sales_goal} className="text-xs" />,
+      edit: {
+        type: 'money',
+        value: (show) => show.sales_goal ?? '',
+        save: async (show, next) => {
+          await api.put(`/shows/${show.show_id}`, { sales_goal: next || null })
+          fetchShows()
+        },
+      },
     },
     {
       key: '_actions',

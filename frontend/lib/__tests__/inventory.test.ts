@@ -47,6 +47,7 @@ export function makeRawItem(overrides: Record<string, unknown> = {}): InventoryI
     card_id: 'base1-4',
     listed_price: '250.00',
     current_market_value: '300.00',
+    sticker_price: '250.00',
     acquired_at: '2026-04-01',
     finish: 'holofoil',
     condition: 'NM',
@@ -73,6 +74,7 @@ export function makeGradedItem(overrides: Record<string, unknown> = {}): Invento
     card_id: 'base1-4',
     listed_price: '900.00',
     current_market_value: null,
+    sticker_price: '900.00',
     acquired_at: '2026-04-01',
     company: 'PSA',
     grade: '9.5',
@@ -99,6 +101,7 @@ export function makeSealedItem(overrides: Record<string, unknown> = {}): Invento
     item_id: '01JSEALEDBOOSTERBOX00000001',
     listed_price: '120.00',
     current_market_value: '140.00',
+    sticker_price: '120.00',
     acquired_at: '2026-04-01',
     product_name: 'Scarlet & Violet Booster Box',
     product_type: 'booster_box',
@@ -189,7 +192,7 @@ describe('searchInventory', () => {
 })
 
 describe('getInventorySummary', () => {
-  const summary: InventorySummary = { cards_in_vault: 312, est_value: '48231.50', sets_tracked: 27 }
+  const summary: InventorySummary = { cards_in_vault: 312, sets_tracked: 27 }
 
   it('calls GET /inventory/summary and returns the parsed body', async () => {
     mockedApiFetch.mockResolvedValue(summary)
@@ -470,23 +473,29 @@ describe('toPresentedCard', () => {
     })
   })
 
-  it('prefers the live catalog market_price over listed_price for a raw item', () => {
+  // RFC 0025 follow-ups #7 — the tile used to prefer the live catalog
+  // market_price over listed_price; the customer price is now sticker_price,
+  // full stop, and neither of the old fields is consulted at all. A card can
+  // carry a live market_price that differs from its sticker and the tile
+  // must still show the sticker — that's the whole point of the RFC.
+  it('reads sticker_price directly, ignoring card.market_price and listed_price', () => {
     const presented = toPresentedCard(
-      makeRawItem({ card: { ...makeRawItem().card, market_price: '400.00' } }),
+      makeRawItem({
+        sticker_price: '199.99',
+        listed_price: '250.00',
+        card: { ...makeRawItem().card, market_price: '400.00' },
+      }),
     )
-    expect(presented.price).toBe('400.00')
+    expect(presented.price).toBe('199.99')
   })
 
-  it('falls back to listed_price, then "Price N/A", when no market_price exists', () => {
-    expect(toPresentedCard(makeRawItem()).price).toBe('250.00')
-    expect(toPresentedCard(makeRawItem({ listed_price: null })).price).toBe('Price N/A')
+  it('falls back to "Price N/A" when sticker_price is null', () => {
+    expect(toPresentedCard(makeRawItem({ sticker_price: null })).price).toBe('Price N/A')
   })
 
-  it('never reads market_price for a graded or sealed item', () => {
-    // market_price lives on the raw catalog join only; a graded slab's price
-    // comes from listed_price (the per-grade figure), never the catalog's
-    // near-mint market_price.
+  it('reads sticker_price for a graded or sealed item too', () => {
     expect(toPresentedCard(makeGradedItem()).price).toBe('900.00')
+    expect(toPresentedCard(makeSealedItem()).price).toBe('120.00')
   })
 
   it('is company + grade for a graded item', () => {

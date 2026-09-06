@@ -15,7 +15,12 @@ import TransactionGroups, { type ArchiveTransaction } from '../TransactionGroups
 
 const onVoid = vi.fn()
 const onRestore = vi.fn()
+const onEdit = vi.fn()
 const postMock = vi.fn()
+
+vi.mock('@/lib/use-shows', () => ({
+  useShows: () => ({ options: [], loading: false }),
+}))
 
 // Owner report: sale rows in the archive showed only a raw item_id ULID —
 // no image, no name — behind a chevron that just repeated the same row.
@@ -31,8 +36,10 @@ vi.mock('@/lib/admin-api', async () => {
 beforeEach(() => {
   onVoid.mockReset()
   onRestore.mockReset()
+  onEdit.mockReset()
   onVoid.mockResolvedValue(undefined)
   onRestore.mockResolvedValue(undefined)
+  onEdit.mockResolvedValue({ cost_basis_updated: false, cost_basis_skipped_reason: null })
   postMock.mockReset()
   postMock.mockImplementation((path: string) => {
     if (path === '/inventory/items-brief') return Promise.resolve({})
@@ -73,6 +80,7 @@ function renderGroups(transactions: ArchiveTransaction[]) {
       transactions={transactions}
       onVoid={onVoid}
       onRestore={onRestore}
+      onEdit={onEdit}
     />,
   )
 }
@@ -301,6 +309,58 @@ describe('sale detail modal', () => {
     expect(within(dialog).getByText('$25.00')).toBeInTheDocument()
   })
 
+  it('shows leg profit (amount - cost_basis) for a sale, RFC 0024 T5', async () => {
+    postMock.mockImplementation((path: string) => {
+      if (path === '/inventory/items-brief') {
+        return Promise.resolve({
+          'item-1': { name: 'Charizard EX', card_id: 'sv1-1', cost_basis: '10.00' },
+        })
+      }
+      return Promise.resolve({})
+    })
+    renderGroups([leg({ txn_id: 'txn-1', item_id: 'item-1', type: 'sale', amount: '40.00' })])
+    fireEvent.click(screen.getByRole('button', { name: /view the 1 card/i }))
+    const dialog = await screen.findByRole('dialog', { name: /sale details/i })
+    expect(await within(dialog).findByText('+$30.00')).toBeInTheDocument()
+  })
+
+  it('warns when the profit may be overstated by a $0 cost basis (consigned item)', async () => {
+    postMock.mockImplementation((path: string) => {
+      if (path === '/inventory/items-brief') {
+        return Promise.resolve({
+          'item-1': { name: 'Charizard EX', card_id: 'sv1-1', cost_basis: '0.00' },
+        })
+      }
+      return Promise.resolve({})
+    })
+    renderGroups([leg({ txn_id: 'txn-1', item_id: 'item-1', type: 'sale', amount: '40.00' })])
+    fireEvent.click(screen.getByRole('button', { name: /view the 1 card/i }))
+    const dialog = await screen.findByRole('dialog', { name: /sale details/i })
+    expect(await within(dialog).findByText('+$40.00')).toBeInTheDocument()
+    expect(within(dialog).getByTitle(/overstated/i)).toBeInTheDocument()
+  })
+
+  it('never shows a profit figure on a purchase leg', async () => {
+    postMock.mockImplementation((path: string) => {
+      if (path === '/inventory/items-brief') {
+        return Promise.resolve({
+          'item-1': { name: 'Charizard EX', card_id: 'sv1-1', cost_basis: '10.00' },
+        })
+      }
+      return Promise.resolve({})
+    })
+    // amount(40) - cost_basis(10) = 30 — a value that appears NOWHERE else on
+    // this leg's row, so its absence is unambiguous evidence no profit badge
+    // rendered (as opposed to a regex that could accidentally match
+    // `SignedAmount`'s own signed rendering of the leg's amount).
+    renderGroups([leg({ txn_id: 'txn-1', item_id: 'item-1', type: 'purchase', amount: '40.00' })])
+    fireEvent.click(screen.getByRole('button', { name: /view the 1 card/i }))
+    const dialog = await screen.findByRole('dialog', { name: /sale details/i })
+    await within(dialog).findByText('Charizard EX')
+    expect(within(dialog).queryByText('+$30.00')).not.toBeInTheDocument()
+    expect(within(dialog).queryByText('-$30.00')).not.toBeInTheDocument()
+  })
+
   it('falls back to the item_id when a leg has no resolvable name', async () => {
     renderGroups([leg({ item_id: 'item-1' })])
     fireEvent.click(screen.getByRole('button', { name: /view the 1 card/i }))
@@ -390,5 +450,102 @@ describe('sale detail modal', () => {
     fireEvent.click(screen.getByRole('button', { name: /view the 3 cards/i }))
     await screen.findByRole('dialog')
     expect(screen.queryAllByTestId('txn-leg')).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Transaction edit (RFC 0024 T3/T4) — a typo correction path distinct from
+// void, reached from the SAME per-leg row the void/restore actions live on.
+// ---------------------------------------------------------------------------
+
+describe('editing a leg from inside the modal', () => {
+  it('opens the edit dialog seeded with the leg\'s own values', async () => {
+    renderGroups([leg({ txn_id: 'txn-1', item_id: 'item-1', amount: '150.00' })])
+    fireEvent.click(screen.getByRole('button', { name: /view the 1 card/i }))
+    await screen.findByRole('dialog', { name: /sale details/i })
+
+    fireEvent.click(screen.getByRole('button', { name: /^edit this card$/i }))
+    expect(screen.getByLabelText('Amount')).toHaveValue('150.00')
+  })
+
+  it('submits only the changed field to onEdit, keyed by txn_id', async () => {
+    renderGroups([leg({ txn_id: 'txn-1', item_id: 'item-1', amount: '150.00' })])
+    fireEvent.click(screen.getByRole('button', { name: /view the 1 card/i }))
+    await screen.findByRole('dialog', { name: /sale details/i })
+    fireEvent.click(screen.getByRole('button', { name: /^edit this card$/i }))
+
+    const amountField = screen.getByLabelText('Amount')
+    fireEvent.change(amountField, { target: { value: '105' } })
+    fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    await waitFor(() => expect(onEdit).toHaveBeenCalledWith('txn-1', { amount: 105 }))
+  })
+
+  it('refetches the archive after a successful edit, closing the dialog', async () => {
+    renderGroups([leg({ txn_id: 'txn-1', item_id: 'item-1', amount: '150.00' })])
+    fireEvent.click(screen.getByRole('button', { name: /view the 1 card/i }))
+    await screen.findByRole('dialog', { name: /sale details/i })
+    fireEvent.click(screen.getByRole('button', { name: /^edit this card$/i }))
+    fireEvent.change(screen.getByLabelText('Amount'), { target: { value: '105' } })
+    fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    await waitFor(() => expect(onEdit).toHaveBeenCalled())
+    await waitFor(() =>
+      expect(screen.queryByLabelText('Amount')).not.toBeInTheDocument(),
+    )
+  })
+
+  it('keeps the dialog open and shows the cost_basis_skipped_reason plainly, not as an error', async () => {
+    onEdit.mockResolvedValue({
+      cost_basis_updated: false,
+      cost_basis_skipped_reason: 'cost basis was changed manually since',
+    })
+    renderGroups([leg({ txn_id: 'txn-1', item_id: 'item-1', type: 'purchase', amount: '32.00' })])
+    fireEvent.click(screen.getByRole('button', { name: /view the 1 card/i }))
+    await screen.findByRole('dialog', { name: /sale details/i })
+    fireEvent.click(screen.getByRole('button', { name: /^edit this card$/i }))
+    fireEvent.change(screen.getByLabelText('Amount'), { target: { value: '40' } })
+    fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    expect(await screen.findByText(/cost basis was changed manually since/i))
+      .toBeInTheDocument()
+    // Still open, still editable — not swapped for an error state.
+    expect(screen.getByLabelText('Amount')).toBeInTheDocument()
+  })
+
+  it('surfaces a failed edit and leaves the row unchanged', async () => {
+    onEdit.mockRejectedValue(new Error('Transaction is voided'))
+    renderGroups([leg({ txn_id: 'txn-1', item_id: 'item-1', amount: '150.00' })])
+    fireEvent.click(screen.getByRole('button', { name: /view the 1 card/i }))
+    await screen.findByRole('dialog', { name: /sale details/i })
+    fireEvent.click(screen.getByRole('button', { name: /^edit this card$/i }))
+    fireEvent.change(screen.getByLabelText('Amount'), { target: { value: '105' } })
+    fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    expect(await screen.findByText(/transaction is voided/i)).toBeInTheDocument()
+  })
+
+  it('does not offer Edit on a voided leg', async () => {
+    renderGroups([leg({
+      txn_id: 'txn-1', item_id: 'item-1',
+      voided_at: '2026-08-11T18:30:00Z', void_reason: 'oops',
+    })])
+    fireEvent.click(screen.getByRole('button', { name: /view the 1 card/i }))
+    await screen.findByRole('dialog', { name: /sale details/i })
+    expect(screen.queryByRole('button', { name: /^edit this card$/i })).not.toBeInTheDocument()
+  })
+
+  it('renders an edit note on the leg, the way the void reason already renders', async () => {
+    renderGroups([leg({
+      txn_id: 'txn-1', item_id: 'item-1',
+      edited_at: '2026-08-12T10:00:00Z', edited_by: 'merlin',
+      edit_history: [{
+        at: '2026-08-12T10:00:00Z', by: 'merlin',
+        changes: [{ field: 'amount', old: '150.00', new: '105.00' }],
+      }],
+    })])
+    fireEvent.click(screen.getByRole('button', { name: /view the 1 card/i }))
+    const dialog = await screen.findByRole('dialog', { name: /sale details/i })
+    expect(within(dialog).getByTestId('edited-note')).toHaveTextContent(/merlin/i)
   })
 })

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, act, waitFor, within } from '@testing-library/react'
 import AdminLocationsPage from '../page'
 
 const getMock = vi.fn()
@@ -39,8 +39,12 @@ describe('AdminLocationsPage', () => {
     render(<AdminLocationsPage />)
     await act(async () => { await Promise.resolve() })
 
-    fireEvent.change(screen.getByLabelText(/value/i), { target: { value: 'display_case_2' } })
-    fireEvent.change(screen.getByLabelText(/label/i), { target: { value: 'Display Case 2' } })
+    // Exact match, not a loose /label/i regex: RFC 0022 gave the table's
+    // Label column its own click-to-edit control, whose closed-state
+    // wrapper carries an "Edit Label" aria-label that a loose regex would
+    // also match.
+    fireEvent.change(screen.getByLabelText('Value'), { target: { value: 'display_case_2' } })
+    fireEvent.change(screen.getByLabelText('Label'), { target: { value: 'Display Case 2' } })
     fireEvent.click(screen.getByRole('button', { name: /add location/i }))
 
     await waitFor(() =>
@@ -69,5 +73,29 @@ describe('AdminLocationsPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /confirm|delete/i }))
 
     expect(await screen.findByText("Location 'glass' is still in use")).toBeInTheDocument()
+  })
+
+  // RFC 0022 T6 — the table's Label column is click-to-edit; Value never is.
+  it('edits a location label inline via PATCH', async () => {
+    mockApi.patch.mockResolvedValueOnce({ value: 'glass', label: 'Display Glass' })
+    render(<AdminLocationsPage />)
+    await act(async () => { await Promise.resolve() })
+
+    const row = (await screen.findByText('Glass')).closest('tr')!
+    fireEvent.click(within(row).getByRole('button', { name: 'Edit Label' }))
+    const input = within(row).getByRole('textbox', { name: 'Edit Label' })
+    fireEvent.change(input, { target: { value: 'Display Glass' } })
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Enter' })
+    })
+
+    expect(mockApi.patch).toHaveBeenCalledWith('/locations/glass', { label: 'Display Glass' })
+  })
+
+  it('never offers an editor for the Value column', async () => {
+    render(<AdminLocationsPage />)
+    await act(async () => { await Promise.resolve() })
+    await screen.findByText('Glass')
+    expect(screen.queryByRole('button', { name: 'Edit Value' })).not.toBeInTheDocument()
   })
 })
